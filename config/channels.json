@@ -1,0 +1,76 @@
+{
+  "monitored_channels": {
+    "daily-trade-setup": "1402971916339380244",
+    "scalps": "1402971964343320636",
+    "forex-exotics": "1402972132920787077",
+    "gold-trades": "1402972164256432220",
+    "oil-trades": "1402972289993019463",
+    "indices-trades": "1402972348193177745",
+    "crypto-trades": "1402972426014429254",
+    "stocks-trades": "1402972455990984774",
+    "swing-trades": "1402972635847200838",
+    "ot-trade-calls": "1402972674082476102",
+    "crypto-alt-trades": "1403532013511905434"
+  },
+  "alert_channel": "1402971805890773005",
+  "command_channel": "1402971848731398174",
+  "channel_settings": {
+    "daily_trade_setup": {
+      "default_expiry": "day_end",
+      "near_distance_pips": 10,
+      "track_interval_seconds": 1
+    },
+    "scalps": {
+      "default_expiry": "day_end",
+      "near_distance_pips": 10,
+      "track_interval_seconds": 1
+    },
+    "forex-exotics": {
+      "default_expiry": "week_end",
+      "near_distance_pips": 10,
+      "track_interval_seconds": 1
+    },
+    "gold-trades": {
+      "default_instrument": "XAUUSD",
+      "default_expiry": "week_end",
+      "near_distance_pips": 5,
+      "track_interval_seconds": 1
+    },
+    "oil-trades": {
+      "default_instrument": "USOILSPOT",
+      "default_expiry": "week_end",
+      "near_distance_pips": 0.5,
+      "track_interval_seconds": 1
+    },
+    "indices-trades": {
+      "default_expiry": "week_end",
+      "near_distance_pips": 20,
+      "track_interval_seconds": 2
+    },
+    "crypto-trades": {
+      "default_expiry": "week_end",
+      "near_distance_pips": 20,
+      "track_interval_seconds": 2
+    },
+    "stocks-trades": {
+      "default_expiry": "week_end",
+      "near_distance_pips": 3,
+      "track_interval_seconds": 2
+    },
+    "swing-trades": {
+      "default_expiry": "week_end",
+      "near_distance_pips": 10,
+      "track_interval_seconds": 2
+    },
+    "ot-trade-calls": {
+      "default_expiry": "day_end",
+      "near_distance_pips": 10,
+      "track_interval_seconds": 2
+    },
+    "crypto-alt-trades": {
+      "default_expiry": "week_end",
+      "near_distance_pips": 10,
+      "track_interval_seconds": 2
+    }
+  }
+}

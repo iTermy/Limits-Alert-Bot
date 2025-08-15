@@ -1,0 +1,9 @@
+{
+  "bot_prefix": "!",
+  "enable_openai_fallback": false,
+  "max_retries": 3,
+  "connection_timeout": 30,
+  "alert_cooldown_minutes": 5,
+  "cleanup_days": 30,
+  "debug_mode": true
+}

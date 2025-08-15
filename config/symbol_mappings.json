@@ -1,0 +1,184 @@
+{
+  "feed_priority": {
+    "forex": ["icmarkets", "oanda"],
+    "indices": ["oanda", "icmarkets"],
+    "crypto": ["binance"],
+    "metals": ["fxcm", "icmarkets"],
+    "stocks": ["icmarkets"],
+    "oil": []
+  },
+
+  "asset_class_patterns": {
+    "forex": {
+      "patterns": ["^[A-Z]{6}$"],
+      "examples": ["EURUSD", "GBPJPY", "AUDUSD"]
+    },
+    "indices": {
+      "keywords": ["spx", "nas", "dax", "jp225", "china", "us2000", "de30", "fra40", "uk100", "aus200"],
+      "patterns": ["(spx|nas|dax|jp|china|us2000|de|fra|uk|aus)\\d+"],
+      "examples": ["spx500usd", "nas100usd", "jp225", "de30eur"]
+    },
+    "crypto": {
+      "patterns": ["^[A-Z]+(USD|USDT)$", "^(BTC|ETH|BNB|ADA|DOT|DOGE|SOL|MATIC|LTC|AVAX|LINK|UNI|ATOM|XRP|ALGO|NEAR|FTM|MANA|SAND|AXS|GALA)"],
+      "suffix": ["USD", "USDT"],
+      "examples": ["BTCUSDT", "ETHUSDT", "DOGEUSDT"]
+    },
+    "metals": {
+      "keywords": ["xau", "xag", "gold", "silver"],
+      "patterns": ["^XA[UG]USD$", "^GOLD$", "^SILVER$"],
+      "examples": ["XAUUSD", "XAGUSD", "GOLD", "SILVER"]
+    },
+    "stocks": {
+      "patterns": ["\\.(NAS|NYSE)$"],
+      "examples": ["AAPL.NAS", "MSFT.NAS", "JPM.NYSE", "TSLA.NAS"]
+    },
+    "oil": {
+      "keywords": ["oil", "wti", "brent", "usoil", "ukoil"],
+      "patterns": ["OIL", "WTI", "BRENT"],
+      "examples": ["USOILSPOT", "UKOILSPOT", "WTIUSD"]
+    }
+  },
+
+  "symbol_mappings": {
+    "icmarkets": {
+      "format_rules": {
+        "forex": "{symbol}",
+        "metals": "GOLD for XAUUSD, SILVER for XAGUSD",
+        "stocks": "{symbol}",
+        "indices": "Not primary feed"
+      },
+      "specific_mappings": {
+        "XAUUSD": "GOLD",
+        "XAGUSD": "SILVER",
+        "GOLD": "GOLD",
+        "SILVER": "SILVER"
+      }
+    },
+
+    "oanda": {
+      "format_rules": {
+        "indices": "{BASE}_{QUOTE}",
+        "forex": "{CCY1}_{CCY2}"
+      },
+      "specific_mappings": {
+        "spx500usd": "SPX500_USD",
+        "spx500": "SPX500_USD",
+        "sp500": "SPX500_USD",
+        "nas100usd": "NAS100_USD",
+        "nas100": "NAS100_USD",
+        "nasdaq": "NAS100_USD",
+        "jp225": "JP225_USD",
+        "jp225usd": "JP225_USD",
+        "nikkei": "JP225_USD",
+        "de30eur": "DE30_EUR",
+        "de30": "DE30_EUR",
+        "de40": "DE30_EUR",
+        "dax": "DE30_EUR",
+        "china50": "CN50_USD",
+        "china50usd": "CN50_USD",
+        "cn50": "CN50_USD",
+        "us2000usd": "US2000_USD",
+        "us2000": "US2000_USD",
+        "russell": "US2000_USD",
+        "fra40": "FR40_EUR",
+        "fra40eur": "FR40_EUR",
+        "cac": "FR40_EUR",
+        "uk100": "UK100_GBP",
+        "uk100gbp": "UK100_GBP",
+        "ftse": "UK100_GBP",
+        "aus200": "AU200_AUD",
+        "aus200aud": "AU200_AUD",
+        "asx": "AU200_AUD",
+        "hk50": "HK33_HKD",
+        "hk33": "HK33_HKD",
+        "eu50": "EU50_EUR",
+        "eu50eur": "EU50_EUR",
+        "stoxx": "EU50_EUR",
+        "EURUSD": "EUR_USD",
+        "GBPUSD": "GBP_USD",
+        "USDJPY": "USD_JPY",
+        "AUDUSD": "AUD_USD",
+        "USDCHF": "USD_CHF",
+        "NZDUSD": "NZD_USD",
+        "USDCAD": "USD_CAD",
+        "EURJPY": "EUR_JPY",
+        "GBPJPY": "GBP_JPY",
+        "EURGBP": "EUR_GBP",
+        "AUDJPY": "AUD_JPY",
+        "EURAUD": "EUR_AUD",
+        "EURCHF": "EUR_CHF",
+        "AUDNZD": "AUD_NZD",
+        "GBPAUD": "GBP_AUD",
+        "GBPCHF": "GBP_CHF",
+        "NZDJPY": "NZD_JPY",
+        "CADJPY": "CAD_JPY",
+        "CHFJPY": "CHF_JPY",
+        "AUDCAD": "AUD_CAD",
+        "EURCAD": "EUR_CAD",
+        "GBPCAD": "GBP_CAD",
+        "GBPNZD": "GBP_NZD",
+        "NZDCAD": "NZD_CAD",
+        "NZDCHF": "NZD_CHF",
+        "AUDCHF": "AUD_CHF",
+        "EURNZD": "EUR_NZD",
+        "USDSGD": "USD_SGD",
+        "EURSGD": "EUR_SGD",
+        "GBPSGD": "GBP_SGD",
+        "SGDJPY": "SGD_JPY"
+      }
+    },
+
+    "binance": {
+      "format_rules": {
+        "crypto": "Always append USDT if not present"
+      },
+      "suffix_conversion": {
+        "USD": "USDT",
+        "": "USDT"
+      },
+      "specific_mappings": {
+        "BTC": "BTCUSDT",
+        "ETH": "ETHUSDT",
+        "BITCOIN": "BTCUSDT",
+        "ETHEREUM": "ETHUSDT"
+      }
+    },
+
+    "fxcm": {
+      "format_rules": {
+        "metals": "Redirect to ICMarkets",
+        "oil": "Not supported currently"
+      },
+      "specific_mappings": {
+        "XAUUSD": "GOLD",
+        "XAGUSD": "SILVER",
+        "GOLD": "GOLD",
+        "SILVER": "SILVER",
+        "USOILSPOT": null,
+        "UKOILSPOT": null,
+        "WTIUSD": null,
+        "BRENTUSD": null
+      }
+    }
+  },
+
+  "reverse_mappings": {
+    "icmarkets": {
+      "GOLD": "XAUUSD",
+      "SILVER": "XAGUSD"
+    },
+    "oanda": {
+      "SPX500_USD": "spx500usd",
+      "NAS100_USD": "nas100usd",
+      "JP225_USD": "jp225",
+      "DE30_EUR": "de30eur",
+      "CN50_USD": "china50",
+      "US2000_USD": "us2000usd",
+      "FR40_EUR": "fra40",
+      "UK100_GBP": "uk100",
+      "AU200_AUD": "aus200",
+      "HK33_HKD": "hk33",
+      "EU50_EUR": "eu50"
+    }
+  }
+}

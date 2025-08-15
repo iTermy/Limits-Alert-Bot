@@ -1,0 +1,108 @@
+{
+  "defaults": {
+    "forex": {
+      "approaching_pips": 10,
+      "pip_size": 0.0001,
+      "min_distance_pips": 2,
+      "description": "Most forex pairs use 4 decimal places"
+    },
+    "forex_jpy": {
+      "approaching_pips": 15,
+      "pip_size": 0.01,
+      "min_distance_pips": 3,
+      "description": "JPY pairs use 2 decimal places"
+    },
+    "metals": {
+      "approaching_distance": 1.00,
+      "pip_size": 0.01,
+      "min_distance": 0.20,
+      "description": "Gold/Silver in USD"
+    },
+    "crypto": {
+      "approaching_distance": 50,
+      "pip_size": 1,
+      "min_distance": 10,
+      "percentage_mode": true,
+      "approaching_percentage": 0.5,
+      "description": "Crypto uses percentage or absolute distance"
+    },
+    "indices": {
+      "approaching_distance": 5.0,
+      "pip_size": 1,
+      "min_distance": 1.0,
+      "description": "Index points"
+    },
+    "stocks": {
+      "approaching_distance": 0.50,
+      "pip_size": 0.01,
+      "min_distance": 0.10,
+      "description": "Stock prices in USD"
+    },
+    "oil": {
+      "approaching_distance": 0.50,
+      "pip_size": 0.01,
+      "min_distance": 0.10,
+      "description": "Oil in USD per barrel"
+    }
+  },
+
+  "overrides": {
+    "XAUUSD": {
+      "approaching_distance": 1.50,
+      "pip_size": 0.01,
+      "min_distance": 0.30
+    },
+    "GOLD": {
+      "approaching_distance": 1.50,
+      "pip_size": 0.01,
+      "min_distance": 0.30
+    },
+    "XAGUSD": {
+      "approaching_distance": 0.05,
+      "pip_size": 0.001,
+      "min_distance": 0.01
+    },
+    "SILVER": {
+      "approaching_distance": 0.05,
+      "pip_size": 0.001,
+      "min_distance": 0.01
+    },
+    "BTCUSDT": {
+      "approaching_distance": 100,
+      "pip_size": 1,
+      "min_distance": 20
+    },
+    "ETHUSDT": {
+      "approaching_distance": 10,
+      "pip_size": 0.1,
+      "min_distance": 2
+    },
+    "spx500usd": {
+      "approaching_distance": 5.0,
+      "pip_size": 0.1,
+      "min_distance": 1.0
+    },
+    "nas100usd": {
+      "approaching_distance": 10.0,
+      "pip_size": 0.1,
+      "min_distance": 2.0
+    },
+    "USDJPY": {
+      "approaching_pips": 15,
+      "pip_size": 0.01,
+      "min_distance_pips": 3
+    },
+    "EURJPY": {
+      "approaching_pips": 15,
+      "pip_size": 0.01,
+      "min_distance_pips": 3
+    },
+    "GBPJPY": {
+      "approaching_pips": 20,
+      "pip_size": 0.01,
+      "min_distance_pips": 4
+    }
+  },
+
+  "dynamic_overrides": {}
+}

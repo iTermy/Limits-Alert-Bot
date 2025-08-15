@@ -1,0 +1,69 @@
+    async def expire_old_signals(self, db_manager) -> int:
+        """
+        Check and expire signals past their expiry time
+
+        Args:
+            db_manager: Database manager instance
+
+        Returns:
+            Number of signals expired
+        """
+        now = datetime.now(pytz.UTC).isoformat()
+
+        # Find expired signals
+        query = """
+            SELECT id, status FROM signals
+            WHERE status IN (?, ?)
+            AND expiry_time IS NOT NULL
+            AND expiry_time < ?
+        """
+
+        expired = await db_manager.fetch_all(
+            query,
+            (SignalStatus.ACTIVE, SignalStatus.HIT, now)
+        )
+
+        if not expired:
+            return 0
+
+        count = 0
+
+        # Use direct database updates to avoid validation issues
+        try:
+            async with db_manager.get_connection() as conn:
+                for signal in expired:
+                    signal_id = signal['id']
+                    old_status = signal['status']
+
+                    # Directly update the signal status
+                    await conn.execute("""
+                        UPDATE signals
+                        SET status = ?, updated_at = ?, closed_at = ?, closed_reason = ?
+                        WHERE id = ?
+                    """, (SignalStatus.CANCELLED, now, now, 'automatic', signal_id))
+
+                    # Record status change
+                    await conn.execute("""
+                        INSERT INTO status_changes (signal_id, old_status, new_status, change_type, reason)
+                        VALUES (?, ?, ?, ?, ?)
+                    """, (signal_id, old_status, SignalStatus.CANCELLED, 'automatic', 'Expired'))
+
+                    # Cancel pending limits
+                    await conn.execute("""
+                        UPDATE limits
+                        SET status = 'cancelled'
+                        WHERE signal_id = ? AND status = 'pending'
+                    """, (signal_id,))
+
+                    count += 1
+
+                await conn.commit()
+
+        except Exception as e:
+            logger.error(f"Error expiring signals: {e}", exc_info=True)
+            return 0
+
+        if count > 0:
+            logger.info(f"Expired {count} signals")
+
+        return count
