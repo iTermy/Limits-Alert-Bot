@@ -24,9 +24,13 @@ class SymbolMapper:
     - FXCM: Redirects to ICMarkets for metals (Gold, Silver)
     """
 
-    def __init__(self, config_path: str = 'config/symbol_mappings.json'):
+    def __init__(self, config_path: str = None):
         """Initialize the symbol mapper with configuration"""
-        self.config_path = Path(config_path)
+        if config_path is None:
+            # Locate config folder relative to this file
+            self.config_path = Path(__file__).resolve().parent.parent / 'config' / 'symbol_mappings.json'
+        else:
+            self.config_path = Path(config_path)
         self.mappings = self._load_mappings()
         self._compile_patterns()
         logger.info(f"SymbolMapper initialized with config from {config_path}")

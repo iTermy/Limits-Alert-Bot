@@ -8,6 +8,9 @@ from utils.logger import get_logger
 from utils.config_loader import config
 from database import db
 from database import initialize_signal_db
+from utils.logger import get_logger
+
+logger = get_logger('bot')
 
 
 class TradingBot(commands.Bot):
@@ -40,6 +43,7 @@ class TradingBot(commands.Bot):
         self.signal_db = None
         self.message_handler = None
         self.expiry_manager = None
+        self.price_monitor = None
 
         # Admin user IDs
         self.admin_ids = [582358569542877184]  # Replace with actual admin IDs
@@ -51,6 +55,9 @@ class TradingBot(commands.Bot):
         # Initialize database
         await db.initialize()
         self.signal_db = initialize_signal_db(db)
+
+        # Initialize price monitoring (NEW)
+        await self.initialize_price_monitor()
 
         # Load channel configuration
         await self.load_config()
@@ -163,6 +170,29 @@ class TradingBot(commands.Bot):
             color=discord.Color.red()
         )
         await ctx.send(embed=embed)
+    async def initialize_price_monitor(self):
+        """Initialize the price monitoring system"""
+        self.logger.info("Starting price monitor initialization...")
+        try:
+            from price_feeds.monitor import PriceMonitor
+
+            # Create monitor instance
+            self.price_monitor = PriceMonitor(
+                bot=self,
+                signal_db=self.signal_db,
+                db=db
+            )
+
+            # Initialize and start monitoring
+            await self.price_monitor.initialize()
+            await self.price_monitor.start()
+
+            self.logger.info("Price monitoring system initialized and started")
+
+        except Exception as e:
+            self.logger.error(f"Failed to initialize price monitor: {e}", exc_info=True)
+            # Don't fail bot startup if monitor fails
+            self.price_monitor = None
 
     @tasks.loop(seconds=30)
     async def heartbeat(self):
@@ -180,6 +210,9 @@ class TradingBot(commands.Bot):
 
         # Cancel background tasks
         self.heartbeat.cancel()
+
+        if self.price_monitor:
+            await self.price_monitor.stop()
 
         # Close database connection
         if db:

@@ -205,6 +205,106 @@ class AdminCommands(BaseCog):
         except Exception as e:
             await ctx.reply(f"❌ Error reading logs: {str(e)}")
 
+    @commands.command(name='monitor')
+    @commands.has_permissions(administrator=True)
+    async def monitor_control(self, ctx, action: str = None):
+        """Control price monitoring
+
+        Usage:
+            !monitor status - Show monitoring status
+            !monitor start - Start monitoring
+            !monitor stop - Stop monitoring
+            !monitor stats - Show statistics
+        """
+        if not self.bot.price_monitor:
+            await ctx.send("❌ Price monitor not initialized")
+            return
+
+        if action == 'status':
+            status = "🟢 Running" if self.bot.price_monitor.running else "🔴 Stopped"
+            await ctx.send(f"Monitor Status: {status}")
+
+        elif action == 'start':
+            if self.bot.price_monitor.running:
+                await ctx.send("Monitor already running")
+            else:
+                await self.bot.price_monitor.start()
+                await ctx.send("✅ Price monitoring started")
+
+        elif action == 'stop':
+            if not self.bot.price_monitor.running:
+                await ctx.send("Monitor already stopped")
+            else:
+                await self.bot.price_monitor.stop()
+                await ctx.send("✅ Price monitoring stopped")
+
+        elif action == 'stats':
+            stats = self.bot.price_monitor.get_stats()
+
+            embed = discord.Embed(
+                title="📊 Monitoring Statistics",
+                color=0x00FF00 if stats['running'] else 0xFF0000
+            )
+
+            embed.add_field(
+                name="Status",
+                value="🟢 Running" if stats['running'] else "🔴 Stopped",
+                inline=True
+            )
+            embed.add_field(
+                name="Checks Performed",
+                value=f"{stats['checks_performed']:,}",
+                inline=True
+            )
+            embed.add_field(
+                name="Alerts Sent",
+                value=f"{stats['alerts_sent']:,}",
+                inline=True
+            )
+            embed.add_field(
+                name="Limits Hit",
+                value=f"{stats['limits_hit']:,}",
+                inline=True
+            )
+            embed.add_field(
+                name="Errors",
+                value=f"{stats['errors']:,}",
+                inline=True
+            )
+            embed.add_field(
+                name="Loop Time",
+                value=f"{stats['last_loop_time']:.3f}s",
+                inline=True
+            )
+
+            # Add cache stats if available
+            if 'cache_stats' in stats and stats['cache_stats']:
+                cache = stats['cache_stats']
+                embed.add_field(
+                    name="Cache Performance",
+                    value=f"Hit Rate: {cache.get('overall_hit_rate', 0):.1%}\n"
+                          f"Entries: {cache.get('total_entries', 0)}",
+                    inline=False
+                )
+
+            await ctx.send(embed=embed)
+
+        else:
+            await ctx.send("Usage: !monitor [status|start|stop|stats]")
+
+    @commands.command(name='testmonitor')
+    @commands.has_permissions(administrator=True)
+    async def test_monitor(self, ctx, signal_id: int):
+        """Test monitoring for a specific signal
+
+        Usage: !testmonitor <signal_id>
+        """
+        if not self.bot.price_monitor:
+            await ctx.send("❌ Price monitor not initialized")
+            return
+
+        await ctx.send(f"Testing monitor for signal #{signal_id}...")
+
 
 async def setup(bot):
     """Setup function for Discord.py to load this cog"""

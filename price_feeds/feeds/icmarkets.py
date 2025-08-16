@@ -28,17 +28,23 @@ class ICMarketsFeed(BaseFeed):
     - Enhanced error recovery
     """
 
-    def __init__(self, cache_config: Optional[Dict] = None):
+    def __init__(self, cache_instance: Optional[SmartPriceCache] = None, cache_config: Optional[Dict] = None):
         """
         Initialize MT5 feed with smart cache
 
         Args:
-            cache_config: Optional cache TTL configuration
+            cache_instance: Existing cache instance to share (for monitor integration)
+            cache_config: Optional cache TTL configuration (only used if creating new cache)
         """
         super().__init__("ICMarkets")
 
-        # Initialize smart cache
-        self.cache = SmartPriceCache(custom_ttl=cache_config)
+        # CRITICAL FIX: Use shared cache if provided, otherwise create new one
+        if cache_instance is not None:
+            self.cache = cache_instance
+            logger.info("Using shared cache instance from monitor")
+        else:
+            self.cache = SmartPriceCache(custom_ttl=cache_config)
+            logger.info("Created new cache instance")
 
         # Symbol validation cache
         self.valid_symbols = set()
@@ -58,11 +64,15 @@ class ICMarketsFeed(BaseFeed):
     async def connect(self) -> bool:
         """
         Initialize MT5 connection
-
-        Returns:
-            True if connection successful
+        ENHANCED: Clear all symbol caches on connect
         """
         try:
+            # CLEAR ALL CACHES on connect to avoid stale mappings
+            self.valid_symbols.clear()
+            self.invalid_symbols.clear()
+            self.symbol_suffix_map.clear()
+            logger.info("Cleared all symbol caches")
+
             loop = asyncio.get_event_loop()
             result = await loop.run_in_executor(None, mt5.initialize)
 
@@ -75,11 +85,12 @@ class ICMarketsFeed(BaseFeed):
                 terminal_info = mt5.terminal_info()
                 if terminal_info:
                     logger.info(f"Connected to MT5 - Terminal: {terminal_info.name}, "
-                              f"Build: {terminal_info.build}, "
-                              f"Company: {terminal_info.company}")
+                                f"Build: {terminal_info.build}, "
+                                f"Company: {terminal_info.company}")
 
-                    # Pre-populate available symbols
-                    await self._cache_available_symbols()
+                    # DON'T cache symbols - let them be found dynamically
+                    # This avoids any caching issues
+                    logger.info("Symbol caching disabled to avoid confusion")
                 else:
                     logger.info("Connected to MT5")
 
@@ -178,26 +189,31 @@ class ICMarketsFeed(BaseFeed):
     async def get_price(self, symbol: str, priority: Priority = Priority.MEDIUM) -> Optional[Dict]:
         """
         Get current bid/ask price for a single symbol with caching
-
-        Args:
-            symbol: MT5 symbol (e.g., 'EURUSD', 'GOLD')
-            priority: Cache priority level
-
-        Returns:
-            Dict with bid, ask, timestamp, or None if failed
+        ENHANCED WITH DEBUGGING
         """
+        logger.info(f"get_price called for {symbol} with priority {priority.name}")
+
         # Check cache first if enabled
         if self.cache_enabled:
             cached_price = await self.cache.get_price(symbol, priority)
             if cached_price:
-                logger.debug(f"Cache hit for {symbol} (priority={priority.value})")
-                return cached_price
+                logger.info(f"Cache hit for {symbol}: Bid={cached_price.get('bid')}, Ask={cached_price.get('ask')}")
+                # Ensure we have both bid and ask
+                if 'bid' in cached_price and 'ask' in cached_price:
+                    if isinstance(cached_price.get('timestamp'), (int, float)):
+                        cached_price['timestamp'] = datetime.fromtimestamp(cached_price['timestamp'])
+                    return cached_price
+                else:
+                    logger.warning(f"Cached price missing bid or ask: {cached_price}")
 
         # Fetch from MT5
+        logger.info(f"Cache miss or disabled, fetching fresh price for {symbol}")
         fresh_price = await self._fetch_single_price(symbol)
 
         # Update cache if successful
         if fresh_price and self.cache_enabled:
+            logger.info(f"Fresh price from MT5: Bid={fresh_price['bid']}, Ask={fresh_price['ask']}")
+
             await self.cache.update_price(
                 symbol=symbol,
                 bid=fresh_price['bid'],
@@ -206,60 +222,45 @@ class ICMarketsFeed(BaseFeed):
                 priority=priority
             )
 
+            # Verify what was cached
+            test_cached = await self.cache.get_price(symbol, Priority.CRITICAL)  # Use CRITICAL to ensure fresh read
+            if test_cached:
+                logger.info(f"Verified cached: Bid={test_cached.get('bid')}, Ask={test_cached.get('ask')}")
+
         return fresh_price
 
     async def _fetch_single_price(self, symbol: str) -> Optional[Dict]:
         """
         Internal method to fetch price from MT5 without cache
-
-        Args:
-            symbol: MT5 symbol
-
-        Returns:
-            Price dict or None
+        SIMPLIFIED: No suffix mapping for ICMarkets
         """
         try:
             if not await self.ensure_connected():
                 logger.error("Cannot fetch price - MT5 not connected")
-                self._update_metrics(False)
                 return None
 
-            # Check if symbol is known invalid
-            if symbol in self.invalid_symbols:
-                logger.debug(f"Skipping known invalid symbol: {symbol}")
-                return None
+            logger.info(f"Fetching MT5 price for: '{symbol}'")
 
-            # Find correct symbol name
-            actual_symbol = symbol
-            if symbol not in self.valid_symbols:
-                actual_symbol = self._find_symbol_with_suffix(symbol)
-                if not actual_symbol:
-                    # Try fetching directly in case cache is outdated
-                    pass  # Will try with original symbol
-
-            # Fetch tick data
+            # Fetch tick data DIRECTLY - no mapping
             loop = asyncio.get_event_loop()
             tick = await loop.run_in_executor(
                 None,
                 mt5.symbol_info_tick,
-                actual_symbol
+                symbol  # Use symbol exactly as provided
             )
 
-            if tick is None and actual_symbol == symbol:
-                # Try with suffix if direct fetch failed
-                actual_symbol = self._find_symbol_with_suffix(symbol)
-                if actual_symbol:
-                    tick = await loop.run_in_executor(
-                        None,
-                        mt5.symbol_info_tick,
-                        actual_symbol
-                    )
-
             if tick is None:
-                logger.warning(f"Symbol not found: {symbol}")
-                self.invalid_symbols.add(symbol)
-                self._update_metrics(False)
+                logger.warning(f"MT5 returned None for '{symbol}'")
                 return None
+
+            logger.info(f"MT5 tick for '{symbol}': Bid={tick.bid:.5f}, Ask={tick.ask:.5f}")
+
+            # Validate price ranges
+            if 'JPY' in symbol.upper():
+                if tick.bid < 50:
+                    logger.error(f"❌ CRITICAL: {symbol} price is wrong! Got {tick.bid:.5f}, expected >50")
+                    # Return None to avoid caching wrong price
+                    return None
 
             # Extract prices
             result = {
@@ -271,40 +272,27 @@ class ICMarketsFeed(BaseFeed):
                 'spread': tick.ask - tick.bid
             }
 
-            self._update_metrics(True)
-            logger.debug(f"Fetched fresh price for {symbol}: Bid={result['bid']:.5f}, "
-                        f"Ask={result['ask']:.5f}, Spread={result['spread']:.5f}")
-
             return result
 
         except Exception as e:
-            logger.error(f"Error fetching price for {symbol}: {e}")
-            self._update_metrics(False)
-
-            if self.should_reconnect():
-                logger.warning(f"Too many failures, triggering reconnection")
-                self.connected = False
-                await self.ensure_connected()
-
+            logger.error(f"Error fetching price for {symbol}: {e}", exc_info=True)
             return None
 
     async def get_batch_prices(
-        self,
-        symbols: List[str],
-        priorities: Optional[Dict[str, Priority]] = None
+            self,
+            symbols: List[str],
+            priorities: Optional[Dict[str, Priority]] = None
     ) -> Dict[str, Dict]:
         """
         Get prices for multiple symbols efficiently with smart caching
-
-        Args:
-            symbols: List of MT5 symbols
-            priorities: Optional dict mapping symbol to priority
-
-        Returns:
-            Dict mapping symbol to price data
+        ENHANCED: Better symbol tracking
         """
         if not symbols:
             return {}
+
+        logger.info(f"=== BATCH FETCH START ===")
+        logger.info(f"Requested symbols: {symbols}")
+        logger.info(f"Priorities: {priorities}")
 
         # Update batch metrics
         self.total_batch_requests += 1
@@ -316,17 +304,38 @@ class ICMarketsFeed(BaseFeed):
                 symbols, priorities
             )
 
-            # If all prices are cached, return immediately
+            # Log cache results
+            logger.info(f"Cache provided {len(cached_prices)} prices:")
+            for sym, price in cached_prices.items():
+                logger.info(f"  {sym}: Bid={price.get('bid'):.5f}, Ask={price.get('ask'):.5f}")
+
+                # Validate cached JPY prices
+                if 'JPY' in sym.upper() and price.get('bid', 0) < 50:
+                    logger.error(f"❌ CACHED JPY PRICE WRONG for {sym}: {price.get('bid'):.5f}")
+                    # Remove from cache and refetch
+                    symbols_to_fetch.append(sym)
+                    del cached_prices[sym]
+                    await self.cache.invalidate(sym)
+                    logger.info(f"Invalidated cache for {sym}, will refetch")
+
+            # If all prices are cached and valid, return immediately
             if not symbols_to_fetch:
-                logger.info(f"All {len(symbols)} prices served from cache")
+                logger.info(f"All prices from cache (and valid)")
                 return cached_prices
 
             # Fetch only uncached symbols
+            logger.info(f"Need to fetch: {symbols_to_fetch}")
             fresh_prices = await self._fetch_batch_prices(symbols_to_fetch)
 
-            # Update cache with fresh prices
+            # Validate fresh prices before caching
+            for sym, price in fresh_prices.items():
+                if 'JPY' in sym.upper() and price.get('bid', 0) < 50:
+                    logger.error(f"❌ FRESH JPY PRICE WRONG for {sym}: {price.get('bid'):.5f}")
+                    # Don't cache wrong prices
+                    del fresh_prices[sym]
+
+            # Update cache with validated fresh prices
             if fresh_prices:
-                # Convert datetime to timestamp for cache
                 cache_updates = {}
                 for sym, price_data in fresh_prices.items():
                     cache_updates[sym] = {
@@ -339,27 +348,13 @@ class ICMarketsFeed(BaseFeed):
             # Combine cached and fresh prices
             cached_prices.update(fresh_prices)
 
-            # Log cache effectiveness
-            cache_rate = (len(cached_prices) - len(fresh_prices)) / len(symbols) * 100
-            logger.info(f"Batch fetch: {len(cached_prices)}/{len(symbols)} symbols "
-                       f"({cache_rate:.1f}% from cache)")
-
+            logger.info(f"=== BATCH FETCH END ===")
             return cached_prices
         else:
             # Cache disabled or no priorities, fetch all
-            self.cache_bypass_count += 1
             return await self._fetch_batch_prices(symbols)
 
     async def _fetch_batch_prices(self, symbols: List[str]) -> Dict[str, Dict]:
-        """
-        Internal method to fetch batch prices from MT5 without cache
-
-        Args:
-            symbols: List of symbols to fetch
-
-        Returns:
-            Dict of symbol -> price data
-        """
         results = {}
 
         try:
@@ -369,57 +364,49 @@ class ICMarketsFeed(BaseFeed):
 
             loop = asyncio.get_event_loop()
 
-            # Process in chunks if needed
-            chunks = [symbols[i:i + self.max_batch_size]
-                     for i in range(0, len(symbols), self.max_batch_size)]
+            for symbol in symbols:
+                logger.info(f"Batch fetching '{symbol}'...")
 
-            for chunk in chunks:
-                # Get all ticks in one call using a more efficient approach
-                for symbol in chunk:
-                    # Skip known invalid symbols
-                    if symbol in self.invalid_symbols:
-                        continue
+                tick = await loop.run_in_executor(
+                    None,
+                    mt5.symbol_info_tick,
+                    symbol
+                )
 
-                    # Find actual symbol name
-                    actual_symbol = symbol
-                    if symbol not in self.valid_symbols:
-                        actual_symbol = self._find_symbol_with_suffix(symbol)
-                        if not actual_symbol:
-                            actual_symbol = symbol  # Try anyway
+                if tick is not None:
+                    # LOG THE ACTUAL TICK DATA
+                    logger.info(f"  MT5 returned for {symbol}: Bid={tick.bid:.5f}, Ask={tick.ask:.5f}")
 
-                    # Use copy_ticks_from for better performance
-                    ticks = await loop.run_in_executor(
-                        None,
-                        mt5.copy_ticks_from,
-                        actual_symbol,
-                        datetime.now(),
-                        1,  # Just get latest tick
-                        mt5.COPY_TICKS_INFO
-                    )
+                    results[symbol] = {
+                        'bid': tick.bid,
+                        'ask': tick.ask,
+                        'timestamp': datetime.fromtimestamp(tick.time),
+                        'volume': tick.volume,
+                        'last': tick.last,
+                        'spread': tick.ask - tick.bid
+                    }
 
-                    if ticks is not None and len(ticks) > 0:
-                        tick = ticks[-1]  # Latest tick
-                        results[symbol] = {
-                            'bid': tick['bid'],
-                            'ask': tick['ask'],
-                            'timestamp': datetime.fromtimestamp(tick['time']),
-                            'volume': tick['volume'],
-                            'last': tick['last'],
-                            'spread': tick['ask'] - tick['bid']
-                        }
-                        self.total_symbols_fetched += 1
-                    else:
-                        logger.debug(f"No tick data for {symbol}")
-                        self.invalid_symbols.add(symbol)
+                    # VERIFY WHAT WAS STORED
+                    logger.info(f"  Stored in results[{symbol}]: Bid={results[symbol]['bid']:.5f}")
 
-            # Log batch performance
-            success_rate = len(results) / len(symbols) * 100 if symbols else 0
-            logger.info(f"MT5 batch fetch: {len(results)}/{len(symbols)} symbols "
-                       f"({success_rate:.1f}% success)")
+                    # Check for obvious errors
+                    if 'JPY' in symbol.upper():
+                        if symbol.startswith('CAD') and results[symbol]['bid'] > 150:
+                            logger.error(f"  ❌ WRONG: CADJPY price {results[symbol]['bid']} is too high!")
+                        elif symbol.startswith('CHF') and results[symbol]['bid'] < 150:
+                            logger.error(f"  ❌ WRONG: CHFJPY price {results[symbol]['bid']} is too low!")
+                else:
+                    logger.warning(f"  ✗ No data for {symbol}")
 
-            # Update metrics based on overall success
-            self._update_metrics(len(results) > 0, len(symbols))
+            # FINAL VERIFICATION
+            logger.info(f"Final results dictionary:")
+            for sym, price in results.items():
+                logger.info(f"  {sym}: Bid={price['bid']:.5f}, Ask={price['ask']:.5f}")
 
+            return results
+
+        except Exception as e:
+            logger.error(f"Error in batch price fetch: {e}", exc_info=True)
             return results
 
         except Exception as e:

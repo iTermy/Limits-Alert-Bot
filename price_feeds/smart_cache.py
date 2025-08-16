@@ -101,17 +101,12 @@ class SmartPriceCache:
     ) -> Optional[Dict[str, float]]:
         """
         Get price from cache if valid, returns None if expired/missing.
-
-        Args:
-            symbol: Symbol to get price for
-            priority: Priority level for this lookup
-
-        Returns:
-            Price dict with bid/ask/timestamp or None
+        ENHANCED WITH DEBUGGING
         """
         async with self.lock:
             if symbol not in self.cache:
                 self.cache_misses += 1
+                logger.debug(f"Cache miss for {symbol} - not in cache")
                 return None
 
             cached = self.cache[symbol]
@@ -119,8 +114,8 @@ class SmartPriceCache:
 
             if cached.is_expired(ttl):
                 self.cache_misses += 1
-                logger.debug(
-                    f"Cache expired for {symbol} (priority={priority.value}, age={time.time() - cached.cached_at:.1f}s)")
+                age = time.time() - cached.cached_at
+                logger.debug(f"Cache expired for {symbol} (age={age:.1f}s > ttl={ttl}s)")
                 return None
 
             # Update hit count
@@ -128,9 +123,15 @@ class SmartPriceCache:
             self.cache_hits += 1
 
             age = time.time() - cached.cached_at
-            logger.debug(f"Cache hit for {symbol} (priority={priority.value}, age={age:.1f}s)")
+            logger.debug(f"Cache hit for {symbol}: Bid={cached.bid}, Ask={cached.ask}, Age={age:.1f}s")
 
-            return cached.to_dict()
+            result = cached.to_dict()
+
+            # Verify the result
+            if result['bid'] == result['ask']:
+                logger.warning(f"WARNING: Returning identical bid/ask from cache for {symbol}: {result['bid']}")
+
+            return result
 
     async def update_price(
             self,
@@ -142,14 +143,13 @@ class SmartPriceCache:
     ) -> None:
         """
         Update cache with new price data.
-
-        Args:
-            symbol: Symbol to cache
-            bid: Bid price
-            ask: Ask price
-            timestamp: Market timestamp
-            priority: Priority level for this symbol
+        ENHANCED WITH DEBUGGING
         """
+        logger.info(f"update_price called: {symbol} Bid={bid}, Ask={ask}, Priority={priority.name}")
+
+        if bid == ask:
+            logger.warning(f"WARNING: Identical bid/ask being cached for {symbol}: {bid}")
+
         async with self.lock:
             # Check cache size limit
             if len(self.cache) >= self.max_cache_size:
@@ -158,7 +158,9 @@ class SmartPriceCache:
             # Update fetch count if exists
             fetch_count = 1
             if symbol in self.cache:
-                fetch_count = self.cache[symbol].fetch_count + 1
+                old_entry = self.cache[symbol]
+                fetch_count = old_entry.fetch_count + 1
+                logger.debug(f"Replacing cache entry for {symbol} (was Bid={old_entry.bid}, Ask={old_entry.ask})")
 
             self.cache[symbol] = CachedPrice(
                 symbol=symbol,
@@ -171,7 +173,14 @@ class SmartPriceCache:
             )
 
             self.total_fetches += 1
-            logger.debug(f"Cache updated for {symbol} (bid={bid}, ask={ask})")
+
+            # Verify what was stored
+            stored = self.cache[symbol]
+            logger.info(f"Cache stored for {symbol}: Bid={stored.bid}, Ask={stored.ask}")
+
+            if stored.bid != bid or stored.ask != ask:
+                logger.error(f"ERROR: Cache corruption! Stored Bid={stored.bid} vs Input Bid={bid}, "
+                             f"Stored Ask={stored.ask} vs Input Ask={ask}")
 
     async def update_batch(
             self,
@@ -180,18 +189,35 @@ class SmartPriceCache:
     ) -> None:
         """
         Update multiple prices at once.
-
-        Args:
-            prices: Dict of symbol -> price data
-            priorities: Optional dict of symbol -> priority
+        FIXED: Ensure bid/ask are properly stored
         """
+        logger.info(f"update_batch called with {len(prices)} prices")
+
         for symbol, price_data in prices.items():
             priority = priorities.get(symbol, Priority.MEDIUM) if priorities else Priority.MEDIUM
+
+            # Ensure we have both bid and ask
+            if 'bid' not in price_data or 'ask' not in price_data:
+                logger.error(f"Missing bid or ask for {symbol}: {price_data}")
+                continue
+
+            bid = price_data['bid']
+            ask = price_data['ask']
+
+            # Check for issues
+            if bid == ask:
+                logger.warning(f"WARNING: Identical bid/ask in batch for {symbol}: {bid}")
+
+            # Ensure timestamp exists
+            timestamp = price_data.get('timestamp', time.time())
+
+            logger.debug(f"Batch updating {symbol}: Bid={bid}, Ask={ask}")
+
             await self.update_price(
                 symbol=symbol,
-                bid=price_data['bid'],
-                ask=price_data['ask'],
-                timestamp=price_data['timestamp'],
+                bid=bid,
+                ask=ask,
+                timestamp=timestamp,
                 priority=priority
             )
 
@@ -218,7 +244,7 @@ class SmartPriceCache:
             price = await self.get_price(symbol, priority)
 
             if price:
-                cached_prices[symbol] = price
+                cached_prices[symbol] = price.copy() if isinstance(price, dict) else price
             else:
                 symbols_to_fetch.append(symbol)
 
@@ -270,7 +296,7 @@ class SmartPriceCache:
             'symbols_cached': list(self.cache.keys())[:10]  # First 10 for brevity
         }
 
-    async def calculate_priority(
+    def calculate_priority(
             self,
             distance_pips: float,
             asset_class: str = "forex"
