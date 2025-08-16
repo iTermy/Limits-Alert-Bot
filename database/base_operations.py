@@ -275,6 +275,8 @@ class BaseOperations:
         query = """
             SELECT 
                 s.id as signal_id,
+                s.message_id,
+                s.channel_id,
                 s.instrument,
                 s.direction,
                 s.stop_loss,
@@ -304,6 +306,8 @@ class BaseOperations:
             if signal_id not in signals:
                 signals[signal_id] = {
                     'signal_id': signal_id,
+                    'message_id': row['message_id'],
+                    'channel_id': row['channel_id'],
                     'instrument': row['instrument'],
                     'direction': row['direction'],
                     'stop_loss': row['stop_loss'],

@@ -8,22 +8,15 @@ import logging
 from typing import Dict, List, Optional, Tuple
 from datetime import datetime
 import discord
-from enum import Enum
 
 from price_feeds.symbol_mapper import SymbolMapper
 from price_feeds.alert_config import AlertDistanceConfig
 from price_feeds.smart_cache import SmartPriceCache, Priority
 from price_feeds.feeds.icmarkets import ICMarketsFeed
+from price_feeds.alert_system import AlertSystem, AlertType
 from utils.logger import get_logger
 
 logger = get_logger('monitor')
-
-
-class AlertType(Enum):
-    """Types of alerts"""
-    APPROACHING = "approaching"
-    HIT = "hit"
-    STOP_LOSS = "stop_loss"
 
 
 class PriceMonitor:
@@ -55,7 +48,10 @@ class PriceMonitor:
         self.cache = SmartPriceCache()
 
         # PASS SHARED CACHE TO FEED
-        self.feed = ICMarketsFeed(cache_instance=self.cache)  # Changed parameter name
+        self.feed = ICMarketsFeed(cache_instance=self.cache)
+
+        # Initialize alert system (pass bot for channel lookups)
+        self.alert_system = AlertSystem(bot=bot)
 
         # Monitoring state
         self.running = False
@@ -65,14 +61,10 @@ class PriceMonitor:
         # Performance tracking
         self.stats = {
             'checks_performed': 0,
-            'alerts_sent': 0,
             'limits_hit': 0,
             'errors': 0,
             'last_loop_time': 0
         }
-
-        # Get alert channel from config
-        self.alert_channel = None
 
     async def initialize(self):
         """Initialize monitor and connect to feed"""
@@ -93,8 +85,9 @@ class PriceMonitor:
                     channel_id = config.get('alert_channel')
                     if channel_id:
                         try:
-                            self.alert_channel = await self.bot.fetch_channel(int(channel_id))
-                            logger.info(f"Alert channel set: #{self.alert_channel.name} ({self.alert_channel.id})")
+                            channel = await self.bot.fetch_channel(int(channel_id))
+                            self.alert_system.set_channel(channel)
+                            logger.info(f"Alert channel set: #{channel.name} ({channel.id})")
                         except discord.NotFound:
                             logger.error(f"Channel with ID {channel_id} not found (bot may not have access).")
                         except discord.Forbidden:
@@ -117,10 +110,9 @@ class PriceMonitor:
             return
 
         self.running = True
-        logger.info("Monitor.running set to True")  # Add this
+        logger.info("Monitor.running set to True")
         self.monitoring_task = asyncio.create_task(self.monitoring_loop())
         logger.info("Price monitoring started")
-        logger.info("Monitoring task created")  # Add this
 
     async def stop(self):
         """Stop the monitoring loop"""
@@ -146,7 +138,7 @@ class PriceMonitor:
             try:
                 # Get signals that need tracking
                 signals = await self.db.get_active_signals_for_tracking()
-                logger.info(f"Found {len(signals)} signals to monitor")  # Add this
+                logger.info(f"Found {len(signals)} signals to monitor")
                 if signals:
                     logger.debug(f"First signal: {signals[0]['instrument']}")
 
@@ -174,10 +166,6 @@ class PriceMonitor:
         """Process all signals, checking limits and stop losses"""
         logger.info(f"Processing {len(signals)} signals")
 
-        # Debug: Log all instruments
-        instruments = [s['instrument'] for s in signals]
-        logger.info(f"Signal instruments: {instruments}")
-
         # Group signals by symbol and calculate priorities
         symbol_priorities = {}
         signal_by_symbol = {}
@@ -187,7 +175,7 @@ class PriceMonitor:
 
             # Calculate priority based on closest pending limit
             priority = await self.calculate_signal_priority(signal)
-            logger.info(f"Calculated priority for {symbol}: {priority.name}")  # <-- Add this
+            logger.info(f"Calculated priority for {symbol}: {priority.name}")
 
             # Track highest priority per symbol
             if symbol not in symbol_priorities:
@@ -219,12 +207,11 @@ class PriceMonitor:
                     price_data = dict(prices[symbol])
                     await self.check_signal(signal, price_data)
             else:
-                logger.error(f"No price data for {symbol}!")  # <-- Add this
+                logger.error(f"No price data for {symbol}!")
 
     async def calculate_signal_priority(self, signal: Dict) -> Priority:
         """
         Calculate priority based on closest pending limit or stop loss
-        FIXED: Use proper pip size from alert config
 
         Args:
             signal: Signal dictionary with pending limits
@@ -260,14 +247,13 @@ class PriceMonitor:
             sl_distance = abs(current_price - signal['stop_loss'])
             min_distance = min(min_distance, sl_distance)
 
-        # Get proper pip size from alert config (handles JPY pairs correctly)
+        # Get proper pip size from alert config
         alert_config_for_symbol = self.alert_config.get_alert_config(symbol)
         pip_size = alert_config_for_symbol.get('pip_size', 0.0001)
 
         # Convert distance to pips
         distance_pips = min_distance / pip_size
 
-        # Log for debugging
         logger.debug(f"Priority calc for {symbol}: min_distance={min_distance:.5f}, "
                      f"pip_size={pip_size}, distance_pips={distance_pips:.1f}")
 
@@ -281,7 +267,6 @@ class PriceMonitor:
         # Determine priority based on distance
         return self.cache.calculate_priority(distance_pips, asset_class)
 
-    # In monitor.py::fetch_prices_batch()
     async def fetch_prices_batch(self, symbol_priorities: Dict[str, Priority]) -> Dict[str, Dict]:
         """
         Fetch prices for multiple symbols efficiently
@@ -297,13 +282,12 @@ class PriceMonitor:
 
         try:
             # Get prices from feed with priorities
-            # IMPORTANT: Pass symbols as list, priorities as dict
             prices = await self.feed.get_batch_prices(
                 symbols,  # List of symbols
                 symbol_priorities  # Dict of priorities
             )
 
-            # LOG WHAT WE GOT BACK
+            # Log what we got back
             logger.info(f"Received prices from feed:")
             for symbol, price_data in prices.items():
                 if price_data:
@@ -339,6 +323,11 @@ class PriceMonitor:
                     f"Current price={current_price:.5f}, "
                     f"Pending limits={len(signal.get('pending_limits', []))}")
 
+
+        # Add guild_id to signal for message link generation
+        if hasattr(self.bot, 'guilds') and self.bot.guilds:
+            signal['guild_id'] = self.bot.guilds[0].id
+
         # Check each pending limit
         for limit in signal.get('pending_limits', []):
             logger.info(f"  Checking limit #{limit['sequence_number']}: {limit['price_level']:.5f}")
@@ -351,12 +340,10 @@ class PriceMonitor:
     async def check_limit(self, signal: Dict, limit: Dict, current_price: float, direction: str):
         """
         Check if a limit is approaching or hit
-        FIXED: Proper pip calculation for JPY pairs and other instruments
         """
         limit_price = limit['price_level']
         symbol = signal['instrument']
 
-        # Log the actual comparison being made
         logger.info(f"    Limit check for Signal #{signal['signal_id']}:")
         logger.info(f"      Symbol: {symbol}")
         logger.info(f"      Direction: {direction}")
@@ -376,7 +363,6 @@ class PriceMonitor:
             logger.info(f"      SHORT: distance={distance:.5f}, is_hit={is_hit}")
 
         # Get proper configuration for this symbol
-        # This will handle JPY pairs and other special cases correctly
         alert_config_for_symbol = self.alert_config.get_alert_config(symbol)
         pip_size = alert_config_for_symbol.get('pip_size', 0.0001)
 
@@ -386,23 +372,25 @@ class PriceMonitor:
         logger.info(f"      Alert config: {alert_config_for_symbol}")
         logger.info(f"      Pip size: {pip_size}")
         logger.info(f"      Distance in pips: {distance_pips:.1f}")
+        logger.info(f"      Limit sequence: #{limit['sequence_number']}")
         logger.info(f"      Approaching alert sent: {limit['approaching_alert_sent']}")
         logger.info(f"      Hit alert sent: {limit['hit_alert_sent']}")
 
         # Check if hit
         if is_hit and not limit['hit_alert_sent']:
-            await self.send_limit_hit_alert(signal, limit, current_price)
+            await self.alert_system.send_limit_hit_alert(signal, limit, current_price)
             await self.process_limit_hit(signal, limit, current_price)
 
-        # Check if approaching (only if not yet hit)
+        # Check if approaching (only for first limit and if not yet hit)
         elif not is_hit and not limit['approaching_alert_sent']:
-            approaching_distance = self.alert_config.get_approaching_distance(symbol)
-            logger.info(
-                f"      Approaching check: Distance={distance_pips:.1f} pips, Threshold={approaching_distance} pips")
+            # Only check approaching for first limit
+            if limit['sequence_number'] == 1:
+                approaching_distance = self.alert_config.get_approaching_distance(symbol)
+                logger.info(f"      First limit approaching check: Distance={distance_pips:.1f} pips, Threshold={approaching_distance} pips")
 
-            if distance_pips <= approaching_distance:
-                await self.send_approaching_alert(signal, limit, current_price, distance_pips)
-                await self.mark_approaching_sent(limit['limit_id'])
+                if distance_pips <= approaching_distance:
+                    await self.alert_system.send_approaching_alert(signal, limit, current_price, distance_pips)
+                    await self.mark_approaching_sent(limit['limit_id'])
 
     async def check_stop_loss(self, signal: Dict, current_price: float, direction: str):
         """
@@ -424,118 +412,8 @@ class PriceMonitor:
             is_hit = current_price >= stop_loss
 
         if is_hit:
-            await self.send_stop_loss_alert(signal, current_price)
+            await self.alert_system.send_stop_loss_alert(signal, current_price)
             await self.process_stop_loss_hit(signal)
-
-    async def send_approaching_alert(self, signal: Dict, limit: Dict, current_price: float, distance_pips: float):
-        """Send alert for approaching limit"""
-        if not self.alert_channel:
-            return
-
-        try:
-            embed = discord.Embed(
-                title="🟡 Limit Approaching",
-                description=f"**{signal['instrument']}** {signal['direction'].upper()}",
-                color=0xFFA500,  # Orange
-                timestamp=datetime.utcnow()
-            )
-
-            embed.add_field(
-                name="Limit Details",
-                value=f"Limit #{limit['sequence_number']}: {limit['price_level']:.5f}",
-                inline=False
-            )
-            embed.add_field(
-                name="Current Price",
-                value=f"{current_price:.5f}",
-                inline=True
-            )
-            embed.add_field(
-                name="Distance",
-                value=f"{distance_pips:.1f} pips",
-                inline=True
-            )
-
-            embed.set_footer(text=f"Signal #{signal['signal_id']}")
-
-            await self.alert_channel.send(embed=embed)
-            self.stats['alerts_sent'] += 1
-            logger.info(f"Approaching alert sent for signal {signal['signal_id']}, limit {limit['limit_id']}")
-
-        except Exception as e:
-            logger.error(f"Failed to send approaching alert: {e}")
-
-    async def send_limit_hit_alert(self, signal: Dict, limit: Dict, current_price: float):
-        """Send alert for limit hit"""
-        if not self.alert_channel:
-            return
-
-        try:
-            embed = discord.Embed(
-                title="🎯 Limit Hit!",
-                description=f"**{signal['instrument']}** {signal['direction'].upper()}",
-                color=0x00FF00,  # Green
-                timestamp=datetime.utcnow()
-            )
-
-            embed.add_field(
-                name="Limit Hit",
-                value=f"Limit #{limit['sequence_number']}: {limit['price_level']:.5f}",
-                inline=False
-            )
-            embed.add_field(
-                name="Hit Price",
-                value=f"{current_price:.5f}",
-                inline=True
-            )
-            embed.add_field(
-                name="Progress",
-                value=f"{signal['limits_hit'] + 1}/{signal['total_limits']} limits hit",
-                inline=True
-            )
-
-            embed.set_footer(text=f"Signal #{signal['signal_id']}")
-
-            await self.alert_channel.send(embed=embed)
-            self.stats['alerts_sent'] += 1
-            self.stats['limits_hit'] += 1
-            logger.info(f"Limit hit alert sent for signal {signal['signal_id']}, limit {limit['limit_id']}")
-
-        except Exception as e:
-            logger.error(f"Failed to send limit hit alert: {e}")
-
-    async def send_stop_loss_alert(self, signal: Dict, current_price: float):
-        """Send alert for stop loss hit"""
-        if not self.alert_channel:
-            return
-
-        try:
-            embed = discord.Embed(
-                title="🛑 Stop Loss Hit!",
-                description=f"**{signal['instrument']}** {signal['direction'].upper()}",
-                color=0xFF0000,  # Red
-                timestamp=datetime.utcnow()
-            )
-
-            embed.add_field(
-                name="Stop Loss",
-                value=f"{signal['stop_loss']:.5f}",
-                inline=True
-            )
-            embed.add_field(
-                name="Hit Price",
-                value=f"{current_price:.5f}",
-                inline=True
-            )
-
-            embed.set_footer(text=f"Signal #{signal['signal_id']}")
-
-            await self.alert_channel.send(embed=embed)
-            self.stats['alerts_sent'] += 1
-            logger.info(f"Stop loss alert sent for signal {signal['signal_id']}")
-
-        except Exception as e:
-            logger.error(f"Failed to send stop loss alert: {e}")
 
     async def mark_approaching_sent(self, limit_id: int):
         """Mark that approaching alert has been sent for a limit"""
@@ -557,6 +435,9 @@ class PriceMonitor:
 
             if result.get('all_limits_hit'):
                 logger.info(f"All limits hit for signal {signal['signal_id']}")
+
+            # Update local stats
+            self.stats['limits_hit'] += 1
 
         except Exception as e:
             logger.error(f"Failed to process limit hit: {e}")
@@ -580,7 +461,8 @@ class PriceMonitor:
         return {
             **self.stats,
             'running': self.running,
-            'cache_stats': self.cache.get_stats() if self.cache else {}
+            'cache_stats': self.cache.get_stats() if self.cache else {},
+            'alert_stats': self.alert_system.get_stats() if self.alert_system else {}
         }
 
     async def test_signal_monitoring(self, signal_id: int):

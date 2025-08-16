@@ -26,7 +26,7 @@
       "description": "Index points"
     },
     "stocks": {
-      "approaching_distance": 0.50,
+      "approaching_distance": 50,
       "pip_size": 0.01,
       "description": "Stock prices in USD"
     },

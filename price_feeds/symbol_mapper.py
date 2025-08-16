@@ -87,13 +87,14 @@ class SymbolMapper:
         if any(oil in symbol_upper for oil in ['WTI', 'BRENT', 'OIL', 'USOIL', 'USOILSPOT']):
             return 'oil'
 
+        # Check stocks (common patterns)
+        if '.' in symbol or any(exchange in symbol_upper for exchange in ['.NAS', '.NYSE', '.LON']):
+            return 'stocks'
+
         # Check indices
         if any(idx in symbol_upper for idx in ['SPX', 'NAS', 'DOW', 'DAX', 'CHINA50', 'US500', 'USTEC', 'US30',
                                                'US2000', 'RUSSEL', 'GER30', 'DE30', 'JP225', 'NIKKEI']):
             return 'indices'
-        # Check stocks (common patterns)
-        if '.' in symbol or any(exchange in symbol_upper for exchange in ['.NAS', '.NYSE', '.LON']):
-            return 'stocks'
 
         # Check forex - FIXED: Simplified approach
         forex_currencies = ['EUR', 'USD', 'GBP', 'JPY', 'AUD', 'NZD', 'CAD', 'CHF', 'SEK', 'NOK', 'DKK', 'PLN', 'HUF',
