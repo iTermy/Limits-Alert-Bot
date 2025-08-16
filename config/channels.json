@@ -10,67 +10,49 @@
     "stocks-trades": "1402972455990984774",
     "swing-trades": "1402972635847200838",
     "ot-trade-calls": "1402972674082476102",
+    "proper-calls": "1406127169448575098",
     "crypto-alt-trades": "1403532013511905434"
   },
   "alert_channel": "1402971805890773005",
   "command_channel": "1402971848731398174",
   "channel_settings": {
     "daily_trade_setup": {
-      "default_expiry": "day_end",
-      "near_distance_pips": 10,
-      "track_interval_seconds": 1
+      "default_expiry": "day_end"
     },
     "scalps": {
-      "default_expiry": "day_end",
-      "near_distance_pips": 10,
-      "track_interval_seconds": 1
+      "default_expiry": "day_end"
     },
     "forex-exotics": {
-      "default_expiry": "week_end",
-      "near_distance_pips": 10,
-      "track_interval_seconds": 1
+      "default_expiry": "week_end"
     },
     "gold-trades": {
       "default_instrument": "XAUUSD",
-      "default_expiry": "week_end",
-      "near_distance_pips": 5,
-      "track_interval_seconds": 1
+      "default_expiry": "week_end"
     },
     "oil-trades": {
       "default_instrument": "USOILSPOT",
-      "default_expiry": "week_end",
-      "near_distance_pips": 0.5,
-      "track_interval_seconds": 1
+      "default_expiry": "week_end"
     },
     "indices-trades": {
-      "default_expiry": "week_end",
-      "near_distance_pips": 20,
-      "track_interval_seconds": 2
+      "default_expiry": "week_end"
     },
     "crypto-trades": {
-      "default_expiry": "week_end",
-      "near_distance_pips": 20,
-      "track_interval_seconds": 2
+      "default_expiry": "week_end"
     },
     "stocks-trades": {
-      "default_expiry": "week_end",
-      "near_distance_pips": 3,
-      "track_interval_seconds": 2
+      "default_expiry": "week_end"
     },
     "swing-trades": {
-      "default_expiry": "week_end",
-      "near_distance_pips": 10,
-      "track_interval_seconds": 2
+      "default_expiry": "week_end"
     },
     "ot-trade-calls": {
-      "default_expiry": "day_end",
-      "near_distance_pips": 10,
-      "track_interval_seconds": 2
+      "default_expiry": "day_end"
+    },
+    "proper-calls": {
+      "default_expiry": "week_end"
     },
     "crypto-alt-trades": {
-      "default_expiry": "week_end",
-      "near_distance_pips": 10,
-      "track_interval_seconds": 2
+      "default_expiry": "week_end"
     }
   }
 }

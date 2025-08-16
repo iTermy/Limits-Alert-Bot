@@ -58,63 +58,69 @@ class SymbolMapper:
                 except re.error as e:
                     logger.warning(f"Invalid regex pattern for {asset_class}: {pattern} - {e}")
 
+    # Add/update this method in symbol_mapper.py
+
     def determine_asset_class(self, symbol: str) -> str:
         """
         Determine the asset class of a symbol
-        Returns: 'forex', 'indices', 'crypto', 'metals', 'stocks', 'oil', or 'unknown'
+        ENHANCED: Properly identifies JPY pairs and other special cases
+
+        Args:
+            symbol: Trading symbol
+
+        Returns:
+            Asset class string (forex, forex_jpy, metals, crypto, indices, stocks, oil)
         """
         symbol_upper = symbol.upper()
-        symbol_lower = symbol.lower()
 
-        # Check stocks first (has .NAS or .NYSE suffix)
-        if '.NAS' in symbol_upper or '.NYSE' in symbol_upper:
-            return 'stocks'
+        # Check crypto patterns
+        if any(crypto in symbol_upper for crypto in ['BTC', 'ETH', 'BNB', 'XRP', 'ADA', 'DOGE', 'SOL', 'DOT']):
+            return 'crypto'
+        if 'USDT' in symbol_upper:
+            return 'crypto'
 
-        # Check metals (specific symbols)
-        metals_patterns = self.mappings['asset_class_patterns']['metals']
-        if any(keyword in symbol_lower for keyword in metals_patterns.get('keywords', [])):
+        # Check metals
+        if any(metal in symbol_upper for metal in ['XAU', 'XAG', 'GOLD', 'SILVER']):
             return 'metals'
-        for pattern in self.compiled_patterns.get('metals', []):
-            if pattern.match(symbol_upper):
-                return 'metals'
 
         # Check oil
-        oil_patterns = self.mappings['asset_class_patterns']['oil']
-        if any(keyword in symbol_lower for keyword in oil_patterns.get('keywords', [])):
+        if any(oil in symbol_upper for oil in ['WTI', 'BRENT', 'OIL', 'USOIL', 'USOILSPOT']):
             return 'oil'
 
         # Check indices
-        indices_patterns = self.mappings['asset_class_patterns']['indices']
-        if any(keyword in symbol_lower for keyword in indices_patterns.get('keywords', [])):
+        if any(idx in symbol_upper for idx in ['SPX', 'NAS', 'DOW', 'DAX', 'CHINA50', 'US500', 'USTEC', 'US30',
+                                               'US2000', 'RUSSEL', 'GER30', 'DE30', 'JP225', 'NIKKEI']):
             return 'indices'
+        # Check stocks (common patterns)
+        if '.' in symbol or any(exchange in symbol_upper for exchange in ['.NAS', '.NYSE', '.LON']):
+            return 'stocks'
 
-        # Check forex BEFORE crypto (6 characters, all letters)
-        # This must come before crypto check since forex pairs can end in USD
-        if len(symbol) == 6 and symbol_upper.isalpha():
-            # Verify it looks like a currency pair
-            currencies = ['EUR', 'USD', 'GBP', 'JPY', 'AUD', 'NZD', 'CAD', 'CHF', 'SGD', 'HKD', 'NOK', 'SEK', 'DKK', 'PLN', 'CZK', 'HUF', 'RON', 'TRY', 'ZAR', 'MXN', 'CNH', 'RUB', 'INR', 'KRW', 'THB', 'MYR', 'PHP', 'IDR']
-            if symbol_upper[:3] in currencies and symbol_upper[3:] in currencies:
+        # Check forex - FIXED: Simplified approach
+        forex_currencies = ['EUR', 'USD', 'GBP', 'JPY', 'AUD', 'NZD', 'CAD', 'CHF', 'SEK', 'NOK', 'DKK', 'PLN', 'HUF',
+                            'CZK', 'MXN', 'ZAR', 'SGD', 'HKD', 'CNH', 'TRY']
+
+        # Remove any slashes for comparison
+        symbol_clean = symbol_upper.replace('/', '')
+
+        # Check if it's a forex pair - simpler approach
+        if len(symbol_clean) == 6:
+            currency1 = symbol_clean[:3]
+            currency2 = symbol_clean[3:]
+
+            if currency1 in forex_currencies and currency2 in forex_currencies:
+                # Check if it's a JPY pair
+                if 'JPY' in symbol_upper:
+                    return 'forex_jpy'
                 return 'forex'
 
-        # Check if it's a known crypto symbol without suffix
-        crypto_symbols = ['BTC', 'ETH', 'BNB', 'ADA', 'DOT', 'DOGE', 'SOL', 'MATIC',
-                         'LTC', 'AVAX', 'LINK', 'UNI', 'ATOM', 'XRP', 'ALGO', 'NEAR',
-                         'FTM', 'MANA', 'SAND', 'AXS', 'GALA']
-        if symbol_upper in crypto_symbols:
-            return 'crypto'
+        # Default to forex for unknown 6-letter combinations that might be exotic pairs
+        if len(symbol) == 6 and symbol.isalpha():
+            if 'JPY' in symbol_upper:
+                return 'forex_jpy'
+            return 'forex'
 
-        # Check crypto (ends with USDT or is crypto+USD but NOT forex)
-        if symbol_upper.endswith('USDT'):
-            return 'crypto'
-
-        # For symbols ending in USD, only classify as crypto if it's not forex and matches crypto pattern
-        if symbol_upper.endswith('USD') and len(symbol) != 6:
-            # Check if the base (without USD) is a known crypto
-            base = symbol_upper[:-3] if symbol_upper.endswith('USD') else symbol_upper[:-4]
-            if base in crypto_symbols:
-                return 'crypto'
-
-        return 'unknown'
+        # Ultimate fallback
+        return 'forex'
 
     def get_best_feed(self, symbol: str) -> str:
         """

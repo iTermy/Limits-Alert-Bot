@@ -33,31 +33,23 @@ def update_channel_config():
             if "gold" in channel_name.lower():
                 config["channel_settings"][channel_name] = {
                     "default_instrument": "XAUUSD",
-                    "default_expiry": "day_end",
-                    "near_distance_pips": 5,
-                    "track_interval_seconds": 1
+                    "default_expiry": "day_end"
                 }
                 print(f"➕ Added gold-specific settings for {channel_name}")
             elif "oil" in channel_name.lower():
                 config["channel_settings"][channel_name] = {
                     "default_instrument": "USOIL",
-                    "default_expiry": "week_end",
-                    "near_distance_pips": 0.5,
-                    "track_interval_seconds": 2
+                    "default_expiry": "week_end"
                 }
                 print(f"➕ Added oil-specific settings for {channel_name}")
             elif "indices" in channel_name.lower() or "index" in channel_name.lower():
                 config["channel_settings"][channel_name] = {
-                    "default_expiry": "day_end",
-                    "near_distance_pips": 10,
-                    "track_interval_seconds": 2
+                    "default_expiry": "day_end"
                 }
                 print(f"➕ Added indices-specific settings for {channel_name}")
             else:
                 config["channel_settings"][channel_name] = {
-                    "default_expiry": "day_end",
-                    "near_distance_pips": 5,
-                    "track_interval_seconds": 1
+                    "default_expiry": "day_end"
                 }
                 print(f"➕ Added default settings for {channel_name}")
 

@@ -296,34 +296,57 @@ class SmartPriceCache:
             'symbols_cached': list(self.cache.keys())[:10]  # First 10 for brevity
         }
 
-    def calculate_priority(
-            self,
-            distance_pips: float,
-            asset_class: str = "forex"
-    ) -> Priority:
+
+    def calculate_priority(self, distance_pips: float, asset_class: str) -> Priority:
         """
-        Calculate priority based on distance to limit.
+        Calculate priority based on distance in pips/points
 
         Args:
-            distance_pips: Distance in pips/points to limit
-            asset_class: Type of asset (forex, metals, crypto, stocks)
+            distance_pips: Distance in pips/points to nearest limit
+            asset_class: Type of asset (forex, forex_jpy, metals, crypto, etc.)
 
         Returns:
-            Priority level
+            Priority enum value
         """
-        # Adjust thresholds based on asset class
+        # Define thresholds per asset class
         thresholds = {
-            "forex": (10, 50),  # critical<10, medium<50
-            "metals": (15, 75),  # metals are more volatile
-            "crypto": (100, 500),  # crypto much more volatile
-            "stocks": (5, 25)  # stocks relatively stable
+            'forex': {
+                'critical': 10,  # < 10 pips
+                'medium': 50,  # 10-50 pips
+            },
+            'forex_jpy': {
+                'critical': 15,  # < 15 pips for JPY pairs
+                'medium': 75,  # 15-75 pips
+            },
+            'metals': {
+                'critical': 100,  # < $1.00 for gold (100 pips at 0.01)
+                'medium': 500,  # $1.00-$5.00
+            },
+            'crypto': {
+                'critical': 50,  # < $50
+                'medium': 200,  # $50-$200
+            },
+            'indices': {
+                'critical': 5,  # < 5 points
+                'medium': 20,  # 5-20 points
+            },
+            'stocks': {
+                'critical': 50,  # < $0.50 (50 pips at 0.01)
+                'medium': 200,  # $0.50-$2.00
+            },
+            'oil': {
+                'critical': 50,  # < $0.50
+                'medium': 200,  # $0.50-$2.00
+            }
         }
 
-        critical_threshold, medium_threshold = thresholds.get(asset_class, (10, 50))
+        # Get thresholds for asset class, default to forex if not found
+        class_thresholds = thresholds.get(asset_class, thresholds['forex'])
 
-        if distance_pips < critical_threshold:
+        # Determine priority
+        if distance_pips < class_thresholds['critical']:
             return Priority.CRITICAL
-        elif distance_pips < medium_threshold:
+        elif distance_pips < class_thresholds['medium']:
             return Priority.MEDIUM
         else:
             return Priority.LOW

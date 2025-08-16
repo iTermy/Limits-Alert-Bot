@@ -57,33 +57,27 @@ class AlertDistanceConfig:
             'defaults': {
                 'forex': {
                     'approaching_pips': 10,
-                    'pip_size': 0.0001,
-                    'min_distance_pips': 2
+                    'pip_size': 0.0001
                 },
                 'forex_jpy': {
                     'approaching_pips': 15,
-                    'pip_size': 0.01,
-                    'min_distance_pips': 3
+                    'pip_size': 0.01
                 },
                 'metals': {
                     'approaching_distance': 1.00,
-                    'pip_size': 0.01,
-                    'min_distance': 0.20
+                    'pip_size': 0.01
                 },
                 'crypto': {
                     'approaching_distance': 50,
-                    'pip_size': 1,
-                    'min_distance': 10
+                    'pip_size': 1
                 },
                 'indices': {
                     'approaching_distance': 5.0,
-                    'pip_size': 1,
-                    'min_distance': 1.0
+                    'pip_size': 1
                 },
                 'stocks': {
                     'approaching_distance': 0.50,
-                    'pip_size': 0.01,
-                    'min_distance': 0.10
+                    'pip_size': 0.01
                 }
             },
             'overrides': {},
@@ -153,33 +147,6 @@ class AlertDistanceConfig:
         config = self.get_alert_config(symbol)
         return config.get('pip_size', 0.0001)
 
-    def get_min_distance(self, symbol: str) -> float:
-        """
-        Get minimum distance threshold for a symbol
-        Below this distance, special handling may be needed
-        """
-        config = self.get_alert_config(symbol)
-
-        # Check for pips-based config
-        if 'min_distance_pips' in config:
-            return config['min_distance_pips']
-
-        return config.get('min_distance', 1)
-
-    def is_within_noise_threshold(self, symbol: str, distance: float) -> bool:
-        """
-        Check if distance is within noise/spread threshold
-
-        Args:
-            symbol: Trading symbol
-            distance: Distance to limit in appropriate units
-
-        Returns:
-            True if distance is less than minimum threshold
-        """
-        min_distance = self.get_min_distance(symbol)
-        return abs(distance) < min_distance
-
     def should_alert_approaching(self, symbol: str, distance: float) -> bool:
         """
         Determine if an approaching alert should be sent
@@ -192,10 +159,8 @@ class AlertDistanceConfig:
             True if distance is within approaching threshold but not noise threshold
         """
         approaching = self.get_approaching_distance(symbol)
-        min_dist = self.get_min_distance(symbol)
-
         # Alert if within approaching distance but not within noise
-        return min_dist <= abs(distance) <= approaching
+        return abs(distance) <= approaching
 
     async def update_override(self, symbol: str, distance: float,
                               pip_size: Optional[float] = None) -> bool:

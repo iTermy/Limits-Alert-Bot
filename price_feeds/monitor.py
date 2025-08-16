@@ -224,6 +224,7 @@ class PriceMonitor:
     async def calculate_signal_priority(self, signal: Dict) -> Priority:
         """
         Calculate priority based on closest pending limit or stop loss
+        FIXED: Use proper pip size from alert config
 
         Args:
             signal: Signal dictionary with pending limits
@@ -235,8 +236,9 @@ class PriceMonitor:
         if signal['status'] == 'hit':
             return Priority.CRITICAL
 
-        # Get current price estimate (use cached if available)
         symbol = signal['instrument']
+
+        # Get current price estimate (use cached if available)
         cached_price = await self.cache.get_price(symbol, Priority.LOW)
 
         if not cached_price:
@@ -258,10 +260,23 @@ class PriceMonitor:
             sl_distance = abs(current_price - signal['stop_loss'])
             min_distance = min(min_distance, sl_distance)
 
-        # Convert distance to pips for priority calculation
-        asset_class = self.symbol_mapper.determine_asset_class(symbol)
-        pip_size = self.alert_config.config['defaults'][asset_class]['pip_size']
+        # Get proper pip size from alert config (handles JPY pairs correctly)
+        alert_config_for_symbol = self.alert_config.get_alert_config(symbol)
+        pip_size = alert_config_for_symbol.get('pip_size', 0.0001)
+
+        # Convert distance to pips
         distance_pips = min_distance / pip_size
+
+        # Log for debugging
+        logger.debug(f"Priority calc for {symbol}: min_distance={min_distance:.5f}, "
+                     f"pip_size={pip_size}, distance_pips={distance_pips:.1f}")
+
+        # Determine asset class for priority calculation
+        asset_class = self.symbol_mapper.determine_asset_class(symbol)
+
+        # Special handling for JPY pairs
+        if asset_class == 'forex' and 'JPY' in symbol.upper():
+            asset_class = 'forex_jpy'
 
         # Determine priority based on distance
         return self.cache.calculate_priority(distance_pips, asset_class)
@@ -336,12 +351,14 @@ class PriceMonitor:
     async def check_limit(self, signal: Dict, limit: Dict, current_price: float, direction: str):
         """
         Check if a limit is approaching or hit
-        ENHANCED WITH DEBUGGING
+        FIXED: Proper pip calculation for JPY pairs and other instruments
         """
         limit_price = limit['price_level']
+        symbol = signal['instrument']
 
         # Log the actual comparison being made
         logger.info(f"    Limit check for Signal #{signal['signal_id']}:")
+        logger.info(f"      Symbol: {symbol}")
         logger.info(f"      Direction: {direction}")
         logger.info(f"      Current price: {current_price:.5f}")
         logger.info(f"      Limit price: {limit_price:.5f}")
@@ -358,18 +375,19 @@ class PriceMonitor:
             is_hit = current_price >= limit_price
             logger.info(f"      SHORT: distance={distance:.5f}, is_hit={is_hit}")
 
+        # Get proper configuration for this symbol
+        # This will handle JPY pairs and other special cases correctly
+        alert_config_for_symbol = self.alert_config.get_alert_config(symbol)
+        pip_size = alert_config_for_symbol.get('pip_size', 0.0001)
+
         # Convert to positive distance in pips
-        symbol = signal['instrument']
-        asset_class = self.symbol_mapper.determine_asset_class(symbol)
-        pip_size = self.alert_config.config['defaults'][asset_class]['pip_size']
         distance_pips = abs(distance) / pip_size
 
+        logger.info(f"      Alert config: {alert_config_for_symbol}")
+        logger.info(f"      Pip size: {pip_size}")
         logger.info(f"      Distance in pips: {distance_pips:.1f}")
         logger.info(f"      Approaching alert sent: {limit['approaching_alert_sent']}")
         logger.info(f"      Hit alert sent: {limit['hit_alert_sent']}")
-
-        if limit['hit_alert_sent']:
-            print('hit_alert_sent')
 
         # Check if hit
         if is_hit and not limit['hit_alert_sent']:
@@ -379,8 +397,8 @@ class PriceMonitor:
         # Check if approaching (only if not yet hit)
         elif not is_hit and not limit['approaching_alert_sent']:
             approaching_distance = self.alert_config.get_approaching_distance(symbol)
-            logger.debug(
-                f"Signal {signal['signal_id']}: Distance={distance_pips:.1f} pips, Approaching threshold={approaching_distance} pips")
+            logger.info(
+                f"      Approaching check: Distance={distance_pips:.1f} pips, Threshold={approaching_distance} pips")
 
             if distance_pips <= approaching_distance:
                 await self.send_approaching_alert(signal, limit, current_price, distance_pips)
