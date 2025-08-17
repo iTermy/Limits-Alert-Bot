@@ -20,13 +20,6 @@ logger = get_logger('monitor')
 
 
 class PriceMonitor:
-    """
-    Main monitoring loop for price tracking and alerts
-
-    Monitors all ACTIVE and HIT signals, checks distances to limits,
-    sends alerts when approaching or hitting limits/stop losses
-    """
-
     def __init__(self, bot, signal_db, db):
         """
         Initialize the price monitor
@@ -52,6 +45,11 @@ class PriceMonitor:
 
         # Initialize alert system (pass bot for channel lookups)
         self.alert_system = AlertSystem(bot=bot)
+
+        # Connect alert system to message handler if it exists
+        if hasattr(bot, 'message_handler') and bot.message_handler:
+            bot.message_handler.alert_system = self.alert_system
+            logger.info("Connected alert system to message handler")
 
         # Monitoring state
         self.running = False
@@ -138,7 +136,7 @@ class PriceMonitor:
             try:
                 # Get signals that need tracking
                 signals = await self.db.get_active_signals_for_tracking()
-                logger.info(f"Found {len(signals)} signals to monitor")
+                # logger.info(f"Found {len(signals)} signals to monitor")
                 if signals:
                     logger.debug(f"First signal: {signals[0]['instrument']}")
 
@@ -164,7 +162,7 @@ class PriceMonitor:
 
     async def process_signals(self, signals: List[Dict]):
         """Process all signals, checking limits and stop losses"""
-        logger.info(f"Processing {len(signals)} signals")
+        # logger.info(f"Processing {len(signals)} signals")
 
         # Group signals by symbol and calculate priorities
         symbol_priorities = {}
@@ -175,16 +173,16 @@ class PriceMonitor:
 
             # Calculate priority based on closest pending limit
             priority = await self.calculate_signal_priority(signal)
-            logger.info(f"Calculated priority for {symbol}: {priority.name}")
+            # logger.info(f"Calculated priority for {symbol}: {priority.name}")
 
             # Track highest priority per symbol
             if symbol not in symbol_priorities:
                 symbol_priorities[symbol] = priority
-                logger.info(f"Initial priority for {symbol}: {priority.name}")
+                # logger.info(f"Initial priority for {symbol}: {priority.name}")
             elif priority.value < symbol_priorities[symbol].value:
                 old_priority = symbol_priorities[symbol]
                 symbol_priorities[symbol] = priority
-                logger.info(f"Updated priority for {symbol}: {old_priority.name} -> {priority.name}")
+                # logger.info(f"Updated priority for {symbol}: {old_priority.name} -> {priority.name}")
 
             # Group signals by symbol
             if symbol not in signal_by_symbol:
@@ -192,12 +190,12 @@ class PriceMonitor:
             signal_by_symbol[symbol].append((signal, priority))
 
         # Log final symbol_priorities
-        logger.info(f"Final symbol_priorities dict: {[(k, v.name) for k, v in symbol_priorities.items()]}")
+        # logger.info(f"Final symbol_priorities dict: {[(k, v.name) for k, v in symbol_priorities.items()]}")
 
         # Fetch prices for all needed symbols
-        logger.info(f"Symbol priorities to fetch: {list(symbol_priorities.keys())}")
+        # logger.info(f"Symbol priorities to fetch: {list(symbol_priorities.keys())}")
         prices = await self.fetch_prices_batch(symbol_priorities)
-        logger.info(f"Received prices for symbols: {list(prices.keys())}")
+        # logger.info(f"Received prices for symbols: {list(prices.keys())}")
 
         # Check each signal against current prices
         for symbol, signal_list in signal_by_symbol.items():
@@ -278,7 +276,7 @@ class PriceMonitor:
             return {}
 
         symbols = list(symbol_priorities.keys())
-        logger.info(f"fetch_prices_batch called for symbols: {symbols}")
+        # logger.info(f"fetch_prices_batch called for symbols: {symbols}")
 
         try:
             # Get prices from feed with priorities
@@ -288,10 +286,10 @@ class PriceMonitor:
             )
 
             # Log what we got back
-            logger.info(f"Received prices from feed:")
-            for symbol, price_data in prices.items():
-                if price_data:
-                    logger.info(f"  {symbol}: Bid={price_data.get('bid', 'N/A')}, Ask={price_data.get('ask', 'N/A')}")
+            # logger.info(f"Received prices from feed:")
+            # for symbol, price_data in prices.items():
+                # if price_data:
+                    # logger.info(f"  {symbol}: Bid={price_data.get('bid', 'N/A')}, Ask={price_data.get('ask', 'N/A')}")
 
             # Verify we got all symbols
             missing_symbols = set(symbols) - set(prices.keys())
@@ -319,9 +317,9 @@ class PriceMonitor:
         # SHORT: watching for price to RISE to limit (use BID)
         current_price = price_data['ask'] if direction == 'long' else price_data['bid']
 
-        logger.info(f"Signal #{signal['signal_id']} ({signal['instrument']} {direction}): "
-                    f"Current price={current_price:.5f}, "
-                    f"Pending limits={len(signal.get('pending_limits', []))}")
+        # logger.info(f"Signal #{signal['signal_id']} ({signal['instrument']} {direction}): "
+        #             f"Current price={current_price:.5f}, "
+        #             f"Pending limits={len(signal.get('pending_limits', []))}")
 
 
         # Add guild_id to signal for message link generation
@@ -330,7 +328,7 @@ class PriceMonitor:
 
         # Check each pending limit
         for limit in signal.get('pending_limits', []):
-            logger.info(f"  Checking limit #{limit['sequence_number']}: {limit['price_level']:.5f}")
+            # logger.info(f"  Checking limit #{limit['sequence_number']}: {limit['price_level']:.5f}")
             await self.check_limit(signal, limit, current_price, direction)
 
         # Check stop loss
@@ -344,23 +342,23 @@ class PriceMonitor:
         limit_price = limit['price_level']
         symbol = signal['instrument']
 
-        logger.info(f"    Limit check for Signal #{signal['signal_id']}:")
-        logger.info(f"      Symbol: {symbol}")
-        logger.info(f"      Direction: {direction}")
-        logger.info(f"      Current price: {current_price:.5f}")
-        logger.info(f"      Limit price: {limit_price:.5f}")
+        # logger.info(f"    Limit check for Signal #{signal['signal_id']}:")
+        # logger.info(f"      Symbol: {symbol}")
+        # logger.info(f"      Direction: {direction}")
+        # logger.info(f"      Current price: {current_price:.5f}")
+        # logger.info(f"      Limit price: {limit_price:.5f}")
 
         # Calculate distance
         if direction == 'long':
             # Long: limit is below, watching price drop
             distance = current_price - limit_price
             is_hit = current_price <= limit_price
-            logger.info(f"      LONG: distance={distance:.5f}, is_hit={is_hit}")
+            # logger.info(f"      LONG: distance={distance:.5f}, is_hit={is_hit}")
         else:
             # Short: limit is above, watching price rise
             distance = limit_price - current_price
             is_hit = current_price >= limit_price
-            logger.info(f"      SHORT: distance={distance:.5f}, is_hit={is_hit}")
+            # logger.info(f"      SHORT: distance={distance:.5f}, is_hit={is_hit}")
 
         # Get proper configuration for this symbol
         alert_config_for_symbol = self.alert_config.get_alert_config(symbol)
@@ -369,12 +367,12 @@ class PriceMonitor:
         # Convert to positive distance in pips
         distance_pips = abs(distance) / pip_size
 
-        logger.info(f"      Alert config: {alert_config_for_symbol}")
-        logger.info(f"      Pip size: {pip_size}")
-        logger.info(f"      Distance in pips: {distance_pips:.1f}")
-        logger.info(f"      Limit sequence: #{limit['sequence_number']}")
-        logger.info(f"      Approaching alert sent: {limit['approaching_alert_sent']}")
-        logger.info(f"      Hit alert sent: {limit['hit_alert_sent']}")
+        # logger.info(f"      Alert config: {alert_config_for_symbol}")
+        # logger.info(f"      Pip size: {pip_size}")
+        # logger.info(f"      Distance in pips: {distance_pips:.1f}")
+        # logger.info(f"      Limit sequence: #{limit['sequence_number']}")
+        # logger.info(f"      Approaching alert sent: {limit['approaching_alert_sent']}")
+        # logger.info(f"      Hit alert sent: {limit['hit_alert_sent']}")
 
         # Check if hit
         if is_hit and not limit['hit_alert_sent']:
@@ -386,7 +384,7 @@ class PriceMonitor:
             # Only check approaching for first limit
             if limit['sequence_number'] == 1:
                 approaching_distance = self.alert_config.get_approaching_distance(symbol)
-                logger.info(f"      First limit approaching check: Distance={distance_pips:.1f} pips, Threshold={approaching_distance} pips")
+                # logger.info(f"      First limit approaching check: Distance={distance_pips:.1f} pips, Threshold={approaching_distance} pips")
 
                 if distance_pips <= approaching_distance:
                     await self.alert_system.send_approaching_alert(signal, limit, current_price, distance_pips)

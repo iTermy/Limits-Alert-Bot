@@ -2,25 +2,432 @@
 Signal Commands - Commands for managing trading signals
 Fixed to work with new enhanced database structure
 """
-from discord.ext import commands
-import discord
 from .base_command import BaseCog
 from utils.embed_factory import EmbedFactory
 from core.parser import parse_signal
 from utils.logger import get_logger
+import discord
+from discord.ext import commands
+from typing import Optional, List, Dict, Any
+import asyncio
 
 logger = get_logger("signal_commands")
 
+
+class ActiveSignalsView(discord.ui.View):
+    """Pagination view for active signals"""
+
+    def __init__(self, signals: List[Dict], embed_factory, guild_id: int,
+                 instrument: Optional[str], page_size: int = 10, timeout: int = 180):
+        super().__init__(timeout=timeout)
+        self.signals = signals
+        self.embed_factory = embed_factory
+        self.guild_id = guild_id
+        self.instrument = instrument
+        self.page_size = page_size
+        self.current_page = 0
+        self.max_page = (len(signals) - 1) // page_size if signals else 0
+
+        # Update button states
+        self.update_buttons()
+
+    def update_buttons(self):
+        """Update button states based on current page"""
+        self.previous_button.disabled = self.current_page <= 0
+        self.next_button.disabled = self.current_page >= self.max_page
+
+        # Update page counter label
+        self.page_label.label = f"Page {self.current_page + 1}/{self.max_page + 1}"
+
+    def get_page_embed(self) -> discord.Embed:
+        """Get embed for current page"""
+        start_idx = self.current_page * self.page_size
+        end_idx = min(start_idx + self.page_size, len(self.signals))
+        page_signals = self.signals[start_idx:end_idx]
+
+        # Create embed using existing factory method but with pagination info
+        embed = self.create_active_signals_embed(
+            page_signals,
+            self.guild_id,
+            self.instrument,
+            page_info=(self.current_page + 1, self.max_page + 1, len(self.signals))
+        )
+        return embed
+
+    def create_active_signals_embed(self, signals: List[Dict], guild_id: int,
+                                    instrument: Optional[str], page_info: tuple) -> discord.Embed:
+        """Create embed for active signals with pagination info"""
+        current_page, total_pages, total_signals = page_info
+
+        if not signals and current_page == 1:
+            embed = discord.Embed(
+                title="📊 Active Signals",
+                description="No active signals found" + (f" for {instrument}" if instrument else ""),
+                color=0xFFA500  # Warning color
+            )
+            return embed
+
+        embed = discord.Embed(
+            title="📊 Active Signals",
+            description=f"Showing page {current_page}/{total_pages} ({total_signals} total signals)" +
+                        (f" for {instrument}" if instrument else ""),
+            color=0x00BFFF  # Info color
+        )
+
+        for signal in signals:
+            # Get status emoji (you'll need to implement this or import from EmbedFactory)
+            status_emoji = self._get_status_emoji(signal.get('status', 'active'))
+
+            # Format limits
+            pending_limits = signal.get('pending_limits', [])
+            hit_limits = signal.get('hit_limits', [])
+
+            if pending_limits:
+                limits_str = self._format_price_list(pending_limits[:3])
+                if len(pending_limits) > 3:
+                    limits_str += f" (+{len(pending_limits) - 3} more)"
+            else:
+                limits_str = "None pending"
+
+            if hit_limits:
+                limits_str += f" | {len(hit_limits)} hit"
+
+            # Format stop loss
+            stop_str = f"{signal.get('stop_loss', 0):.5f}" if signal.get('stop_loss') else "None"
+
+            # Create link or label
+            if str(signal['message_id']).startswith("manual_"):
+                link_label = "Manual Entry"
+            else:
+                message_url = f"https://discord.com/channels/{guild_id}/{signal['channel_id']}/{signal['message_id']}"
+                link_label = f"{message_url}"
+
+            # Build field value
+            field_value = (
+                f"**Limits:** {limits_str}\n"
+                f"**Stop:** {stop_str}\n"
+                f"**Status:** {signal.get('status', 'active').upper()}"
+            )
+
+            # Add distance information if available
+            if signal.get('distance_info') and signal.get('status', 'active').lower() in ['active', 'hit']:
+                distance_info = signal['distance_info']
+                formatted_distance = distance_info['formatted']
+
+                if (distance_info['distance'] > 0) & (signal.get('status', 'active').upper() != "HIT"):
+                    field_value += f"\n**Distance:** {formatted_distance}"
+
+            if signal.get('time_remaining'):
+                field_value += f"\n**Expiry:** {signal['time_remaining']}"
+
+            field_value += f"\n**Source:** {link_label}"
+
+            embed.add_field(
+                name=f"{status_emoji} #{signal['id']} - {signal['instrument']} - {signal['direction'].upper()}",
+                value=field_value,
+                inline=False
+            )
+
+        embed.set_footer(text=f"Total: {total_signals} signals | Use buttons to navigate")
+        return embed
+
+    def _get_status_emoji(self, status: str) -> str:
+        """Get emoji for status"""
+        status_emojis = {
+            'active': '🟢',
+            'hit': '🎯',
+            'profit': '💰',
+            'breakeven': '➖',
+            'stop_loss': '🛑',
+            'cancelled': '❌'
+        }
+        return status_emojis.get(status.lower(), '⚫')
+
+    def _format_price_list(self, prices: list) -> str:
+        """Format list of prices"""
+        if not prices:
+            return "None"
+        return ", ".join(f"{p:.5f}" if isinstance(p, (int, float)) else str(p) for p in prices)
+
+    @discord.ui.button(label="◀ Previous", style=discord.ButtonStyle.primary)
+    async def previous_button(self, interaction: discord.Interaction, button: discord.ui.Button):
+        """Go to previous page"""
+        self.current_page -= 1
+        self.update_buttons()
+        embed = self.get_page_embed()
+        await interaction.response.edit_message(embed=embed, view=self)
+
+    @discord.ui.button(label="Page 1/1", style=discord.ButtonStyle.secondary, disabled=True)
+    async def page_label(self, interaction: discord.Interaction, button: discord.ui.Button):
+        """Page counter (non-interactive)"""
+        pass
+
+    @discord.ui.button(label="Next ▶", style=discord.ButtonStyle.primary)
+    async def next_button(self, interaction: discord.Interaction, button: discord.ui.Button):
+        """Go to next page"""
+        self.current_page += 1
+        self.update_buttons()
+        embed = self.get_page_embed()
+        await interaction.response.edit_message(embed=embed, view=self)
 
 class SignalCommands(BaseCog):
     """Commands for managing trading signals"""
 
     @commands.command(name='active')
-    async def active_signals(self, ctx: commands.Context, instrument: str = None):
-        """Show active trading signals (ACTIVE and HIT status)"""
+    async def active_signals(self, ctx: commands.Context, *, args: str = None):
+        """
+        Show active trading signals with sorting and pagination
+
+        Usage:
+            !active - Show most recent active signals
+            !active XAUUSD - Filter by instrument
+            !active sort:distance - Sort by distance to limit
+            !active sort:recent - Sort by most recent (default)
+            !active sort:oldest - Sort by oldest first
+            !active sort:progress - Sort by most limits hit
+            !active XAUUSD sort:distance - Combine filter and sort
+        """
+
+        # Parse arguments
+        instrument = None
+        sort_method = 'recent'  # default
+
+        if args:
+            args_parts = args.split()
+            for part in args_parts:
+                if part.startswith('sort:'):
+                    sort_method = part.split(':', 1)[1].lower()
+                else:
+                    # Assume it's an instrument filter
+                    instrument = part.upper()
+
+        # Validate sort method
+        valid_sorts = ['recent', 'oldest', 'distance', 'progress']
+        if sort_method not in valid_sorts:
+            await ctx.send(f"❌ Invalid sort method. Valid options: {', '.join(valid_sorts)}")
+            return
+
+        # Get signals from database
         signals = await self.signal_db.get_active_signals_detailed(instrument)
-        embed = EmbedFactory.active_signals_list(signals, ctx.guild.id, instrument)
-        await ctx.send(embed=embed)
+
+        if not signals:
+            embed = discord.Embed(
+                title="📊 Active Signals",
+                description="No active signals found" + (f" for {instrument}" if instrument else ""),
+                color=0xFFA500
+            )
+            await ctx.send(embed=embed)
+            return
+
+        # Import necessary modules for price fetching and distance calculation
+        from price_feeds.smart_cache import SmartPriceCache, Priority
+        from price_feeds.alert_config import AlertDistanceConfig
+
+        # Get cache and alert config instances
+        cache = None
+        alert_config = AlertDistanceConfig()
+
+        # Try to get cache from monitor if available
+        if hasattr(self.bot, 'monitor') and self.bot.monitor:
+            cache = self.bot.monitor.cache
+
+        # Calculate distances for each signal (only if we need distance sorting or display)
+        if cache and (sort_method == 'distance' or True):  # Always calculate for display
+            for signal in signals:
+                if signal.get('pending_limits'):
+                    # Get current price from cache
+                    symbol = signal['instrument']
+                    cached_price = await cache.get_price(symbol, Priority.LOW)
+
+                    if cached_price:
+                        # Determine which price to use based on direction
+                        direction = signal['direction'].lower()
+                        current_price = cached_price['ask'] if direction == 'long' else cached_price['bid']
+
+                        # Get the first pending limit
+                        if signal['pending_limits']:
+                            limit_price = signal['pending_limits'][0]
+
+                            # Calculate distance
+                            if direction == 'long':
+                                distance = current_price - limit_price
+                            else:
+                                distance = limit_price - current_price
+
+                            # Get pip size for proper formatting
+                            pip_size = alert_config.get_pip_size(symbol)
+                            distance_pips = abs(distance) / pip_size
+
+                            # Store distance info
+                            signal['distance_info'] = {
+                                'distance': distance,
+                                'distance_pips': distance_pips,
+                                'current_price': current_price,
+                                'formatted': alert_config.format_distance_for_display(symbol, distance_pips)
+                            }
+
+        # Apply sorting
+        if sort_method == 'recent':
+            # Already sorted by created_at DESC from database
+            pass
+        elif sort_method == 'oldest':
+            signals.reverse()
+        elif sort_method == 'distance':
+            # Sort by distance (closest first)
+            # Signals without distance info go to the end
+            def get_distance_key(signal):
+                if signal.get('distance_info'):
+                    return signal['distance_info']['distance_pips']
+                return float('inf')  # Put signals without distance at the end
+
+            signals.sort(key=get_distance_key)
+        elif sort_method == 'progress':
+            # Sort by number of limits hit (most progress first)
+            signals.sort(key=lambda s: len(s.get('hit_limits', [])), reverse=True)
+
+        # Create pagination view
+        view = ActiveSignalsView(
+            signals=signals,
+            embed_factory=None,  # We'll use the internal method
+            guild_id=ctx.guild.id,
+            instrument=instrument,
+            page_size=10
+        )
+
+        # Send initial embed with view
+        embed = view.get_page_embed()
+
+        # Add sort info to embed
+        sort_descriptions = {
+            'recent': 'Most Recent First',
+            'oldest': 'Oldest First',
+            'distance': 'Closest to Limit',
+            'progress': 'Most Progress'
+        }
+        embed.add_field(
+            name="Sort Method",
+            value=sort_descriptions.get(sort_method, sort_method.title()),
+            inline=False
+        )
+
+        await ctx.send(embed=embed, view=view)
+
+    @commands.command(name='activetxt')
+    async def active_signals_text(self, ctx: commands.Context, instrument: str = None):
+        """
+        Show active trading signals in plain text format for easy copying
+
+        Usage:
+            !activetxt - Show all active signals in text format
+            !activetxt XAUUSD - Filter by instrument
+        """
+
+        # Get signals from database (most recent first)
+        signals = await self.signal_db.get_active_signals_detailed(instrument)
+
+        if not signals:
+            await ctx.send("No active signals found" + (f" for {instrument}" if instrument else ""))
+            return
+
+        # Format signals into text lines
+        formatted_lines = []
+
+        for signal in signals:
+            # Get signal ID
+            signal_id = signal['id']
+
+            # Get instrument (convert to underscore format if needed for other bot)
+            instrument_name = signal['instrument']
+            # Convert common formats (e.g., EURUSD to EUR_USD, XAUUSD to XAU_USD)
+            if len(instrument_name) == 6 and not '_' in instrument_name:
+                # Likely a forex pair
+                instrument_name = f"{instrument_name[:3]}_{instrument_name[3:]}"
+            elif instrument_name.startswith('XAU') and len(instrument_name) == 6:
+                # Gold vs currency
+                instrument_name = f"XAU_{instrument_name[3:]}"
+            elif instrument_name.startswith('XAG') and len(instrument_name) == 6:
+                # Silver vs currency
+                instrument_name = f"XAG_{instrument_name[3:]}"
+
+            # Get direction
+            direction = signal['direction'].upper()
+
+            # Format pending limits as entries
+            pending_limits = signal.get('pending_limits', [])
+            if pending_limits:
+                # Format each limit with its number
+                entries_parts = []
+                for i, limit_price in enumerate(pending_limits, 1):
+                    # Format price based on number of decimal places needed
+                    if limit_price < 10:  # Forex pairs
+                        entries_parts.append(f"{i}: {limit_price:.5f}")
+                    elif limit_price < 100:  # JPY pairs or similar
+                        entries_parts.append(f"{i}: {limit_price:.3f}")
+                    else:  # Gold, indices, etc.
+                        entries_parts.append(f"{i}: {limit_price:.2f}")
+
+                entries_str = ", ".join(entries_parts)
+            else:
+                entries_str = "None"
+
+            # Format stop loss
+            stop_loss = signal.get('stop_loss')
+            if stop_loss:
+                # Format based on price level
+                if stop_loss < 10:
+                    sl_str = f"{stop_loss:.5f}"
+                elif stop_loss < 100:
+                    sl_str = f"{stop_loss:.3f}"
+                else:
+                    sl_str = f"{stop_loss:.2f}"
+            else:
+                sl_str = "None"
+
+            # Build the formatted line
+            line = f"**#{signal_id}** | {instrument_name} | {direction} | Entries: {entries_str} | SL: {sl_str}"
+            formatted_lines.append(line)
+
+        # Split into messages if needed (Discord has 2000 char limit)
+        messages = []
+        current_message = []
+        current_length = 0
+
+        # Add header
+        header = f"**Active Signals ({len(signals)} total)**\n"
+        if instrument:
+            header = f"**Active Signals for {instrument} ({len(signals)} total)**\n"
+
+        current_message.append(header)
+        current_length = len(header)
+
+        for line in formatted_lines:
+            line_with_newline = line + "\n"
+            line_length = len(line_with_newline)
+
+            # Check if adding this line would exceed Discord's limit
+            if current_length + line_length > 1900:  # Leave some buffer
+                # Send current message and start a new one
+                messages.append("".join(current_message))
+                current_message = []
+                current_length = 0
+
+            current_message.append(line_with_newline)
+            current_length += line_length
+
+        # Add any remaining lines
+        if current_message:
+            messages.append("".join(current_message))
+
+        # Send all messages
+        for i, message in enumerate(messages):
+            if i > 0:
+                # Add a small delay between messages to avoid rate limiting
+                await asyncio.sleep(0.5)
+            await ctx.send(message)
+
+        # Add footer in last message if multiple messages
+        if len(messages) > 1:
+            await ctx.send(f"*Sent in {len(messages)} parts due to length*")
 
     @commands.command(name='all')
     async def all_signals(self, ctx: commands.Context, status: str = None):

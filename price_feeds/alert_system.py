@@ -1,5 +1,6 @@
 """
 Alert System - Handles all alert generation and sending for the price monitor
+Enhanced with message ID tracking for reply-based status management
 """
 
 import asyncio
@@ -31,6 +32,7 @@ class AlertSystem:
     - Only sends approaching alert for first limit
     - Handles limit hit and stop loss alerts
     - Tracks alert statistics
+    - Stores alert message IDs for reply-based management
     """
 
     def __init__(self, alert_channel: Optional[discord.TextChannel] = None, bot=None):
@@ -43,6 +45,10 @@ class AlertSystem:
         """
         self.alert_channel = alert_channel
         self.bot = bot
+
+        # Alert message tracking - maps alert message ID to signal ID
+        # This allows users to reply to alerts to manage signals
+        self.alert_messages = {}  # {message_id: signal_id}
 
         # Statistics tracking
         self.stats = {
@@ -73,6 +79,36 @@ class AlertSystem:
             price_str += '0'
 
         return price_str
+
+    def track_alert_message(self, message_id: int, signal_id: int):
+        """
+        Track an alert message for reply-based management
+
+        Args:
+            message_id: Discord message ID of the alert
+            signal_id: Database signal ID this alert relates to
+        """
+        self.alert_messages[str(message_id)] = signal_id
+        logger.debug(f"Tracked alert message {message_id} for signal {signal_id}")
+
+        # Clean up old entries if we have too many (keep last 1000)
+        if len(self.alert_messages) > 1000:
+            # Remove oldest entries
+            to_remove = len(self.alert_messages) - 1000
+            for key in list(self.alert_messages.keys())[:to_remove]:
+                del self.alert_messages[key]
+
+    def get_signal_from_alert(self, message_id: str) -> Optional[int]:
+        """
+        Get the signal ID associated with an alert message
+
+        Args:
+            message_id: Discord message ID of the alert
+
+        Returns:
+            Signal ID if found, None otherwise
+        """
+        return self.alert_messages.get(str(message_id))
 
     async def send_approaching_alert(self, signal: Dict, limit: Dict, current_price: float, distance_pips: float) -> bool:
         """
@@ -154,9 +190,12 @@ class AlertSystem:
                         inline=False
                     )
 
-            embed.set_footer(text=f"Signal #{signal['signal_id']}")
+            embed.set_footer(text=f"Signal #{signal['signal_id']} • Reply to manage")
 
-            await self.alert_channel.send(embed=embed)
+            message = await self.alert_channel.send(embed=embed)
+
+            # Track this alert message
+            self.track_alert_message(message.id, signal['signal_id'])
 
             # Update statistics
             self.stats['approaching_sent'] += 1
@@ -264,9 +303,12 @@ class AlertSystem:
                     inline=False
                 )
 
-            embed.set_footer(text=f"Signal #{signal['signal_id']}")
+            embed.set_footer(text=f"Signal #{signal['signal_id']} • Reply to manage")
 
-            await self.alert_channel.send(embed=embed)
+            message = await self.alert_channel.send(embed=embed)
+
+            # Track this alert message
+            self.track_alert_message(message.id, signal['signal_id'])
 
             # Update statistics
             self.stats['hit_sent'] += 1
@@ -356,9 +398,12 @@ class AlertSystem:
                 inline=False
             )
 
-            embed.set_footer(text=f"Signal #{signal['signal_id']} • Status changed to STOP_LOSS")
+            embed.set_footer(text=f"Signal #{signal['signal_id']} • Status changed to STOP_LOSS • Reply to manage")
 
-            await self.alert_channel.send(embed=embed)
+            message = await self.alert_channel.send(embed=embed)
+
+            # Track this alert message
+            self.track_alert_message(message.id, signal['signal_id'])
 
             # Update statistics
             self.stats['stop_loss_sent'] += 1
@@ -382,5 +427,6 @@ class AlertSystem:
                 'total': self.stats['total_alerts']
             },
             'errors': self.stats['errors'],
-            'channel_configured': self.alert_channel is not None
+            'channel_configured': self.alert_channel is not None,
+            'tracked_messages': len(self.alert_messages)
         }

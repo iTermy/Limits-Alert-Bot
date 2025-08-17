@@ -237,7 +237,8 @@ class EmbedFactory:
         return embed
 
     @staticmethod
-    def active_signals_list(signals: List[Dict[str, Any]], guild_id: int, instrument: Optional[str] = None) -> discord.Embed:
+    def active_signals_list(signals: List[Dict[str, Any]], guild_id: int,
+                            instrument: Optional[str] = None) -> discord.Embed:
         """Create an embed for displaying active signals"""
         if not signals:
             embed = discord.Embed(
@@ -288,6 +289,19 @@ class EmbedFactory:
                 f"**Stop:** {stop_str}\n"
                 f"**Status:** {signal.get('status', 'active').upper()}"
             )
+
+            # Add distance information if available
+            if signal.get('distance_info') and signal.get('status', 'active').lower() in ['active', 'hit']:
+                distance_info = signal['distance_info']
+                formatted_distance = distance_info['formatted']
+
+                # Add direction indicator (approaching or moving away)
+                if distance_info['distance'] > 0:
+                    # Price is in the right direction (away from limit)
+                    field_value += f"\n**Distance:** {formatted_distance}"
+                else:
+                    # Price has passed the limit (shouldn't happen for pending limits)
+                    field_value += f"\n**Distance:** Past limit by {formatted_distance}"
 
             if signal.get('time_remaining'):
                 field_value += f"\n**Expiry:** {signal['time_remaining']}"

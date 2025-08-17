@@ -1,5 +1,6 @@
 """
 Trading Bot Core - Main bot class with modular architecture
+Fixed to properly connect alert system to message handler
 """
 import discord
 from discord.ext import commands, tasks
@@ -43,7 +44,7 @@ class TradingBot(commands.Bot):
         self.signal_db = None
         self.message_handler = None
         self.expiry_manager = None
-        self.price_monitor = None
+        self.monitor = None  # Changed from price_monitor to monitor for consistency
 
         # Admin user IDs
         self.admin_ids = [582358569542877184]  # Replace with actual admin IDs
@@ -52,23 +53,32 @@ class TradingBot(commands.Bot):
         """Called when bot is getting ready"""
         self.logger.info("Starting bot setup...")
 
-        # Initialize database
+        # Initialize database FIRST
         await db.initialize()
         self.signal_db = initialize_signal_db(db)
 
-        # Initialize price monitoring (NEW)
+        # Load channel configuration SECOND
+        await self.load_config()
+
+        # Initialize message handler THIRD (before monitor)
+        from discord_handlers.message_handler import MessageHandler
+        self.message_handler = MessageHandler(self)
+        self.logger.info("Message handler initialized")
+
+        # Initialize price monitoring FOURTH (after message handler)
         await self.initialize_price_monitor()
 
-        # Load channel configuration
-        await self.load_config()
+        # CRITICAL: Connect alert system to message handler
+        if self.monitor and self.message_handler:
+            self.message_handler.alert_system = self.monitor.alert_system
+            self.logger.info(f"Connected alert system to message handler")
+            self.logger.info(f"Alert system is tracking {len(self.monitor.alert_system.alert_messages)} messages")
+        else:
+            self.logger.error("Failed to connect alert system - monitor or message_handler is None")
 
         # Start expiry manager
         from core.expiry_manager import ExpiryManager
         self.expiry_manager = ExpiryManager(self)
-
-        # Initialize message handler
-        from discord_handlers.message_handler import MessageHandler
-        self.message_handler = MessageHandler(self)
 
         # Load command extensions
         await self.load_extensions()
@@ -121,6 +131,17 @@ class TradingBot(commands.Bot):
         self.logger.info(f"Bot logged in as {self.user.name} ({self.user.id})")
         self.logger.info(f"Connected to {len(self.guilds)} guild(s)")
 
+        # Double-check the connection after everything is ready
+        if self.monitor and self.message_handler:
+            # Ensure connection is still valid
+            if not self.message_handler.alert_system:
+                self.message_handler.alert_system = self.monitor.alert_system
+                self.logger.info("Re-connected alert system in on_ready")
+
+            # Log status
+            tracked_count = len(self.monitor.alert_system.alert_messages) if self.monitor.alert_system else 0
+            self.logger.info(f"Alert system status: {tracked_count} tracked messages")
+
         # Set bot status
         await self.change_presence(
             activity=discord.Activity(
@@ -170,29 +191,31 @@ class TradingBot(commands.Bot):
             color=discord.Color.red()
         )
         await ctx.send(embed=embed)
+
     async def initialize_price_monitor(self):
         """Initialize the price monitoring system"""
         self.logger.info("Starting price monitor initialization...")
         try:
             from price_feeds.monitor import PriceMonitor
 
-            # Create monitor instance
-            self.price_monitor = PriceMonitor(
+            # Create monitor instance - use self.monitor not self.price_monitor
+            self.monitor = PriceMonitor(
                 bot=self,
                 signal_db=self.signal_db,
                 db=db
             )
 
             # Initialize and start monitoring
-            await self.price_monitor.initialize()
-            await self.price_monitor.start()
+            await self.monitor.initialize()
+            await self.monitor.start()
 
             self.logger.info("Price monitoring system initialized and started")
+            self.logger.info(f"Alert system created with {len(self.monitor.alert_system.alert_messages)} tracked messages")
 
         except Exception as e:
             self.logger.error(f"Failed to initialize price monitor: {e}", exc_info=True)
             # Don't fail bot startup if monitor fails
-            self.price_monitor = None
+            self.monitor = None
 
     @tasks.loop(seconds=30)
     async def heartbeat(self):
@@ -211,8 +234,8 @@ class TradingBot(commands.Bot):
         # Cancel background tasks
         self.heartbeat.cancel()
 
-        if self.price_monitor:
-            await self.price_monitor.stop()
+        if self.monitor:
+            await self.monitor.stop()
 
         # Close database connection
         if db:
