@@ -116,7 +116,8 @@ class TradingBot(commands.Bot):
         extensions = [
             'commands.general_commands',
             'commands.signal_commands',
-            'commands.admin_commands'
+            'commands.admin_commands',
+            'commands.feed_commands'
         ]
 
         for extension in extensions:

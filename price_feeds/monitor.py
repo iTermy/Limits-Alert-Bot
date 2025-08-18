@@ -1,6 +1,6 @@
 """
-Price Monitor - Main monitoring loop for ICMarkets
-Monitors active signals, checks limits, and sends Discord alerts
+Price Monitor - Updated with multi-feed support
+Monitors active signals using FeedManager for intelligent feed routing
 """
 
 import asyncio
@@ -12,7 +12,7 @@ import discord
 from price_feeds.symbol_mapper import SymbolMapper
 from price_feeds.alert_config import AlertDistanceConfig
 from price_feeds.smart_cache import SmartPriceCache, Priority
-from price_feeds.feeds.icmarkets import ICMarketsFeed
+from price_feeds.feed_manager import FeedManager  # NEW: Use FeedManager instead of single feed
 from price_feeds.alert_system import AlertSystem, AlertType
 from utils.logger import get_logger
 
@@ -22,7 +22,7 @@ logger = get_logger('monitor')
 class PriceMonitor:
     def __init__(self, bot, signal_db, db):
         """
-        Initialize the price monitor
+        Initialize the price monitor with multi-feed support
 
         Args:
             bot: Discord bot instance for sending alerts
@@ -40,8 +40,8 @@ class PriceMonitor:
         # CREATE SHARED CACHE INSTANCE
         self.cache = SmartPriceCache()
 
-        # PASS SHARED CACHE TO FEED
-        self.feed = ICMarketsFeed(cache_instance=self.cache)
+        # NEW: Use FeedManager instead of single ICMarkets feed
+        self.feed_manager = FeedManager(cache_instance=self.cache)
 
         # Initialize alert system (pass bot for channel lookups)
         self.alert_system = AlertSystem(bot=bot)
@@ -65,16 +65,26 @@ class PriceMonitor:
         }
 
     async def initialize(self):
-        """Initialize monitor and connect to feed"""
+        """Initialize monitor and connect to all feeds"""
         try:
-            # Connect to ICMarkets
-            await self.feed.connect()
-            logger.info("Connected to ICMarkets feed")
+            # NEW: Initialize all feeds through FeedManager
+            await self.feed_manager.initialize()
 
+            # Get feed status
+            feed_status = self.feed_manager.get_feed_status()
+            connected_feeds = [f for f, info in feed_status.items()
+                             if info['status'] == 'connected']
+
+            if not connected_feeds:
+                logger.error("No feeds connected! Cannot start monitoring.")
+                raise Exception("No price feeds available")
+
+            logger.info(f"Connected to {len(connected_feeds)} price feeds: {', '.join(connected_feeds)}")
+
+            # Setup alert channel
             from pathlib import Path
             import json
 
-            # Get alert channel
             config_path = Path(__file__).resolve().parent.parent / 'config' / 'channels.json'
 
             try:
@@ -87,9 +97,9 @@ class PriceMonitor:
                             self.alert_system.set_channel(channel)
                             logger.info(f"Alert channel set: #{channel.name} ({channel.id})")
                         except discord.NotFound:
-                            logger.error(f"Channel with ID {channel_id} not found (bot may not have access).")
+                            logger.error(f"Channel with ID {channel_id} not found")
                         except discord.Forbidden:
-                            logger.error(f"Bot does not have permission to access channel {channel_id}.")
+                            logger.error(f"Bot does not have permission to access channel {channel_id}")
                         except Exception as e:
                             logger.error(f"Error fetching channel {channel_id}: {e}")
                     else:
@@ -110,35 +120,31 @@ class PriceMonitor:
         self.running = True
         logger.info("Monitor.running set to True")
         self.monitoring_task = asyncio.create_task(self.monitoring_loop())
-        logger.info("Price monitoring started")
+        logger.info("Price monitoring started with multi-feed support")
 
     async def stop(self):
         """Stop the monitoring loop"""
         self.running = False
         if self.monitoring_task:
             await self.monitoring_task
+
+        # Shutdown feed manager
+        await self.feed_manager.shutdown()
         logger.info("Price monitoring stopped")
 
     async def monitoring_loop(self):
         """
         Main monitoring loop - runs every second
-
-        1. Get active signals
-        2. Calculate priorities based on closest limits
-        3. Fetch prices (using cache where appropriate)
-        4. Check limits and stop losses
-        5. Send alerts as needed
+        Now uses FeedManager for intelligent feed routing
         """
-        logger.info("Monitoring loop started!")
+        logger.info("Monitoring loop started with multi-feed support!")
+
         while self.running:
             loop_start = asyncio.get_event_loop().time()
 
             try:
                 # Get signals that need tracking
                 signals = await self.db.get_active_signals_for_tracking()
-                # logger.info(f"Found {len(signals)} signals to monitor")
-                if signals:
-                    logger.debug(f"First signal: {signals[0]['instrument']}")
 
                 if signals:
                     # Process signals by priority
@@ -162,8 +168,6 @@ class PriceMonitor:
 
     async def process_signals(self, signals: List[Dict]):
         """Process all signals, checking limits and stop losses"""
-        # logger.info(f"Processing {len(signals)} signals")
-
         # Group signals by symbol and calculate priorities
         symbol_priorities = {}
         signal_by_symbol = {}
@@ -173,29 +177,20 @@ class PriceMonitor:
 
             # Calculate priority based on closest pending limit
             priority = await self.calculate_signal_priority(signal)
-            # logger.info(f"Calculated priority for {symbol}: {priority.name}")
 
             # Track highest priority per symbol
             if symbol not in symbol_priorities:
                 symbol_priorities[symbol] = priority
-                # logger.info(f"Initial priority for {symbol}: {priority.name}")
             elif priority.value < symbol_priorities[symbol].value:
-                old_priority = symbol_priorities[symbol]
                 symbol_priorities[symbol] = priority
-                # logger.info(f"Updated priority for {symbol}: {old_priority.name} -> {priority.name}")
 
             # Group signals by symbol
             if symbol not in signal_by_symbol:
                 signal_by_symbol[symbol] = []
             signal_by_symbol[symbol].append((signal, priority))
 
-        # Log final symbol_priorities
-        # logger.info(f"Final symbol_priorities dict: {[(k, v.name) for k, v in symbol_priorities.items()]}")
-
-        # Fetch prices for all needed symbols
-        # logger.info(f"Symbol priorities to fetch: {list(symbol_priorities.keys())}")
+        # NEW: Fetch prices using FeedManager (handles feed selection automatically)
         prices = await self.fetch_prices_batch(symbol_priorities)
-        # logger.info(f"Received prices for symbols: {list(prices.keys())}")
 
         # Check each signal against current prices
         for symbol, signal_list in signal_by_symbol.items():
@@ -203,19 +198,18 @@ class PriceMonitor:
                 for signal, priority in signal_list:
                     # Create a fresh copy for each signal
                     price_data = dict(prices[symbol])
+
+                    # Log which feed was used (for debugging)
+                    if 'feed' in price_data:
+                        logger.debug(f"Using {price_data['feed']} feed for {symbol}")
+
                     await self.check_signal(signal, price_data)
             else:
-                logger.error(f"No price data for {symbol}!")
+                logger.error(f"No price data available for {symbol} from any feed!")
 
     async def calculate_signal_priority(self, signal: Dict) -> Priority:
         """
         Calculate priority based on closest pending limit or stop loss
-
-        Args:
-            signal: Signal dictionary with pending limits
-
-        Returns:
-            Priority enum value
         """
         # If signal is already HIT status, it's critical
         if signal['status'] == 'hit':
@@ -267,7 +261,7 @@ class PriceMonitor:
 
     async def fetch_prices_batch(self, symbol_priorities: Dict[str, Priority]) -> Dict[str, Dict]:
         """
-        Fetch prices for multiple symbols efficiently
+        Fetch prices for multiple symbols efficiently using FeedManager
 
         Args:
             symbol_priorities: Dict mapping symbols to their priorities
@@ -276,25 +270,18 @@ class PriceMonitor:
             return {}
 
         symbols = list(symbol_priorities.keys())
-        # logger.info(f"fetch_prices_batch called for symbols: {symbols}")
 
         try:
-            # Get prices from feed with priorities
-            prices = await self.feed.get_batch_prices(
-                symbols,  # List of symbols
-                symbol_priorities  # Dict of priorities
+            # NEW: Use FeedManager to get prices (handles feed selection automatically)
+            prices = await self.feed_manager.get_batch_prices(
+                symbols,
+                symbol_priorities
             )
 
-            # Log what we got back
-            # logger.info(f"Received prices from feed:")
-            # for symbol, price_data in prices.items():
-                # if price_data:
-                    # logger.info(f"  {symbol}: Bid={price_data.get('bid', 'N/A')}, Ask={price_data.get('ask', 'N/A')}")
-
-            # Verify we got all symbols
-            missing_symbols = set(symbols) - set(prices.keys())
-            if missing_symbols:
-                logger.error(f"Missing prices for symbols: {missing_symbols}")
+            # Log feed usage statistics periodically
+            if self.stats['checks_performed'] % 100 == 0:  # Every 100 checks
+                feed_stats = self.feed_manager.get_stats()
+                logger.info(f"Feed usage stats: {feed_stats['feeds_used']}")
 
             return prices
 
@@ -305,22 +292,11 @@ class PriceMonitor:
     async def check_signal(self, signal: Dict, price_data: Dict):
         """
         Check a signal against current price and send alerts as needed
-
-        Args:
-            signal: Signal dictionary
-            price_data: Current price data (bid, ask, timestamp)
         """
         direction = signal['direction'].lower()
 
         # Determine which price to use based on direction
-        # LONG: watching for price to DROP to limit (use ASK)
-        # SHORT: watching for price to RISE to limit (use BID)
         current_price = price_data['ask'] if direction == 'long' else price_data['bid']
-
-        # logger.info(f"Signal #{signal['signal_id']} ({signal['instrument']} {direction}): "
-        #             f"Current price={current_price:.5f}, "
-        #             f"Pending limits={len(signal.get('pending_limits', []))}")
-
 
         # Add guild_id to signal for message link generation
         if hasattr(self.bot, 'guilds') and self.bot.guilds:
@@ -328,7 +304,6 @@ class PriceMonitor:
 
         # Check each pending limit
         for limit in signal.get('pending_limits', []):
-            # logger.info(f"  Checking limit #{limit['sequence_number']}: {limit['price_level']:.5f}")
             await self.check_limit(signal, limit, current_price, direction)
 
         # Check stop loss
@@ -336,29 +311,17 @@ class PriceMonitor:
             await self.check_stop_loss(signal, current_price, direction)
 
     async def check_limit(self, signal: Dict, limit: Dict, current_price: float, direction: str):
-        """
-        Check if a limit is approaching or hit
-        """
+        """Check if a limit is approaching or hit"""
         limit_price = limit['price_level']
         symbol = signal['instrument']
 
-        # logger.info(f"    Limit check for Signal #{signal['signal_id']}:")
-        # logger.info(f"      Symbol: {symbol}")
-        # logger.info(f"      Direction: {direction}")
-        # logger.info(f"      Current price: {current_price:.5f}")
-        # logger.info(f"      Limit price: {limit_price:.5f}")
-
         # Calculate distance
         if direction == 'long':
-            # Long: limit is below, watching price drop
             distance = current_price - limit_price
             is_hit = current_price <= limit_price
-            # logger.info(f"      LONG: distance={distance:.5f}, is_hit={is_hit}")
         else:
-            # Short: limit is above, watching price rise
             distance = limit_price - current_price
             is_hit = current_price >= limit_price
-            # logger.info(f"      SHORT: distance={distance:.5f}, is_hit={is_hit}")
 
         # Get proper configuration for this symbol
         alert_config_for_symbol = self.alert_config.get_alert_config(symbol)
@@ -366,13 +329,6 @@ class PriceMonitor:
 
         # Convert to positive distance in pips
         distance_pips = abs(distance) / pip_size
-
-        # logger.info(f"      Alert config: {alert_config_for_symbol}")
-        # logger.info(f"      Pip size: {pip_size}")
-        # logger.info(f"      Distance in pips: {distance_pips:.1f}")
-        # logger.info(f"      Limit sequence: #{limit['sequence_number']}")
-        # logger.info(f"      Approaching alert sent: {limit['approaching_alert_sent']}")
-        # logger.info(f"      Hit alert sent: {limit['hit_alert_sent']}")
 
         # Check if hit
         if is_hit and not limit['hit_alert_sent']:
@@ -384,29 +340,19 @@ class PriceMonitor:
             # Only check approaching for first limit
             if limit['sequence_number'] == 1:
                 approaching_distance = self.alert_config.get_approaching_distance(symbol)
-                # logger.info(f"      First limit approaching check: Distance={distance_pips:.1f} pips, Threshold={approaching_distance} pips")
 
                 if distance_pips <= approaching_distance:
                     await self.alert_system.send_approaching_alert(signal, limit, current_price, distance_pips)
                     await self.mark_approaching_sent(limit['limit_id'])
 
     async def check_stop_loss(self, signal: Dict, current_price: float, direction: str):
-        """
-        Check if stop loss is hit
-
-        Args:
-            signal: Signal dictionary
-            current_price: Current price
-            direction: Trade direction
-        """
+        """Check if stop loss is hit"""
         stop_loss = signal['stop_loss']
 
         # Check if stop loss hit
         if direction == 'long':
-            # Long: stop loss is below entry, hit if price drops to it
             is_hit = current_price <= stop_loss
         else:
-            # Short: stop loss is above entry, hit if price rises to it
             is_hit = current_price >= stop_loss
 
         if is_hit:
@@ -455,21 +401,17 @@ class PriceMonitor:
             logger.error(f"Failed to process stop loss: {e}")
 
     def get_stats(self) -> Dict:
-        """Get monitoring statistics"""
+        """Get monitoring statistics including feed manager stats"""
         return {
             **self.stats,
             'running': self.running,
+            'feed_manager': self.feed_manager.get_stats() if self.feed_manager else {},
             'cache_stats': self.cache.get_stats() if self.cache else {},
             'alert_stats': self.alert_system.get_stats() if self.alert_system else {}
         }
 
     async def test_signal_monitoring(self, signal_id: int):
-        """
-        Test monitoring for a specific signal (for debugging)
-
-        Args:
-            signal_id: Signal ID to test
-        """
+        """Test monitoring for a specific signal (for debugging)"""
         try:
             # Get signal from database
             signal = await self.signal_db.get_signal_with_limits(signal_id)
@@ -500,13 +442,23 @@ class PriceMonitor:
 
             # Calculate priority and fetch price
             priority = await self.calculate_signal_priority(formatted)
-            price = await self.feed.get_price(signal['instrument'], priority)
+
+            # NEW: Use FeedManager to get price
+            price = await self.feed_manager.get_price(signal['instrument'], priority)
 
             if price:
                 await self.check_signal(formatted, price)
-                logger.info(f"Test check completed for signal {signal_id}")
+                logger.info(f"Test check completed for signal {signal_id} using {price.get('feed', 'unknown')} feed")
             else:
-                logger.error(f"Failed to get price for {signal['instrument']}")
+                logger.error(f"Failed to get price for {signal['instrument']} from any feed")
 
         except Exception as e:
             logger.error(f"Test monitoring failed: {e}", exc_info=True)
+
+    async def get_feed_health(self) -> Dict:
+        """Get health status of all price feeds"""
+        return self.feed_manager.get_feed_status()
+
+    async def test_all_feeds(self) -> Dict:
+        """Test all configured feeds"""
+        return await self.feed_manager.test_all_feeds()

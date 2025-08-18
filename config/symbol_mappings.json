@@ -5,7 +5,7 @@
     "crypto": ["binance"],
     "metals": ["fxcm", "icmarkets"],
     "stocks": ["icmarkets"],
-    "oil": []
+    "oil": ["fxcm"]
   },
 
   "asset_class_patterns": {

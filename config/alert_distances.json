@@ -11,8 +11,8 @@
       "description": "JPY pairs use 2 decimal places"
     },
     "metals": {
-      "approaching_distance": 1.00,
-      "pip_size": 0.01,
+      "approaching_distance": 50,
+      "pip_size": 0.1,
       "description": "Gold/Silver in USD"
     },
     "crypto": {
@@ -41,6 +41,26 @@
     "XAGUSD": {
       "approaching_distance": 0.05,
       "pip_size": 0.001
+    },
+    "JP255USD": {
+      "approaching_distance": 60,
+      "pip_size": 1
+    },
+    "SPX500USD": {
+      "approaching_distance": 20,
+      "pip_size": 1
+    },
+    "NAS100USD": {
+      "approaching_distance": 30,
+      "pip_size": 1
+    },
+    "BTCUSDT": {
+      "approaching_distance": 400,
+      "pip_size": 1
+    },
+    "ETHUSDT": {
+      "approaching_distance": 20,
+      "pip_size": 1
     }
   },
 

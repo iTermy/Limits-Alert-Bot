@@ -327,8 +327,8 @@ class SmartPriceCache:
                 'medium': 200,  # $50-$200
             },
             'indices': {
-                'critical': 5,  # < 5 points
-                'medium': 20,  # 5-20 points
+                'critical': 10,  # < 5 points
+                'medium': 30,  # 5-20 points
             },
             'stocks': {
                 'critical': 50,  # < $0.50 (50 pips at 0.01)
