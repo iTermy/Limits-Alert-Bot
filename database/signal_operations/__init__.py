@@ -6,6 +6,7 @@ from enum import Enum
 from core.parser import ParsedSignal
 from utils.logger import get_logger
 
+
 logger = get_logger("signal_db")
 
 
@@ -251,3 +252,46 @@ class SignalDatabase:
         """Get emoji for status display"""
         from .utils import get_status_emoji
         return get_status_emoji(status)
+
+    async def get_trading_period_range(self, period: str = 'week') -> Dict[str, Any]:
+        """
+        Get the date range for the current trading period
+
+        Args:
+            period: 'week' or 'month'
+
+        Returns:
+            Dictionary with start/end dates and display strings
+        """
+        return await self._analytics.get_trading_period_range(period)
+
+    async def get_period_signals_with_results(self, start_date: str, end_date: str) -> List[Dict[str, Any]]:
+        """
+        Get all signals with final results within a date range
+
+        Args:
+            start_date: ISO format start date
+            end_date: ISO format end date
+
+        Returns:
+            List of signals with their results
+        """
+        return await self._analytics.get_period_signals_with_results(start_date, end_date)
+
+    async def get_week_performance_summary(self) -> Dict[str, Any]:
+        """
+        Get current week's performance summary
+
+        Returns:
+            Dictionary with week's performance metrics
+        """
+        return await self._analytics.get_week_performance_summary()
+
+    async def get_month_performance_summary(self) -> Dict[str, Any]:
+        """
+        Get current month's performance summary
+
+        Returns:
+            Dictionary with month's performance metrics
+        """
+        return await self._analytics.get_month_performance_summary()

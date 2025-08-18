@@ -225,3 +225,201 @@ class AnalyticsManager:
             'overall': dict(overall_stats) if overall_stats else {},
             'by_instrument': by_instrument
         }
+
+
+    """
+    Add these methods to your AnalyticsManager class in analytics.py
+    """
+
+
+    async def get_trading_period_range(self, period: str = 'week') -> Dict[str, Any]:
+        """
+        Get the date range for the current trading period
+        Trading week starts Sunday 6:00 PM UTC and ends Sunday 5:59 PM UTC
+
+        Args:
+            period: 'week' or 'month'
+
+        Returns:
+            Dictionary with start/end dates and display strings
+        """
+        now = datetime.now(pytz.UTC)
+
+        if period == 'week':
+            # Find the most recent Sunday 6:00 PM
+            days_since_sunday = (now.weekday() + 1) % 7  # Monday = 0, Sunday = 6
+            last_sunday = now - timedelta(days=days_since_sunday)
+
+            # Set to 6:00 PM (18:00)
+            week_start = last_sunday.replace(hour=18, minute=0, second=0, microsecond=0)
+
+            # If we're before Sunday 6:00 PM, we're still in the previous week
+            if now < week_start:
+                week_start = week_start - timedelta(days=7)
+
+            # End is next Sunday at 5:59:59 PM
+            week_end = week_start + timedelta(days=7) - timedelta(seconds=1)
+
+            return {
+                'start': week_start.isoformat(),
+                'end': week_end.isoformat(),
+                'display_start': week_start.strftime('%B %d, %Y'),
+                'display_end': week_end.strftime('%B %d, %Y')
+            }
+
+        elif period == 'month':
+            # Current month from the 1st at 00:00 to the last day at 23:59:59
+            month_start = now.replace(day=1, hour=0, minute=0, second=0, microsecond=0)
+
+            # Find last day of month
+            if now.month == 12:
+                next_month = month_start.replace(year=now.year + 1, month=1)
+            else:
+                next_month = month_start.replace(month=now.month + 1)
+
+            month_end = next_month - timedelta(seconds=1)
+
+            return {
+                'start': month_start.isoformat(),
+                'end': month_end.isoformat(),
+                'display_start': month_start.strftime('%B %d, %Y'),
+                'display_end': month_end.strftime('%B %d, %Y')
+            }
+
+        else:
+            raise ValueError(f"Invalid period: {period}")
+
+
+    async def get_period_signals_with_results(self, start_date: str, end_date: str) -> List[Dict[str, Any]]:
+        """
+        Get all signals with final results (profit/breakeven/stop_loss) within a date range
+
+        Args:
+            start_date: ISO format start date
+            end_date: ISO format end date
+
+        Returns:
+            List of signals with their results
+        """
+        query = """
+            SELECT 
+                s.id,
+                s.message_id,
+                s.channel_id,
+                s.instrument,
+                s.direction,
+                s.status,
+                s.limits_hit,
+                s.total_limits,
+                s.created_at,
+                s.closed_at,
+                CASE 
+                    WHEN s.closed_at IS NOT NULL THEN s.closed_at
+                    ELSE s.updated_at
+                END as completion_time
+            FROM signals s
+            WHERE s.status IN (?, ?, ?)
+            AND (
+                (s.closed_at IS NOT NULL AND s.closed_at >= ? AND s.closed_at <= ?)
+                OR 
+                (s.closed_at IS NULL AND s.updated_at >= ? AND s.updated_at <= ?)
+            )
+            ORDER BY completion_time DESC
+        """
+
+        params = (
+            SignalStatus.PROFIT,
+            SignalStatus.BREAKEVEN,
+            SignalStatus.STOP_LOSS,
+            start_date, end_date,
+            start_date, end_date
+        )
+
+        signals = await self.db.fetch_all(query, params)
+
+        # Convert to list of dicts and add additional info
+        result = []
+        for signal in signals:
+            signal_dict = dict(signal)
+
+            # Add status emoji for display
+            from .utils import get_status_emoji
+            signal_dict['status_emoji'] = get_status_emoji(signal_dict['status'])
+
+            # Add completion percentage
+            if signal_dict['total_limits'] > 0:
+                signal_dict['completion_pct'] = (signal_dict['limits_hit'] / signal_dict['total_limits']) * 100
+            else:
+                signal_dict['completion_pct'] = 0
+
+            result.append(signal_dict)
+
+        return result
+
+
+    async def get_week_performance_summary(self) -> Dict[str, Any]:
+        """
+        Get a quick summary of the current week's performance
+
+        Returns:
+            Dictionary with week's performance metrics
+        """
+        date_range = await self.get_trading_period_range('week')
+        signals = await self.get_period_signals_with_results(
+            date_range['start'],
+            date_range['end']
+        )
+
+        total = len(signals)
+        profit = len([s for s in signals if s['status'] == SignalStatus.PROFIT])
+        breakeven = len([s for s in signals if s['status'] == SignalStatus.BREAKEVEN])
+        stop_loss = len([s for s in signals if s['status'] == SignalStatus.STOP_LOSS])
+
+        # Calculate win rate
+        trades_with_outcome = profit + stop_loss
+        win_rate = (profit / trades_with_outcome * 100) if trades_with_outcome > 0 else 0
+
+        return {
+            'period': 'week',
+            'date_range': date_range,
+            'total_signals': total,
+            'profit': profit,
+            'breakeven': breakeven,
+            'stop_loss': stop_loss,
+            'win_rate': win_rate,
+            'signals': signals
+        }
+
+
+    async def get_month_performance_summary(self) -> Dict[str, Any]:
+        """
+        Get a quick summary of the current month's performance
+
+        Returns:
+            Dictionary with month's performance metrics
+        """
+        date_range = await self.get_trading_period_range('month')
+        signals = await self.get_period_signals_with_results(
+            date_range['start'],
+            date_range['end']
+        )
+
+        total = len(signals)
+        profit = len([s for s in signals if s['status'] == SignalStatus.PROFIT])
+        breakeven = len([s for s in signals if s['status'] == SignalStatus.BREAKEVEN])
+        stop_loss = len([s for s in signals if s['status'] == SignalStatus.STOP_LOSS])
+
+        # Calculate win rate
+        trades_with_outcome = profit + stop_loss
+        win_rate = (profit / trades_with_outcome * 100) if trades_with_outcome > 0 else 0
+
+        return {
+            'period': 'month',
+            'date_range': date_range,
+            'total_signals': total,
+            'profit': profit,
+            'breakeven': breakeven,
+            'stop_loss': stop_loss,
+            'win_rate': win_rate,
+            'signals': signals
+        }

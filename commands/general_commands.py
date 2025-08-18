@@ -85,8 +85,12 @@ class GeneralCommands(BaseCog):
                 description="Commands for viewing and managing trading signals",
                 color=discord.Color.blue()
             )
-            embed.add_field(name="!active [instrument]", value="Show active trading signals (ACTIVE and HIT status)",
+            embed.add_field(name="!active [instrument]", value="Show active trading signals (ACTIVE and HIT status)\n"
+                                                               "!active sort:distance - sorts by closest distance (pips)\n"
+                                                               "!active sort:recent - sorts by most recently added signals\n"
+                                                               "!active sort:olest - sorts by oldest added signals",
                             inline=False)
+            embed.add_field(name="!activetxt", value="Show old !active format from previous bot.")
             embed.add_field(name="!all [status]",
                             value="Show all signals or filter by status\nValid statuses: active, hit, profit, breakeven, stop_loss, cancelled",
                             inline=False)
@@ -96,6 +100,7 @@ class GeneralCommands(BaseCog):
             embed.add_field(name="!info <signal_id>", value="Show detailed information about a specific signal",
                             inline=False)
             embed.add_field(name="!stats", value="Show detailed statistics about signals", inline=False)
+            embed.add_field(name="!report <week/month>", value="Show detailed trade report for the current week/month")
             embed.add_field(name="!setexpiry <signal_id> <day/week/month/vth/YYYY-MM-DD>",
                 value=(
                     "Set a signal's expiry time.\n"

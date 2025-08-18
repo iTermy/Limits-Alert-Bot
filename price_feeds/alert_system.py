@@ -192,6 +192,7 @@ class AlertSystem:
 
             embed.set_footer(text=f"Signal #{signal['signal_id']} • Reply to manage")
 
+            await self.alert_channel.send("<@&1334203997107650662>")
             message = await self.alert_channel.send(embed=embed)
 
             # Track this alert message
@@ -305,6 +306,7 @@ class AlertSystem:
 
             embed.set_footer(text=f"Signal #{signal['signal_id']} • Reply to manage")
 
+            await self.alert_channel.send("<@&1334203997107650662>")
             message = await self.alert_channel.send(embed=embed)
 
             # Track this alert message
@@ -400,6 +402,7 @@ class AlertSystem:
 
             embed.set_footer(text=f"Signal #{signal['signal_id']} • Status changed to STOP_LOSS • Reply to manage")
 
+            await self.alert_channel.send("<@&1334203997107650662>")
             message = await self.alert_channel.send(embed=embed)
 
             # Track this alert message
