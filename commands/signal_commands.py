@@ -1375,7 +1375,7 @@ class SignalCommands(BaseCog):
 
                         profit_text.append(
                             f"#{signal['id']} | {signal['instrument']} | "
-                            f"{signal['direction'].upper()} | {closed_date}"
+                            f"{signal['direction'].upper()} | {closed_date} UTC"
                         )
 
                     value = "\n".join(profit_text)
@@ -1402,7 +1402,7 @@ class SignalCommands(BaseCog):
                                 closed_date = "N/A"
 
                         be_text.append(
-                            f"#{signal['id']} | {signal['instrument']} | {closed_date}"
+                            f"#{signal['id']} | {signal['instrument']} | {closed_date} UTC"
                         )
 
                     value = "\n".join(be_text)

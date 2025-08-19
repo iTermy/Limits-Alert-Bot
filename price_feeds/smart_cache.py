@@ -128,8 +128,8 @@ class SmartPriceCache:
             result = cached.to_dict()
 
             # Verify the result
-            if result['bid'] == result['ask']:
-                logger.warning(f"WARNING: Returning identical bid/ask from cache for {symbol}: {result['bid']}")
+            # if result['bid'] == result['ask']:
+            #     logger.warning(f"WARNING: Returning identical bid/ask from cache for {symbol}: {result['bid']}")
 
             return result
 
@@ -147,8 +147,8 @@ class SmartPriceCache:
         """
         logger.info(f"update_price called: {symbol} Bid={bid}, Ask={ask}, Priority={priority.name}")
 
-        if bid == ask:
-            logger.warning(f"WARNING: Identical bid/ask being cached for {symbol}: {bid}")
+        # if bid == ask:
+        #     logger.warning(f"WARNING: Identical bid/ask being cached for {symbol}: {bid}")
 
         async with self.lock:
             # Check cache size limit

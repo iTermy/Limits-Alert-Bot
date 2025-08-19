@@ -229,9 +229,9 @@ class OANDAFeed(BaseFeed):
                 return None
 
             # Check if instrument is supported
-            if self.supported_instruments and symbol not in self.supported_instruments:
-                logger.warning(f"Instrument {symbol} not available on OANDA")
-                return None
+            # if self.supported_instruments and symbol not in self.supported_instruments:
+            #     logger.warning(f"Instrument {symbol} not available on OANDA")
+            #     return None
 
             # Rate limiting
             await self._rate_limit()
