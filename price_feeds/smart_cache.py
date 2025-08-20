@@ -205,8 +205,8 @@ class SmartPriceCache:
             ask = price_data['ask']
 
             # Check for issues
-            if bid == ask:
-                logger.warning(f"WARNING: Identical bid/ask in batch for {symbol}: {bid}")
+            # if bid == ask:
+            #     logger.warning(f"WARNING: Identical bid/ask in batch for {symbol}: {bid}")
 
             # Ensure timestamp exists
             timestamp = price_data.get('timestamp', time.time())

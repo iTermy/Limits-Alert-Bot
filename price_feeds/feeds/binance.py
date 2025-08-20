@@ -411,7 +411,7 @@ class BinanceFeed(BaseFeed):
             await self._rate_limit()
 
             # Fetch all book tickers (no params = all symbols)
-            async with self.session.get(self.ticker_url, timeout=15) as response:
+            async with self.session.get(self.ticker_url, timeout=2) as response:
                 if response.status == 200:
                     data = await response.json()
 
@@ -440,6 +440,11 @@ class BinanceFeed(BaseFeed):
                     missing = symbols_set - set(results.keys())
                     if missing:
                         logger.warning(f"Symbols not found on Binance: {missing}")
+
+                elif response.status == 429:  # Rate limit
+                    logger.error("Binance rate limit hit! Backing off...")
+                    # Mark feed as failed to trigger blacklist
+                    raise Exception("Rate limit exceeded")
 
                 else:
                     error_text = await response.text()

@@ -334,18 +334,24 @@ class FeedManager:
                             feed_priorities[feed_sym] = priorities[internal]
 
                 # Fetch batch from feed
-                logger.info(f"Fetching {len(feed_symbols)} symbols from {feed_name}")
-                feed_results = await feed.get_batch_prices(feed_symbols, feed_priorities)
+                try:
+                    logger.info(f"Fetching {len(feed_symbols)} symbols from {feed_name}")
+                    feed_results = await asyncio.wait_for(
+                        feed.get_batch_prices(feed_symbols, feed_priorities),
+                        timeout=3.0  # 3 seconds max per feed
+                    )
 
-                # Map results back to internal symbols
-                for internal_symbol, feed_symbol in symbol_pairs:
-                    if feed_symbol in feed_results:
-                        price_data = feed_results[feed_symbol].copy()
-                        price_data['feed'] = feed_name
-                        price_data['original_symbol'] = internal_symbol
-                        results[internal_symbol] = price_data
+                    # Map results back to internal symbols
+                    for internal_symbol, feed_symbol in symbol_pairs:
+                        if feed_symbol in feed_results:
+                            price_data = feed_results[feed_symbol].copy()
+                            price_data['feed'] = feed_name
+                            price_data['original_symbol'] = internal_symbol
+                            results[internal_symbol] = price_data
 
-                        self.stats['feeds_used'][feed_name] = self.stats['feeds_used'].get(feed_name, 0) + 1
+                            self.stats['feeds_used'][feed_name] = self.stats['feeds_used'].get(feed_name, 0) + 1
+                except asyncio.TimeoutError:
+                    logger.error(f"Timeout fetching from {feed_name} after 3 seconds")
 
             except Exception as e:
                 logger.error(f"Error fetching batch from {feed_name}: {e}")
