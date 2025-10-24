@@ -76,28 +76,39 @@ class HighConfidenceStrategy(BaseParsingStrategy):
             if not instrument:
                 logger.debug(f"No instrument found for channel {channel_name}")
                 return None
+            if instrument:
+                logger.info(f"instrument is {instrument}")
 
             # Scale numbers if needed for forex
             numbers = scale_forex_numbers(
                 numbers, instrument, FOREX_PAIRS, HIGH_VALUE_INSTRUMENTS
             )
+            if numbers:
+                logger.info(f"numbers is {numbers}")
+            if not numbers:
+                logger.warning(f"No numbers found")
 
             # Extract direction
             direction = self.extract_direction(cleaned)
             if not direction:
                 return None
+            logger.info(f"Direction is {direction}")
 
             # Determine limits and stop loss
             limits, stop_loss = self._determine_limits_and_stop(numbers, direction)
+            logger.info(f'limits is {limits} and stop_loss is {stop_loss}')
 
             if not limits or stop_loss is None:
+                logger.info(f"Stop loss is {stop_loss}" and limits is {limits})
                 return None
 
             # Extract expiry
             expiry_type = self.extract_expiry(cleaned, channel_name)
+            logger.info(f"expiry_type is {expiry_type}")
 
             # Extract keywords
             keywords = self.extract_keywords(cleaned)
+            logger.info(f"keywords is {keywords}")
 
             # Create signal
             signal = ParsedSignal(
@@ -117,10 +128,10 @@ class HighConfidenceStrategy(BaseParsingStrategy):
                 logger.info(f"High-confidence parse success: {signal.instrument} {signal.direction}")
                 return signal
 
-            return None
+            if not self.validate_signal(signal):
+                logger.info(f'Could not validate {signal}')
 
         except Exception as e:
-            logger.debug(f"High-confidence parsing failed: {e}")
             return None
 
     def _determine_limits_and_stop(self, numbers: List[float], direction: str) -> tuple:

@@ -1,4 +1,5 @@
 """
+__init.py
 Enhanced modular signal parser for trading signals
 """
 from typing import Optional, List

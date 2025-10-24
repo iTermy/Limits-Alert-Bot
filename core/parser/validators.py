@@ -23,8 +23,11 @@ class SignalValidator:
         Returns:
             True if signal is valid
         """
+        logger.info(f'Validating parsed signal...{signal}')
         if not signal:
+            logger.debug("No valid signal")
             return False
+
 
         # Must have all required fields
         if not all([signal.instrument, signal.direction, signal.limits, signal.stop_loss]):

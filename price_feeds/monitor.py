@@ -137,35 +137,41 @@ class PriceMonitor:
 
         while self.running:
             loop_start = asyncio.get_event_loop().time()
-
-            # Track phase timings
             timings = {}
 
             try:
-                # Phase 1: Database query
-                t1 = asyncio.get_event_loop().time()
-                signals = await self.db.get_active_signals_for_tracking()
-                timings['db_query'] = asyncio.get_event_loop().time() - t1
+                # Run the loop body with a 10-second timeout
+                await asyncio.wait_for(self._monitoring_iteration(timings, loop_start), timeout=10.0)
 
-                if signals:
-                    # Phase 2: Price fetching
-                    t2 = asyncio.get_event_loop().time()
-                    await self.process_signals(signals)
-                    timings['processing'] = asyncio.get_event_loop().time() - t2
-
-                # Log if slow
-                total_time = asyncio.get_event_loop().time() - loop_start
-                # logger.info(f"total monitoring loop time: {total_time}")
-                if total_time > 0.5:  # Log if over 500ms
-                    logger.warning(f"Slow loop: {total_time:.3f}s - Breakdown: {timings}")
+            except asyncio.TimeoutError:
+                logger.error("Monitoring iteration timed out (>10s). Retrying...")
 
             except Exception as e:
                 logger.error(f"Monitoring error: {e}", exc_info=True)
 
-            # Adaptive sleep time
+            # Adaptive sleep time, even after timeout
             loop_time = asyncio.get_event_loop().time() - loop_start
             sleep_time = max(0, 1.0 - loop_time)
             await asyncio.sleep(sleep_time)
+
+    async def _monitoring_iteration(self, timings, loop_start):
+        """One iteration of monitoring work (with detailed timings)."""
+
+        # Phase 1: Database query
+        t1 = asyncio.get_event_loop().time()
+        signals = await self.db.get_active_signals_for_tracking()
+        timings['db_query'] = asyncio.get_event_loop().time() - t1
+
+        if signals:
+            # Phase 2: Price fetching
+            t2 = asyncio.get_event_loop().time()
+            await self.process_signals(signals)
+            timings['processing'] = asyncio.get_event_loop().time() - t2
+
+        # Log if slow
+        total_time = asyncio.get_event_loop().time() - loop_start
+        if total_time > 0.5:  # Log if over 500ms
+            logger.warning(f"Slow loop: {total_time:.3f}s - Breakdown: {timings}")
 
     async def process_signals(self, signals: List[Dict]):
         """Process all signals, checking limits and stop losses"""
@@ -221,8 +227,8 @@ class PriceMonitor:
         timings['checking'] = asyncio.get_event_loop().time() - t3
 
         # Log if any phase is slow
-        if any(t > 0.1 for t in timings.values()):
-            logger.info(f"Processing breakdown: {timings}")
+        # if any(t > 0.1 for t in timings.values()):
+        #     logger.info(f"Processing breakdown: {timings}")
 
         return timings
 

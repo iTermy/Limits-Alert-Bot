@@ -133,7 +133,6 @@ class FeedCommands(commands.Cog):
             await ctx.reply(f"❌ Error getting feed status: {str(e)}")
 
     @commands.command(name='testfeeds', aliases=['tf'])
-    @commands.has_permissions(administrator=True)
     async def test_feeds(self, ctx):
         """
         Test all configured price feeds
@@ -297,7 +296,6 @@ class FeedCommands(commands.Cog):
             await ctx.reply(f"❌ Error getting stats: {str(e)}")
 
     @commands.command(name='switchfeed', aliases=['sf'])
-    @commands.has_permissions(administrator=True)
     async def switch_feed(self, ctx, symbol: str, feed: Optional[str] = None):
         """
         Test which feed would be used for a symbol

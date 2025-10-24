@@ -209,10 +209,12 @@ class AIParsingStrategy(BaseParsingStrategy):
                     f"Default expiry for this channel is week_end")
         elif 'stock' in channel_lower:
             return (f"This is from a stock channel - symbols end with .NYSE or .NAS."
-                    f"Default expiry for this channel is week_end")
+                    f"Default expiry for this channel is month_end")
         elif 'ot-trade' in channel_lower:
-            return (f"This is from a stock channel - symbols end with .NYSE or .NAS."
-                    f"Default expiry for this channel is day_end")
+            return (f"Default expiry for this channel is day_end")
+        elif 'alt' in channel_lower:
+            return (f"This is from a crypto alts channel- symbols end with USDT"
+                    f"Default expiry for this channel is month_end")
 
         return ""
 

@@ -28,7 +28,7 @@ from typing import List
 def extract_numbers(text: str) -> List[float]:
     """Extract all numbers from text, excluding numbers inside blacklisted terms."""
     blacklist = ["spx500usd", "jp225", "nas100usd", "china50", "russel2000", "us30usd", "de30",
-                 "dax30", "ger30", "spx500", "sp500", "nas100"]
+                 "dax30", "ger30", "spx500", "sp500", "nas100", "us2000", "us2000usd"]
 
     # Remove any blacklisted term (case-insensitive) before extracting
     for word in blacklist:
@@ -83,19 +83,19 @@ def is_potential_signal(message: str, trading_keywords: List[str],
         True if message appears to be a signal
     """
     blacklist = ["spx500usd", "jp225", "nas100usd", "china50", "russel2000", "us30usd", "de30",
-                 "dax30", "ger30", "spx500", "sp500", "nas100"]
+                 "dax30", "ger30", "spx500", "sp500", "nas100", "us30"]
 
     # Remove any blacklisted term (case-insensitive) before extracting
     for word in blacklist:
         text = re.sub(re.escape(word), "", message, flags=re.IGNORECASE)
 
     # Should have multiple numbers for limits and stop
-    numbers = re.findall(r'\d+\.?\d*', message)
+    numbers = re.findall(r'\d+\.?\d*', text)
     if len(numbers) < 2:
         return False
 
     # Check for trading-related keywords
-    text_lower = message.lower()
+    text_lower = text.lower()
     all_keywords = trading_keywords + list(instrument_mappings.keys())
 
     return any(keyword in text_lower for keyword in all_keywords)

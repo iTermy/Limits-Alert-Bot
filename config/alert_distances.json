@@ -55,7 +55,7 @@
       "pip_size": 1
     },
     "BTCUSDT": {
-      "approaching_distance": 400,
+      "approaching_distance": 600,
       "pip_size": 1
     },
     "ETHUSDT": {

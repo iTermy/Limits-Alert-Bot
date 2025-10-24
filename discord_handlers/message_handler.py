@@ -20,6 +20,39 @@ class MessageHandler:
         self.alert_system = None  # Will be set by monitor when initialized
         logger.info("MessageHandler initialized, alert_system is None initially")
 
+        # Cache allowed channels for quick lookup
+        self._allowed_channels = None
+
+    def _get_allowed_channels(self):
+        """Get set of allowed channel IDs (monitored + alert + command channels)"""
+        if self._allowed_channels is None:
+            self._allowed_channels = set()
+
+            # Add monitored channels
+            for channel_id in self.bot.monitored_channels:
+                self._allowed_channels.add(channel_id)
+
+            # Add alert channel
+            if hasattr(self.bot, 'alert_channel_id') and self.bot.alert_channel_id:
+                self._allowed_channels.add(self.bot.alert_channel_id)
+
+            # Add command channel
+            if hasattr(self.bot, 'command_channel_id') and self.bot.command_channel_id:
+                self._allowed_channels.add(self.bot.command_channel_id)
+
+            # Try to get from channels_config if not set
+            if hasattr(self.bot, 'channels_config'):
+                if 'alert_channel' in self.bot.channels_config:
+                    self._allowed_channels.add(int(self.bot.channels_config['alert_channel']))
+                if 'command_channel' in self.bot.channels_config:
+                    self._allowed_channels.add(int(self.bot.channels_config['command_channel']))
+
+        return self._allowed_channels
+
+    def is_allowed_channel(self, channel_id: int) -> bool:
+        """Check if bot should process messages in this channel"""
+        return channel_id in self._get_allowed_channels()
+
     async def handle_new_message(self, message: discord.Message):
         """
         Process new messages for signals and reply functionality
@@ -29,6 +62,12 @@ class MessageHandler:
         """
         # Ignore bot's own messages
         if message.author.bot:
+            return
+
+        # CHECK: Only process messages in allowed channels
+        print(self.is_allowed_channel(message.channel.id))
+        if not self.is_allowed_channel(message.channel.id):
+            # Silently ignore messages in non-trading channels
             return
 
         # Debug logging for replies
@@ -73,7 +112,8 @@ class MessageHandler:
             # But double-check here as a fallback
             if hasattr(self.bot, 'monitor') and self.bot.monitor and self.bot.monitor.alert_system:
                 self.alert_system = self.bot.monitor.alert_system
-                logger.info(f"Got alert system from bot.monitor, has {len(self.alert_system.alert_messages)} tracked messages")
+                logger.info(
+                    f"Got alert system from bot.monitor, has {len(self.alert_system.alert_messages)} tracked messages")
             else:
                 logger.warning("Alert system not available - monitor may not be initialized")
                 logger.warning(f"bot.monitor exists: {hasattr(self.bot, 'monitor')}")
@@ -98,7 +138,8 @@ class MessageHandler:
                         embed = referenced.embeds[0]
                         if any(keyword in embed.title.lower() for keyword in ['approaching', 'hit', 'stop loss']):
                             logger.warning(f"Message looks like alert but isn't tracked: {referenced.id}")
-                            await message.reply("❌ This alert is not tracked. It may have been sent before the bot restarted.")
+                            await message.reply(
+                                "❌ This alert is not tracked. It may have been sent before the bot restarted.")
                             return
                 else:
                     logger.debug("Referenced message is not from bot, not an alert")
@@ -107,7 +148,17 @@ class MessageHandler:
             logger.info(f"Processing alert management command for signal {signal_id}: '{message.content}'")
 
             # Parse the command
-            command = message.content.lower().strip()
+            command_parts = message.content.lower().strip().split()
+            command = command_parts[0] if command_parts else ""
+
+            # Parse optional profit amount (for profit commands)
+            profit_amount = None
+            if len(command_parts) > 1 and command in ("profit", "win", "tp", "hit"):
+                try:
+                    profit_amount = float(command_parts[1])
+                    logger.debug(f"Parsed profit amount: {profit_amount}")
+                except (ValueError, IndexError):
+                    logger.debug(f"Could not parse profit amount from: {command_parts[1:]}")
 
             # Get the signal from database
             signal = await self.signal_db.get_signal_with_limits(signal_id)
@@ -149,6 +200,10 @@ class MessageHandler:
                         timeout=5.0
                     )
                     action_taken = "marked as PROFIT"
+
+                    # Send profit alert to profit channel if successful
+                    if success:
+                        await self.send_profit_alert(signal, message.author, profit_amount)
 
                 elif command in ("breakeven", "be"):
                     logger.debug(f"Processing breakeven command for signal {signal_id}")
@@ -203,7 +258,8 @@ class MessageHandler:
                     # Unknown command
                     logger.debug(f"Unknown command: '{command}'")
                     await message.reply(
-                        "❓ Unknown command. Valid commands: `cancel`, `profit`, `tp`, `breakeven`, `be`, `sl`, `stop`, `reactivate`"
+                        "❓ Unknown command. Valid commands: `cancel`, `profit`, `tp`, `breakeven`, `be`, `sl`, `stop`, `reactivate`\n"
+                        "For profit, you can optionally specify pips: `profit 40`"
                     )
                     return
 
@@ -231,6 +287,12 @@ class MessageHandler:
                 embed.add_field(name="Instrument", value=signal['instrument'], inline=True)
                 embed.add_field(name="Direction", value=signal['direction'].upper(), inline=True)
                 embed.add_field(name="Updated By", value=message.author.mention, inline=True)
+
+                # Add profit amount if specified
+                if action_taken == "marked as PROFIT" and profit_amount:
+                    unit = self.get_pip_unit_name(signal['instrument'])
+                    embed.add_field(name="Profit", value=f"{profit_amount:.1f} {unit}", inline=True)
+
                 embed.set_footer(text=f"Via alert reply")
 
                 await message.channel.send(embed=embed)
@@ -243,6 +305,143 @@ class MessageHandler:
         except Exception as e:
             logger.error(f"Error in alert management reply: {e}", exc_info=True)
             await message.reply("❌ An error occurred processing your command.")
+
+    async def send_profit_alert(self, signal, user, profit_amount=None):
+        """
+        Send a profit alert to the profit channel
+
+        Args:
+            signal: The signal data from database
+            user: The Discord user who marked it as profit
+            profit_amount: Optional profit amount in pips/points
+        """
+        try:
+            # Load channel configuration
+            import json
+            import os
+
+            config_path = os.path.join('config', 'channels.json')
+            with open(config_path, 'r') as f:
+                channels_config = json.load(f)
+
+            profit_channel_id = channels_config.get('profit_channel')
+            if not profit_channel_id:
+                logger.warning("No profit_channel configured in channels.json")
+                return
+
+            profit_channel = self.bot.get_channel(int(profit_channel_id))
+            if not profit_channel:
+                logger.error(f"Could not find profit channel with ID {profit_channel_id}")
+                return
+
+            # Create profit embed
+            embed = discord.Embed(
+                title="💰 PROFIT Alert",
+                description=f"Signal #{signal['id']} has been marked as **PROFIT**",
+                color=0x00FF00,  # Green
+                timestamp=discord.utils.utcnow()
+            )
+
+            # Add signal details
+            embed.add_field(name="Symbol", value=signal['instrument'], inline=True)
+            embed.add_field(name="Position", value=signal['direction'].upper(), inline=True)
+
+            # Add profit amount if specified
+            if profit_amount:
+                unit = self.get_pip_unit_name(signal['instrument'])
+                embed.add_field(name="Profit", value=f"**{profit_amount:.1f} {unit}**", inline=True)
+            else:
+                embed.add_field(name="Status", value="✅ Profit", inline=True)
+
+            # Add entry price if available
+            if signal.get('entry_price'):
+                embed.add_field(name="Entry", value=f"{signal['entry_price']}", inline=True)
+
+            # Add limits if available
+            if signal.get('limits'):
+                limits_text = []
+                for limit in signal['limits']:
+                    if limit.get('status') == 'hit':
+                        limits_text.append(f"~~{limit['price_level']}~~ ✅")
+                    else:
+                        limits_text.append(str(limit['price_level']))
+                if limits_text:
+                    embed.add_field(name="Limits", value="\n".join(limits_text[:3]), inline=True)  # Show max 3
+
+            # Add stop loss if available
+            if signal.get('stop_loss'):
+                embed.add_field(name="Stop Loss", value=signal['stop_loss'], inline=True)
+
+            # Add metadata
+            embed.set_footer(text=f"Marked by {user.name}")
+
+            # Add original message link if available
+            if signal.get('message_id') and signal.get('channel_id'):
+                try:
+                    original_channel = self.bot.get_channel(int(signal['channel_id']))
+                    if original_channel:
+                        message_link = f"https://discord.com/channels/{original_channel.guild.id}/{signal['channel_id']}/{signal['message_id']}"
+                        embed.add_field(name="Original Signal", value=f"[View Message]({message_link})", inline=False)
+                except Exception as e:
+                    logger.debug(f"Could not create message link: {e}")
+
+            # Send the profit alert
+            await profit_channel.send(embed=embed)
+            logger.info(f"Sent profit alert for signal {signal['id']} to profit channel")
+
+        except Exception as e:
+            logger.error(f"Error sending profit alert: {e}", exc_info=True)
+
+    def get_pip_unit_name(self, instrument):
+        """
+        Get the appropriate unit name (pips/points) for an instrument
+
+        Args:
+            instrument: The trading instrument symbol
+
+        Returns:
+            str: "pips" or "points" depending on the instrument type
+        """
+        instrument_upper = instrument.upper()
+
+        # Load alert config to determine asset type
+        import json
+        import os
+
+        try:
+            config_path = os.path.join('config', 'alert_distances.json')
+            with open(config_path, 'r') as f:
+                alert_config = json.load(f)
+
+            # Check if it's in overrides first
+            if instrument_upper in alert_config.get('overrides', {}):
+                # Determine based on common patterns
+                if 'USD' in instrument_upper and any(
+                        x in instrument_upper for x in ['EUR', 'GBP', 'AUD', 'NZD', 'CAD', 'CHF', 'JPY']):
+                    return "pips"
+                elif any(x in instrument_upper for x in ['SPX', 'NAS', 'JP225', 'US30']):
+                    return "points"
+                elif any(x in instrument_upper for x in ['BTC', 'ETH', 'SOL']):
+                    return "points"
+                elif 'XAU' in instrument_upper or 'XAG' in instrument_upper:
+                    return "pips"
+
+            # Default logic based on instrument patterns
+            if any(currency in instrument_upper for currency in
+                   ['EUR', 'GBP', 'USD', 'JPY', 'AUD', 'NZD', 'CAD', 'CHF']):
+                # Check if it's a forex pair (has two currencies)
+                forex_count = sum(
+                    1 for curr in ['EUR', 'GBP', 'USD', 'JPY', 'AUD', 'NZD', 'CAD', 'CHF'] if curr in instrument_upper)
+                if forex_count >= 2 or 'XAU' in instrument_upper or 'XAG' in instrument_upper:
+                    return "pips"
+
+            # Default to points for indices, stocks, crypto
+            return "points"
+
+        except Exception as e:
+            logger.debug(f"Error determining pip unit: {e}")
+            # Safe default
+            return "pips" if 'USD' in instrument_upper else "points"
 
     async def check_signal_management_reply(self, message: discord.Message):
         """
@@ -381,8 +580,6 @@ class MessageHandler:
         except Exception as e:
             self.logger.error(f"Error in signal management reply: {e}", exc_info=True)
 
-    # ... rest of the methods remain the same ...
-
     async def process_signal(self, message: discord.Message):
         """Process a potential trading signal with enhanced parsing"""
         try:
@@ -398,26 +595,48 @@ class MessageHandler:
                 )
 
                 if success:
-                    await message.add_reaction("✅")
+                    await self.safe_add_reaction(message, "✅")
                     self.logger.info(f"Signal #{signal_id} processed: {parsed.instrument} {parsed.direction}")
                 else:
                     existing = await self.signal_db.get_signal_by_message_id(str(message.id))
                     if existing and existing['status'] != 'cancelled':
-                        await message.add_reaction("⚠️")
+                        await self.safe_add_reaction(message, "⚠️")
                     else:
-                        await message.add_reaction("♻️")
+                        await self.safe_add_reaction(message, "♻️")
             else:
                 if self.looks_like_signal(message.content):
-                    await message.add_reaction("⚠️")
+                    await self.safe_add_reaction(message, "⚠️")
                     self.logger.debug(f"Failed to parse apparent signal from message {message.id}")
 
         except Exception as e:
-            self.logger.error(f"Error processing signal: {e}", exc_info=True)
-            await message.add_reaction("⚠️️")
+            # Use repr() to safely convert any problematic characters
+            self.logger.error(f"Error processing signal: {repr(str(e))}", exc_info=True)
+            await self.safe_add_reaction(message, "⚠️")
+
+    async def safe_add_reaction(self, message: discord.Message, emoji: str):
+        """Safely add a reaction to a message, handling common Discord API errors"""
+        try:
+            await message.add_reaction(emoji)
+        except discord.NotFound:
+            # Message was deleted or we lost access
+            self.logger.warning(f"Could not add reaction to message {message.id} - message not found")
+        except discord.Forbidden:
+            # Lost permissions to add reactions
+            self.logger.warning(f"Could not add reaction to message {message.id} - missing permissions")
+        except discord.HTTPException as e:
+            # Other Discord API errors
+            self.logger.warning(f"Could not add reaction to message {message.id} - HTTP error: {repr(str(e))}")
+        except Exception as e:
+            # Catch-all for any other errors
+            self.logger.error(f"Unexpected error adding reaction: {repr(str(e))}", exc_info=False)
 
     async def handle_message_edit(self, before: discord.Message, after: discord.Message):
-        """Handle message edits with signal re-parsing"""
+        """Handle message edits with signal reparsing"""
         if after.author.bot:
+            return
+
+        # CHECK: Only process edits in allowed channels
+        if not self.is_allowed_channel(after.channel.id):
             return
 
         if after.channel.id not in self.bot.monitored_channels:
@@ -453,6 +672,10 @@ class MessageHandler:
 
     async def handle_message_delete(self, payload: discord.RawMessageDeleteEvent):
         """Handle message deletions with signal cancellation"""
+        # CHECK: Only process deletions in allowed channels
+        if not self.is_allowed_channel(payload.channel_id):
+            return
+
         if payload.channel_id not in self.bot.monitored_channels:
             return
 
