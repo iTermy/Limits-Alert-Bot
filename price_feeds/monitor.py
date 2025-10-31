@@ -133,42 +133,53 @@ class PriceMonitor:
         logger.info("Price monitoring stopped")
 
     async def monitoring_loop(self):
-        """
-        Main monitoring loop - runs every second
-        Now uses FeedManager for intelligent feed routing
-        """
-        logger.info("Monitoring loop started with multi-feed support!")
+        """Enhanced monitoring loop with detailed metrics"""
 
         while self.running:
             loop_start = asyncio.get_event_loop().time()
+            timings = {}
 
             try:
-                # Get signals that need tracking
-                signals = await self.db.get_active_signals_for_tracking()
+                # Run the loop body with a 10-second timeout
+                await asyncio.wait_for(self._monitoring_iteration(timings, loop_start), timeout=10.0)
 
-                if signals:
-                    # Process signals by priority
-                    await self.process_signals(signals)
-
-                self.stats['checks_performed'] += 1
+            except asyncio.TimeoutError:
+                logger.error("Monitoring iteration timed out (>10s). Retrying...")
 
             except Exception as e:
-                logger.error(f"Error in monitoring loop: {e}", exc_info=True)
-                self.stats['errors'] += 1
+                logger.error(f"Monitoring error: {e}", exc_info=True)
 
-            # Calculate sleep time to maintain 1-second intervals
+            # Adaptive sleep time, even after timeout
             loop_time = asyncio.get_event_loop().time() - loop_start
-            self.stats['last_loop_time'] = loop_time
             sleep_time = max(0, 1.0 - loop_time)
-
-            if loop_time > 1.0:
-                logger.warning(f"Monitoring loop took {loop_time:.2f}s")
-
             await asyncio.sleep(sleep_time)
+
+    async def _monitoring_iteration(self, timings, loop_start):
+        """One iteration of monitoring work (with detailed timings)."""
+
+        # Phase 1: Database query
+        t1 = asyncio.get_event_loop().time()
+        signals = await self.db.get_active_signals_for_tracking()
+        timings['db_query'] = asyncio.get_event_loop().time() - t1
+
+        if signals:
+            # Phase 2: Price fetching
+            t2 = asyncio.get_event_loop().time()
+            await self.process_signals(signals)
+            timings['processing'] = asyncio.get_event_loop().time() - t2
+
+        # Log if slow
+        total_time = asyncio.get_event_loop().time() - loop_start
+        if total_time > 0.5:  # Log if over 500ms
+            logger.warning(f"Slow loop: {total_time:.3f}s - Breakdown: {timings}")
 
     async def process_signals(self, signals: List[Dict]):
         """Process all signals, checking limits and stop losses"""
         # Group signals by symbol and calculate priorities
+        timings = {}
+
+        # Phase 1: Grouping and priority
+        t1 = asyncio.get_event_loop().time()
         symbol_priorities = {}
         signal_by_symbol = {}
 
@@ -189,23 +200,37 @@ class PriceMonitor:
                 signal_by_symbol[symbol] = []
             signal_by_symbol[symbol].append((signal, priority))
 
-        # NEW: Fetch prices using FeedManager (handles feed selection automatically)
-        prices = await self.fetch_prices_batch(symbol_priorities)
+        timings['grouping'] = asyncio.get_event_loop().time() - t1
 
+        # Phase 2: Price fetching
+        t2 = asyncio.get_event_loop().time()
+        # Fetch prices using FeedManager (handles feed selection automatically)
+        prices = await self.fetch_prices_batch(symbol_priorities)
+        timings['price_fetch'] = asyncio.get_event_loop().time() - t2
+
+        # Phase 3: Signal checking (now async)
+        t3 = asyncio.get_event_loop().time()
         # Check each signal against current prices
+        check_tasks = []
+
         for symbol, signal_list in signal_by_symbol.items():
             if symbol in prices:
                 for signal, priority in signal_list:
-                    # Create a fresh copy for each signal
-                    price_data = dict(prices[symbol])
+                    task = asyncio.create_task(
+                        self.check_signal(signal, prices[symbol])
+                    )
+                    check_tasks.append(task)
 
-                    # Log which feed was used (for debugging)
-                    if 'feed' in price_data:
-                        logger.debug(f"Using {price_data['feed']} feed for {symbol}")
+        if check_tasks:
+            await asyncio.gather(*check_tasks, return_exceptions=True)
 
-                    await self.check_signal(signal, price_data)
-            else:
-                logger.error(f"No price data available for {symbol} from any feed!")
+        timings['checking'] = asyncio.get_event_loop().time() - t3
+
+        # Log if any phase is slow
+        # if any(t > 0.1 for t in timings.values()):
+        #     logger.info(f"Processing breakdown: {timings}")
+
+        return timings
 
     async def calculate_signal_priority(self, signal: Dict) -> Priority:
         """
@@ -281,7 +306,7 @@ class PriceMonitor:
             # Log feed usage statistics periodically
             if self.stats['checks_performed'] % 100 == 0:  # Every 100 checks
                 feed_stats = self.feed_manager.get_stats()
-                logger.info(f"Feed usage stats: {feed_stats['feeds_used']}")
+                # logger.info(f"Feed usage stats: {feed_stats['feeds_used']}")
 
             return prices
 

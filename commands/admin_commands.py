@@ -206,7 +206,6 @@ class AdminCommands(BaseCog):
             await ctx.reply(f"❌ Error reading logs: {str(e)}")
 
     @commands.command(name='monitor')
-    @commands.has_permissions(administrator=True)
     async def monitor_control(self, ctx, action: str = None):
         """Control price monitoring
 
@@ -293,7 +292,6 @@ class AdminCommands(BaseCog):
             await ctx.send("Usage: !monitor [status|start|stop|stats]")
 
     @commands.command(name='testmonitor')
-    @commands.has_permissions(administrator=True)
     async def test_monitor(self, ctx, signal_id: int):
         """Test monitoring for a specific signal
 

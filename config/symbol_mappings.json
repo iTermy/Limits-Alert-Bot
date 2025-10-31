@@ -43,7 +43,7 @@
     "icmarkets": {
       "format_rules": {
         "forex": "{symbol}",
-        "metals": "GOLD for XAUUSD, SILVER for XAGUSD",
+        "metals": "XAUUSD for GOLD, XAGUSD for SILVER",
         "stocks": "{symbol}",
         "indices": "Not primary feed"
       },

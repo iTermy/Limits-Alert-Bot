@@ -94,9 +94,6 @@ class ActiveSignalsView(discord.ui.View):
             if hit_limits:
                 limits_str += f" | {len(hit_limits)} hit"
 
-            # Format stop loss
-            stop_str = f"{signal.get('stop_loss', 0):.5f}" if signal.get('stop_loss') else "None"
-
             # Create link or label
             if str(signal['message_id']).startswith("manual_"):
                 link_label = "Manual Entry"
@@ -104,12 +101,8 @@ class ActiveSignalsView(discord.ui.View):
                 message_url = f"https://discord.com/channels/{guild_id}/{signal['channel_id']}/{signal['message_id']}"
                 link_label = f"{message_url}"
 
-            # Build field value
-            field_value = (
-                f"**Limits:** {limits_str}\n"
-                f"**Stop:** {stop_str}\n"
-                f"**Status:** {signal.get('status', 'active').upper()}"
-            )
+            # Build field value - SIMPLIFIED VERSION (removed Status and Stop lines)
+            field_value = f"**Limits:** {limits_str}"
 
             # Add distance information if available
             if signal.get('distance_info') and signal.get('status', 'active').lower() in ['active', 'hit']:
@@ -171,6 +164,7 @@ class ActiveSignalsView(discord.ui.View):
         self.update_buttons()
         embed = self.get_page_embed()
         await interaction.response.edit_message(embed=embed, view=self)
+
 
 class SignalCommands(BaseCog):
     """Commands for managing trading signals"""
@@ -338,6 +332,17 @@ class SignalCommands(BaseCog):
             # Get signal ID
             signal_id = signal['id']
 
+            # Create hyperlink for the signal ID
+            # Check if it's a manual entry or has a valid message ID
+            if str(signal['message_id']).startswith("manual_"):
+                # For manual entries, just use the ID without a link
+                signal_id_formatted = f"**#{signal_id}**"
+            else:
+                # Create the Discord message URL
+                message_url = f"https://discord.com/channels/{ctx.guild.id}/{signal['channel_id']}/{signal['message_id']}"
+                # Format as a clickable hyperlink (Discord markdown format)
+                signal_id_formatted = f"[**#{signal_id}**]({message_url})"
+
             # Get instrument (convert to underscore format if needed for other bot)
             instrument_name = signal['instrument']
             # Convert common formats (e.g., EURUSD to EUR_USD, XAUUSD to XAU_USD)
@@ -385,8 +390,18 @@ class SignalCommands(BaseCog):
             else:
                 sl_str = "None"
 
-            # Build the formatted line
-            line = f"**#{signal_id}** | {instrument_name} | {direction} | Entries: {entries_str} | SL: {sl_str}"
+            # Format expiry time
+            expiry_time = signal.get('expiry_type')
+            expiry_map = {
+                'day_end': 'VTD',
+                'week_end': 'VTW',
+                'month_end': 'VTM',
+                'no_expiry': 'VTAI'
+            }
+            expiry_str = expiry_map.get(expiry_time, 'N/A')
+
+            # Build the formatted line with hyperlinked ID and expiry
+            line = f"{signal_id_formatted} | {instrument_name} | {direction} | Entries: {entries_str} | SL: {sl_str} | {expiry_str}"
             formatted_lines.append(line)
 
         # Split into messages if needed (Discord has 2000 char limit)
@@ -682,7 +697,6 @@ class SignalCommands(BaseCog):
         await ctx.send(embed=embed)
 
     @commands.command(name='test_signal')
-    @commands.has_permissions(administrator=True)
     async def test_signal(self, ctx: commands.Context, *, signal_text: str = None):
         """Test signal parsing with custom or sample text"""
         if not signal_text:
@@ -1198,8 +1212,6 @@ class SignalCommands(BaseCog):
     async def _quick_status(self, ctx: commands.Context, signal_id: int, status: str):
         await self.set_signal_status(ctx, signal_id, status)
 
-
-    # Add this command to SignalCommands class
     @commands.command(name='report')
     async def report(self, ctx: commands.Context, period: str = 'week'):
         """
@@ -1246,222 +1258,200 @@ class SignalCommands(BaseCog):
                 await loading_msg.edit(content=None, embed=embed)
                 return
 
-            # Organize signals by status
-            signals_by_status = {
-                'profit': [],
-                'breakeven': [],
-                'stop_loss': []
-            }
+            # Organize signals by status (excluding breakeven from display)
+            profit_signals = []
+            stoploss_signals = []
 
             # Group signals by status
             for signal in signals:
-
                 if signal['status'] == SignalStatus.PROFIT:
-                    signals_by_status['profit'].append(signal)
-                elif signal['status'] == SignalStatus.BREAKEVEN:
-                    signals_by_status['breakeven'].append(signal)
+                    profit_signals.append(signal)
                 elif signal['status'] == SignalStatus.STOP_LOSS:
-                    signals_by_status['stop_loss'].append(signal)
+                    stoploss_signals.append(signal)
+                # Note: We're ignoring BREAKEVEN signals for display but they could still exist in the data
 
-            # Calculate statistics
-            total_signals = len(signals)
-            profit_count = len(signals_by_status['profit'])
-            breakeven_count = len(signals_by_status['breakeven'])
-            stoploss_count = len(signals_by_status['stop_loss'])
+            # Calculate statistics (only counting profit and stop loss for win rate)
+            total_signals = len([s for s in signals if s['status'] in [SignalStatus.PROFIT, SignalStatus.STOP_LOSS]])
+            profit_count = len(profit_signals)
+            stoploss_count = len(stoploss_signals)
 
             # Calculate win rate (profit as wins, stop loss as losses)
-            trades_with_outcome = profit_count + stoploss_count
-            win_rate = (profit_count / trades_with_outcome * 100) if trades_with_outcome > 0 else 0
+            win_rate = (profit_count / total_signals * 100) if total_signals > 0 else 0
 
             # Calculate percentages
             profit_pct = (profit_count / total_signals * 100) if total_signals > 0 else 0
-            breakeven_pct = (breakeven_count / total_signals * 100) if total_signals > 0 else 0
             stoploss_pct = (stoploss_count / total_signals * 100) if total_signals > 0 else 0
 
-            # Calculate by instrument statistics
-            signals_by_instrument = {}
-            for signal in signals:
-                instrument = signal['instrument']
-                if instrument not in signals_by_instrument:
-                    signals_by_instrument[instrument] = {
-                        'total': 0,
-                        'profit': 0,
-                        'breakeven': 0,
-                        'stop_loss': 0
-                    }
+            # Create embed
+            embed = discord.Embed(
+                title=f"📊 {period.title()} Trading Report",
+                description=f"Performance summary for the current {period}",
+                color=0x00FF00 if win_rate >= 50 else 0xFF0000
+            )
 
-                signals_by_instrument[instrument]['total'] += 1
+            # Add date range
+            embed.add_field(
+                name="📅 Date Range",
+                value=f"{date_range['display_start']} - {date_range['display_end']}",
+                inline=False
+            )
 
-                if signal['status'] == SignalStatus.PROFIT:
-                    signals_by_instrument[instrument]['profit'] += 1
-                elif signal['status'] == SignalStatus.BREAKEVEN:
-                    signals_by_instrument[instrument]['breakeven'] += 1
-                elif signal['status'] == SignalStatus.STOP_LOSS:
-                    signals_by_instrument[instrument]['stop_loss'] += 1
+            # Add summary statistics (removed breakeven)
+            embed.add_field(
+                name="📈 Overview",
+                value=f"**Total Signals:** {total_signals}\n"
+                      f"**Win Rate:** {win_rate:.1f}%\n"
+                      f"**Profit:** {profit_count} ({profit_pct:.1f}%)\n"
+                      f"**Stop Loss:** {stoploss_count} ({stoploss_pct:.1f}%)",
+                inline=False
+            )
 
-            # Calculate win rate for each instrument
-            for instrument, data in signals_by_instrument.items():
-                inst_trades = data['profit'] + data['stop_loss']
-                data['win_rate'] = (data['profit'] / inst_trades * 100) if inst_trades > 0 else 0
+            # Build signal lines for profit trades
+            if profit_signals:
+                profit_lines = []
+                for signal in profit_signals:
+                    # Get first limit if available
+                    first_limit = ""
+                    if signal.get('limits') and len(signal['limits']) > 0:
+                        first_limit = f" | {signal['limits'][0]}"
 
-            # Sort instruments by win rate
-            sorted_instruments = dict(sorted(
-                signals_by_instrument.items(),
-                key=lambda x: x[1]['win_rate'],
-                reverse=True
-            ))
+                    line = f"#{signal['id']} | {signal['instrument']} | {signal['direction'].upper()}{first_limit} 🟢"
+                    profit_lines.append(line)
 
-            # Prepare stats dictionary
-            stats = {
-                'total': total_signals,
-                'profit_count': profit_count,
-                'breakeven_count': breakeven_count,
-                'stoploss_count': stoploss_count,
-                'profit_pct': profit_pct,
-                'breakeven_pct': breakeven_pct,
-                'stoploss_pct': stoploss_pct,
-                'win_rate': win_rate,
-                'by_instrument': sorted_instruments
-            }
+                # Join all lines and check if we need pagination
+                profit_text = "\n".join(profit_lines)
 
-            # Create view for pagination if there are many signals
-            if total_signals > 10:
-                view = ReportView(
-                    signals_by_status=signals_by_status,
-                    date_range=date_range,
-                    period=period,
-                    stats=stats
+                # Discord embed field value limit is 1024 characters
+                # If it exceeds, we'll truncate and show count
+                if len(profit_text) > 1024:
+                    # Calculate how many we can fit (roughly 50 chars per line)
+                    max_lines = 1024 // 50
+                    truncated_lines = profit_lines[:max_lines]
+                    profit_text = "\n".join(truncated_lines)
+                    profit_text += f"\n... and {len(profit_lines) - max_lines} more"
+
+                embed.add_field(
+                    name=f"💰 Profited Trades ({profit_count})",
+                    value=profit_text,
+                    inline=False
                 )
 
-                await loading_msg.edit(content=None, embed=view.get_embed(), view=view)
-            else:
-                # Create simple embed for small reports
+            # Build signal lines for stop loss trades
+            if stoploss_signals:
+                sl_lines = []
+                for signal in stoploss_signals:
+                    # Get stop loss value if available
+                    sl_value = ""
+                    if signal.get('stop_loss'):
+                        sl_value = f" | {signal['stop_loss']}"
+
+                    line = f"#{signal['id']} | {signal['instrument']} | {signal['direction'].upper()}{sl_value} 🛑"
+                    sl_lines.append(line)
+
+                # Join all lines
+                sl_text = "\n".join(sl_lines)
+
+                # Check field limit
+                if len(sl_text) > 1024:
+                    max_lines = 1024 // 50
+                    truncated_lines = sl_lines[:max_lines]
+                    sl_text = "\n".join(truncated_lines)
+                    sl_text += f"\n... and {len(sl_lines) - max_lines} more"
+
+                embed.add_field(
+                    name=f"🛑 Stop Loss Trades ({stoploss_count})",
+                    value=sl_text,
+                    inline=False
+                )
+
+            # Check total embed size (6000 character limit)
+            # If we're approaching the limit, we need to implement pagination
+            total_chars = len(embed.title or '') + len(embed.description or '')
+            for field in embed.fields:
+                total_chars += len(field.name) + len(field.value)
+
+            if total_chars > 5500:  # Leave some buffer
+                # If we hit the limit, we need to use pagination
+                # For now, let's truncate more aggressively
+
+                # Rebuild embed with fewer entries
                 embed = discord.Embed(
                     title=f"📊 {period.title()} Trading Report",
                     description=f"Performance summary for the current {period}",
                     color=0x00FF00 if win_rate >= 50 else 0xFF0000
                 )
 
-                # Add date range
                 embed.add_field(
                     name="📅 Date Range",
                     value=f"{date_range['display_start']} - {date_range['display_end']}",
                     inline=False
                 )
 
-                # Add summary statistics
                 embed.add_field(
                     name="📈 Overview",
                     value=f"**Total Signals:** {total_signals}\n"
                           f"**Win Rate:** {win_rate:.1f}%\n"
                           f"**Profit:** {profit_count} ({profit_pct:.1f}%)\n"
-                          f"**Breakeven:** {breakeven_count} ({breakeven_pct:.1f}%)\n"
                           f"**Stop Loss:** {stoploss_count} ({stoploss_pct:.1f}%)",
                     inline=False
                 )
 
-                # Add profit trades
-                if signals_by_status['profit']:
-                    profit_text = []
-                    for signal in signals_by_status['profit'][:5]:
-                        # Format closed date
-                        closed_date = "N/A"
-                        if signal.get('closed_at'):
-                            try:
-                                closed_dt = datetime.fromisoformat(signal['closed_at'].replace('Z', '+00:00'))
-                                closed_date = closed_dt.strftime("%m/%d %H:%M")
-                            except:
-                                closed_date = "N/A"
+                # Show limited number of trades
+                if profit_signals:
+                    max_profit_show = min(15, len(profit_signals))
+                    profit_lines = []
+                    for signal in profit_signals[:max_profit_show]:
+                        first_limit = ""
+                        if signal.get('limits') and len(signal['limits']) > 0:
+                            first_limit = f" | {signal['limits'][0]}"
+                        line = f"#{signal['id']} | {signal['instrument']} | {signal['direction'].upper()}{first_limit} 💰"
+                        profit_lines.append(line)
 
-                        profit_text.append(
-                            f"#{signal['id']} | {signal['instrument']} | "
-                            f"{signal['direction'].upper()} | {closed_date} UTC"
-                        )
-
-                    value = "\n".join(profit_text)
-                    if len(signals_by_status['profit']) > 5:
-                        value += f"\n... and {len(signals_by_status['profit']) - 5} more"
+                    profit_text = "\n".join(profit_lines)
+                    if len(profit_signals) > max_profit_show:
+                        profit_text += f"\n... and {len(profit_signals) - max_profit_show} more"
 
                     embed.add_field(
-                        name=f"🟢 Profit Trades ({profit_count})",
-                        value=value,
+                        name=f"💰 Profited Trades ({profit_count})",
+                        value=profit_text,
                         inline=False
                     )
 
-                # Add breakeven trades
-                if signals_by_status['breakeven']:
-                    be_text = []
-                    for signal in signals_by_status['breakeven'][:3]:
-                        # Format closed date
-                        closed_date = "N/A"
-                        if signal.get('closed_at'):
-                            try:
-                                closed_dt = datetime.fromisoformat(signal['closed_at'].replace('Z', '+00:00'))
-                                closed_date = closed_dt.strftime("%m/%d %H:%M")
-                            except:
-                                closed_date = "N/A"
+                if stoploss_signals:
+                    max_sl_show = min(15, len(stoploss_signals))
+                    sl_lines = []
+                    for signal in stoploss_signals[:max_sl_show]:
+                        sl_value = ""
+                        if signal.get('stop_loss'):
+                            sl_value = f" | {signal['stop_loss']}"
+                        line = f"#{signal['id']} | {signal['instrument']} | {signal['direction'].upper()}{sl_value} 🛑"
+                        sl_lines.append(line)
 
-                        be_text.append(
-                            f"#{signal['id']} | {signal['instrument']} | {closed_date} UTC"
-                        )
-
-                    value = "\n".join(be_text)
-                    if len(signals_by_status['breakeven']) > 3:
-                        value += f"\n... and {len(signals_by_status['breakeven']) - 3} more"
+                    sl_text = "\n".join(sl_lines)
+                    if len(stoploss_signals) > max_sl_show:
+                        sl_text += f"\n... and {len(stoploss_signals) - max_sl_show} more"
 
                     embed.add_field(
-                        name=f"🟡 Breakeven Trades ({breakeven_count})",
-                        value=value,
+                        name=f"🛑 Stop Loss Trades ({stoploss_count})",
+                        value=sl_text,
                         inline=False
                     )
 
-                # Add stop loss trades
-                if signals_by_status['stop_loss']:
-                    sl_text = []
-                    for signal in signals_by_status['stop_loss'][:3]:
-                        # Format closed date
-                        closed_date = "N/A"
-                        if signal.get('closed_at'):
-                            try:
-                                closed_dt = datetime.fromisoformat(signal['closed_at'].replace('Z', '+00:00'))
-                                closed_date = closed_dt.strftime("%m/%d %H:%M")
-                            except:
-                                closed_date = "N/A"
-
-                        sl_text.append(
-                            f"#{signal['id']} | {signal['instrument']} | {closed_date} UTC"
-                        )
-
-                    value = "\n".join(sl_text)
-                    if len(signals_by_status['stop_loss']) > 3:
-                        value += f"\n... and {len(signals_by_status['stop_loss']) - 3} more"
-
-                    embed.add_field(
-                        name=f"🔴 Stop Loss Trades ({stoploss_count})",
-                        value=value,
-                        inline=False
+                # Add note about pagination if needed
+                if len(profit_signals) > 15 or len(stoploss_signals) > 15:
+                    embed.set_footer(
+                        text=f"Showing limited results due to size constraints | Generated at {datetime.utcnow().strftime('%Y-%m-%d %H:%M')} UTC"
                     )
-
-                # Add instrument breakdown if multiple
-                if len(sorted_instruments) > 1:
-                    inst_text = []
-                    for instrument, data in list(sorted_instruments.items())[:5]:
-                        inst_text.append(
-                            f"**{instrument}:** {data['profit']}/{data['total']} "
-                            f"({data['win_rate']:.0f}%)"
-                        )
-
-                    embed.add_field(
-                        name="📊 By Instrument",
-                        value="\n".join(inst_text),
-                        inline=False
+                else:
+                    embed.set_footer(
+                        text=f"Report generated at {datetime.utcnow().strftime('%Y-%m-%d %H:%M')} UTC"
                     )
-
+            else:
                 embed.set_footer(
                     text=f"Report generated at {datetime.utcnow().strftime('%Y-%m-%d %H:%M')} UTC"
                 )
 
-                await loading_msg.edit(content=None, embed=embed)
+            await loading_msg.edit(content=None, embed=embed)
 
         except Exception as e:
             error_embed = discord.Embed(
@@ -1519,201 +1509,6 @@ class SignalCommands(BaseCog):
     @commands.command(name='cancel')
     async def set_cancelled(self, ctx: commands.Context, signal_id: int):
         await self._quick_status(ctx, signal_id, "cancelled")
-
-
-class ReportView(discord.ui.View):
-    """Pagination view for detailed report signals"""
-
-    def __init__(self, signals_by_status: Dict[str, List], date_range: Dict,
-                 period: str, stats: Dict, timeout: int = 180):
-        super().__init__(timeout=timeout)
-        self.signals_by_status = signals_by_status
-        self.date_range = date_range
-        self.period = period
-        self.stats = stats
-        self.current_category = 'summary'
-        self.current_page = 0
-        self.page_size = 10
-
-        # Categories for navigation
-        self.categories = ['summary']
-        if signals_by_status.get('profit'):
-            self.categories.append('profit')
-        if signals_by_status.get('breakeven'):
-            self.categories.append('breakeven')
-        if signals_by_status.get('stop_loss'):
-            self.categories.append('stop_loss')
-
-        self.update_buttons()
-
-    def update_buttons(self):
-        """Update button states based on current view"""
-        # Disable/enable navigation buttons appropriately
-        for item in self.children:
-            if isinstance(item, discord.ui.Button):
-                if item.custom_id == 'prev_category':
-                    item.disabled = self.categories.index(self.current_category) == 0
-                elif item.custom_id == 'next_category':
-                    item.disabled = self.categories.index(self.current_category) == len(self.categories) - 1
-
-    def get_embed(self) -> discord.Embed:
-        """Generate embed for current view state"""
-        if self.current_category == 'summary':
-            return self.get_summary_embed()
-        else:
-            return self.get_signals_embed(self.current_category)
-
-    def get_summary_embed(self) -> discord.Embed:
-        """Generate the summary embed"""
-        win_rate = self.stats['win_rate']
-
-        embed = discord.Embed(
-            title=f"📊 {self.period.title()} Trading Report",
-            description=f"Performance summary for the current {self.period}",
-            color=0x00FF00 if win_rate >= 50 else 0xFF0000
-        )
-
-        # Date range
-        embed.add_field(
-            name="📅 Date Range",
-            value=f"{self.date_range['display_start']} - {self.date_range['display_end']}",
-            inline=False
-        )
-
-        # Overview statistics
-        embed.add_field(
-            name="📈 Overview",
-            value=f"**Total Signals:** {self.stats['total']}\n"
-                  f"**Win Rate:** {win_rate:.1f}%\n"
-                  f"**Profit:** {self.stats['profit_count']} ({self.stats['profit_pct']:.1f}%)\n"
-                  f"**Breakeven:** {self.stats['breakeven_count']} ({self.stats['breakeven_pct']:.1f}%)\n"
-                  f"**Stop Loss:** {self.stats['stoploss_count']} ({self.stats['stoploss_pct']:.1f}%)",
-            inline=False
-        )
-
-        # Instrument breakdown if available
-        if self.stats.get('by_instrument'):
-            inst_text = []
-            for instrument, data in list(self.stats['by_instrument'].items())[:5]:
-                inst_text.append(
-                    f"**{instrument}:** {data['profit']}/{data['total']} "
-                    f"({data['win_rate']:.0f}% WR)"
-                )
-
-            embed.add_field(
-                name="📊 Top Instruments",
-                value="\n".join(inst_text),
-                inline=False
-            )
-
-        # Navigation hint
-        if len(self.categories) > 1:
-            embed.add_field(
-                name="Navigation",
-                value="Use buttons below to view detailed signal lists",
-                inline=False
-            )
-
-        embed.set_footer(text=f"Generated at {datetime.now().strftime('%Y-%m-%d %H:%M')} UTC")
-        return embed
-
-    def get_signals_embed(self, status_type: str) -> discord.Embed:
-        """Generate embed for specific signal status category"""
-        signals = self.signals_by_status.get(status_type, [])
-
-        # Determine color and emoji based on status
-        status_config = {
-            'profit': ('🟢', 0x00FF00, 'Profit Trades'),
-            'breakeven': ('🟡', 0xFFFF00, 'Breakeven Trades'),
-            'stop_loss': ('🔴', 0xFF0000, 'Stop Loss Trades')
-        }
-
-        emoji, color, title = status_config.get(status_type, ('📊', 0x808080, 'Trades'))
-
-        # Calculate pagination
-        start_idx = self.current_page * self.page_size
-        end_idx = min(start_idx + self.page_size, len(signals))
-        page_signals = signals[start_idx:end_idx]
-
-        embed = discord.Embed(
-            title=f"{emoji} {title} ({len(signals)} total)",
-            description=f"Page {self.current_page + 1}/{((len(signals) - 1) // self.page_size) + 1}",
-            color=color
-        )
-
-        # Add signals
-        for signal in page_signals:
-            # Format closed date
-            closed_date = "N/A"
-            if signal.get('closed_at'):
-                try:
-                    closed_dt = datetime.fromisoformat(signal['closed_at'].replace('Z', '+00:00'))
-                    closed_date = closed_dt.strftime("%m/%d %H:%M UTC")
-                except:
-                    closed_date = "N/A"
-
-            limits_info = f"{signal['limits_hit']}/{signal['total_limits']} limits"
-
-            embed.add_field(
-                name=f"#{signal['id']} - {signal['instrument']}",
-                value=f"**Direction:** {signal['direction'].upper()}\n"
-                      f"**Closed:** {closed_date}\n"
-                      f"**Progress:** {limits_info}",
-                inline=True
-            )
-
-        # Fill empty fields for alignment (Discord shows 3 per row)
-        while len(embed.fields) % 3 != 0:
-            embed.add_field(name="\u200b", value="\u200b", inline=True)
-
-        embed.set_footer(
-            text=f"{self.period.title()} Report | "
-                 f"{self.date_range['display_start']} - {self.date_range['display_end']}"
-        )
-
-        return embed
-
-    @discord.ui.button(label='◀ Category', style=discord.ButtonStyle.primary,
-                       custom_id='prev_category', row=0)
-    async def prev_category(self, interaction: discord.Interaction, button: discord.ui.Button):
-        """Go to previous category"""
-        idx = self.categories.index(self.current_category)
-        if idx > 0:
-            self.current_category = self.categories[idx - 1]
-            self.current_page = 0
-            self.update_buttons()
-            await interaction.response.edit_message(embed=self.get_embed(), view=self)
-
-    @discord.ui.button(label='Category ▶', style=discord.ButtonStyle.primary,
-                       custom_id='next_category', row=0)
-    async def next_category(self, interaction: discord.Interaction, button: discord.ui.Button):
-        """Go to next category"""
-        idx = self.categories.index(self.current_category)
-        if idx < len(self.categories) - 1:
-            self.current_category = self.categories[idx + 1]
-            self.current_page = 0
-            self.update_buttons()
-            await interaction.response.edit_message(embed=self.get_embed(), view=self)
-
-    @discord.ui.button(label='◀ Page', style=discord.ButtonStyle.secondary,
-                       custom_id='prev_page', row=1)
-    async def prev_page(self, interaction: discord.Interaction, button: discord.ui.Button):
-        """Go to previous page within category"""
-        if self.current_category != 'summary' and self.current_page > 0:
-            self.current_page -= 1
-            await interaction.response.edit_message(embed=self.get_embed(), view=self)
-
-    @discord.ui.button(label='Page ▶', style=discord.ButtonStyle.secondary,
-                       custom_id='next_page', row=1)
-    async def next_page(self, interaction: discord.Interaction, button: discord.ui.Button):
-        """Go to next page within category"""
-        if self.current_category != 'summary':
-            signals = self.signals_by_status.get(self.current_category, [])
-            max_page = (len(signals) - 1) // self.page_size
-            if self.current_page < max_page:
-                self.current_page += 1
-                await interaction.response.edit_message(embed=self.get_embed(), view=self)
-
 
 async def setup(bot):
     """Setup function for Discord.py to load this cog"""

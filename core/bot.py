@@ -152,13 +152,55 @@ class TradingBot(commands.Bot):
         )
 
     async def on_message(self, message: discord.Message):
-        """Handle new messages"""
-        # Let message handler process it first
-        if self.message_handler:
-            await self.message_handler.handle_new_message(message)
+        """Handle new messages with error resilience"""
+        try:
+            # Check if message is in an allowed channel
+            allowed_channels = set()
 
-        # Then process commands
-        await self.process_commands(message)
+            # Add monitored channels
+            allowed_channels.update(self.monitored_channels)
+
+            # Add alert channel
+            if hasattr(self, 'alert_channel_id') and self.alert_channel_id:
+                allowed_channels.add(self.alert_channel_id)
+
+            # Add command channel
+            if hasattr(self, 'command_channel_id') and self.command_channel_id:
+                allowed_channels.add(self.command_channel_id)
+
+            # Try to get from channels_config if not set
+            if hasattr(self, 'channels_config'):
+                if 'alert_channel' in self.channels_config:
+                    allowed_channels.add(int(self.channels_config['alert_channel']))
+                if 'command_channel' in self.channels_config:
+                    allowed_channels.add(int(self.channels_config['command_channel']))
+
+            # Only process messages in allowed channels
+            if message.channel.id not in allowed_channels:
+                return  # Silently ignore messages in non-trading channels
+
+            # Let message handler process it first
+            if self.message_handler:
+                try:
+                    await self.message_handler.handle_new_message(message)
+                except discord.NotFound:
+                    # Message was deleted while processing
+                    self.logger.debug(f"Message {message.id} was deleted during processing")
+                except Exception as e:
+                    # Log error but don't crash - allow bot to continue
+                    self.logger.error(f"Error in message handler for message {message.id}: {repr(str(e))}",
+                                      exc_info=True)
+
+            # Then process commands (only in allowed channels)
+            try:
+                await self.process_commands(message)
+            except Exception as e:
+                # Log error but don't crash
+                self.logger.error(f"Error processing commands for message {message.id}: {repr(str(e))}", exc_info=True)
+
+        except Exception as e:
+            # Final catch-all to prevent any crashes
+            self.logger.error(f"Critical error in on_message: {repr(str(e))}", exc_info=True)
 
     async def on_message_edit(self, before: discord.Message, after: discord.Message):
         """Handle message edits"""
