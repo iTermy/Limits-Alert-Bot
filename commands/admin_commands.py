@@ -1,6 +1,6 @@
 """
 Admin Commands - Administrative commands for bot management
-Fixed to work with new enhanced database structure
+Updated to work with streaming architecture
 """
 from discord.ext import commands
 import discord
@@ -215,30 +215,30 @@ class AdminCommands(BaseCog):
             !monitor stop - Stop monitoring
             !monitor stats - Show statistics
         """
-        if not self.bot.price_monitor:
+        if not self.bot.monitor:
             await ctx.send("❌ Price monitor not initialized")
             return
 
         if action == 'status':
-            status = "🟢 Running" if self.bot.price_monitor.running else "🔴 Stopped"
+            status = "🟢 Running" if self.bot.monitor.running else "🔴 Stopped"
             await ctx.send(f"Monitor Status: {status}")
 
         elif action == 'start':
-            if self.bot.price_monitor.running:
+            if self.bot.monitor.running:
                 await ctx.send("Monitor already running")
             else:
-                await self.bot.price_monitor.start()
+                await self.bot.monitor.start()
                 await ctx.send("✅ Price monitoring started")
 
         elif action == 'stop':
-            if not self.bot.price_monitor.running:
+            if not self.bot.monitor.running:
                 await ctx.send("Monitor already stopped")
             else:
-                await self.bot.price_monitor.stop()
+                await self.bot.monitor.stop()
                 await ctx.send("✅ Price monitoring stopped")
 
         elif action == 'stats':
-            stats = self.bot.price_monitor.get_stats()
+            stats = self.bot.monitor.get_stats()
 
             embed = discord.Embed(
                 title="📊 Monitoring Statistics",
@@ -270,19 +270,15 @@ class AdminCommands(BaseCog):
                 value=f"{stats['errors']:,}",
                 inline=True
             )
-            embed.add_field(
-                name="Loop Time",
-                value=f"{stats['last_loop_time']:.3f}s",
-                inline=True
-            )
 
-            # Add cache stats if available
-            if 'cache_stats' in stats and stats['cache_stats']:
-                cache = stats['cache_stats']
+            # Add streaming stats
+            if 'stream_manager' in stats:
+                stream_stats = stats['stream_manager']
                 embed.add_field(
-                    name="Cache Performance",
-                    value=f"Hit Rate: {cache.get('overall_hit_rate', 0):.1%}\n"
-                          f"Entries: {cache.get('total_entries', 0)}",
+                    name="📡 Streaming",
+                    value=f"Subscriptions: {stream_stats.get('subscribed_symbols', 0)}\n"
+                          f"Updates: {stream_stats.get('updates_received', 0):,}\n"
+                          f"Reconnections: {stream_stats.get('reconnections', 0)}",
                     inline=False
                 )
 
@@ -291,13 +287,176 @@ class AdminCommands(BaseCog):
         else:
             await ctx.send("Usage: !monitor [status|start|stop|stats]")
 
+    @commands.command(name='refresh')
+    async def refresh_streams(self, ctx: commands.Context):
+        """Refresh all streaming connections (reconnect all feeds)"""
+        if not self.bot.monitor:
+            await ctx.send("❌ Price monitor not initialized")
+            return
+
+        await ctx.send("🔄 Refreshing all streaming connections...")
+
+        try:
+            # Reconnect all feeds
+            if hasattr(self.bot.monitor, 'stream_manager'):
+                await self.bot.monitor.stream_manager.reconnect_all()
+
+                embed = discord.Embed(
+                    title="✅ Streams Refreshed",
+                    description="All streaming connections have been refreshed",
+                    color=discord.Color.green()
+                )
+
+                # Get updated feed status
+                feed_status = self.bot.monitor.stream_manager.feed_status
+                status_str = "\n".join([
+                    f"{'✅' if connected else '❌'} {feed.upper()}"
+                    for feed, connected in feed_status.items()
+                ])
+
+                embed.add_field(
+                    name="Feed Status",
+                    value=status_str,
+                    inline=False
+                )
+
+                await ctx.send(embed=embed)
+            else:
+                await ctx.send("❌ Stream manager not available")
+
+        except Exception as e:
+            self.logger.error(f"Error refreshing streams: {e}")
+            await ctx.send(f"❌ Error refreshing streams: {str(e)}")
+
+    @commands.command(name='reconnect')
+    async def reconnect_feed(self, ctx: commands.Context, feed_name: str = None):
+        """Reconnect a specific feed
+
+        Usage: !reconnect <feed_name>
+        Valid feeds: icmarkets, oanda, binance
+        """
+        if not feed_name:
+            await ctx.reply("Please specify a feed: icmarkets, oanda, or binance")
+            return
+
+        feed_name = feed_name.lower()
+        valid_feeds = ['icmarkets', 'oanda', 'binance']
+
+        if feed_name not in valid_feeds:
+            await ctx.reply(f"❌ Invalid feed. Valid options: {', '.join(valid_feeds)}")
+            return
+
+        if not self.bot.monitor or not hasattr(self.bot.monitor, 'stream_manager'):
+            await ctx.send("❌ Stream manager not initialized")
+            return
+
+        try:
+            feed = self.bot.monitor.stream_manager.feeds.get(feed_name)
+            if not feed:
+                await ctx.send(f"❌ Feed '{feed_name}' not found")
+                return
+
+            await ctx.send(f"🔄 Reconnecting {feed_name.upper()}...")
+
+            await feed.reconnect()
+
+            # Check if reconnection was successful
+            if feed.connected:
+                embed = discord.Embed(
+                    title=f"✅ {feed_name.upper()} Reconnected",
+                    description=f"Successfully reconnected to {feed_name.upper()}",
+                    color=discord.Color.green()
+                )
+
+                # Show subscribed symbols
+                subscribed = feed.get_subscribed_symbols()
+                if subscribed:
+                    embed.add_field(
+                        name="Subscribed Symbols",
+                        value=f"{len(subscribed)} symbols",
+                        inline=True
+                    )
+
+                await ctx.send(embed=embed)
+            else:
+                await ctx.send(f"⚠️ Reconnection initiated but {feed_name.upper()} not yet connected")
+
+        except Exception as e:
+            self.logger.error(f"Error reconnecting {feed_name}: {e}")
+            await ctx.send(f"❌ Error reconnecting {feed_name}: {str(e)}")
+
+    @commands.command(name='streamhealth')
+    async def stream_health(self, ctx: commands.Context):
+        """Show detailed health metrics for all streaming feeds"""
+        if not self.bot.monitor or not hasattr(self.bot.monitor, 'stream_manager'):
+            await ctx.send("❌ Stream manager not initialized")
+            return
+
+        try:
+            stream_manager = self.bot.monitor.stream_manager
+            stats = stream_manager.get_stats()
+
+            embed = discord.Embed(
+                title="📡 Streaming Health Dashboard",
+                description="Real-time health metrics for all price feeds",
+                color=discord.Color.blue()
+            )
+
+            # Overall statistics
+            embed.add_field(
+                name="📊 Overall Statistics",
+                value=f"**Subscribed Symbols:** {stats.get('subscribed_symbols', 0)}\n"
+                      f"**Connected Feeds:** {stats.get('connected_feeds', 0)}/3\n"
+                      f"**Total Updates:** {stats.get('updates_received', 0):,}\n"
+                      f"**Total Reconnections:** {stats.get('reconnections', 0)}",
+                inline=False
+            )
+
+            # Individual feed health
+            feed_icons = {
+                'icmarkets': '🏦',
+                'oanda': '💱',
+                'binance': '₿'
+            }
+
+            for feed_name, feed in stream_manager.feeds.items():
+                icon = feed_icons.get(feed_name, '📈')
+                connected = feed.connected
+                status_emoji = '🟢' if connected else '🔴'
+
+                subscribed = feed.get_subscribed_symbols()
+
+                field_value = f"{status_emoji} **Status:** {'Connected' if connected else 'Disconnected'}\n"
+                field_value += f"📊 **Subscriptions:** {len(subscribed)}\n"
+
+                # Add feed-specific stats if available
+                if hasattr(feed, 'get_stats'):
+                    feed_stats = feed.get_stats()
+                    if 'updates_received' in feed_stats:
+                        field_value += f"📥 **Updates:** {feed_stats['updates_received']:,}\n"
+                    if 'reconnections' in feed_stats:
+                        field_value += f"🔄 **Reconnections:** {feed_stats['reconnections']}\n"
+
+                embed.add_field(
+                    name=f"{icon} {feed_name.upper()}",
+                    value=field_value,
+                    inline=True
+                )
+
+            embed.set_footer(text=f"Monitor running: {self.bot.monitor.running}")
+            await ctx.send(embed=embed)
+
+        except Exception as e:
+            self.logger.error(f"Error getting stream health: {e}")
+            await ctx.send(f"❌ Error getting stream health: {str(e)}")
+
     @commands.command(name='testmonitor')
     async def test_monitor(self, ctx, signal_id: int):
         """Test monitoring for a specific signal
 
         Usage: !testmonitor <signal_id>
         """
-        if not self.bot.price_monitor:
+        if not self.bot.monitor:
             await ctx.send("❌ Price monitor not initialized")
             return
 

@@ -1,6 +1,7 @@
 """
 Feed management commands for Discord bot
-Provides commands to check feed status, test feeds, and manage multi-feed system
+Updated to work with streaming architecture
+Provides commands to check feed status, test feeds, and manage streaming connections
 """
 
 import discord
@@ -29,7 +30,7 @@ class FeedCommands(commands.Cog):
     @commands.command(name='feeds', aliases=['feedstatus', 'fs'])
     async def feed_status(self, ctx):
         """
-        Check the status of all price feeds
+        Check the status of all streaming price feeds
 
         Usage: !feeds
         """
@@ -37,14 +38,17 @@ class FeedCommands(commands.Cog):
             await ctx.reply("❌ Monitor not initialized")
             return
 
+        if not hasattr(self.monitor, 'stream_manager'):
+            await ctx.reply("❌ Stream manager not available")
+            return
+
         try:
-            # Get feed status
-            feed_status = await self.monitor.get_feed_health()
+            stream_manager = self.monitor.stream_manager
 
             # Create embed
             embed = discord.Embed(
-                title="📊 Price Feed Status",
-                description="Current status of all configured price feeds",
+                title="📡 Streaming Feed Status",
+                description="Real-time status of all streaming price feeds",
                 color=discord.Color.blue(),
                 timestamp=datetime.now()
             )
@@ -56,41 +60,41 @@ class FeedCommands(commands.Cog):
                 'binance': '₿'
             }
 
-            # Status colors
-            status_colors = {
-                'connected': '🟢',
-                'disconnected': '🔴',
-                'error': '🟡',
-                'not_configured': '⚫'
-            }
+            # Get feed status
+            feed_status = stream_manager.feed_status
 
             # Add field for each feed
-            for feed_name, info in feed_status.items():
+            for feed_name, connected in feed_status.items():
                 icon = feed_icons.get(feed_name, '📈')
-                status = info['status']
-                color = status_colors.get(status, '⚪')
+                status_emoji = '🟢' if connected else '🔴'
+
+                feed = stream_manager.feeds.get(feed_name)
+                if not feed:
+                    continue
 
                 # Build field value
-                field_value = f"{color} **Status:** {status.title()}"
+                field_value = f"{status_emoji} **Status:** {'Connected' if connected else 'Disconnected'}"
 
-                # Add blacklist info if applicable
-                if info.get('blacklisted'):
-                    field_value += "\n⚠️ Temporarily blacklisted"
+                # Get subscribed symbols
+                subscribed = feed.get_subscribed_symbols()
+                field_value += f"\n📊 **Subscriptions:** {len(subscribed)}"
 
-                # Add health metrics if available
-                if 'health' in info:
-                    health = info['health']
-                    field_value += f"\n📊 Success rate: {health.get('fetch_success_rate', 'N/A')}"
-                    field_value += f"\n🔄 Total fetches: {health.get('successful_fetches', 0)}"
+                # Add feed-specific stats if available
+                if hasattr(feed, 'get_stats'):
+                    feed_stats = feed.get_stats()
 
-                    if health.get('last_successful_fetch'):
-                        last_fetch = health['last_successful_fetch']
-                        if isinstance(last_fetch, datetime):
-                            time_ago = (datetime.now() - last_fetch).total_seconds()
-                            if time_ago < 60:
-                                field_value += f"\n⏰ Last fetch: {int(time_ago)}s ago"
-                            else:
-                                field_value += f"\n⏰ Last fetch: {int(time_ago / 60)}m ago"
+                    if 'updates_received' in feed_stats:
+                        field_value += f"\n📥 **Updates:** {feed_stats['updates_received']:,}"
+
+                    if 'reconnections' in feed_stats:
+                        field_value += f"\n🔄 **Reconnections:** {feed_stats['reconnections']}"
+
+                    if 'last_update' in feed_stats and feed_stats['last_update']:
+                        time_ago = (datetime.now() - feed_stats['last_update']).total_seconds()
+                        if time_ago < 60:
+                            field_value += f"\n⏰ **Last update:** {int(time_ago)}s ago"
+                        else:
+                            field_value += f"\n⏰ **Last update:** {int(time_ago / 60)}m ago"
 
                 embed.add_field(
                     name=f"{icon} {feed_name.upper()}",
@@ -98,34 +102,34 @@ class FeedCommands(commands.Cog):
                     inline=True
                 )
 
-            # Add feed manager stats
-            stats = self.monitor.get_stats()
-            if 'feed_manager' in stats:
-                fm_stats = stats['feed_manager']
+            # Add overall statistics
+            stats = stream_manager.get_stats()
+            embed.add_field(
+                name="📈 Overall Statistics",
+                value=(
+                    f"🎯 **Total subscriptions:** {stats.get('subscribed_symbols', 0)}\n"
+                    f"✅ **Connected feeds:** {stats.get('connected_feeds', 0)}/3\n"
+                    f"📥 **Total updates:** {stats.get('updates_received', 0):,}\n"
+                    f"🔄 **Total reconnections:** {stats.get('reconnections', 0)}"
+                ),
+                inline=False
+            )
 
-                # Overall statistics
+            # Show some subscribed symbols
+            subscribed_symbols = stream_manager.subscribed_symbols
+            if subscribed_symbols:
+                symbol_list = sorted(list(subscribed_symbols))[:10]
+                symbols_str = ", ".join(symbol_list)
+                if len(subscribed_symbols) > 10:
+                    symbols_str += f" (+{len(subscribed_symbols) - 10} more)"
+
                 embed.add_field(
-                    name="📈 Overall Statistics",
-                    value=(
-                        f"✅ Success rate: {fm_stats.get('success_rate', 'N/A')}\n"
-                        f"📊 Total requests: {fm_stats.get('total_requests', 0)}\n"
-                        f"🔄 Fallbacks used: {fm_stats.get('fallback_used', 0)}"
-                    ),
+                    name="🎯 Monitored Symbols (sample)",
+                    value=symbols_str,
                     inline=False
                 )
 
-                # Feed usage distribution
-                if fm_stats.get('feeds_used'):
-                    usage_str = "\n".join([
-                        f"{feed_icons.get(f, '📊')} {f}: {count}"
-                        for f, count in fm_stats['feeds_used'].items()
-                    ])
-                    embed.add_field(
-                        name="📊 Feed Usage",
-                        value=usage_str or "No data yet",
-                        inline=True
-                    )
-
+            embed.set_footer(text="Use !streamhealth for detailed health metrics")
             await ctx.reply(embed=embed)
 
         except Exception as e:
@@ -135,7 +139,7 @@ class FeedCommands(commands.Cog):
     @commands.command(name='testfeeds', aliases=['tf'])
     async def test_feeds(self, ctx):
         """
-        Test all configured price feeds
+        Test all configured streaming feeds
 
         Usage: !testfeeds
         Admin only
@@ -144,16 +148,38 @@ class FeedCommands(commands.Cog):
             await ctx.reply("❌ Monitor not initialized")
             return
 
-        await ctx.reply("🔄 Testing all configured feeds...")
+        if not hasattr(self.monitor, 'stream_manager'):
+            await ctx.reply("❌ Stream manager not available")
+            return
+
+        await ctx.reply("🔄 Testing all streaming feeds...")
 
         try:
-            # Run tests
-            test_results = await self.monitor.test_all_feeds()
+            stream_manager = self.monitor.stream_manager
+            test_results = {}
+
+            # Test each feed
+            for feed_name, feed in stream_manager.feeds.items():
+                try:
+                    # Check if feed is connected
+                    if feed.connected:
+                        # Try to get a sample price to verify stream is working
+                        subscribed = feed.get_subscribed_symbols()
+                        if subscribed:
+                            # Feed is connected and has subscriptions
+                            test_results[feed_name] = (True, f"Connected with {len(subscribed)} subscriptions")
+                        else:
+                            test_results[feed_name] = (True, "Connected but no active subscriptions")
+                    else:
+                        test_results[feed_name] = (False, "Not connected")
+
+                except Exception as e:
+                    test_results[feed_name] = (False, f"Error: {str(e)}")
 
             # Create embed
             embed = discord.Embed(
-                title="🧪 Feed Test Results",
-                description="Connection test for all price feeds",
+                title="🧪 Streaming Feed Test Results",
+                description="Connection test for all streaming price feeds",
                 color=discord.Color.green() if all(r[0] for r in test_results.values()) else discord.Color.orange(),
                 timestamp=datetime.now()
             )
@@ -167,6 +193,15 @@ class FeedCommands(commands.Cog):
                     inline=False
                 )
 
+            # Add recommendation if any failed
+            failed_feeds = [name for name, (success, _) in test_results.items() if not success]
+            if failed_feeds:
+                embed.add_field(
+                    name="💡 Recommendation",
+                    value=f"Try reconnecting failed feeds with: `!reconnect <feed_name>`",
+                    inline=False
+                )
+
             await ctx.reply(embed=embed)
 
         except Exception as e:
@@ -176,7 +211,7 @@ class FeedCommands(commands.Cog):
     @commands.command(name='checkprice', aliases=['cp', 'price'])
     async def check_price(self, ctx, symbol: str):
         """
-        Check current price for a symbol from best available feed
+        Check current price for a symbol from streaming feeds
 
         Usage: !checkprice EURUSD
         """
@@ -184,15 +219,20 @@ class FeedCommands(commands.Cog):
             await ctx.reply("❌ Monitor not initialized")
             return
 
+        if not hasattr(self.monitor, 'stream_manager'):
+            await ctx.reply("❌ Stream manager not available")
+            return
+
         symbol = symbol.upper()
 
         try:
-            # Get price from feed manager
-            from price_feeds.smart_cache import Priority
-            price_data = await self.monitor.feed_manager.get_price(symbol, Priority.CRITICAL)
+            stream_manager = self.monitor.stream_manager
+
+            # Get latest price from stream manager
+            price_data = await stream_manager.get_latest_price(symbol)
 
             if not price_data:
-                await ctx.reply(f"❌ Could not get price for {symbol} from any feed")
+                await ctx.reply(f"❌ Could not get price for {symbol}. Symbol may not be subscribed.")
                 return
 
             # Create embed
@@ -213,6 +253,14 @@ class FeedCommands(commands.Cog):
             feed_used = price_data.get('feed', 'unknown')
             embed.add_field(name="🔌 Feed", value=feed_used.upper(), inline=True)
 
+            # Streaming status
+            is_subscribed = symbol in stream_manager.subscribed_symbols
+            embed.add_field(
+                name="📡 Status",
+                value="🟢 Subscribed" if is_subscribed else "⚪ Not Subscribed",
+                inline=True
+            )
+
             # Additional info if available
             if 'tradeable' in price_data:
                 tradeable = "✅" if price_data['tradeable'] else "❌"
@@ -224,10 +272,83 @@ class FeedCommands(commands.Cog):
             logger.error(f"Error checking price for {symbol}: {e}", exc_info=True)
             await ctx.reply(f"❌ Error checking price: {str(e)}")
 
+    @commands.command(name='subscriptions', aliases=['subs'])
+    async def show_subscriptions(self, ctx):
+        """
+        Show all currently subscribed symbols across all feeds
+
+        Usage: !subscriptions
+        """
+        if not self.monitor or not hasattr(self.monitor, 'stream_manager'):
+            await ctx.reply("❌ Stream manager not available")
+            return
+
+        try:
+            stream_manager = self.monitor.stream_manager
+            subscribed_symbols = stream_manager.subscribed_symbols
+
+            if not subscribed_symbols:
+                embed = discord.Embed(
+                    title="📡 Active Subscriptions",
+                    description="No symbols currently subscribed",
+                    color=discord.Color.orange()
+                )
+                await ctx.reply(embed=embed)
+                return
+
+            # Sort symbols
+            sorted_symbols = sorted(list(subscribed_symbols))
+
+            # Create embed
+            embed = discord.Embed(
+                title="📡 Active Subscriptions",
+                description=f"Currently monitoring {len(sorted_symbols)} symbols via streaming",
+                color=discord.Color.blue()
+            )
+
+            # Group symbols by feed
+            symbol_to_feed = stream_manager.symbol_to_feed
+
+            feeds_data = {}
+            for symbol in sorted_symbols:
+                feed_name = symbol_to_feed.get(symbol, 'unknown')
+                if feed_name not in feeds_data:
+                    feeds_data[feed_name] = []
+                feeds_data[feed_name].append(symbol)
+
+            # Add field for each feed
+            feed_icons = {
+                'icmarkets': '🏦',
+                'oanda': '💱',
+                'binance': '₿'
+            }
+
+            for feed_name, symbols in feeds_data.items():
+                icon = feed_icons.get(feed_name, '📈')
+
+                # Limit display to prevent overflow
+                display_symbols = symbols[:20]
+                symbols_str = ", ".join(display_symbols)
+                if len(symbols) > 20:
+                    symbols_str += f"\n... +{len(symbols) - 20} more"
+
+                embed.add_field(
+                    name=f"{icon} {feed_name.upper()} ({len(symbols)})",
+                    value=symbols_str,
+                    inline=False
+                )
+
+            embed.set_footer(text=f"Total: {len(sorted_symbols)} symbols")
+            await ctx.reply(embed=embed)
+
+        except Exception as e:
+            logger.error(f"Error showing subscriptions: {e}", exc_info=True)
+            await ctx.reply(f"❌ Error: {str(e)}")
+
     @commands.command(name='feedstats', aliases=['fstats'])
     async def feed_stats(self, ctx):
         """
-        Show detailed feed performance statistics
+        Show detailed streaming performance statistics
 
         Usage: !feedstats
         """
@@ -235,13 +356,18 @@ class FeedCommands(commands.Cog):
             await ctx.reply("❌ Monitor not initialized")
             return
 
+        if not hasattr(self.monitor, 'stream_manager'):
+            await ctx.reply("❌ Stream manager not available")
+            return
+
         try:
             stats = self.monitor.get_stats()
+            stream_stats = stats.get('stream_manager', {})
 
             # Create embed
             embed = discord.Embed(
-                title="📊 Feed Performance Statistics",
-                description="Detailed performance metrics for price feeds",
+                title="📊 Streaming Performance Statistics",
+                description="Detailed performance metrics for streaming price feeds",
                 color=discord.Color.blue(),
                 timestamp=datetime.now()
             )
@@ -250,42 +376,60 @@ class FeedCommands(commands.Cog):
             embed.add_field(
                 name="🔄 Monitor Status",
                 value=(
-                    f"Running: {'✅' if stats.get('running') else '❌'}\n"
-                    f"Checks performed: {stats.get('checks_performed', 0)}\n"
-                    f"Limits hit: {stats.get('limits_hit', 0)}\n"
-                    f"Errors: {stats.get('errors', 0)}\n"
-                    f"Last loop time: {stats.get('last_loop_time', 0):.3f}s"
+                    f"**Running:** {'✅' if stats.get('running') else '❌'}\n"
+                    f"**Checks performed:** {stats.get('checks_performed', 0):,}\n"
+                    f"**Limits hit:** {stats.get('limits_hit', 0)}\n"
+                    f"**Alerts sent:** {stats.get('alerts_sent', 0)}\n"
+                    f"**Errors:** {stats.get('errors', 0)}"
                 ),
                 inline=False
             )
 
-            # Feed manager stats
-            if 'feed_manager' in stats:
-                fm = stats['feed_manager']
+            # Stream manager stats
+            if stream_stats:
                 embed.add_field(
-                    name="📈 Feed Manager",
+                    name="📡 Streaming Performance",
                     value=(
-                        f"Success rate: {fm.get('success_rate', 'N/A')}\n"
-                        f"Total requests: {fm.get('total_requests', 0)}\n"
-                        f"Successful: {fm.get('successful_requests', 0)}\n"
-                        f"Failed: {fm.get('failed_requests', 0)}\n"
-                        f"Fallbacks: {fm.get('fallback_used', 0)}"
+                        f"**Subscribed symbols:** {stream_stats.get('subscribed_symbols', 0)}\n"
+                        f"**Connected feeds:** {stream_stats.get('connected_feeds', 0)}/3\n"
+                        f"**Updates received:** {stream_stats.get('updates_received', 0):,}\n"
+                        f"**Reconnections:** {stream_stats.get('reconnections', 0)}"
                     ),
                     inline=True
                 )
 
-            # Cache stats
-            if 'cache_stats' in stats:
-                cache = stats['cache_stats']
+            # Individual feed stats
+            if hasattr(self.monitor.stream_manager, 'feeds'):
+                feed_icons = {
+                    'icmarkets': '🏦',
+                    'oanda': '💱',
+                    'binance': '₿'
+                }
+
+                for feed_name, feed in self.monitor.stream_manager.feeds.items():
+                    icon = feed_icons.get(feed_name, '📈')
+
+                    if hasattr(feed, 'get_stats'):
+                        feed_stats = feed.get_stats()
+                        subscribed = len(feed.get_subscribed_symbols())
+
+                        field_value = f"**Subscriptions:** {subscribed}\n"
+                        if 'updates_received' in feed_stats:
+                            field_value += f"**Updates:** {feed_stats['updates_received']:,}\n"
+                        if 'reconnections' in feed_stats:
+                            field_value += f"**Reconnections:** {feed_stats['reconnections']}"
+
+                        embed.add_field(
+                            name=f"{icon} {feed_name.upper()}",
+                            value=field_value,
+                            inline=True
+                        )
+
+            # Alert latency if available
+            if 'average_check_time' in stats:
                 embed.add_field(
-                    name="💾 Cache Performance",
-                    value=(
-                        f"Hit rate: {cache.get('hit_rate', 'N/A')}\n"
-                        f"Cache size: {cache.get('cache_size', 0)}\n"
-                        f"Total fetches: {cache.get('total_fetches', 0)}\n"
-                        f"Cache hits: {cache.get('cache_hits', 0)}\n"
-                        f"Cache misses: {cache.get('cache_misses', 0)}"
-                    ),
+                    name="⚡ Performance",
+                    value=f"Avg check time: {stats['average_check_time']:.3f}s",
                     inline=True
                 )
 
@@ -295,80 +439,120 @@ class FeedCommands(commands.Cog):
             logger.error(f"Error getting feed stats: {e}", exc_info=True)
             await ctx.reply(f"❌ Error getting stats: {str(e)}")
 
-    @commands.command(name='switchfeed', aliases=['sf'])
-    async def switch_feed(self, ctx, symbol: str, feed: Optional[str] = None):
+    @commands.command(name='feedinfo', aliases=['fi'])
+    async def feed_info(self, ctx, feed_name: str = None):
         """
-        Test which feed would be used for a symbol
+        Show detailed information about a specific feed
 
-        Usage: !switchfeed EURUSD [feed_name]
-        Admin only
+        Usage: !feedinfo <feed_name>
+        Valid feeds: icmarkets, oanda, binance
         """
-        if not self.monitor:
-            await ctx.reply("❌ Monitor not initialized")
+        if not feed_name:
+            await ctx.reply("Please specify a feed: icmarkets, oanda, or binance")
             return
 
-        symbol = symbol.upper()
+        feed_name = feed_name.lower()
+        valid_feeds = ['icmarkets', 'oanda', 'binance']
+
+        if feed_name not in valid_feeds:
+            await ctx.reply(f"❌ Invalid feed. Valid options: {', '.join(valid_feeds)}")
+            return
+
+        if not self.monitor or not hasattr(self.monitor, 'stream_manager'):
+            await ctx.reply("❌ Stream manager not available")
+            return
 
         try:
-            # Get available feeds for symbol
-            available = self.monitor.feed_manager._get_available_feeds_for_symbol(symbol)
+            stream_manager = self.monitor.stream_manager
+            feed = stream_manager.feeds.get(feed_name)
 
-            if not available:
-                await ctx.reply(f"❌ No feeds available for {symbol}")
+            if not feed:
+                await ctx.reply(f"❌ Feed '{feed_name}' not found")
                 return
 
-            # Create response
+            # Feed icons
+            feed_icons = {
+                'icmarkets': '🏦',
+                'oanda': '💱',
+                'binance': '₿'
+            }
+            icon = feed_icons.get(feed_name, '📈')
+
+            # Create embed
             embed = discord.Embed(
-                title=f"🔄 Feed Selection for {symbol}",
-                color=discord.Color.blue()
+                title=f"{icon} {feed_name.upper()} Feed Information",
+                color=discord.Color.green() if feed.connected else discord.Color.red(),
+                timestamp=datetime.now()
             )
 
-            # Show feed priority
+            # Connection status
+            status_emoji = '🟢' if feed.connected else '🔴'
             embed.add_field(
-                name="📊 Available Feeds (in priority order)",
-                value="\n".join([f"{i + 1}. {f}" for i, f in enumerate(available)]),
-                inline=False
-            )
-
-            # Show what would be used
-            embed.add_field(
-                name="✅ Primary Feed",
-                value=available[0].upper(),
+                name="Connection Status",
+                value=f"{status_emoji} {'Connected' if feed.connected else 'Disconnected'}",
                 inline=True
             )
 
-            if len(available) > 1:
+            # Subscribed symbols
+            subscribed = feed.get_subscribed_symbols()
+            embed.add_field(
+                name="Subscriptions",
+                value=f"📊 {len(subscribed)} symbols",
+                inline=True
+            )
+
+            # Feed-specific stats
+            if hasattr(feed, 'get_stats'):
+                feed_stats = feed.get_stats()
+
+                if 'updates_received' in feed_stats:
+                    embed.add_field(
+                        name="Updates Received",
+                        value=f"📥 {feed_stats['updates_received']:,}",
+                        inline=True
+                    )
+
+                if 'reconnections' in feed_stats:
+                    embed.add_field(
+                        name="Reconnections",
+                        value=f"🔄 {feed_stats['reconnections']}",
+                        inline=True
+                    )
+
+                if 'last_update' in feed_stats and feed_stats['last_update']:
+                    time_ago = (datetime.now() - feed_stats['last_update']).total_seconds()
+                    if time_ago < 60:
+                        last_update_str = f"{int(time_ago)}s ago"
+                    elif time_ago < 3600:
+                        last_update_str = f"{int(time_ago / 60)}m ago"
+                    else:
+                        last_update_str = f"{int(time_ago / 3600)}h ago"
+
+                    embed.add_field(
+                        name="Last Update",
+                        value=f"⏰ {last_update_str}",
+                        inline=True
+                    )
+
+            # Show sample of subscribed symbols
+            if subscribed:
+                sample_size = min(15, len(subscribed))
+                sample = sorted(list(subscribed))[:sample_size]
+                symbols_str = ", ".join(sample)
+                if len(subscribed) > sample_size:
+                    symbols_str += f"\n... +{len(subscribed) - sample_size} more"
+
                 embed.add_field(
-                    name="🔄 Fallback Feed",
-                    value=available[1].upper() if len(available) > 1 else "None",
-                    inline=True
+                    name="Subscribed Symbols (sample)",
+                    value=symbols_str,
+                    inline=False
                 )
 
-            # Test specific feed if requested
-            if feed and feed.lower() in available:
-                from price_feeds.smart_cache import Priority
-                price = await self.monitor.feed_manager.feeds[feed.lower()].get_price(
-                    self.monitor.symbol_mapper.get_feed_symbol(symbol, feed.lower()),
-                    Priority.CRITICAL
-                )
-
-                if price:
-                    embed.add_field(
-                        name=f"✅ Test: {feed.upper()}",
-                        value=f"Bid: {price['bid']:.5f}\nAsk: {price['ask']:.5f}",
-                        inline=False
-                    )
-                else:
-                    embed.add_field(
-                        name=f"❌ Test: {feed.upper()}",
-                        value="Failed to get price",
-                        inline=False
-                    )
-
+            embed.set_footer(text=f"Use !reconnect {feed_name} to reconnect this feed")
             await ctx.reply(embed=embed)
 
         except Exception as e:
-            logger.error(f"Error checking feed for {symbol}: {e}", exc_info=True)
+            logger.error(f"Error getting feed info: {e}", exc_info=True)
             await ctx.reply(f"❌ Error: {str(e)}")
 
 

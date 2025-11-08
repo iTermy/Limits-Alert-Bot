@@ -117,7 +117,8 @@ class TradingBot(commands.Bot):
             'commands.general_commands',
             'commands.signal_commands',
             'commands.admin_commands',
-            'commands.feed_commands'
+            'commands.feed_commands',
+            'commands.debug_commands'
         ]
 
         for extension in extensions:
@@ -239,7 +240,7 @@ class TradingBot(commands.Bot):
         """Initialize the price monitoring system"""
         self.logger.info("Starting price monitor initialization...")
         try:
-            from price_feeds.monitor import PriceMonitor
+            from price_feeds.streaming_monitor import StreamingPriceMonitor as PriceMonitor
 
             # Create monitor instance - use self.monitor not self.price_monitor
             self.monitor = PriceMonitor(

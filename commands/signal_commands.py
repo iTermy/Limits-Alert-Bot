@@ -1,6 +1,7 @@
 """
 Signal Commands - Commands for managing trading signals
-Fixed to work with new enhanced database structure
+Updated to work with streaming architecture
+FIXED: Better crypto support and decimal formatting
 """
 from database.models import SignalStatus
 from .base_command import BaseCog
@@ -14,6 +15,81 @@ import asyncio
 from datetime import datetime
 
 logger = get_logger("signal_commands")
+
+
+def format_price(price: float, symbol: str = None) -> str:
+    """
+    Format price with appropriate decimal places
+    FIXED: Removes redundant trailing zeros
+
+    Args:
+        price: Price to format
+        symbol: Optional symbol for context-aware formatting
+
+    Returns:
+        Formatted price string
+    """
+    if price is None:
+        return "N/A"
+
+    # Determine decimal places based on price magnitude
+    if price < 0.0001:
+        # Very small prices (some crypto pairs)
+        formatted = f"{price:.8f}"
+    elif price < 0.01:
+        # Small prices (JPY pairs, some crypto)
+        formatted = f"{price:.5f}"
+    elif price < 10:
+        # Medium prices (forex, some indices)
+        formatted = f"{price:.5f}"
+    elif price < 100:
+        # Larger prices (some indices)
+        formatted = f"{price:.3f}"
+    elif price < 10000:
+        # Large prices (BTC, indices)
+        formatted = f"{price:.2f}"
+    else:
+        # Very large prices (BTC, some stocks)
+        formatted = f"{price:.2f}"
+
+    # Remove redundant trailing zeros, but keep at least one decimal place
+    # 100000.00000 -> 100000.0
+    # 1.23400 -> 1.234
+    # 1.10000 -> 1.1
+    if '.' in formatted:
+        # Remove trailing zeros
+        formatted = formatted.rstrip('0')
+        # Ensure at least one decimal place
+        if formatted.endswith('.'):
+            formatted += '0'
+
+    return formatted
+
+
+def format_distance_display(symbol: str, distance_value: float, is_crypto: bool = False) -> str:
+    """
+    Format distance for display in active command
+    FIXED: Now supports crypto with $ formatting
+
+    Args:
+        symbol: Trading symbol
+        distance_value: Distance in pips or dollars
+        is_crypto: Whether this is a crypto symbol
+
+    Returns:
+        Formatted distance string
+    """
+    if is_crypto:
+        # For crypto, show dollar amount
+        # e.g., "$234.50 away"
+        return f"${abs(distance_value):.2f}"
+    else:
+        # For forex/indices, show pips
+        # e.g., "23.4 pips"
+        if abs(distance_value) < 1:
+            return f"{abs(distance_value):.1f} pip"
+        else:
+            return f"{abs(distance_value):.1f} pips"
 
 
 class ActiveSignalsView(discord.ui.View):
@@ -77,7 +153,7 @@ class ActiveSignalsView(discord.ui.View):
         )
 
         for signal in signals:
-            # Get status emoji (you'll need to implement this or import from EmbedFactory)
+            # Get status emoji
             status_emoji = self._get_status_emoji(signal.get('status', 'active'))
 
             # Format limits
@@ -85,7 +161,8 @@ class ActiveSignalsView(discord.ui.View):
             hit_limits = signal.get('hit_limits', [])
 
             if pending_limits:
-                limits_str = self._format_price_list(pending_limits[:3])
+                # FIXED: Use format_price for better formatting
+                limits_str = ", ".join([format_price(p, signal['instrument']) for p in pending_limits[:3]])
                 if len(pending_limits) > 3:
                     limits_str += f" (+{len(pending_limits) - 3} more)"
             else:
@@ -101,16 +178,28 @@ class ActiveSignalsView(discord.ui.View):
                 message_url = f"https://discord.com/channels/{guild_id}/{signal['channel_id']}/{signal['message_id']}"
                 link_label = f"{message_url}"
 
-            # Build field value - SIMPLIFIED VERSION (removed Status and Stop lines)
+            # Build field value
             field_value = f"**Limits:** {limits_str}"
 
             # Add distance information if available
+            # FIXED: Now works for crypto too
             if signal.get('distance_info') and signal.get('status', 'active').lower() in ['active', 'hit']:
                 distance_info = signal['distance_info']
-                formatted_distance = distance_info['formatted']
 
-                if (distance_info['distance'] > 0) & (signal.get('status', 'active').upper() != "HIT"):
-                    field_value += f"\n**Distance:** {formatted_distance}"
+                # Check if crypto or index
+                is_crypto = signal.get('is_crypto', False)
+                is_index = signal.get('is_index', False)
+
+                if is_crypto or is_index:
+                    # Show dollar distance for crypto and indices
+                    distance_dollars = abs(distance_info.get('distance', 0))
+                    if distance_dollars > 0 and signal.get('status', 'active').upper() != "HIT":
+                        field_value += f"\n**Distance:** ${distance_dollars:.2f} away"
+                else:
+                    # Show pip distance for forex
+                    formatted_distance = distance_info.get('formatted', '')
+                    if formatted_distance and signal.get('status', 'active').upper() != "HIT":
+                        field_value += f"\n**Distance:** {formatted_distance}"
 
             if signal.get('time_remaining'):
                 field_value += f"\n**Expiry:** {signal['time_remaining']}"
@@ -139,7 +228,7 @@ class ActiveSignalsView(discord.ui.View):
         return status_emojis.get(status.lower(), '⚫')
 
     def _format_price_list(self, prices: list) -> str:
-        """Format list of prices"""
+        """Format list of prices - DEPRECATED, use format_price instead"""
         if not prices:
             return "None"
         return ", ".join(f"{p:.5f}" if isinstance(p, (int, float)) else str(p) for p in prices)
@@ -173,15 +262,16 @@ class SignalCommands(BaseCog):
     async def active_signals(self, ctx: commands.Context, *, args: str = None):
         """
         Show active trading signals with sorting and pagination
+        FIXED: Now works with crypto showing dollar distances
 
         Usage:
             !active - Show most recent active signals
-            !active XAUUSD - Filter by instrument
+            !active BTCUSDT - Filter by instrument
             !active sort:distance - Sort by distance to limit
             !active sort:recent - Sort by most recent (default)
             !active sort:oldest - Sort by oldest first
             !active sort:progress - Sort by most limits hit
-            !active XAUUSD sort:distance - Combine filter and sort
+            !active BTCUSDT sort:distance - Combine filter and sort
         """
 
         # Parse arguments
@@ -215,52 +305,73 @@ class SignalCommands(BaseCog):
             await ctx.send(embed=embed)
             return
 
-        # Import necessary modules for price fetching and distance calculation
-        from price_feeds.smart_cache import SmartPriceCache, Priority
-        from price_feeds.alert_config import AlertDistanceConfig
+        # In the active_signals command, around line 267 in your file:
 
-        # Get cache and alert config instances
-        cache = None
-        alert_config = AlertDistanceConfig()
-
-        # Try to get cache from monitor if available
+        # Calculate distances for each signal (for sorting and display)
+        # FIXED: Now properly handles crypto AND indices
         if hasattr(self.bot, 'monitor') and self.bot.monitor:
-            cache = self.bot.monitor.cache
+            if hasattr(self.bot.monitor, 'stream_manager'):
+                from price_feeds.alert_config import AlertDistanceConfig
+                alert_config = AlertDistanceConfig()
 
-        # Calculate distances for each signal (only if we need distance sorting or display)
-        if cache and (sort_method == 'distance' or True):  # Always calculate for display
-            for signal in signals:
-                if signal.get('pending_limits'):
-                    # Get current price from cache
-                    symbol = signal['instrument']
-                    cached_price = await cache.get_price(symbol, Priority.LOW)
+                for signal in signals:
+                    if signal.get('pending_limits'):
+                        # Get current price from stream manager
+                        symbol = signal['instrument']
 
-                    if cached_price:
-                        # Determine which price to use based on direction
-                        direction = signal['direction'].lower()
-                        current_price = cached_price['ask'] if direction == 'long' else cached_price['bid']
+                        # Determine asset type
+                        is_crypto = any(crypto in symbol.upper() for crypto in
+                                        ['BTC', 'ETH', 'BNB', 'XRP', 'ADA', 'DOGE', 'SOL',
+                                         'DOT']) or 'USDT' in symbol.upper()
 
-                        # Get the first pending limit
-                        if signal['pending_limits']:
-                            limit_price = signal['pending_limits'][0]
+                        # CRITICAL FIX: Detect indices for dollar distance
+                        is_index = any(idx in symbol.upper() for idx in
+                                       ['SPX', 'NAS', 'DOW', 'DAX', 'CHINA50', 'US500', 'USTEC', 'US30',
+                                        'US2000', 'RUSSELL', 'GER', 'DE30', 'DE40', 'JP225', 'NIKKEI'])
 
-                            # Calculate distance
-                            if direction == 'long':
-                                distance = current_price - limit_price
-                            else:
-                                distance = limit_price - current_price
+                        signal['is_crypto'] = is_crypto
+                        signal['is_index'] = is_index
 
-                            # Get pip size for proper formatting
-                            pip_size = alert_config.get_pip_size(symbol)
-                            distance_pips = abs(distance) / pip_size
+                        try:
+                            cached_price = await self.bot.monitor.stream_manager.get_latest_price(symbol)
 
-                            # Store distance info
-                            signal['distance_info'] = {
-                                'distance': distance,
-                                'distance_pips': distance_pips,
-                                'current_price': current_price,
-                                'formatted': alert_config.format_distance_for_display(symbol, distance_pips)
-                            }
+                            if cached_price:
+                                # Determine which price to use based on direction
+                                direction = signal['direction'].lower()
+                                current_price = cached_price['ask'] if direction == 'long' else cached_price['bid']
+
+                                # Get the first pending limit
+                                if signal['pending_limits']:
+                                    limit_price = signal['pending_limits'][0]
+
+                                    # Calculate distance
+                                    if direction == 'long':
+                                        distance = current_price - limit_price
+                                    else:
+                                        distance = limit_price - current_price
+
+                                    # Format based on asset type
+                                    # CRITICAL FIX: Indices use dollar distance like crypto
+                                    if is_crypto or is_index:
+                                        # For crypto and indices, distance is in dollars
+                                        distance_value = abs(distance)
+                                        formatted = f"${distance_value:.2f} away"
+                                    else:
+                                        # For forex, use pips
+                                        pip_size = alert_config.get_pip_size(symbol)
+                                        distance_pips = abs(distance) / pip_size
+                                        distance_value = distance_pips
+                                        formatted = alert_config.format_distance_for_display(symbol, distance_pips)
+
+                                    # Store distance info
+                                    signal['distance_info'] = {
+                                        'distance': distance_value,
+                                        'current_price': current_price,
+                                        'formatted': formatted
+                                    }
+                        except Exception as e:
+                            logger.warning(f"Could not get price for {symbol}: {e}")
+                            pass
 
         # Apply sorting
         if sort_method == 'recent':
@@ -270,10 +381,9 @@ class SignalCommands(BaseCog):
             signals.reverse()
         elif sort_method == 'distance':
             # Sort by distance (closest first)
-            # Signals without distance info go to the end
             def get_distance_key(signal):
                 if signal.get('distance_info'):
-                    return signal['distance_info']['distance_pips']
+                    return signal['distance_info']['distance']
                 return float('inf')  # Put signals without distance at the end
 
             signals.sort(key=get_distance_key)
@@ -284,7 +394,7 @@ class SignalCommands(BaseCog):
         # Create pagination view
         view = ActiveSignalsView(
             signals=signals,
-            embed_factory=None,  # We'll use the internal method
+            embed_factory=None,
             guild_id=ctx.guild.id,
             instrument=instrument,
             page_size=10
@@ -312,10 +422,11 @@ class SignalCommands(BaseCog):
     async def active_signals_text(self, ctx: commands.Context, instrument: str = None):
         """
         Show active trading signals in plain text format for easy copying
+        FIXED: Better decimal formatting
 
         Usage:
             !activetxt - Show all active signals in text format
-            !activetxt XAUUSD - Filter by instrument
+            !activetxt BTCUSDT - Filter by instrument
         """
 
         # Get signals from database (most recent first)
@@ -333,60 +444,39 @@ class SignalCommands(BaseCog):
             signal_id = signal['id']
 
             # Create hyperlink for the signal ID
-            # Check if it's a manual entry or has a valid message ID
             if str(signal['message_id']).startswith("manual_"):
-                # For manual entries, just use the ID without a link
                 signal_id_formatted = f"**#{signal_id}**"
             else:
-                # Create the Discord message URL
                 message_url = f"https://discord.com/channels/{ctx.guild.id}/{signal['channel_id']}/{signal['message_id']}"
-                # Format as a clickable hyperlink (Discord markdown format)
                 signal_id_formatted = f"[**#{signal_id}**]({message_url})"
 
-            # Get instrument (convert to underscore format if needed for other bot)
+            # Get instrument (convert to underscore format if needed)
             instrument_name = signal['instrument']
-            # Convert common formats (e.g., EURUSD to EUR_USD, XAUUSD to XAU_USD)
-            if len(instrument_name) == 6 and not '_' in instrument_name:
-                # Likely a forex pair
+            if len(instrument_name) == 6 and '_' not in instrument_name:
                 instrument_name = f"{instrument_name[:3]}_{instrument_name[3:]}"
             elif instrument_name.startswith('XAU') and len(instrument_name) == 6:
-                # Gold vs currency
                 instrument_name = f"XAU_{instrument_name[3:]}"
             elif instrument_name.startswith('XAG') and len(instrument_name) == 6:
-                # Silver vs currency
                 instrument_name = f"XAG_{instrument_name[3:]}"
 
             # Get direction
             direction = signal['direction'].upper()
 
-            # Format pending limits as entries
+            # Format pending limits as entries - FIXED: Better formatting
             pending_limits = signal.get('pending_limits', [])
             if pending_limits:
-                # Format each limit with its number
                 entries_parts = []
                 for i, limit_price in enumerate(pending_limits, 1):
-                    # Format price based on number of decimal places needed
-                    if limit_price < 10:  # Forex pairs
-                        entries_parts.append(f"{i}: {limit_price:.5f}")
-                    elif limit_price < 100:  # JPY pairs or similar
-                        entries_parts.append(f"{i}: {limit_price:.3f}")
-                    else:  # Gold, indices, etc.
-                        entries_parts.append(f"{i}: {limit_price:.2f}")
-
+                    formatted_price = format_price(limit_price, signal['instrument'])
+                    entries_parts.append(f"{i}: {formatted_price}")
                 entries_str = ", ".join(entries_parts)
             else:
                 entries_str = "None"
 
-            # Format stop loss
+            # Format stop loss - FIXED: Better formatting
             stop_loss = signal.get('stop_loss')
             if stop_loss:
-                # Format based on price level
-                if stop_loss < 10:
-                    sl_str = f"{stop_loss:.5f}"
-                elif stop_loss < 100:
-                    sl_str = f"{stop_loss:.3f}"
-                else:
-                    sl_str = f"{stop_loss:.2f}"
+                sl_str = format_price(stop_loss, signal['instrument'])
             else:
                 sl_str = "None"
 
@@ -400,11 +490,11 @@ class SignalCommands(BaseCog):
             }
             expiry_str = expiry_map.get(expiry_time, 'N/A')
 
-            # Build the formatted line with hyperlinked ID and expiry
+            # Build the formatted line
             line = f"{signal_id_formatted} | {instrument_name} | {direction} | Entries: {entries_str} | SL: {sl_str} | {expiry_str}"
             formatted_lines.append(line)
 
-        # Split into messages if needed (Discord has 2000 char limit)
+        # Split into messages if needed
         messages = []
         current_message = []
         current_length = 0
@@ -421,9 +511,7 @@ class SignalCommands(BaseCog):
             line_with_newline = line + "\n"
             line_length = len(line_with_newline)
 
-            # Check if adding this line would exceed Discord's limit
-            if current_length + line_length > 1900:  # Leave some buffer
-                # Send current message and start a new one
+            if current_length + line_length > 1900:
                 messages.append("".join(current_message))
                 current_message = []
                 current_length = 0
@@ -431,18 +519,15 @@ class SignalCommands(BaseCog):
             current_message.append(line_with_newline)
             current_length += line_length
 
-        # Add any remaining lines
         if current_message:
             messages.append("".join(current_message))
 
         # Send all messages
         for i, message in enumerate(messages):
             if i > 0:
-                # Add a small delay between messages to avoid rate limiting
                 await asyncio.sleep(0.5)
             await ctx.send(message)
 
-        # Add footer in last message if multiple messages
         if len(messages) > 1:
             await ctx.send(f"*Sent in {len(messages)} parts due to length*")
 
@@ -450,6 +535,7 @@ class SignalCommands(BaseCog):
     async def all_signals(self, ctx: commands.Context, status: str = None):
         """
         Show all signals or filter by status
+        FIXED: Better decimal formatting
 
         Usage: !all [status]
         Valid statuses: active, hit, profit, breakeven, stop_loss, cancelled
@@ -458,7 +544,6 @@ class SignalCommands(BaseCog):
 
         valid_statuses = ['active', 'hit', 'profit', 'breakeven', 'stop_loss', 'cancelled']
 
-        # Filter by status if provided
         if status:
             status = status.lower()
             if status not in valid_statuses:
@@ -491,8 +576,8 @@ class SignalCommands(BaseCog):
         }
 
         for signal in signals[:10]:
-            # Format stop loss depending on its size
-            stop_loss_value = f"{signal['stop_loss']:.5f}" if signal['stop_loss'] < 10 else f"{signal['stop_loss']:.2f}"
+            # FIXED: Better stop loss formatting
+            stop_loss_value = format_price(signal['stop_loss'], signal['instrument']) if signal['stop_loss'] else "N/A"
             status_emoji = status_emoji_map.get(signal['status'], '❓')
 
             embed.add_field(
@@ -510,7 +595,6 @@ class SignalCommands(BaseCog):
     async def add_signal(self, ctx: commands.Context, *, signal_text: str = None):
         """Add a trading signal manually from the command channel"""
 
-        # Check if in command channel (if configured)
         if self.bot.command_channel_id and ctx.channel.id != self.bot.command_channel_id:
             await ctx.reply("This command can only be used in the command channel.")
             return
@@ -522,18 +606,17 @@ class SignalCommands(BaseCog):
         # Determine default expiry based on instrument
         temp_parsed = parse_signal(signal_text, "command")
 
-        # If no expiry specified in text, add default based on instrument
+        # If no expiry specified in text, add default
         text_lower = signal_text.lower()
         has_expiry = any(exp in text_lower for exp in ['vth', 'vtai', 'vtd', 'vtwe', 'vtme', 'alien'])
 
         if not has_expiry and temp_parsed:
-            # Check if it's a major forex pair
             major_forex = ['EURUSD', 'GBPUSD', 'USDJPY', 'USDCHF', 'AUDUSD', 'USDCAD', 'NZDUSD']
 
             if temp_parsed.instrument in major_forex:
-                signal_text += " vtd"  # Day end for major forex
+                signal_text += " vtd"
             else:
-                signal_text += " vtwe"  # Week end for everything else
+                signal_text += " vtwe"
 
         # Parse the signal
         parsed = parse_signal(signal_text, "command")
@@ -542,7 +625,7 @@ class SignalCommands(BaseCog):
             await ctx.reply("❌ Failed to parse signal. Please check the format.")
             return
 
-        # Save to database using a pseudo message ID
+        # Save to database
         pseudo_message_id = f"manual_{ctx.author.id}_{ctx.message.id}"
 
         success, signal_id = await self.signal_db.save_signal(
@@ -554,6 +637,9 @@ class SignalCommands(BaseCog):
         if success:
             embed = EmbedFactory.signal_added(signal_id, parsed, ctx.author.name)
             await ctx.send(embed=embed)
+
+            # Note: The monitor should automatically subscribe to the symbol
+            # when it detects a new signal in the database
         else:
             await ctx.reply("⚠️ Failed to save signal to database.")
 
@@ -565,19 +651,16 @@ class SignalCommands(BaseCog):
             await ctx.reply("Please provide a signal ID. Example: `!delete 42`")
             return
 
-        # Check if signal exists
         signal = await self.signal_db.get_signal_with_limits(signal_id)
 
         if not signal:
             await ctx.reply(f"❌ Signal #{signal_id} not found.")
             return
 
-        # Delete the signal using the database method directly
         try:
             from database import db
 
             async with db.get_connection() as conn:
-                # Delete will cascade to limits and status_changes
                 await conn.execute("DELETE FROM signals WHERE id = ?", (signal_id,))
                 await conn.commit()
                 success = True
@@ -591,37 +674,30 @@ class SignalCommands(BaseCog):
                 description=f"Signal #{signal_id} has been deleted",
                 color=discord.Color.orange()
             )
-            embed.add_field(
-                name="Instrument",
-                value=signal['instrument'],
-                inline=True
-            )
-            embed.add_field(
-                name="Direction",
-                value=signal['direction'].upper(),
-                inline=True
-            )
-            embed.add_field(
-                name="Status",
-                value=signal['status'],
-                inline=True
-            )
+            embed.add_field(name="Instrument", value=signal['instrument'], inline=True)
+            embed.add_field(name="Direction", value=signal['direction'].upper(), inline=True)
+            embed.add_field(name="Status", value=signal['status'], inline=True)
             embed.set_footer(text=f"Deleted by {ctx.author.name}")
 
             await ctx.send(embed=embed)
             self.logger.info(f"Signal {signal_id} deleted by {ctx.author.name}")
+
+            # Note: The monitor should automatically unsubscribe from the symbol
+            # if no other signals need it
         else:
             await ctx.reply("⚠️ Failed to delete signal.")
 
     @commands.command(name='info')
     async def signal_info(self, ctx: commands.Context, signal_id: int = None):
-        """Show detailed information about a specific signal"""
+        """
+        Show detailed information about a specific signal
+        FIXED: Better decimal formatting
+        """
 
         if not signal_id:
             await ctx.reply("Please provide a signal ID. Example: `!info 42`")
             return
 
-        # Get signal with limits
         signal = await self.signal_db.get_signal_with_limits(signal_id)
 
         if not signal:
@@ -646,22 +722,35 @@ class SignalCommands(BaseCog):
         # Basic info
         embed.add_field(name="Direction", value=signal['direction'].upper(), inline=True)
         embed.add_field(name="Status", value=signal['status'].upper(), inline=True)
-        embed.add_field(name="Stop Loss", value=f"{signal['stop_loss']:.5f}" if signal['stop_loss'] < 10 else f"{signal['stop_loss']:.2f}", inline=True)
 
-        # Limits info
+        # FIXED: Better stop loss formatting
+        stop_loss_formatted = format_price(signal['stop_loss'], signal['instrument']) if signal['stop_loss'] else "N/A"
+        embed.add_field(name="Stop Loss", value=stop_loss_formatted, inline=True)
+
+        # Streaming status (if available)
+        if hasattr(self.bot, 'monitor') and self.bot.monitor:
+            if hasattr(self.bot.monitor, 'stream_manager'):
+                is_subscribed = signal['instrument'] in self.bot.monitor.stream_manager.subscribed_symbols
+                embed.add_field(
+                    name="Streaming Status",
+                    value="🟢 Subscribed" if is_subscribed else "⚪ Not Subscribed",
+                    inline=True
+                )
+
+        # Limits info - FIXED: Better formatting
         if signal['limits']:
             pending_limits = [l for l in signal['limits'] if l['status'] == 'pending']
             hit_limits = [l for l in signal['limits'] if l['status'] == 'hit']
 
             if pending_limits:
-                pending_str = "\n".join([f"• {l['price_level']:.5f}" if l['price_level'] < 10 else f"• {l['price_level']:.2f}"
+                pending_str = "\n".join([f"• {format_price(l['price_level'], signal['instrument'])}"
                                         for l in pending_limits[:5]])
                 if len(pending_limits) > 5:
                     pending_str += f"\n... +{len(pending_limits) - 5} more"
                 embed.add_field(name=f"Pending Limits ({len(pending_limits)})", value=pending_str, inline=False)
 
             if hit_limits:
-                hit_str = "\n".join([f"• {l['price_level']:.5f} ✅" if l['price_level'] < 10 else f"• {l['price_level']:.2f} ✅"
+                hit_str = "\n".join([f"• {format_price(l['price_level'], signal['instrument'])} ✅"
                                     for l in hit_limits[:5]])
                 if len(hit_limits) > 5:
                     hit_str += f"\n... +{len(hit_limits) - 5} more"
@@ -685,7 +774,7 @@ class SignalCommands(BaseCog):
         if signal.get('expiry_type'):
             embed.add_field(name="Expiry Type", value=signal['expiry_type'].replace('_', ' ').title(), inline=True)
 
-        # Link to original message if not manual
+        # Link to original message
         if not str(signal['message_id']).startswith("manual_"):
             message_url = f"https://discord.com/channels/{ctx.guild.id}/{signal['channel_id']}/{signal['message_id']}"
             embed.add_field(name="Source", value=f"[Jump to message]({message_url})", inline=False)
@@ -702,10 +791,8 @@ class SignalCommands(BaseCog):
         if not signal_text:
             signal_text = "1.34850—–1.34922——1.35035 gbpusd short vth Stops 1.35132"
 
-        # Get channel name from context
         channel_name = self.get_channel_name(ctx.channel.id)
 
-        # Parse the signal with enhanced parser
         parsed = parse_signal(signal_text, channel_name)
 
         embed = discord.Embed(
@@ -720,56 +807,29 @@ class SignalCommands(BaseCog):
         )
 
         if channel_name:
-            embed.add_field(
-                name="Channel",
-                value=channel_name,
-                inline=True
-            )
+            embed.add_field(name="Channel", value=channel_name, inline=True)
 
         if parsed:
-            embed.add_field(
-                name="✅ Parse Success",
-                value=f"**Method:** {parsed.parse_method}",
-                inline=False
-            )
-            embed.add_field(
-                name="Instrument",
-                value=parsed.instrument,
-                inline=True
-            )
-            embed.add_field(
-                name="Direction",
-                value=parsed.direction.upper(),
-                inline=True
-            )
-            embed.add_field(
-                name="Stop Loss",
-                value=f"{parsed.stop_loss:.5f}" if parsed.stop_loss < 10 else f"{parsed.stop_loss:.2f}",
-                inline=True
-            )
+            embed.add_field(name="✅ Parse Success", value=f"**Method:** {parsed.parse_method}", inline=False)
+            embed.add_field(name="Instrument", value=parsed.instrument, inline=True)
+            embed.add_field(name="Direction", value=parsed.direction.upper(), inline=True)
+
+            # FIXED: Better formatting
+            stop_formatted = format_price(parsed.stop_loss, parsed.instrument)
+            embed.add_field(name="Stop Loss", value=stop_formatted, inline=True)
+
+            # FIXED: Better limit formatting
+            limits_formatted = "\n".join([f"• {format_price(limit, parsed.instrument)}" for limit in parsed.limits])
             embed.add_field(
                 name="Limits",
-                value="\n".join([f"• {limit:.5f}" if limit < 10 else f"• {limit:.2f}"
-                                 for limit in parsed.limits]),
+                value=limits_formatted,
                 inline=True
             )
-            embed.add_field(
-                name="Expiry",
-                value=parsed.expiry_type,
-                inline=True
-            )
+            embed.add_field(name="Expiry", value=parsed.expiry_type, inline=True)
             if parsed.keywords:
-                embed.add_field(
-                    name="Keywords",
-                    value=", ".join(parsed.keywords),
-                    inline=True
-                )
+                embed.add_field(name="Keywords", value=", ".join(parsed.keywords), inline=True)
         else:
-            embed.add_field(
-                name="❌ Parse Failed",
-                value="Could not extract valid signal from text",
-                inline=False
-            )
+            embed.add_field(name="❌ Parse Failed", value="Could not extract valid signal from text", inline=False)
 
         await ctx.send(embed=embed)
 
@@ -814,6 +874,10 @@ class SignalCommands(BaseCog):
 
         embed.set_footer(text=f"Requested by {ctx.author.name}")
         await ctx.send(embed=embed)
+
+    # Include the rest of the commands from the original file
+    # (setexpiry, setstatus, profit, breakeven, hit, stoploss, cancel, report)
+    # These don't need changes for streaming architecture
 
     @commands.command(name='setexpiry')
     async def set_expiry(self, ctx, signal_id: str = None, *expiry_args):
@@ -1212,6 +1276,27 @@ class SignalCommands(BaseCog):
     async def _quick_status(self, ctx: commands.Context, signal_id: int, status: str):
         await self.set_signal_status(ctx, signal_id, status)
 
+    # Shortcut commands
+    @commands.command(name='profit', aliases=['tp'])
+    async def set_profit(self, ctx: commands.Context, signal_id: int):
+        await self.set_signal_status(ctx, signal_id, "profit")
+
+    @commands.command(name='breakeven', aliases=['be'])
+    async def set_breakeven(self, ctx: commands.Context, signal_id: int):
+        await self.set_signal_status(ctx, signal_id, "breakeven")
+
+    @commands.command(name='hit')
+    async def set_hit(self, ctx: commands.Context, signal_id: int):
+        await self.set_signal_status(ctx, signal_id, "hit")
+
+    @commands.command(name='stoploss', aliases=['sl'])
+    async def set_stop_loss(self, ctx: commands.Context, signal_id: int):
+        await self.set_signal_status(ctx, signal_id, "stop_loss")
+
+    @commands.command(name='cancel')
+    async def set_cancelled(self, ctx: commands.Context, signal_id: int):
+        await self.set_signal_status(ctx, signal_id, "cancelled")
+
     @commands.command(name='report')
     async def report(self, ctx: commands.Context, period: str = 'week'):
         """
@@ -1467,48 +1552,6 @@ class SignalCommands(BaseCog):
             logger = get_logger("signal_commands")
             logger.error(f"Error in report command: {e}\n{traceback.format_exc()}")
 
-    def _get_channel_name_from_id(self, channel_id: str) -> str:
-        """Helper method to get channel name from ID"""
-        try:
-            # Try to get from config first
-            from utils.config_loader import ConfigLoader
-            config = ConfigLoader()
-            channels = config.get('monitored_channels', {})
-
-            # Reverse lookup in the config
-            for name, id_value in channels.items():
-                if str(id_value) == str(channel_id):
-                    return name.replace('-', ' ').replace('_', ' ')
-
-            # If not found in config, try to get from Discord
-            channel = self.bot.get_channel(int(channel_id))
-            if channel:
-                return channel.name
-
-            return "unknown"
-        except:
-            return "unknown"
-
-        # Shortcut commands
-    @commands.command(name='profit', aliases=['tp'])
-    async def set_profit(self, ctx: commands.Context, signal_id: int):
-        await self._quick_status(ctx, signal_id, "profit")
-
-    @commands.command(name='breakeven', aliases=['be'])
-    async def set_breakeven(self, ctx: commands.Context, signal_id: int):
-        await self._quick_status(ctx, signal_id, "breakeven")
-
-    @commands.command(name='hit')
-    async def set_hit(self, ctx: commands.Context, signal_id: int):
-        await self._quick_status(ctx, signal_id, "hit")
-
-    @commands.command(name='stoploss', aliases=['sl'])
-    async def set_stop_loss(self, ctx: commands.Context, signal_id: int):
-        await self._quick_status(ctx, signal_id, "stop_loss")
-
-    @commands.command(name='cancel')
-    async def set_cancelled(self, ctx: commands.Context, signal_id: int):
-        await self._quick_status(ctx, signal_id, "cancelled")
 
 async def setup(bot):
     """Setup function for Discord.py to load this cog"""
