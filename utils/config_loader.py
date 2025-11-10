@@ -1,10 +1,14 @@
 """
 Configuration loader for the Trading Alert Bot
+Enhanced with spread buffer settings helpers
 """
 import json
 import os
+import logging
 from pathlib import Path
 from typing import Dict, Any, Optional
+
+logger = logging.getLogger(__name__)
 
 
 class ConfigLoader:
@@ -31,7 +35,15 @@ class ConfigLoader:
             "connection_timeout": 30,
             "alert_cooldown_minutes": 5,
             "cleanup_days": 30,
-            "debug_mode": True
+            "debug_mode": True,
+            "spread_buffer_enabled": True,
+            "spread_buffer_config": {
+                "apply_to_approaching": True,
+                "apply_to_hit": True,
+                "apply_to_stop_loss": False,
+                "fallback_spread": 0.0,
+                "log_buffer_usage": True
+            }
         }
 
         # Default channels (will need to be updated by user)
@@ -183,3 +195,49 @@ def get_config(filename: str = "settings.json") -> Dict[str, Any]:
         Configuration dictionary
     """
     return config.load(filename)
+
+
+def load_settings() -> dict:
+    """
+    Load settings from settings.json
+
+    Returns:
+        Settings dictionary with spread buffer defaults if file not found
+    """
+    config_path = Path(__file__).parent.parent / 'config' / 'settings.json'
+    try:
+        with open(config_path, 'r') as f:
+            return json.load(f)
+    except FileNotFoundError:
+        logger.warning("settings.json not found, using defaults")
+        return {
+            "bot_prefix": "!",
+            "spread_buffer_enabled": True,
+            "spread_buffer_config": {
+                "apply_to_approaching": True,
+                "apply_to_hit": True,
+                "apply_to_stop_loss": False,
+                "fallback_spread": 0.0,
+                "log_buffer_usage": True
+            }
+        }
+    except Exception as e:
+        logger.error(f"Error loading settings: {e}")
+        return {"spread_buffer_enabled": True}
+
+
+def save_settings(settings: dict):
+    """
+    Save settings to settings.json
+
+    Args:
+        settings: Settings dictionary to save
+    """
+    config_path = Path(__file__).parent.parent / 'config' / 'settings.json'
+    try:
+        with open(config_path, 'w') as f:
+            json.dump(settings, f, indent=2)
+        logger.info("Settings saved successfully")
+    except Exception as e:
+        logger.error(f"Error saving settings: {e}")
+        raise

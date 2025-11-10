@@ -436,19 +436,19 @@ class LifecycleManager:
         Returns:
             Number of signals expired
         """
-        now = datetime.now(pytz.UTC).isoformat()
+        # now = datetime.now(pytz.UTC).isoformat()
 
         # Find expired signals
         query = """
             SELECT id, status FROM signals
             WHERE status IN (?, ?)
             AND expiry_time IS NOT NULL
-            AND expiry_time < ?
+            AND expiry_time < CURRENT_TIMESTAMP
         """
 
         expired = await db_manager.fetch_all(
             query,
-            (SignalStatus.ACTIVE, SignalStatus.HIT, now)
+            (SignalStatus.ACTIVE, SignalStatus.HIT)
         )
 
         if not expired:
@@ -463,12 +463,11 @@ class LifecycleManager:
                     signal_id = signal['id']
                     old_status = signal['status']
 
-                    # Directly update the signal status
                     await conn.execute("""
                         UPDATE signals
-                        SET status = ?, updated_at = ?, closed_at = ?, closed_reason = ?
+                        SET status = ?, updated_at = CURRENT_TIMESTAMP, closed_at = CURRENT_TIMESTAMP, closed_reason = ?
                         WHERE id = ?
-                    """, (SignalStatus.CANCELLED, now, now, 'automatic', signal_id))
+                    """, (SignalStatus.CANCELLED, 'automatic', signal_id))
 
                     # Record status change
                     await conn.execute("""

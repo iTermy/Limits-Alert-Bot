@@ -3,9 +3,9 @@
     "forex": ["icmarkets", "oanda"],
     "indices": ["oanda", "icmarkets"],
     "crypto": ["binance"],
-    "metals": ["fxcm", "icmarkets"],
+    "metals": ["icmarkets"],
     "stocks": ["icmarkets"],
-    "oil": []
+    "oil": ["fxcm"]
   },
 
   "asset_class_patterns": {
@@ -43,15 +43,13 @@
     "icmarkets": {
       "format_rules": {
         "forex": "{symbol}",
-        "metals": "GOLD for XAUUSD, SILVER for XAGUSD",
+        "metals": "XAUUSD for GOLD, XAGUSD for SILVER",
         "stocks": "{symbol}",
         "indices": "Not primary feed"
       },
       "specific_mappings": {
-        "XAUUSD": "GOLD",
-        "XAGUSD": "SILVER",
-        "GOLD": "GOLD",
-        "SILVER": "SILVER"
+        "GOLD": "XAUUSD",
+        "SILVER": "XAGUSD"
       }
     },
 

@@ -1,7 +1,12 @@
 """
-Symbol Mapper for Trading Alert Bot
+Symbol Mapper for Trading Alert Bot - FIXED VERSION
 Handles symbol translation between internal format and various price feeds
 Achieves 95%+ accuracy in feed selection and symbol mapping
+
+CRITICAL FIXES:
+1. OANDA: Properly adds underscores (SPX500USD → SPX500_USD)
+2. Binance: Returns lowercase (BTCUSDT → btcusdt)
+3. Reverse mapping: Properly converts back to database format
 """
 
 import json
@@ -57,8 +62,6 @@ class SymbolMapper:
                     self.compiled_patterns[asset_class].append(re.compile(pattern, re.IGNORECASE))
                 except re.error as e:
                     logger.warning(f"Invalid regex pattern for {asset_class}: {pattern} - {e}")
-
-    # Add/update this method in symbol_mapper.py
 
     def determine_asset_class(self, symbol: str) -> str:
         """
@@ -150,7 +153,7 @@ class SymbolMapper:
         Convert internal symbol to feed-specific format
 
         Args:
-            internal_symbol: The symbol as it appears in signals
+            internal_symbol: The symbol as it appears in signals (database format)
             feed: Target feed. If None, uses get_best_feed()
 
         Returns:
@@ -167,11 +170,18 @@ class SymbolMapper:
 
         # Try exact match
         if symbol_upper in specific_mappings:
-            return specific_mappings[symbol_upper]
+            result = specific_mappings[symbol_upper]
+            # CRITICAL FIX for Binance: Convert to lowercase
+            if feed == 'binance':
+                return result.lower()
+            return result
 
         # Try lowercase match for indices
         if internal_symbol.lower() in specific_mappings:
-            return specific_mappings[internal_symbol.lower()]
+            result = specific_mappings[internal_symbol.lower()]
+            if feed == 'binance':
+                return result.lower()
+            return result
 
         # Handle by feed type
         if feed == 'icmarkets':
@@ -207,7 +217,10 @@ class SymbolMapper:
         return symbol_upper
 
     def _map_to_oanda(self, symbol: str) -> Optional[str]:
-        """Map symbol to OANDA format"""
+        """
+        Map symbol to OANDA format
+        CRITICAL FIX: Properly adds underscores for indices
+        """
         symbol_upper = symbol.upper()
         symbol_lower = symbol.lower()
 
@@ -222,14 +235,39 @@ class SymbolMapper:
         if symbol_upper in specific:
             return specific[symbol_upper]
 
+        asset_class = self.determine_asset_class(symbol)
+
         # Handle forex pairs not in specific mappings
-        if self.determine_asset_class(symbol) == 'forex' and len(symbol) == 6:
+        if asset_class in ['forex', 'forex_jpy'] and len(symbol) == 6:
             # Convert EURUSD to EUR_USD format
             return f"{symbol_upper[:3]}_{symbol_upper[3:]}"
 
-        # If it's an index but not in mappings, try to construct it
-        if self.determine_asset_class(symbol) == 'indices':
-            # Try common patterns
+        # CRITICAL FIX: Handle indices - Add underscore before currency suffix
+        if asset_class == 'indices':
+            # Special case: JP225 (no currency suffix) -> JP225_USD
+            if symbol_upper == 'JP225':
+                logger.debug(f"OANDA mapping: {symbol_upper} -> JP225_USD")
+                return 'JP225_USD'
+
+            # Common index patterns that need underscores
+            # SPX500USD -> SPX500_USD
+            # NAS100USD -> NAS100_USD
+            # US30USD -> US30_USD
+
+            # Check if ends with a currency code (must be exact match at end)
+            currency_codes = ['USD', 'EUR', 'GBP', 'JPY', 'AUD', 'CAD', 'CHF']
+
+            for currency in currency_codes:
+                if symbol_upper.endswith(currency):
+                    # Insert underscore before currency
+                    base = symbol_upper[:-len(currency)]
+                    # Only add underscore if there's a base part
+                    if base:
+                        result = f"{base}_{currency}"
+                        logger.debug(f"OANDA mapping: {symbol_upper} -> {result}")
+                        return result
+
+            # Fallback: Try common patterns
             if 'spx' in symbol_lower or 'sp500' in symbol_lower:
                 return 'SPX500_USD'
             if 'nas' in symbol_lower or 'nasdaq' in symbol_lower:
@@ -237,45 +275,59 @@ class SymbolMapper:
             if 'dax' in symbol_lower or 'de30' in symbol_lower or 'de40' in symbol_lower:
                 return 'DE30_EUR'
 
+            # Final fallback: if it looks like an index, log a warning
+            logger.warning(f"Could not map index symbol to OANDA: {symbol_upper}")
+
         return None
 
     def _map_to_binance(self, symbol: str) -> str:
-        """Map symbol to Binance format (always USDT pairs)"""
+        """
+        Map symbol to Binance format (always lowercase USDT pairs)
+        CRITICAL FIX: Returns lowercase for WebSocket compatibility
+        """
         symbol_upper = symbol.upper()
 
         # Check specific mappings
         specific = self.mappings['symbol_mappings']['binance']['specific_mappings']
         if symbol_upper in specific:
-            return specific[symbol_upper]
+            # CRITICAL: Return lowercase for Binance WebSocket
+            return specific[symbol_upper].lower()
 
-        # If already ends with USDT, return as-is
+        # If already ends with USDT, return lowercase
         if symbol_upper.endswith('USDT'):
-            return symbol_upper
+            return symbol_upper.lower()
 
-        # If ends with USD, replace with USDT
+        # If ends with USD, replace with USDT and lowercase
         if symbol_upper.endswith('USD'):
-            return symbol_upper[:-3] + 'USDT'
+            return (symbol_upper[:-3] + 'USDT').lower()
 
-        # Otherwise, append USDT
-        return symbol_upper + 'USDT'
+        # Otherwise, append USDT and lowercase
+        return (symbol_upper + 'USDT').lower()
 
     def get_internal_symbol(self, feed_symbol: str, feed: str) -> Optional[str]:
         """
         Reverse mapping: Convert feed-specific symbol back to internal format
+        CRITICAL FIX: Must return UPPERCASE to match database format
 
         Args:
             feed_symbol: Symbol in feed-specific format
             feed: The feed this symbol came from
 
         Returns:
-            Internal symbol format or None if not found
+            Internal symbol format (database format) or None if not found
         """
         feed = feed.lower()
 
         # Check reverse mappings first
         reverse_mappings = self.mappings.get('reverse_mappings', {}).get(feed, {})
+
+        # For case-insensitive matching (especially Binance)
+        feed_symbol_upper = feed_symbol.upper()
+
         if feed_symbol in reverse_mappings:
-            return reverse_mappings[feed_symbol]
+            return reverse_mappings[feed_symbol].upper()  # ✓ ENSURE UPPERCASE
+        if feed_symbol_upper in reverse_mappings:
+            return reverse_mappings[feed_symbol_upper].upper()  # ✓ ENSURE UPPERCASE
 
         # Handle by feed type
         if feed == 'icmarkets':
@@ -284,21 +336,40 @@ class SymbolMapper:
                 return 'XAUUSD'
             elif feed_symbol == 'SILVER':
                 return 'XAGUSD'
-            return feed_symbol
+            return feed_symbol.upper()
 
         elif feed == 'oanda':
-            # Convert EUR_USD back to EURUSD
+            # CRITICAL FIX: Convert EUR_USD back to EURUSD (remove underscores)
+            # MUST return uppercase to match database format
+
+            # Special case: JP225_USD -> JP225
+            if feed_symbol.upper() == 'JP225_USD':
+                logger.debug(f"OANDA reverse mapping: {feed_symbol} -> JP225")
+                return 'JP225'  # Already uppercase
+
             if '_' in feed_symbol:
-                return feed_symbol.replace('_', '')
-            return feed_symbol.lower()  # Indices often come back lowercase
+                # SPX500_USD -> SPX500USD
+                # NAS100_USD -> NAS100USD
+                # EUR_USD -> EURUSD
+                result = feed_symbol.replace('_', '').upper()  # ✓ ENSURE UPPERCASE
+                logger.debug(f"OANDA reverse mapping: {feed_symbol} -> {result}")
+                return result
+
+            # Handle any other format - ensure uppercase
+            return feed_symbol.upper()
 
         elif feed == 'binance':
-            # Remove USDT suffix for internal format
-            if feed_symbol.endswith('USDT'):
-                return feed_symbol[:-4] + 'USD'
-            return feed_symbol
+            # CRITICAL FIX: Convert lowercase back to uppercase and handle USDT suffix
+            # btcusdt -> BTCUSDT (keep USDT in database)
+            # ethusdt -> ETHUSDT
 
-        return feed_symbol
+            feed_symbol_upper = feed_symbol.upper()
+
+            # Keep USDT in the database format (don't convert to USD)
+            # Database stores: BTCUSDT, ETHUSDT (with USDT)
+            return feed_symbol_upper  # Already uppercase now
+
+        return feed_symbol.upper()  # ✓ FINAL FALLBACK: ALWAYS UPPERCASE
 
     def get_all_feed_symbols(self, internal_symbol: str) -> Dict[str, Optional[str]]:
         """
@@ -350,16 +421,16 @@ class SymbolMapper:
 
 # Convenience functions for testing and debugging
 def test_symbol_mapper():
-    """Test the symbol mapper with various symbols"""
+    """Test the symbol mapper with various symbols - ENHANCED TEST"""
     mapper = SymbolMapper()
 
     test_symbols = [
         # Forex
         'EURUSD', 'GBPJPY', 'AUDUSD', 'USDCAD',
-        # Indices
-        'spx500usd', 'nas100usd', 'jp225', 'dax', 'de30eur',
-        # Crypto
-        'BTCUSDT', 'ETHUSDT', 'BTC', 'ETH', 'DOGEUSDT',
+        # Indices (CRITICAL TEST CASES)
+        'SPX500USD', 'NAS100USD', 'US30USD', 'spx500usd', 'nas100usd', 'jp225', 'dax', 'de30eur',
+        # Crypto (CRITICAL TEST CASES)
+        'BTCUSDT', 'ETHUSDT', 'BTC', 'ETH', 'DOGEUSDT', 'BTCUSD',
         # Metals
         'XAUUSD', 'XAGUSD', 'GOLD', 'SILVER',
         # Stocks
@@ -369,7 +440,7 @@ def test_symbol_mapper():
     ]
 
     print("\n" + "="*80)
-    print("SYMBOL MAPPER TEST RESULTS")
+    print("SYMBOL MAPPER TEST RESULTS - FIXED VERSION")
     print("="*80)
 
     for symbol in test_symbols:
@@ -378,7 +449,8 @@ def test_symbol_mapper():
         feed_symbol = mapper.get_feed_symbol(symbol)
         is_valid, reason = mapper.validate_symbol(symbol)
 
-        print(f"\nSymbol: {symbol}")
+        print(f"\n{'='*80}")
+        print(f"Symbol: {symbol}")
         print(f"  Asset Class: {asset_class}")
         print(f"  Best Feed: {best_feed}")
         print(f"  Feed Symbol: {feed_symbol}")
@@ -390,6 +462,34 @@ def test_symbol_mapper():
         for feed, mapped in all_feeds.items():
             if mapped:
                 print(f"    {feed}: {mapped}")
+
+                # Test reverse mapping
+                reverse = mapper.get_internal_symbol(mapped, feed)
+                match = "✓" if reverse == symbol.upper() else f"✗ (got {reverse})"
+                print(f"      Reverse: {reverse} {match}")
+
+    # CRITICAL TEST: Specific problematic cases
+    print(f"\n{'='*80}")
+    print("CRITICAL TEST CASES:")
+    print("="*80)
+
+    critical_tests = [
+        ('SPX500USD', 'oanda', 'SPX500_USD'),
+        ('NAS100USD', 'oanda', 'NAS100_USD'),
+        ('BTCUSDT', 'binance', 'btcusdt'),
+        ('ETHUSDT', 'binance', 'ethusdt'),
+    ]
+
+    for internal, feed, expected in critical_tests:
+        result = mapper.get_feed_symbol(internal, feed)
+        reverse = mapper.get_internal_symbol(result, feed) if result else None
+
+        forward_match = "✓" if result == expected else f"✗ (got {result})"
+        reverse_match = "✓" if reverse == internal else f"✗ (got {reverse})"
+
+        print(f"\n{internal} → {feed}:")
+        print(f"  Forward: {result} (expected {expected}) {forward_match}")
+        print(f"  Reverse: {reverse} (expected {internal}) {reverse_match}")
 
 
 if __name__ == "__main__":

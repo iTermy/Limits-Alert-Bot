@@ -15,6 +15,7 @@
   },
   "alert_channel": "1402971805890773005",
   "command_channel": "1402971848731398174",
+  "profit_channel": "1414288228206514279",
   "channel_settings": {
     "daily_trade_setup": {
       "default_expiry": "day_end"
@@ -40,7 +41,7 @@
       "default_expiry": "week_end"
     },
     "stocks-trades": {
-      "default_expiry": "week_end"
+      "default_expiry": "month_end"
     },
     "swing-trades": {
       "default_expiry": "week_end"
@@ -52,7 +53,7 @@
       "default_expiry": "week_end"
     },
     "crypto-alt-trades": {
-      "default_expiry": "week_end"
+      "default_expiry": "month_end"
     }
   }
 }

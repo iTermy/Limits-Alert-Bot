@@ -184,11 +184,14 @@ class BaseOperations:
             limit_data = dict(limit_data)
             signal_id = limit_data['signal_id']
 
-            # Update limit
+            # Update limit - CRITICAL FIX: Set hit_alert_sent = 1
             now = datetime.now(pytz.UTC).isoformat()
             await conn.execute("""
                 UPDATE limits 
-                SET status = ?, hit_time = ?, hit_price = ?
+                SET status = ?, 
+                    hit_time = ?, 
+                    hit_price = ?,
+                    hit_alert_sent = 1
                 WHERE id = ?
             """, (LimitStatus.HIT, now, hit_price or limit_data['price_level'], limit_id))
 
