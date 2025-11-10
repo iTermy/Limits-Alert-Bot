@@ -1,0 +1,87 @@
+{
+  "check_interval_seconds": 60,
+  "stale_threshold_seconds": 300,
+  "max_reconnect_attempts": 3,
+  "reconnect_delay_seconds": 10,
+  "admin_user_id": "582358569542877184",
+  "alert_cooldown_minutes": 15,
+  "startup_grace_period_seconds": 120,
+  "market_hours": {
+    "crypto": {
+      "always_open": true,
+      "description": "Crypto markets are 24/7"
+    },
+    "stocks": {
+      "days": [
+        1,
+        2,
+        3,
+        4,
+        5
+      ],
+      "open_time": "09:30",
+      "close_time": "17:00",
+      "timezone": "America/New_York",
+      "description": "US stock market hours"
+    },
+    "forex": {
+      "days": [
+        0,
+        1,
+        2,
+        3,
+        4,
+        5
+      ],
+      "open_time": "18:00",
+      "close_time": "17:00",
+      "timezone": "America/New_York",
+      "spread_hour_start": "17:00",
+      "spread_hour_end": "18:00",
+      "description": "Forex market hours (Sunday 6 PM EST - Friday 5 PM EST)"
+    },
+    "metals": {
+      "days": [
+        0,
+        1,
+        2,
+        3,
+        4,
+        5
+      ],
+      "open_time": "18:00",
+      "close_time": "17:00",
+      "timezone": "America/New_York",
+      "spread_hour_start": "17:00",
+      "spread_hour_end": "18:00",
+      "description": "Metals follow forex hours"
+    },
+    "indices": {
+      "days": [
+        0,
+        1,
+        2,
+        3,
+        4,
+        5
+      ],
+      "open_time": "18:00",
+      "close_time": "17:00",
+      "timezone": "America/New_York",
+      "spread_hour_start": "17:00",
+      "spread_hour_end": "18:00",
+      "description": "Indices follow forex hours"
+    }
+  },
+  "us_market_holidays_2025": [
+    "2025-01-01",
+    "2025-01-20",
+    "2025-02-17",
+    "2025-04-18",
+    "2025-05-26",
+    "2025-07-04",
+    "2025-09-01",
+    "2025-11-27",
+    "2025-12-25"
+  ]
+}

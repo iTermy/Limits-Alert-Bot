@@ -1,6 +1,8 @@
 """
 Streaming Price Monitor - Simplified version using real-time price streams
 Replaces polling + caching with event-driven price updates
+ENHANCED: Added spread buffer system for limit checks
+ENHANCED: Passes spread info to alert system for display
 """
 
 import asyncio
@@ -8,11 +10,13 @@ import logging
 from typing import Dict, List
 from datetime import datetime
 import discord
+from price_feeds.feed_health_monitor import FeedHealthMonitor
 
 from price_feeds.price_stream_manager import PriceStreamManager
 from price_feeds.alert_config import AlertDistanceConfig
 from price_feeds.alert_system import AlertSystem
 from utils.logger import get_logger
+from utils.config_loader import load_settings
 
 logger = get_logger('stream_monitor')
 
@@ -26,6 +30,9 @@ class StreamingPriceMonitor:
     - No batch fetching
     - No priority calculations
     - Just react to price updates in real-time
+
+    ENHANCED: Includes spread buffer system for approaching and hit alerts
+    ENHANCED: Passes spread values to alert system for display
     """
 
     def __init__(self, bot, signal_db, db):
@@ -49,13 +56,20 @@ class StreamingPriceMonitor:
         self.active_signals: Dict[int, Dict] = {}  # signal_id -> signal_data
         self.symbol_to_signals: Dict[str, List[int]] = {}  # symbol -> [signal_ids]
 
+        # Spread buffer cache (to avoid reloading settings every check)
+        self._spread_buffer_enabled = None
+        self._last_settings_load = None
+        self._settings_cache_duration = 30  # Reload settings every 30 seconds
+
         # Performance tracking
         self.stats = {
             'price_updates': 0,
             'signals_checked': 0,
             'limits_hit': 0,
             'stop_losses_hit': 0,
-            'errors': 0
+            'errors': 0,
+            'buffer_prevented_alerts': 0,
+            'buffer_allowed_alerts': 0
         }
 
     async def initialize(self):
@@ -84,11 +98,63 @@ class StreamingPriceMonitor:
             except Exception as e:
                 logger.error(f"Error setting up alert channel: {e}")
 
+            config_path = Path(__file__).resolve().parent.parent / 'config' / 'health_config.json'
+            admin_user_id = None
+
+            try:
+                with open(config_path, 'r') as f:
+                    health_config = json.load(f)
+                    admin_user_id_str = health_config.get('582358569542877184')
+                    if admin_user_id_str and admin_user_id_str != '582358569542877184':
+                        admin_user_id = int(admin_user_id_str)
+            except Exception as e:
+                logger.warning(f"Could not load admin user ID: {e}")
+
+            self.health_monitor = FeedHealthMonitor(
+                stream_manager=self.stream_manager,
+                bot=self.bot,
+                admin_user_id=admin_user_id
+            )
+
+            self.stream_manager.set_health_monitor(self.health_monitor)
+            await self.health_monitor.start_monitoring()
+
+            # Load initial spread buffer setting
+            self._reload_spread_buffer_setting()
+
             logger.info("Streaming monitor initialized")
 
         except Exception as e:
             logger.error(f"Failed to initialize monitor: {e}")
             raise
+
+    def _reload_spread_buffer_setting(self):
+        """Reload spread buffer setting from config (with caching)"""
+        now = datetime.now()
+
+        # Check if we need to reload
+        if (self._last_settings_load is None or
+            (now - self._last_settings_load).total_seconds() > self._settings_cache_duration):
+
+            try:
+                settings = load_settings()
+                self._spread_buffer_enabled = settings.get('spread_buffer_enabled', True)
+                self._last_settings_load = now
+                logger.debug(f"Spread buffer setting reloaded: {self._spread_buffer_enabled}")
+            except Exception as e:
+                logger.error(f"Error loading spread buffer setting: {e}, using default (True)")
+                self._spread_buffer_enabled = True
+                self._last_settings_load = now
+
+    def _is_spread_buffer_enabled(self) -> bool:
+        """
+        Check if spread buffer is enabled (with caching)
+
+        Returns:
+            True if spread buffer is enabled
+        """
+        self._reload_spread_buffer_setting()
+        return self._spread_buffer_enabled
 
     async def start(self):
         """Start the streaming monitor"""
@@ -112,6 +178,9 @@ class StreamingPriceMonitor:
 
         # Shutdown stream manager
         await self.stream_manager.shutdown()
+
+        if self.health_monitor:
+            await self.health_monitor.stop_monitoring()
 
         logger.info("Streaming price monitor stopped")
 
@@ -203,7 +272,7 @@ class StreamingPriceMonitor:
 
         Args:
             symbol: Symbol that updated
-            price_data: Price dictionary with bid, ask, timestamp
+            price_data: Price dictionary with bid, ask, timestamp, spread
         """
         self.stats['price_updates'] += 1
 
@@ -221,6 +290,9 @@ class StreamingPriceMonitor:
                 continue
 
             try:
+                # Add current spread to signal dict for use in checks
+                signal['current_spread'] = price_data.get('spread', 0.0)
+
                 await self._check_signal(signal, price_data)
                 self.stats['signals_checked'] += 1
             except Exception as e:
@@ -253,57 +325,138 @@ class StreamingPriceMonitor:
             await self._check_stop_loss(signal, current_price, direction)
 
     async def _check_limit(self, signal: Dict, limit: Dict, current_price: float, direction: str):
-        """Check if a limit is approaching or hit"""
+        """
+        Check if a limit is approaching or hit
+        ENHANCED: Applies spread buffer and passes spread info to alerts
+
+        Args:
+            signal: Signal dictionary (includes current_spread)
+            limit: Limit dictionary
+            current_price: Current market price (ask for long, bid for short)
+            direction: 'long' or 'short'
+        """
         limit_price = limit['price_level']
         symbol = signal['instrument']
 
-        # Calculate distance
+        # Get spread from signal dict (set in _on_price_update)
+        spread = signal.get('current_spread', 0.0)
+
+        # Validate spread
+        if spread is None or spread < 0:
+            logger.warning(f"Invalid spread for {symbol}: {spread}, using 0")
+            spread = 0.0
+
+        # Check if spread buffer is enabled
+        spread_buffer_enabled = self._is_spread_buffer_enabled()
+
+        # Calculate distance and determine if hit
         if direction == 'long':
             distance = current_price - limit_price
-            is_hit = current_price <= limit_price
-        else:
+
+            # Apply spread buffer if enabled
+            if spread_buffer_enabled:
+                # For long: alert when ask <= limit + spread
+                is_hit = current_price <= (limit_price + spread)
+
+                if spread > 0 and is_hit and current_price > limit_price:
+                    logger.debug(
+                        f"Spread buffer ALLOWED alert for {symbol}: "
+                        f"ask={current_price:.5f}, limit={limit_price:.5f}, "
+                        f"spread={spread:.5f}, within buffer"
+                    )
+                    self.stats['buffer_allowed_alerts'] += 1
+            else:
+                # No buffer: exact price check
+                is_hit = current_price <= limit_price
+
+        else:  # short
             distance = limit_price - current_price
-            is_hit = current_price >= limit_price
 
-        # Get alert configuration
-        alert_config = self.alert_config.get_alert_config(symbol)
-        pip_size = alert_config.get('pip_size', 0.0001)
-        distance_pips = abs(distance) / pip_size
+            # Apply spread buffer if enabled
+            if spread_buffer_enabled:
+                # For short: alert when bid >= limit - spread
+                is_hit = current_price >= (limit_price - spread)
 
-        # Check if hit
-        if is_hit and not limit['hit_alert_sent']:
-            await self.alert_system.send_limit_hit_alert(signal, limit, current_price)
+                if spread > 0 and is_hit and current_price < limit_price:
+                    logger.debug(
+                        f"Spread buffer ALLOWED alert for {symbol}: "
+                        f"bid={current_price:.5f}, limit={limit_price:.5f}, "
+                        f"spread={spread:.5f}, within buffer"
+                    )
+                    self.stats['buffer_allowed_alerts'] += 1
+            else:
+                # No buffer: exact price check
+                is_hit = current_price >= limit_price
+
+        # Check if hit (with in-memory flag check)
+        if is_hit and not limit.get('hit_alert_sent', False):
+            # ENHANCED: Pass spread and buffer status to alert system
+            await self.alert_system.send_limit_hit_alert(
+                signal, limit, current_price,
+                spread=spread,
+                spread_buffer_enabled=spread_buffer_enabled
+            )
             await self._process_limit_hit(signal, limit, current_price)
+
+            # CRITICAL: Update in-memory flag immediately
+            limit['hit_alert_sent'] = True
+
             self.stats['limits_hit'] += 1
 
         # Check if approaching (first limit only)
-        # CRITICAL FIX: Check the flag from the limit dict, not just database
         elif not is_hit and not limit.get('approaching_alert_sent', False):
             if limit['sequence_number'] == 1:
-                approaching_distance = self.alert_config.get_approaching_distance(symbol)
-
-                if distance_pips <= approaching_distance:
-                    await self.alert_system.send_approaching_alert(
-                        signal, limit, current_price, distance_pips
+                try:
+                    approaching_distance = self.alert_config.get_approaching_distance(
+                        symbol,
+                        current_price=current_price
                     )
+                except Exception as e:
+                    logger.error(f"Error getting approaching distance for {symbol}: {e}")
+                    approaching_distance = 0.0010
+
+                # Distance is now in absolute price units, compare directly
+                if abs(distance) <= approaching_distance:
+                    # Format distance for display
+                    formatted_distance = self.alert_config.format_distance_for_display(
+                        symbol,
+                        abs(distance),
+                        current_price
+                    )
+
+                    # ENHANCED: Send alert with spread info
+                    await self.alert_system.send_approaching_alert(
+                        signal, limit, current_price, formatted_distance,
+                        spread=spread,
+                        spread_buffer_enabled=spread_buffer_enabled
+                    )
+
                     # Mark as sent in database
                     await self._mark_approaching_sent(limit['limit_id'])
 
-                    # CRITICAL: Update the in-memory limit dict to prevent re-alerting
-                    # before the next database refresh
+                    # CRITICAL: Update in-memory flag
                     limit['approaching_alert_sent'] = True
 
     async def _check_stop_loss(self, signal: Dict, current_price: float, direction: str):
-        """Check if stop loss is hit"""
+        """
+        Check if stop loss is hit
+        NOTE: Spread buffer is NOT applied to stop loss checks (must be exact)
+
+        Args:
+            signal: Signal dictionary
+            current_price: Current market price (ask for long, bid for short)
+            direction: 'long' or 'short'
+        """
         stop_loss = signal['stop_loss']
 
-        # Check if hit
+        # Check if hit (NO SPREAD BUFFER - exact prices only)
         if direction == 'long':
             is_hit = current_price <= stop_loss
         else:
             is_hit = current_price >= stop_loss
 
         if is_hit:
+            # Stop loss alerts never show spread
             await self.alert_system.send_stop_loss_alert(signal, current_price)
             await self._process_stop_loss_hit(signal)
             self.stats['stop_losses_hit'] += 1
@@ -375,6 +528,7 @@ class StreamingPriceMonitor:
             'running': self.running,
             'active_signals': len(self.active_signals),
             'monitored_symbols': len(self.symbol_to_signals),
+            'spread_buffer_enabled': self._spread_buffer_enabled,
             'stream_manager': self.stream_manager.get_stats(),
             'alert_stats': self.alert_system.get_stats()
         }

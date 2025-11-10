@@ -99,6 +99,128 @@ class AdminCommands(BaseCog):
             self.logger.error(f"Error clearing database: {e}", exc_info=True)
             return False
 
+    @commands.command(name='spreadbuffer')
+    async def spread_buffer_toggle(self, ctx: commands.Context, action: str = None):
+        """
+        Toggle spread buffer on/off or check status
+
+        The spread buffer prevents false alerts caused by bid-ask spread.
+        When enabled, alerts are triggered when price is within the spread of the limit.
+
+        Usage:
+            !spreadbuffer on - Enable spread buffer
+            !spreadbuffer off - Disable spread buffer
+            !spreadbuffer status - Check current status
+        """
+        if not action:
+            await ctx.send("Usage: `!spreadbuffer on/off/status`")
+            return
+
+        action = action.lower()
+
+        # Load current settings
+        from utils.config_loader import load_settings, save_settings
+
+        try:
+            settings = load_settings()
+        except Exception as e:
+            self.logger.error(f"Error loading settings: {e}")
+            await ctx.send("❌ Error loading settings. Please check configuration.")
+            return
+
+        if action == 'status':
+            status = settings.get('spread_buffer_enabled', True)
+            status_text = "✅ ENABLED" if status else "❌ DISABLED"
+
+            embed = discord.Embed(
+                title="📊 Spread Buffer Status",
+                description=f"Current status: **{status_text}**",
+                color=discord.Color.green() if status else discord.Color.red()
+            )
+
+            # Add details
+            config = settings.get('spread_buffer_config', {})
+            embed.add_field(
+                name="Configuration",
+                value=f"**Approaching alerts:** {config.get('apply_to_approaching', True)}\n"
+                      f"**Hit alerts:** {config.get('apply_to_hit', True)}\n"
+                      f"**Stop loss:** {config.get('apply_to_stop_loss', False)}",
+                inline=False
+            )
+
+            # Add explanation
+            embed.add_field(
+                name="ℹ️ How it works",
+                value="When enabled, the buffer accounts for bid-ask spread to prevent false alerts.\n"
+                      "• **Long signals:** Alert when `ask ≤ limit + spread`\n"
+                      "• **Short signals:** Alert when `bid ≥ limit - spread`\n"
+                      "• **Stop loss:** Always uses exact prices (no buffer)",
+                inline=False
+            )
+
+            # Show monitor stats if available
+            if hasattr(self.bot, 'monitor') and self.bot.monitor:
+                stats = self.bot.monitor.get_stats()
+                if 'buffer_allowed_alerts' in stats:
+                    embed.add_field(
+                        name="📈 Statistics",
+                        value=f"**Alerts allowed by buffer:** {stats['buffer_allowed_alerts']}\n"
+                              f"**Total signals checked:** {stats['signals_checked']:,}",
+                        inline=False
+                    )
+
+            await ctx.send(embed=embed)
+
+        elif action == 'on':
+            settings['spread_buffer_enabled'] = True
+            try:
+                save_settings(settings)
+            except Exception as e:
+                self.logger.error(f"Error saving settings: {e}")
+                await ctx.send("❌ Error saving settings. Changes not persisted.")
+                return
+
+            embed = discord.Embed(
+                title="✅ Spread Buffer Enabled",
+                description="Spread buffer is now active for all approaching and hit alerts.\n\n"
+                            "This helps prevent false alerts caused by bid-ask spread fluctuations.",
+                color=discord.Color.green()
+            )
+            embed.add_field(
+                name="Next Steps",
+                value="The buffer will take effect immediately for all active signals.\n"
+                      "Monitor will reload settings within 30 seconds.",
+                inline=False
+            )
+            await ctx.send(embed=embed)
+            self.logger.info(f"Spread buffer enabled by {ctx.author.name}")
+
+        elif action == 'off':
+            settings['spread_buffer_enabled'] = False
+            try:
+                save_settings(settings)
+            except Exception as e:
+                self.logger.error(f"Error saving settings: {e}")
+                await ctx.send("❌ Error saving settings. Changes not persisted.")
+                return
+
+            embed = discord.Embed(
+                title="❌ Spread Buffer Disabled",
+                description="Spread buffer is now inactive.\n\n"
+                            "Alerts will use exact price comparisons without accounting for spread.",
+                color=discord.Color.red()
+            )
+            embed.add_field(
+                name="⚠️ Warning",
+                value="Disabling the buffer may result in more frequent alerts during volatile periods.",
+                inline=False
+            )
+            await ctx.send(embed=embed)
+            self.logger.info(f"Spread buffer disabled by {ctx.author.name}")
+
+        else:
+            await ctx.send("Invalid action. Use: `!spreadbuffer on/off/status`")
+
     @commands.command(name='expire')
     async def expire_signals(self, ctx: commands.Context):
         """Manually trigger expiry check for old signals"""
@@ -130,37 +252,30 @@ class AdminCommands(BaseCog):
     async def reload_config(self, ctx: commands.Context):
         """Reload configuration files"""
         try:
+            from utils.config_loader import config
             config.reload_all()
-            self.bot.channels_config = config.load("channels.json")
-            self.bot.settings = config.load("settings.json")
 
-            # Update monitored channels
-            self.bot.monitored_channels.clear()
-            for channel_name, channel_id in self.bot.channels_config.get("monitored_channels", {}).items():
-                if channel_id:
-                    self.bot.monitored_channels.add(int(channel_id))
+            # Reload bot configs if they exist
+            if hasattr(self.bot, 'channels_config'):
+                from utils.config_loader import get_config
+                self.bot.channels_config = get_config("channels.json")
+            if hasattr(self.bot, 'settings'):
+                from utils.config_loader import load_settings
+                self.bot.settings = load_settings()
 
-            # Update alert channel
-            alert_id = self.bot.channels_config.get("alert_channel")
-            if alert_id:
-                self.bot.alert_channel_id = int(alert_id)
-
-            # Update command channel
-            command_id = self.bot.channels_config.get("command_channel")
-            if command_id:
-                self.bot.command_channel_id = int(command_id)
-
-            embed = EmbedFactory.success(
+            embed = discord.Embed(
                 title="✅ Configuration Reloaded",
-                description="All configuration files have been reloaded successfully"
+                description="All configuration files have been reloaded successfully",
+                color=discord.Color.green()
             )
             await ctx.send(embed=embed)
-            self.logger.info("Configuration reloaded by user")
+            self.logger.info("Configuration reloaded by admin")
 
         except Exception as e:
-            embed = EmbedFactory.error(
-                title="Reload Failed",
-                description=f"Error: {str(e)}"
+            embed = discord.Embed(
+                title="❌ Reload Failed",
+                description=f"Error: {str(e)}",
+                color=discord.Color.red()
             )
             await ctx.send(embed=embed)
             self.logger.error(f"Configuration reload failed: {e}")
@@ -215,7 +330,7 @@ class AdminCommands(BaseCog):
             !monitor stop - Stop monitoring
             !monitor stats - Show statistics
         """
-        if not self.bot.monitor:
+        if not hasattr(self.bot, 'monitor') or not self.bot.monitor:
             await ctx.send("❌ Price monitor not initialized")
             return
 
@@ -251,25 +366,39 @@ class AdminCommands(BaseCog):
                 inline=True
             )
             embed.add_field(
-                name="Checks Performed",
-                value=f"{stats['checks_performed']:,}",
+                name="Price Updates",
+                value=f"{stats.get('price_updates', 0):,}",
                 inline=True
             )
             embed.add_field(
-                name="Alerts Sent",
-                value=f"{stats['alerts_sent']:,}",
+                name="Signals Checked",
+                value=f"{stats.get('signals_checked', 0):,}",
                 inline=True
             )
             embed.add_field(
                 name="Limits Hit",
-                value=f"{stats['limits_hit']:,}",
+                value=f"{stats.get('limits_hit', 0):,}",
+                inline=True
+            )
+            embed.add_field(
+                name="Stop Losses",
+                value=f"{stats.get('stop_losses_hit', 0):,}",
                 inline=True
             )
             embed.add_field(
                 name="Errors",
-                value=f"{stats['errors']:,}",
+                value=f"{stats.get('errors', 0):,}",
                 inline=True
             )
+
+            # Add spread buffer stats if available
+            if 'buffer_allowed_alerts' in stats:
+                embed.add_field(
+                    name="🔧 Spread Buffer",
+                    value=f"Enabled: {stats.get('spread_buffer_enabled', 'Unknown')}\n"
+                          f"Alerts allowed: {stats.get('buffer_allowed_alerts', 0):,}",
+                    inline=False
+                )
 
             # Add streaming stats
             if 'stream_manager' in stats:
@@ -286,6 +415,245 @@ class AdminCommands(BaseCog):
 
         else:
             await ctx.send("Usage: !monitor [status|start|stop|stats]")
+
+    @commands.command(name='setalertdistance')
+    @commands.has_permissions(administrator=True)
+    async def set_alert_distance(self, ctx: commands.Context, symbol: str = None,
+                                 value: float = None, distance_type: str = None):
+        """
+        Set custom alert distance for a symbol
+
+        Usage:
+            !setalertdistance USDJPY 30 pips
+            !setalertdistance XAUUSD 15 dollars
+            !setalertdistance NAS100USD 1.5 percentage
+
+        Types:
+            - pips: For forex pairs
+            - dollars: For metals, indices, stocks, crypto
+            - percentage: For any asset (as % of price)
+        """
+        if not symbol or value is None or not distance_type:
+            embed = discord.Embed(
+                title="⚙️ Set Alert Distance",
+                description="Set a custom alert distance for a symbol",
+                color=discord.Color.blue()
+            )
+            embed.add_field(
+                name="Usage",
+                value="```!setalertdistance <symbol> <value> <type>```",
+                inline=False
+            )
+            embed.add_field(
+                name="Examples",
+                value="```!setalertdistance USDJPY 30 pips\n"
+                      "!setalertdistance XAUUSD 15 dollars\n"
+                      "!setalertdistance NAS100USD 1.5 percentage```",
+                inline=False
+            )
+            embed.add_field(
+                name="Types",
+                value="**pips** - For forex pairs\n"
+                      "**dollars** - For metals, indices, stocks, crypto\n"
+                      "**percentage** - For any asset (as % of price)",
+                inline=False
+            )
+            await ctx.send(embed=embed)
+            return
+
+        # Validate type
+        distance_type = distance_type.lower()
+        if distance_type not in ['pips', 'dollars', 'percentage']:
+            await ctx.send(f"❌ Invalid type. Must be: pips, dollars, or percentage")
+            return
+
+        # Validate value
+        if value <= 0:
+            await ctx.send(f"❌ Value must be greater than 0")
+            return
+
+        # Get alert config - UPDATED FOR PHASE 2
+        if hasattr(self.bot, 'monitor') and hasattr(self.bot.monitor, 'alert_config'):
+            alert_config = self.bot.monitor.alert_config
+        else:
+            from price_feeds.alert_config import AlertDistanceConfig
+            alert_config = AlertDistanceConfig()
+
+        # Set override
+        success = alert_config.set_override(
+            symbol=symbol,
+            value=value,
+            distance_type=distance_type,
+            set_by=ctx.author.name
+        )
+
+        if success:
+            embed = discord.Embed(
+                title="✅ Alert Distance Set",
+                description=f"Custom alert distance configured for **{symbol.upper()}**",
+                color=discord.Color.green()
+            )
+            embed.add_field(name="Distance", value=f"{value} {distance_type}", inline=True)
+            embed.add_field(name="Set By", value=ctx.author.name, inline=True)
+
+            # Show what this means in practical terms
+            config = alert_config._get_config_for_symbol(symbol)
+            asset_class = alert_config._determine_asset_class(symbol)
+            embed.add_field(name="Asset Class", value=asset_class.replace('_', ' ').title(), inline=True)
+
+            embed.set_footer(text="Use !removealertdistance to remove this override")
+
+            await ctx.send(embed=embed)
+            self.logger.info(f"Alert distance set: {symbol.upper()} = {value} {distance_type} by {ctx.author.name}")
+        else:
+            await ctx.send("❌ Failed to set alert distance. Check logs for details.")
+
+    @commands.command(name='removealertdistance')
+    @commands.has_permissions(administrator=True)
+    async def remove_alert_distance(self, ctx: commands.Context, symbol: str = None):
+        """
+        Remove custom alert distance override for a symbol
+
+        Usage:
+            !removealertdistance USDJPY
+        """
+        if not symbol:
+            await ctx.send("Usage: `!removealertdistance <symbol>`\nExample: `!removealertdistance USDJPY`")
+            return
+
+        # Get alert config - UPDATED FOR PHASE 2
+        if hasattr(self.bot, 'monitor') and hasattr(self.bot.monitor, 'alert_config'):
+            alert_config = self.bot.monitor.alert_config
+        else:
+            from price_feeds.alert_config import AlertDistanceConfig
+            alert_config = AlertDistanceConfig()
+
+        # Remove override
+        success = alert_config.remove_override(symbol)
+
+        if success:
+            # Get the default that will now be used
+            config = alert_config._get_config_for_symbol(symbol)
+
+            embed = discord.Embed(
+                title="✅ Override Removed",
+                description=f"Custom alert distance removed for **{symbol.upper()}**",
+                color=discord.Color.green()
+            )
+            embed.add_field(
+                name="Default Applied",
+                value=f"{symbol.upper()} will now use default: {config['value']} {config['type']}",
+                inline=False
+            )
+            embed.set_footer(text="Use !showalertdistances to see current defaults")
+
+            await ctx.send(embed=embed)
+            self.logger.info(f"Alert distance override removed: {symbol.upper()} by {ctx.author.name}")
+        else:
+            await ctx.send(f"❌ No custom alert distance found for **{symbol.upper()}**")
+
+    @commands.command(name='showalertdistances', aliases=['alertdistances', 'alertconfig'])
+    async def show_alert_distances(self, ctx: commands.Context, symbol: str = None):
+        """
+        Show alert distance configuration
+
+        Usage:
+            !showalertdistances - Show all defaults and overrides
+            !showalertdistances USDJPY - Show config for specific symbol
+        """
+        # Get alert config - UPDATED FOR PHASE 2
+        if hasattr(self.bot, 'monitor') and hasattr(self.bot.monitor, 'alert_config'):
+            alert_config = self.bot.monitor.alert_config
+        else:
+            from price_feeds.alert_config import AlertDistanceConfig
+            alert_config = AlertDistanceConfig()
+
+        if symbol:
+            # Show specific symbol
+            config = alert_config.get_config_display(symbol)
+
+            embed = discord.Embed(
+                title=f"⚙️ Alert Distance: {config['symbol']}",
+                color=discord.Color.blue()
+            )
+
+            # Distance info
+            distance_str = f"{config['value']} {config['type']}"
+            embed.add_field(name="Distance", value=distance_str, inline=True)
+            embed.add_field(name="Asset Class", value=config['asset_class'].replace('_', ' ').title(), inline=True)
+
+            # Override status
+            if config['is_override']:
+                embed.add_field(name="Type", value="🔧 Custom Override", inline=True)
+                embed.add_field(name="Set By", value=config.get('set_by', 'Unknown'), inline=True)
+                embed.add_field(name="Set At", value=config.get('set_at', 'Unknown')[:19], inline=True)
+                embed.set_footer(text="Use !removealertdistance to remove this override")
+            else:
+                embed.add_field(name="Type", value="📋 Default", inline=True)
+                embed.set_footer(text="Use !setalertdistance to set a custom override")
+
+            await ctx.send(embed=embed)
+
+        else:
+            # Show all configuration
+            config = alert_config.get_config_display()
+
+            embed = discord.Embed(
+                title="⚙️ Alert Distance Configuration",
+                description="Default alert distances and custom overrides",
+                color=discord.Color.blue()
+            )
+
+            # Defaults
+            defaults_text = []
+            for asset_class, settings in config['defaults'].items():
+                name = asset_class.replace('_', ' ').title()
+                value = settings['value']
+                type_str = settings['type']
+                defaults_text.append(f"**{name}**: {value} {type_str}")
+
+            embed.add_field(
+                name="📋 Defaults",
+                value="\n".join(defaults_text),
+                inline=False
+            )
+
+            # Overrides
+            if config['overrides']:
+                overrides_text = []
+                for symbol, settings in config['overrides'].items():
+                    value = settings['value']
+                    type_str = settings['type']
+                    overrides_text.append(f"**{symbol}**: {value} {type_str}")
+
+                # Limit display to 10 items
+                display_count = min(len(overrides_text), 10)
+                embed.add_field(
+                    name=f"🔧 Custom Overrides ({len(config['overrides'])})",
+                    value="\n".join(overrides_text[:display_count]),
+                    inline=False
+                )
+
+                if len(config['overrides']) > 10:
+                    embed.set_footer(
+                        text=f"Showing 10 of {len(config['overrides'])} overrides. Use !showalertdistances <symbol> for details.")
+            else:
+                embed.add_field(
+                    name="🔧 Custom Overrides",
+                    value="None configured",
+                    inline=False
+                )
+
+            if not config['overrides']:
+                embed.add_field(
+                    name="Commands",
+                    value="`!setalertdistance <symbol> <value> <type>` - Set override\n"
+                          "`!removealertdistance <symbol>` - Remove override\n"
+                          "`!showalertdistances <symbol>` - Show specific symbol",
+                    inline=False
+                )
+
+            await ctx.send(embed=embed)
 
     @commands.command(name='refresh')
     async def refresh_streams(self, ctx: commands.Context):

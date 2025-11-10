@@ -136,6 +136,287 @@ class FeedCommands(commands.Cog):
             logger.error(f"Error getting feed status: {e}", exc_info=True)
             await ctx.reply(f"❌ Error getting feed status: {str(e)}")
 
+    @commands.command(name='feedhealth', aliases=['fh', 'health'])
+    async def feed_health(self, ctx):
+        """
+        Display current health status of all price feeds
+
+        Usage: !feedhealth
+        """
+        if not self.monitor:
+            await ctx.reply("❌ Monitor not initialized")
+            return
+
+        if not hasattr(self.monitor, 'health_monitor') or not self.monitor.health_monitor:
+            await ctx.reply("❌ Health monitor not initialized")
+            return
+
+        health_monitor = self.monitor.health_monitor
+
+        try:
+            # Get health stats
+            stats = health_monitor.get_health_stats()
+
+            # Build embed
+            embed = discord.Embed(
+                title="📊 Feed Health Status",
+                description="Real-time health monitoring of all price feeds",
+                color=discord.Color.blue(),
+                timestamp=datetime.now()
+            )
+
+            # Overall stats
+            overall = stats['overall_stats']
+            embed.add_field(
+                name="📈 Overall Statistics",
+                value=(
+                    f"**Checks Performed:** {overall['checks_performed']}\n"
+                    f"**Stale Detections:** {overall['stale_detections']}\n"
+                    f"**Reconnections:** {overall['reconnections_attempted']} "
+                    f"({overall['reconnections_successful']} successful)\n"
+                    f"**Alerts Sent:** {overall['alerts_sent']}\n"
+                    f"**False Positives Avoided:** {overall['false_positives_avoided']}"
+                ),
+                inline=False
+            )
+
+            # Feed details
+            feed_icons = {
+                'icmarkets': '🏦',
+                'oanda': '💱',
+                'binance': '₿'
+            }
+
+            for feed_name, details in stats['feed_details'].items():
+                icon = feed_icons.get(feed_name, '📈')
+
+                status_emoji = {
+                    'healthy': '✅',
+                    'degraded': '⚠️',
+                    'down': '❌',
+                    'idle': '⏸️',
+                    'unknown': '❓'
+                }.get(details['status'], '❓')
+
+                if details['symbols_monitored'] > 0:
+                    value = (
+                        f"**Status:** {status_emoji} {details['status'].title()}\n"
+                        f"**Symbols:** {details['symbols_monitored']}\n"
+                        f"**Last Update:** {details['newest_update']} ago\n"
+                        f"**Oldest Update:** {details['oldest_update']} ago"
+                    )
+
+                    if details['reconnect_attempts'] > 0:
+                        value += f"\n**Reconnect Attempts:** {details['reconnect_attempts']}"
+
+                    embed.add_field(
+                        name=f"{icon} {feed_name.upper()}",
+                        value=value,
+                        inline=True
+                    )
+                else:
+                    embed.add_field(
+                        name=f"{icon} {feed_name.upper()}",
+                        value=f"**Status:** {status_emoji} Idle (no symbols)",
+                        inline=True
+                    )
+
+            # Footer
+            embed.set_footer(
+                text=f"Monitoring: {'Active' if stats['monitoring_running'] else 'Inactive'} | "
+                     f"Uptime: {stats['uptime']} | "
+                     f"Admin: {'Configured' if stats['admin_configured'] else 'Not Set'}"
+            )
+
+            await ctx.reply(embed=embed)
+
+        except Exception as e:
+            logger.error(f"Error getting feed health: {e}", exc_info=True)
+            await ctx.reply(f"❌ Error getting feed health: {str(e)}")
+
+    @commands.command(name='setadmin', aliases=['setalert'])
+    @commands.has_permissions(administrator=True)
+    async def set_admin(self, ctx, user: discord.User = None):
+        """
+        Set the admin user for health alerts (admin only)
+
+        Usage: !setadmin @user
+               !setadmin (sets yourself)
+        """
+        if not self.monitor:
+            await ctx.reply("❌ Monitor not initialized")
+            return
+
+        if not hasattr(self.monitor, 'health_monitor') or not self.monitor.health_monitor:
+            await ctx.reply("❌ Health monitor not initialized")
+            return
+
+        try:
+            # Default to command author if no user specified
+            target_user = user if user else ctx.author
+
+            # Set admin user
+            self.monitor.health_monitor.set_admin_user(target_user.id)
+
+            # Update config file
+            from pathlib import Path
+            import json
+
+            config_path = Path(__file__).resolve().parent.parent / 'config' / 'health_config.json'
+
+            try:
+                with open(config_path, 'r') as f:
+                    config = json.load(f)
+
+                config['admin_user_id'] = str(target_user.id)
+
+                with open(config_path, 'w') as f:
+                    json.dump(config, f, indent=2)
+
+                await ctx.reply(f"✅ Admin user set to {target_user.mention} and saved to config")
+
+                # Send test DM
+                try:
+                    await target_user.send(
+                        "✅ **Health Monitor Alert Setup Complete**\n\n"
+                        "You will now receive DM alerts when price feeds experience issues.\n\n"
+                        "Types of alerts:\n"
+                        "• ⚠️ Feed failures\n"
+                        "• ✅ Feed recoveries\n"
+                        "• 🔄 Reconnection status\n\n"
+                        "Use `!feedhealth` in the server to check current status."
+                    )
+                    await ctx.reply(f"✅ Test alert sent to {target_user.mention}")
+                except Exception as e:
+                    await ctx.reply(f"⚠️ Admin set, but couldn't send test DM: {e}")
+
+            except Exception as e:
+                await ctx.reply(f"⚠️ Admin user set in memory, but failed to save to config: {e}")
+
+        except Exception as e:
+            logger.error(f"Error setting admin user: {e}", exc_info=True)
+            await ctx.reply(f"❌ Error setting admin user: {str(e)}")
+
+    # ============================================================================
+    # ENHANCED VERSION OF EXISTING !testfeeds COMMAND
+    # Replace your existing test_feeds method with this enhanced version
+    # ============================================================================
+
+    @commands.command(name='testfeeds', aliases=['tf'])
+    async def test_feeds(self, ctx):
+        """
+        Test all configured streaming feeds with health monitoring integration
+
+        Usage: !testfeeds
+        """
+        if not self.monitor:
+            await ctx.reply("❌ Monitor not initialized")
+            return
+
+        if not hasattr(self.monitor, 'stream_manager'):
+            await ctx.reply("❌ Stream manager not available")
+            return
+
+        await ctx.reply("🔄 Testing all streaming feeds...")
+
+        try:
+            stream_manager = self.monitor.stream_manager
+            test_results = {}
+
+            # Test each feed
+            feed_icons = {
+                'icmarkets': '🏦',
+                'oanda': '💱',
+                'binance': '₿'
+            }
+
+            for feed_name, feed in stream_manager.feeds.items():
+                try:
+                    # Check if feed is connected
+                    if feed.connected:
+                        # Try to get subscribed symbols
+                        subscribed = feed.get_subscribed_symbols()
+                        if subscribed:
+                            test_results[feed_name] = (True, f"Connected with {len(subscribed)} subscriptions")
+                        else:
+                            test_results[feed_name] = (True, "Connected but no active subscriptions")
+                    else:
+                        test_results[feed_name] = (False, "Not connected")
+
+                except Exception as e:
+                    test_results[feed_name] = (False, f"Error: {str(e)}")
+
+            # Create embed
+            all_success = all(r[0] for r in test_results.values())
+            embed = discord.Embed(
+                title="🧪 Streaming Feed Test Results",
+                description="Connection test for all streaming price feeds",
+                color=discord.Color.green() if all_success else discord.Color.orange(),
+                timestamp=datetime.now()
+            )
+
+            # Add results
+            for feed_name, (success, message) in test_results.items():
+                icon = feed_icons.get(feed_name, '📈')
+                status_emoji = "✅" if success else "❌"
+                embed.add_field(
+                    name=f"{icon} {feed_name.upper()}",
+                    value=f"{status_emoji} {message}",
+                    inline=False
+                )
+
+            # Check if health monitor is available
+            health_status = ""
+            if hasattr(self.monitor, 'health_monitor') and self.monitor.health_monitor:
+                health_running = self.monitor.health_monitor.running
+                health_status = f"\n\n**Health Monitor:** {'✅ Active' if health_running else '⚠️ Inactive'}"
+
+            # Add recommendation if any failed
+            failed_feeds = [name for name, (success, _) in test_results.items() if not success]
+            if failed_feeds:
+                failed_list = ', '.join(failed_feeds)
+                embed.add_field(
+                    name="💡 Recommendation",
+                    value=f"Feeds with issues: {failed_list}\n"
+                          f"Attempting automatic reconnection...{health_status}",
+                    inline=False
+                )
+
+                # Attempt reconnection
+                await ctx.channel.send("🔄 Attempting reconnection to failed feeds...")
+
+                results = await stream_manager.reconnect_all()
+
+                reconnect_messages = []
+                for feed_name, success in results.items():
+                    if feed_name in failed_feeds:
+                        emoji = "✅" if success else "❌"
+                        status = "Connected" if success else "Failed"
+                        reconnect_messages.append(f"{emoji} {feed_name.upper()}: {status}")
+
+                if reconnect_messages:
+                    await ctx.channel.send('\n'.join(reconnect_messages))
+            else:
+                embed.add_field(
+                    name="✅ All Systems Operational",
+                    value=f"All feeds are connected and functioning properly{health_status}",
+                    inline=False
+                )
+
+            # Add footer with health monitor info
+            footer_text = "Use !feedhealth for detailed health metrics"
+            if hasattr(self.monitor, 'health_monitor') and self.monitor.health_monitor:
+                admin_configured = self.monitor.health_monitor.admin_user_id is not None
+                footer_text += f" | Admin alerts: {'Configured' if admin_configured else 'Not set'}"
+
+            embed.set_footer(text=footer_text)
+            await ctx.reply(embed=embed)
+
+        except Exception as e:
+            logger.error(f"Error testing feeds: {e}", exc_info=True)
+            await ctx.reply(f"❌ Error testing feeds: {str(e)}")
+
+
     @commands.command(name='testfeeds', aliases=['tf'])
     async def test_feeds(self, ctx):
         """
@@ -438,6 +719,7 @@ class FeedCommands(commands.Cog):
         except Exception as e:
             logger.error(f"Error getting feed stats: {e}", exc_info=True)
             await ctx.reply(f"❌ Error getting stats: {str(e)}")
+
 
     @commands.command(name='feedinfo', aliases=['fi'])
     async def feed_info(self, ctx, feed_name: str = None):

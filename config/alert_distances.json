@@ -1,72 +1,47 @@
 {
   "defaults": {
     "forex": {
-      "approaching_pips": 10,
-      "pip_size": 0.0001,
-      "description": "Most forex pairs use 4 decimal places"
+      "type": "pips",
+      "value": 10.0,
+      "description": "Standard forex pairs"
     },
     "forex_jpy": {
-      "approaching_pips": 15,
-      "pip_size": 0.01,
-      "description": "JPY pairs use 2 decimal places"
+      "type": "pips",
+      "value": 20.0,
+      "description": "JPY pairs (auto-detected)"
     },
     "metals": {
-      "approaching_distance": 50,
-      "pip_size": 0.1,
-      "description": "Gold/Silver in USD"
-    },
-    "crypto": {
-      "approaching_distance": 50,
-      "pip_size": 1,
-      "description": "Crypto uses percentage or absolute distance"
+      "type": "dollars",
+      "value": 10.0,
+      "description": "Gold, Silver, etc."
     },
     "indices": {
-      "approaching_distance": 5.0,
-      "pip_size": 1,
-      "description": "Index points"
+      "type": "percentage",
+      "value": 1.0,
+      "description": "Stock indices"
     },
     "stocks": {
-      "approaching_distance": 50,
-      "pip_size": 0.01,
-      "description": "Stock prices in USD"
+      "type": "percentage",
+      "value": 1.0,
+      "description": "Individual stocks"
+    },
+    "crypto": {
+      "type": "percentage",
+      "value": 0.5,
+      "description": "Cryptocurrencies"
     },
     "oil": {
-      "approaching_distance": 0.50,
-      "pip_size": 0.01,
-      "description": "Oil in USD per barrel"
+      "type": "dollars",
+      "value": 0.5,
+      "description": "Oil commodities"
     }
   },
-
   "overrides": {
-    "XAGUSD": {
-      "approaching_distance": 0.05,
-      "pip_size": 0.001
-    },
-    "JP255USD": {
-      "approaching_distance": 60,
-      "pip_size": 1
-    },
-    "SPX500USD": {
-      "approaching_distance": 20,
-      "pip_size": 1
-    },
     "NAS100USD": {
-      "approaching_distance": 30,
-      "pip_size": 1
-    },
-    "BTCUSDT": {
-      "approaching_distance": 600,
-      "pip_size": 1
-    },
-    "ETHUSDT": {
-      "approaching_distance": 20,
-      "pip_size": 1
-    },
-    "SOLUSDT": {
-      "approaching_distance": 20,
-      "pip_size": 0.01
+      "type": "dollars",
+      "value": 20.0,
+      "set_by": "itermy",
+      "set_at": "2025-11-10T02:33:22.532551+00:00"
     }
-  },
-
-  "dynamic_overrides": {}
+  }
 }

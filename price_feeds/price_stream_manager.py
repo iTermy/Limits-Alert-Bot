@@ -2,6 +2,7 @@
 Price Stream Manager - Coordinates streaming price feeds
 Replaces polling + caching with real-time WebSocket/streaming connections
 FIXED: Added OANDA practice account support
+ENHANCED: Added spread calculation in _process_price_update
 """
 
 import asyncio
@@ -27,6 +28,7 @@ class PriceStreamManager:
     - Reconnection handling for all feeds
     - Price update broadcasting to multiple subscribers
     - Symbol subscription management
+    - Automatic spread calculation
     """
 
     def __init__(self):
@@ -47,6 +49,9 @@ class PriceStreamManager:
 
         # Subscribers (callbacks to notify on price updates)
         self.subscribers: List[Callable] = []
+
+        # Start health monitor
+        self.health_monitor = None
 
         # Statistics
         self.stats = {
@@ -227,6 +232,16 @@ class PriceStreamManager:
         if callback in self.subscribers:
             self.subscribers.remove(callback)
 
+    def set_health_monitor(self, health_monitor):
+        """
+        Set the health monitor reference
+
+        Args:
+            health_monitor: FeedHealthMonitor instance
+        """
+        self.health_monitor = health_monitor
+        logger.info("Health monitor connected to stream manager")
+
     async def _handle_icmarkets_stream(self):
         """Handle MT5 price stream"""
         feed = self.feeds['icmarkets']
@@ -305,12 +320,30 @@ class PriceStreamManager:
     async def _process_price_update(self, symbol: str, price_data: Dict, feed: str):
         """
         Process a price update and notify subscribers
+        ENHANCED: Automatically calculates spread if not present
 
         Args:
             symbol: Internal format symbol
             price_data: Price dictionary with bid, ask, timestamp
             feed: Feed name
         """
+        # Calculate spread if not already present
+        if 'spread' not in price_data and 'bid' in price_data and 'ask' in price_data:
+            try:
+                spread = price_data['ask'] - price_data['bid']
+                # Validate spread is non-negative
+                if spread < 0:
+                    logger.warning(f"Negative spread detected for {symbol}: {spread}, using 0")
+                    spread = 0.0
+                price_data['spread'] = spread
+            except (TypeError, KeyError) as e:
+                logger.warning(f"Could not calculate spread for {symbol}: {e}, using 0")
+                price_data['spread'] = 0.0
+
+        # Update health monitor
+        if self.health_monitor:
+            self.health_monitor.update_last_seen(symbol, feed)
+
         # Store latest price
         async with self.price_lock:
             self.latest_prices[symbol] = {
