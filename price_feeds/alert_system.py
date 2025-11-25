@@ -46,6 +46,9 @@ class AlertSystem:
             bot: Discord bot instance for fetching channels
         """
         self.alert_channel = alert_channel
+        self.pa_alert_channel = None
+        self._load_pa_channels()
+
         self.bot = bot
 
         # Alert message tracking - maps alert message ID to signal ID
@@ -65,6 +68,62 @@ class AlertSystem:
         """Update the alert channel"""
         self.alert_channel = channel
         logger.info(f"Alert channel set to #{channel.name} ({channel.id})")
+
+    def _load_pa_channels(self):
+        """Load PA channel IDs from config"""
+        try:
+            from pathlib import Path
+            import json
+
+            config_path = Path(__file__).parent.parent / 'config' / 'channels.json'
+            with open(config_path, 'r') as f:
+                config = json.load(f)
+
+            # Get PA channel IDs
+            monitored = config.get('monitored_channels', {})
+            self.pa_channel_ids = set()
+
+            for channel_name, channel_id in monitored.items():
+                if 'pa' in channel_name.lower() or 'price-action' in channel_name.lower():
+                    self.pa_channel_ids.add(str(channel_id))
+
+            logger.info(f"Loaded {len(self.pa_channel_ids)} PA channel IDs: {self.pa_channel_ids}")
+
+        except Exception as e:
+            logger.error(f"Failed to load PA channels: {e}")
+            self.pa_channel_ids = set()
+
+    def set_pa_channel(self, channel: discord.TextChannel):
+        """Set the PA alert channel"""
+        self.pa_alert_channel = channel
+        logger.info(f"PA alert channel set: #{channel.name} ({channel.id})")
+
+    def is_pa_signal(self, signal: Dict) -> bool:
+        """Check if signal originated from a PA channel"""
+        channel_id = str(signal.get('channel_id', ''))
+        is_pa = channel_id in self.pa_channel_ids
+        if is_pa:
+            logger.debug(f"Signal {signal.get('signal_id')} identified as PA signal (channel: {channel_id})")
+        return is_pa
+
+    def _get_alert_channel(self, signal: Dict) -> discord.TextChannel:
+        """
+        Determine which alert channel to use based on signal source
+
+        Args:
+            signal: Signal dictionary with channel_id
+
+        Returns:
+            Alert channel to use
+        """
+        if self.is_pa_signal(signal):
+            if self.pa_alert_channel:
+                logger.debug(f"Routing to PA alert channel for signal {signal.get('signal_id')}")
+                return self.pa_alert_channel
+            else:
+                logger.warning(f"PA signal detected but no PA alert channel configured, using main channel")
+                return self.alert_channel
+        return self.alert_channel
 
     def _format_price(self, price: float) -> str:
         """Format price with appropriate decimal places"""
@@ -130,8 +189,10 @@ class AlertSystem:
         Returns:
             True if alert was sent successfully
         """
-        if not self.alert_channel:
-            logger.warning("No alert channel configured")
+        target_channel = self._get_alert_channel(signal)
+
+        if not target_channel:
+            logger.error("No alert channel configured")
             return False
 
         # ONLY send approaching alert for the first limit
@@ -195,8 +256,8 @@ class AlertSystem:
 
             embed.set_footer(text=f"Signal #{signal['signal_id']} • Reply to manage")
 
-            await self.alert_channel.send("<@&1334203997107650662>")
-            message = await self.alert_channel.send(embed=embed)
+            await target_channel.send("<@&1334203997107650662>")
+            message = await target_channel.send(embed=embed)
 
             # Track this alert message
             self.track_alert_message(message.id, signal['signal_id'])
@@ -228,8 +289,10 @@ class AlertSystem:
         Returns:
             True if alert was sent successfully
         """
-        if not self.alert_channel:
-            logger.warning("No alert channel configured")
+        target_channel = self._get_alert_channel(signal)
+
+        if not target_channel:
+            logger.error("No alert channel configured")
             return False
 
         try:
@@ -308,8 +371,8 @@ class AlertSystem:
 
             embed.set_footer(text=f"Signal #{signal['signal_id']} • Reply to manage")
 
-            await self.alert_channel.send("<@&1334203997107650662>")
-            message = await self.alert_channel.send(embed=embed)
+            await target_channel.send("<@&1334203997107650662>")
+            message = await target_channel.send(embed=embed)
 
             # Track this alert message
             self.track_alert_message(message.id, signal['signal_id'])
@@ -338,8 +401,10 @@ class AlertSystem:
         Returns:
             True if alert was sent successfully
         """
-        if not self.alert_channel:
-            logger.warning("No alert channel configured")
+        target_channel = self._get_alert_channel(signal)
+
+        if not target_channel:
+            logger.error("No alert channel configured")
             return False
 
         try:
@@ -386,8 +451,8 @@ class AlertSystem:
 
             embed.set_footer(text=f"Signal #{signal['signal_id']} • Status changed to STOP_LOSS • Reply to manage")
 
-            await self.alert_channel.send("<@&1334203997107650662>")
-            message = await self.alert_channel.send(embed=embed)
+            await target_channel.send("<@&1334203997107650662>")
+            message = await target_channel.send(embed=embed)
 
             # Track this alert message
             self.track_alert_message(message.id, signal['signal_id'])

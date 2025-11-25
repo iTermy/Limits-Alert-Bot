@@ -11,9 +11,12 @@
     "swing-trades": "1402972635847200838",
     "ot-trade-calls": "1402972674082476102",
     "proper-calls": "1406127169448575098",
-    "crypto-alt-trades": "1403532013511905434"
+    "crypto-alt-trades": "1403532013511905434",
+    "price-action-trades": "1402972075446239303",
+    "gold-pa-signals": "1402972221953019986"
   },
   "alert_channel": "1402971805890773005",
+  "pa-alert-channel": "1442668785990631435",
   "command_channel": "1402971848731398174",
   "profit_channel": "1414288228206514279",
   "channel_settings": {
@@ -23,12 +26,18 @@
     "scalps": {
       "default_expiry": "day_end"
     },
+    "price-action-trades": {
+      "default_expiry": "day_end"
+    },
     "forex-exotics": {
       "default_expiry": "week_end"
     },
     "gold-trades": {
       "default_instrument": "XAUUSD",
       "default_expiry": "week_end"
+    },
+    "gold-pa-signals": {
+      "default_expiry": "day_end"
     },
     "oil-trades": {
       "default_instrument": "USOILSPOT",

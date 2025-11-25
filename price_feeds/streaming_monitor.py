@@ -95,6 +95,17 @@ class StreamingPriceMonitor:
                         channel = await self.bot.fetch_channel(int(channel_id))
                         self.alert_system.set_channel(channel)
                         logger.info(f"Alert channel set: #{channel.name}")
+                    # NEW: Setup PA alert channel
+                    pa_channel_id = config.get('pa-alert-channel')
+                    if pa_channel_id:
+                        try:
+                            pa_channel = await self.bot.fetch_channel(int(pa_channel_id))
+                            self.alert_system.set_pa_channel(pa_channel)
+                            logger.info(f"PA alert channel set: #{pa_channel.name}")
+                        except Exception as e:
+                            logger.error(f"Failed to set PA alert channel: {e}")
+                    else:
+                        logger.warning("No PA alert channel configured in channels.json")
             except Exception as e:
                 logger.error(f"Error setting up alert channel: {e}")
 
