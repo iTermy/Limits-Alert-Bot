@@ -175,6 +175,8 @@ class TradingBot(commands.Bot):
                     allowed_channels.add(int(self.channels_config['alert_channel']))
                 if 'command_channel' in self.channels_config:
                     allowed_channels.add(int(self.channels_config['command_channel']))
+                if 'pa-alert-channel' in self.channels_config:
+                    allowed_channels.add(int(self.channels_config['pa-alert-channel']))
 
             # Only process messages in allowed channels
             if message.channel.id not in allowed_channels:

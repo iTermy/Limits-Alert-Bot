@@ -417,7 +417,6 @@ class AdminCommands(BaseCog):
             await ctx.send("Usage: !monitor [status|start|stop|stats]")
 
     @commands.command(name='setalertdistance')
-    @commands.has_permissions(administrator=True)
     async def set_alert_distance(self, ctx: commands.Context, symbol: str = None,
                                  value: float = None, distance_type: str = None):
         """

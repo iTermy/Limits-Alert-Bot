@@ -257,6 +257,91 @@ class LifecycleManager:
             logger.error(f"Error manually setting signal status: {e}", exc_info=True)
             return False
 
+    async def manually_set_signal_to_hit(self, signal_id: int, reason: str) -> bool:
+        """
+        Manually mark a signal as HIT by marking its first pending limit as hit.
+        This mimics the behavior of automatic hit detection.
+
+        Args:
+            signal_id: Signal ID to mark as hit
+            reason: Reason for manual hit (for audit trail)
+
+        Returns:
+            bool: True if successful
+        """
+        try:
+            from database.models import SignalStatus
+
+            # Get the signal with all its limits
+            signal = await self.get_signal_with_limits(signal_id)
+
+            if not signal:
+                logger.error(f"Signal {signal_id} not found")
+                return False
+
+            # Check if signal is in ACTIVE status
+            if signal['status'] != SignalStatus.ACTIVE:
+                logger.warning(f"Signal {signal_id} is not ACTIVE (status: {signal['status']})")
+                # For non-active signals, just change the status directly
+                return await self.manually_set_signal_status(signal_id, SignalStatus.HIT, reason)
+
+            # Find the first pending limit (lowest sequence number)
+            pending_limits = [
+                l for l in signal.get('limits', [])
+                if l.get('status') == 'pending'
+            ]
+
+            if not pending_limits:
+                logger.warning(f"Signal {signal_id} has no pending limits")
+                # No pending limits, just change status
+                return await self.manually_set_signal_status(signal_id, SignalStatus.HIT, reason)
+
+            # Sort by sequence number and get first
+            first_limit = min(pending_limits, key=lambda l: l.get('sequence_number', 999))
+
+            logger.info(
+                f"Manually marking signal {signal_id} as HIT by hitting limit {first_limit['id']} "
+                f"(price: {first_limit['price_level']})"
+            )
+
+            # Use the existing process_limit_hit method which:
+            # - Marks limit as hit
+            # - Sets hit_alert_sent = 1
+            # - Updates signal status to HIT
+            # - Sets first_limit_hit_time
+            # - Records status change in audit
+            result = await self.process_limit_hit(
+                limit_id=first_limit['id'],
+                hit_price=first_limit['price_level']  # Use limit price as hit price
+            )
+
+            if result and result.get('signal_id'):
+                logger.info(f"Signal {signal_id} manually marked as HIT via limit hit")
+
+                # Update the status change reason to reflect it was manual
+                async with self.db.get_connection() as conn:
+                    # Update the most recent status change reason
+                    await conn.execute("""
+                        UPDATE status_changes 
+                        SET reason = ?, change_type = 'manual'
+                        WHERE signal_id = ? 
+                        AND new_status = 'hit'
+                        AND id = (
+                            SELECT MAX(id) FROM status_changes 
+                            WHERE signal_id = ? AND new_status = 'hit'
+                        )
+                    """, (reason, signal_id, signal_id))
+                    await conn.commit()
+
+                return True
+            else:
+                logger.error(f"Failed to process limit hit for signal {signal_id}")
+                return False
+
+        except Exception as e:
+            logger.error(f"Error manually setting signal {signal_id} to hit: {e}", exc_info=True)
+            return False
+
     async def process_limit_hit(self, limit_id: int, actual_price: float, signal_db) -> Dict[str, Any]:
         """
         Process a limit hit event

@@ -46,6 +46,9 @@ class MessageHandler:
                     self._allowed_channels.add(int(self.bot.channels_config['alert_channel']))
                 if 'command_channel' in self.bot.channels_config:
                     self._allowed_channels.add(int(self.bot.channels_config['command_channel']))
+                # NEW: Add PA alert channel
+                if 'pa-alert-channel' in self.bot.channels_config:
+                    self._allowed_channels.add(int(self.bot.channels_config['pa-alert-channel']))
 
         return self._allowed_channels
 
@@ -191,19 +194,29 @@ class MessageHandler:
                     action_taken = "cancelled"
                     logger.debug(f"Cancel result: {success}")
 
-                elif command in ("profit", "win", "tp", "hit"):
+
+                elif command in ("profit", "win", "tp"):
                     logger.debug(f"Processing profit command for signal {signal_id}")
                     success = await asyncio.wait_for(
                         self.signal_db.manually_set_signal_status(
                             signal_id, 'profit', f"Set via alert reply by {message.author.name}"
+
                         ),
                         timeout=5.0
                     )
                     action_taken = "marked as PROFIT"
-
                     # Send profit alert to profit channel if successful
                     if success:
                         await self.send_profit_alert(signal, message.author, profit_amount)
+                elif command in ("hit",):
+                    logger.debug(f"Processing hit command for signal {signal_id}")
+                    success = await asyncio.wait_for(
+                        self.signal_db.manually_set_signal_status(
+                            signal_id, 'hit', f"Set via alert reply by {message.author.name}"
+                        ),
+                        timeout=5.0
+                    )
+                    action_taken = "marked as HIT"
 
                 elif command in ("breakeven", "be"):
                     logger.debug(f"Processing breakeven command for signal {signal_id}")

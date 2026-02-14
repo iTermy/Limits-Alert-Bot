@@ -1,12 +1,15 @@
 """
 Binance WebSocket Streaming Feed
 Uses Binance's WebSocket API for real-time crypto price updates
+FIXED: Added SSL certificate support for Windows VPS
 """
 
 import asyncio
 import aiohttp
 import logging
 import json
+import ssl
+import certifi
 from typing import Dict, Set, AsyncIterator, Tuple
 from datetime import datetime
 
@@ -24,6 +27,7 @@ class BinanceStream:
     def __init__(self, use_testnet: bool = False, use_international: bool = False):
         """Initialize Binance stream"""
         import os
+
         self.use_international = use_international or \
                                  os.getenv('BINANCE_USE_INTERNATIONAL', 'false').lower() == 'true'
 
@@ -34,6 +38,15 @@ class BinanceStream:
             self.ws_url = "wss://stream.binance.com:9443/stream"
         else:
             self.ws_url = "wss://stream.binance.us:9443/stream"
+
+        # FIXED: Create SSL context for Windows VPS
+        try:
+            self.ssl_context = ssl.create_default_context(cafile=certifi.where())
+            logger.info("SSL context created with certifi certificates")
+        except Exception as e:
+            logger.warning(f"Could not create SSL context with certifi: {e}")
+            # Fallback to default SSL context
+            self.ssl_context = ssl.create_default_context()
 
         # Connection management
         self.ws_session: aiohttp.ClientSession = None
@@ -50,11 +63,16 @@ class BinanceStream:
         logger.info(f"BinanceStream initialized ({'international' if self.use_international else 'US'} API)")
 
     async def connect(self) -> bool:
-        """Initialize Binance WebSocket session"""
+        """Initialize Binance WebSocket session with SSL support"""
         try:
-            self.ws_session = aiohttp.ClientSession()
+            # FIXED: Create connector with SSL context
+            connector = aiohttp.TCPConnector(ssl=self.ssl_context)
+
+            # Create session with SSL-configured connector
+            self.ws_session = aiohttp.ClientSession(connector=connector)
+
             self.connected = True
-            logger.info("Binance WebSocket ready")
+            logger.info("Binance WebSocket ready (with SSL support)")
             return True
 
         except Exception as e:
