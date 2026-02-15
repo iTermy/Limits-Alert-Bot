@@ -552,14 +552,63 @@ class SignalCommands(BaseCog):
     async def generate_report(
         self,
         ctx: commands.Context,
-        period: str = "week"
+        period: str = "week",
+        filter_type: str = None
     ):
-        """Generate a trading report for specified period"""
+        """
+        Generate a trading report for specified period
+
+        Args:
+            period: 'day', 'week', or 'month'
+            filter_type: Optional - 'stoploss', 'sl', 'profit', 'win' to filter results
+        """
         if period.lower() not in ['day', 'week', 'month']:
             await ctx.send("❌ Period must be 'day', 'week', or 'month'")
             return
 
-        loading_msg = await ctx.send(f"📊 Generating {period} report...")
+        # Normalize filter type
+        filter_normalized = None
+        if filter_type:
+            filter_lower = filter_type.lower()
+            if filter_lower in ['stoploss', 'sl', 'stop', 'stop_loss']:
+                filter_normalized = 'stoploss'
+            elif filter_lower in ['profit', 'win', 'tp']:
+                filter_normalized = 'profit'
+            else:
+                await ctx.send("❌ Filter must be 'stoploss'/'sl' or 'profit'/'win'")
+                return
+
+        # Update loading message based on filter
+        if filter_normalized:
+            loading_msg = await ctx.send(f"📊 Generating {period} report ({filter_normalized} only)...")
+        else:
+            loading_msg = await ctx.send(f"📊 Generating {period} report...")
+
+        def cap_field_value(lines: list, max_length: int = 1024) -> str:
+            """
+            Cap field value to max_length by truncating lines and adding summary.
+            Discord embed fields have a 1024 character limit.
+            """
+            if not lines:
+                return ""
+
+            result_lines = []
+            current_length = 0
+            omitted_count = 0
+
+            for line in lines:
+                line_length = len(line) + 1  # +1 for newline
+                if current_length + line_length > max_length - 50:  # Reserve 50 chars for "... +X more"
+                    omitted_count = len(lines) - len(result_lines)
+                    break
+                result_lines.append(line)
+                current_length += line_length
+
+            result = "\n".join(result_lines)
+            if omitted_count > 0:
+                result += f"\n... +{omitted_count} more signal{'s' if omitted_count > 1 else ''}"
+
+            return result
 
         try:
             date_range = await self.signal_db.get_trading_period_range(period)
@@ -637,6 +686,29 @@ class SignalCommands(BaseCog):
             pa_profit = [s for s in pa_signals if s.get('status', '').lower() == 'profit']
             pa_stoploss = [s for s in pa_signals if s.get('status', '').lower() in ['stoploss', 'stop_loss']]
 
+            # Apply filter if specified
+            if filter_normalized == 'stoploss':
+                # Only show stop loss signals
+                regular_profit = []
+                pa_profit = []
+            elif filter_normalized == 'profit':
+                # Only show profit signals
+                regular_stoploss = []
+                pa_stoploss = []
+
+            # Check if filter resulted in no signals
+            if filter_normalized:
+                filtered_count = len(regular_profit) + len(regular_stoploss) + len(pa_profit) + len(pa_stoploss)
+                if filtered_count == 0:
+                    filter_label = "stop loss" if filter_normalized == 'stoploss' else "profit"
+                    embed = discord.Embed(
+                        title=f"📊 {period.title()} Trading Report - {filter_label.title()} Only",
+                        description=f"No {filter_label} signals found for the current {period}",
+                        color=0xFFA500
+                    )
+                    await loading_msg.edit(content=None, embed=embed)
+                    return
+
             # Calculate overall statistics
             total_regular = len([s for s in regular_signals if s.get('status', '').lower() in ['profit', 'stoploss', 'stop_loss']])
             total_pa = len([s for s in pa_signals if s.get('status', '').lower() in ['profit', 'stoploss', 'stop_loss']])
@@ -656,9 +728,18 @@ class SignalCommands(BaseCog):
             overall_win_rate = (total_profit / total_signals * 100) if total_signals > 0 else 0
 
             # Create embed
+            title_suffix = ""
+            description_suffix = ""
+            if filter_normalized == 'stoploss':
+                title_suffix = " - Stop Losses Only"
+                description_suffix = " (stop loss signals only)"
+            elif filter_normalized == 'profit':
+                title_suffix = " - Profits Only"
+                description_suffix = " (profit signals only)"
+
             embed = discord.Embed(
-                title=f"📊 {period.title()} Trading Report",
-                description=f"Performance summary for the current {period}",
+                title=f"📊 {period.title()} Trading Report{title_suffix}",
+                description=f"Performance summary for the current {period}{description_suffix}",
                 color=0x00FF00 if overall_win_rate >= 50 else 0xFF0000
             )
 
@@ -716,7 +797,7 @@ class SignalCommands(BaseCog):
                     )
 
                 if trade_lines:
-                    trades_text = "\n".join(trade_lines)
+                    trades_text = cap_field_value(trade_lines)
                     embed.add_field(
                         name=f"Regular Trades ({total_regular})",
                         value=trades_text,
@@ -753,7 +834,7 @@ class SignalCommands(BaseCog):
                     )
 
                 if pa_trade_lines:
-                    pa_trades_text = "\n".join(pa_trade_lines)
+                    pa_trades_text = cap_field_value(pa_trade_lines)
                     embed.add_field(
                         name=f"PA Trades ({total_pa})",
                         value=pa_trades_text,

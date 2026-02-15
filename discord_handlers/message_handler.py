@@ -400,6 +400,8 @@ class MessageHandler:
 
                 embed.set_footer(text=f"Via alert reply")
 
+                # Send role ping before embed (similar to limit hit alerts)
+                await message.channel.send("<@&1334203997107650662>")
                 await message.channel.send(embed=embed)
 
                 logger.info(f"Signal {signal_id} {action_taken} via alert reply by {message.author.name}")
