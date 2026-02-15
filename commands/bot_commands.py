@@ -1,11 +1,9 @@
 """
 Bot Commands - Essential bot management and utility commands
-Consolidated from admin_commands, feed_commands, general_commands, and debug_commands
 """
 from discord.ext import commands
 import discord
 import asyncio
-from typing import Optional
 from .base_command import BaseCog
 from datetime import datetime
 
@@ -19,7 +17,7 @@ class BotCommands(BaseCog):
     async def ping(self, ctx: commands.Context):
         """Check bot latency"""
         latency = round(self.bot.latency * 1000)
-        await ctx.send(f"🏓 Pong! Latency: {latency}ms")
+        await ctx.send(f"Latency: {latency}ms")
 
     @commands.command(name='help')
     async def help_command(self, ctx: commands.Context):
@@ -42,7 +40,7 @@ class BotCommands(BaseCog):
             "`!sl <id>` - Mark as stop loss\n"
             "`!cancel <id>` - Cancel signal"
         )
-        embed.add_field(name="📊 Signal Commands", value=signal_cmds, inline=False)
+        embed.add_field(name="Signal Commands", value=signal_cmds, inline=False)
 
         # Bot commands
         bot_cmds = (
@@ -51,7 +49,7 @@ class BotCommands(BaseCog):
             "`!price <symbol>` - Check current price\n"
             "`!feeds` - Feed status overview"
         )
-        embed.add_field(name="🤖 Bot Commands", value=bot_cmds, inline=False)
+        embed.add_field(name="Bot Commands", value=bot_cmds, inline=False)
 
         # Admin commands
         if self.is_admin(ctx.author):
@@ -60,7 +58,7 @@ class BotCommands(BaseCog):
                 "`!reload` - Reload configuration\n"
                 "`!shutdown` - Shutdown bot"
             )
-            embed.add_field(name="⚙️ Admin Commands", value=admin_cmds, inline=False)
+            embed.add_field(name="Admin Commands", value=admin_cmds, inline=False)
 
         await ctx.send(embed=embed)
 
@@ -86,7 +84,7 @@ class BotCommands(BaseCog):
                 return
 
             embed = discord.Embed(
-                title=f"💰 {symbol_upper} Price",
+                title=f"{symbol_upper} Price",
                 color=0x00FF00
             )
 
@@ -147,7 +145,7 @@ class BotCommands(BaseCog):
     async def health_check(self, ctx: commands.Context):
         """Complete bot health check - feeds, database, monitoring"""
         embed = discord.Embed(
-            title="🏥 Bot Health Check",
+            title="Bot Health Check",
             description="Complete system status",
             color=0x00FF00
         )
@@ -157,9 +155,9 @@ class BotCommands(BaseCog):
         if uptime:
             hours = int(uptime.total_seconds() // 3600)
             minutes = int((uptime.total_seconds() % 3600) // 60)
-            embed.add_field(name="⏱️ Uptime", value=f"{hours}h {minutes}m", inline=True)
+            embed.add_field(name="⏱Uptime", value=f"{hours}h {minutes}m", inline=True)
 
-        embed.add_field(name="🏓 Latency", value=f"{round(self.bot.latency * 1000)}ms", inline=True)
+        embed.add_field(name="Latency", value=f"{round(self.bot.latency * 1000)}ms", inline=True)
 
         # Database status
         try:
@@ -167,12 +165,12 @@ class BotCommands(BaseCog):
             total_signals = stats.get('total_signals', 0)
             tracking = stats.get('tracking_count', 0)
             embed.add_field(
-                name="💾 Database",
+                name="Database",
                 value=f"🟢 Connected\n{tracking} active / {total_signals} total",
                 inline=True
             )
         except Exception as e:
-            embed.add_field(name="💾 Database", value=f"🔴 Error: {str(e)[:50]}", inline=True)
+            embed.add_field(name="Database", value=f"🔴 Error: {str(e)[:50]}", inline=True)
 
         # Monitor status
         if hasattr(self.bot, 'monitor') and self.bot.monitor:
@@ -189,7 +187,7 @@ class BotCommands(BaseCog):
 
                 if feed_status:
                     embed.add_field(
-                        name="📡 Feeds",
+                        name="Feeds",
                         value="\n".join(feed_status),
                         inline=True
                     )
@@ -197,7 +195,7 @@ class BotCommands(BaseCog):
                 # Subscriptions
                 if hasattr(stream_manager, 'subscribed_symbols'):
                     active_subs = len(stream_manager.subscribed_symbols)
-                    embed.add_field(name="📊 Subscriptions", value=str(active_subs), inline=True)
+                    embed.add_field(name="Subscriptions", value=str(active_subs), inline=True)
 
                 # Recent updates
                 if hasattr(stream_manager, 'last_price_update'):
@@ -207,9 +205,9 @@ class BotCommands(BaseCog):
                         status = "🟢 Active" if seconds_ago < 60 else "🟡 Slow"
                         embed.add_field(name="🔄 Last Update", value=f"{status}\n{int(seconds_ago)}s ago", inline=True)
             else:
-                embed.add_field(name="📡 Monitor", value="🔴 Stream manager unavailable", inline=False)
+                embed.add_field(name="Monitor", value="🔴 Stream manager unavailable", inline=False)
         else:
-            embed.add_field(name="📡 Monitor", value="🔴 Not running", inline=False)
+            embed.add_field(name="Monitor", value="🔴 Not running", inline=False)
 
         # Overall health color
         if all([

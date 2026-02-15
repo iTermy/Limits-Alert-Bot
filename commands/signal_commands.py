@@ -1,20 +1,15 @@
 """
-Signal Commands - Simplified version
-Removed excessive logging, defensive programming, and consolidated repeated code
+Signal Commands
 """
-from database.models import SignalStatus
 from .base_command import BaseCog
-from utils.embed_factory import EmbedFactory
-from core.parser import parse_signal
 from utils.logger import get_logger
 from utils.formatting import (
-    format_price, format_distance_display, is_crypto_symbol,
+    format_price, is_crypto_symbol,
     is_index_symbol, get_status_emoji
 )
 import discord
 from discord.ext import commands
-from typing import Optional, List, Dict, Any
-import asyncio
+from typing import Optional, List, Dict
 from datetime import datetime
 
 logger = get_logger("signal_commands")
