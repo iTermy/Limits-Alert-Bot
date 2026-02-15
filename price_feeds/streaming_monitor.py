@@ -106,6 +106,17 @@ class StreamingPriceMonitor:
                             logger.error(f"Failed to set PA alert channel: {e}")
                     else:
                         logger.warning("No PA alert channel configured in channels.json")
+                    # NEW: Setup toll alert channel
+                    toll_channel_id = config.get('toll-alert-channel')
+                    if toll_channel_id:
+                        try:
+                            toll_channel = await self.bot.fetch_channel(int(toll_channel_id))
+                            self.alert_system.set_toll_channel(toll_channel)
+                            logger.info(f"Toll alert channel set: #{toll_channel.name}")
+                        except Exception as e:
+                            logger.error(f"Failed to set toll alert channel: {e}")
+                    else:
+                        logger.warning("No toll alert channel configured in channels.json")
             except Exception as e:
                 logger.error(f"Error setting up alert channel: {e}")
 

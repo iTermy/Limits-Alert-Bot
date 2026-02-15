@@ -611,16 +611,20 @@ class SignalCommands(BaseCog):
             # Create reverse mapping: channel_id -> channel_name
             channel_id_to_name = {str(channel_id): name for name, channel_id in monitored_channels.items()}
 
-            # Separate signals into PA and regular based on channel
+            # Separate signals into PA, toll, and regular based on channel
             pa_signals = []
+            toll_signals = []
             regular_signals = []
 
             for signal in signals:
                 channel_id = str(signal.get('channel_id', ''))
                 channel_name = channel_id_to_name.get(channel_id, '').lower()
 
+                # Check if it's a toll channel (contains 'toll' in name) - exclude from report
+                if 'toll' in channel_name:
+                    toll_signals.append(signal)
                 # Check if it's a PA channel (contains 'pa' in name)
-                if any(x in channel_name for x in ['pa', 'price-action']):
+                elif any(x in channel_name for x in ['pa', 'price-action']):
                     pa_signals.append(signal)
                 else:
                     regular_signals.append(signal)

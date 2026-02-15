@@ -49,6 +49,9 @@ class MessageHandler:
                 # NEW: Add PA alert channel
                 if 'pa-alert-channel' in self.bot.channels_config:
                     self._allowed_channels.add(int(self.bot.channels_config['pa-alert-channel']))
+                # NEW: Add toll alert channel
+                if 'toll-alert-channel' in self.bot.channels_config:
+                    self._allowed_channels.add(int(self.bot.channels_config['toll-alert-channel']))
 
         return self._allowed_channels
 
@@ -690,6 +693,16 @@ class MessageHandler:
             parsed = parse_signal(message.content, channel_name)
 
             if parsed:
+                # Special handling for toll signals - set stop loss to impossible values
+                # so they effectively have no stop loss
+                if channel_name and 'toll' in channel_name.lower():
+                    if parsed.direction.lower() == 'long':
+                        parsed.stop_loss = 0
+                        self.logger.info(f"Toll signal detected (long) - setting stop_loss to 0 (effectively no SL)")
+                    else:  # short
+                        parsed.stop_loss = 99999
+                        self.logger.info(f"Toll signal detected (short) - setting stop_loss to 99999 (effectively no SL)")
+
                 success, signal_id = await self.signal_db.save_signal(
                     parsed,
                     str(message.id),
@@ -756,6 +769,15 @@ class MessageHandler:
         parsed = parse_signal(after.content, channel_name)
 
         if parsed:
+            # Special handling for toll signals - set stop loss to impossible values
+            if channel_name and 'toll' in channel_name.lower():
+                if parsed.direction.lower() == 'long':
+                    parsed.stop_loss = 0
+                    self.logger.info(f"Toll signal edit detected (long) - setting stop_loss to 0")
+                else:  # short
+                    parsed.stop_loss = 99999
+                    self.logger.info(f"Toll signal edit detected (short) - setting stop_loss to 99999")
+
             success = await self.signal_db.update_signal_from_edit(str(after.id), parsed)
 
             if success:
