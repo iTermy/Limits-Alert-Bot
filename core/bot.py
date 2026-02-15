@@ -114,11 +114,8 @@ class TradingBot(commands.Bot):
     async def load_extensions(self):
         """Load all command cogs"""
         extensions = [
-            'commands.general_commands',
-            'commands.signal_commands',
-            'commands.admin_commands',
-            'commands.feed_commands',
-            'commands.debug_commands'
+            'commands.bot_commands',
+            'commands.signal_commands'
         ]
 
         for extension in extensions:

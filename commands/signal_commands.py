@@ -66,7 +66,7 @@ class ActiveSignalsView(discord.ui.View):
             )
 
         embed = discord.Embed(
-            title="📊 Active Signals",
+            title="Active Signals",
             description=f"Showing page {current_page}/{total_pages} ({total_signals} total signals)" +
                         (f" for {instrument}" if instrument else ""),
             color=0x00BFFF
@@ -210,13 +210,44 @@ class SignalCommands(BaseCog):
     async def active_signals(
         self,
         ctx: commands.Context,
-        instrument: Optional[str] = None
+        *,
+        args: str = None
     ):
-        """Display active trading signals with pagination"""
+        """
+        Display active trading signals with sorting and pagination
+
+        Usage:
+            !active - Show most recent active signals
+            !active BTCUSDT - Filter by instrument
+            !active sort:distance - Sort by distance to limit
+            !active sort:recent - Sort by most recent (default)
+            !active sort:oldest - Sort by oldest first
+            !active sort:progress - Sort by most limits hit
+            !active BTCUSDT sort:distance - Combine filter and sort
+        """
         loading_msg = await ctx.send("🔄 Loading active signals...")
 
+        # Parse arguments
+        instrument = None
+        sort_method = 'recent'  # default
+
+        if args:
+            args_parts = args.split()
+            for part in args_parts:
+                if part.startswith('sort:'):
+                    sort_method = part.split(':', 1)[1].lower()
+                else:
+                    # Assume it's an instrument filter
+                    instrument = part.upper()
+
+        # Validate sort method
+        valid_sorts = ['recent', 'oldest', 'distance', 'progress']
+        if sort_method not in valid_sorts:
+            await loading_msg.edit(content=f"❌ Invalid sort method. Valid options: {', '.join(valid_sorts)}")
+            return
+
         signals = await self.signal_db.get_active_signals_detailed(
-            instrument.upper() if instrument else None
+            instrument if instrument else None
         )
 
         if not signals:
@@ -274,14 +305,46 @@ class SignalCommands(BaseCog):
                     except Exception as e:
                         logger.warning(f"Could not get price for {symbol}: {e}")
 
+        # Apply sorting
+        if sort_method == 'recent':
+            # Already sorted by created_at DESC from database
+            pass
+        elif sort_method == 'oldest':
+            signals.reverse()
+        elif sort_method == 'distance':
+            # Sort by distance (closest first)
+            def get_distance_key(signal):
+                if signal.get('distance_info'):
+                    return signal['distance_info']['distance']
+                return float('inf')  # Put signals without distance at the end
+            signals.sort(key=get_distance_key)
+        elif sort_method == 'progress':
+            # Sort by number of limits hit (most progress first)
+            signals.sort(key=lambda s: len(s.get('hit_limits', [])), reverse=True)
+
         # Create pagination view
         view = ActiveSignalsView(
             signals=signals,
             guild_id=ctx.guild.id,
-            instrument=instrument.upper() if instrument else None
+            instrument=instrument
         )
 
-        await loading_msg.edit(content=None, embed=view.get_page_embed(), view=view)
+        # Get initial embed
+        embed = view.get_page_embed()
+
+        # Add sort info to footer
+        sort_descriptions = {
+            'recent': 'Most Recent First',
+            'oldest': 'Oldest First',
+            'distance': 'Closest to Limit',
+            'progress': 'Most Progress'
+        }
+
+        current_footer = embed.footer.text if embed.footer else ""
+        sort_info = f" | Sorted by: {sort_descriptions.get(sort_method, sort_method.title())}"
+        embed.set_footer(text=current_footer + sort_info)
+
+        await loading_msg.edit(content=None, embed=embed, view=view)
 
     @commands.command(name="delete")
     async def delete_signal(self, ctx: commands.Context, signal_id: int):
@@ -369,10 +432,25 @@ class SignalCommands(BaseCog):
 
         # Timestamps
         if signal.get('first_limit_hit_time'):
-            embed.add_field(name="First Hit", value=f"<t:{int(signal['first_limit_hit_time'].timestamp())}:R>", inline=True)
+            try:
+                timestamp = signal['first_limit_hit_time']
+                if isinstance(timestamp, str):
+                    # Parse ISO format string
+                    from datetime import datetime
+                    timestamp = datetime.fromisoformat(timestamp.replace('Z', '+00:00'))
+                embed.add_field(name="First Hit", value=f"<t:{int(timestamp.timestamp())}:R>", inline=True)
+            except:
+                pass
 
         if signal.get('closed_at'):
-            embed.add_field(name="Closed", value=f"<t:{int(signal['closed_at'].timestamp())}:R>", inline=True)
+            try:
+                timestamp = signal['closed_at']
+                if isinstance(timestamp, str):
+                    from datetime import datetime
+                    timestamp = datetime.fromisoformat(timestamp.replace('Z', '+00:00'))
+                embed.add_field(name="Closed", value=f"<t:{int(timestamp.timestamp())}:R>", inline=True)
+            except:
+                pass
 
         # Link to original message
         if not str(signal['message_id']).startswith("manual_"):
@@ -438,7 +516,7 @@ class SignalCommands(BaseCog):
     async def set_stop_loss(self, ctx: commands.Context, signal_id: int):
         await self.set_signal_status(ctx, signal_id, "stop_loss")
 
-    @commands.command(name="cancel", aliases=["nm", "cancle"], description="Cancel a signal")
+    @commands.command(name="cancel", aliases=["nm"], description="Cancel a signal")
     async def set_cancelled(self, ctx: commands.Context, signal_id: int):
         await self.set_signal_status(ctx, signal_id, "cancelled")
 
@@ -507,71 +585,189 @@ class SignalCommands(BaseCog):
                 await loading_msg.edit(content=None, embed=embed)
                 return
 
-            # Calculate statistics - filter by status (use string comparison)
-            profit_signals = [s for s in signals if s.get('status', '').lower() == 'profit']
-            stoploss_signals = [s for s in signals if s.get('status', '').lower() in ['stoploss', 'stop_loss']]
+            # Fetch full signal details with limits for each signal
+            enriched_signals = []
+            for signal in signals:
+                full_signal = await self.signal_db.get_signal_with_limits(signal['id'])
+                if full_signal:
+                    # Merge the status and other info from period query
+                    full_signal['status'] = signal['status']
+                    full_signal['channel_id'] = signal['channel_id']
+                    enriched_signals.append(full_signal)
 
-            total_signals = len(signals)
-            profit_count = len(profit_signals)
-            stoploss_count = len(stoploss_signals)
-            win_rate = (profit_count / total_signals * 100) if total_signals > 0 else 0
+            signals = enriched_signals
 
+            # Get channel names for categorization
+            from utils.config_loader import config
+
+            # Load channels.json directly
+            import json
+            from pathlib import Path
+
+            channels_file = Path(__file__).resolve().parent.parent / 'config' / 'channels.json'
+            try:
+                with open(channels_file, 'r') as f:
+                    channels_data = json.load(f)
+                monitored_channels = channels_data.get('monitored_channels', {})
+            except Exception as e:
+                logger.warning(f"Could not load channels.json: {e}")
+                monitored_channels = {}
+
+            # Create reverse mapping: channel_id -> channel_name
+            channel_id_to_name = {str(channel_id): name for name, channel_id in monitored_channels.items()}
+
+            # Separate signals into PA and regular based on channel
+            pa_signals = []
+            regular_signals = []
+
+            for signal in signals:
+                channel_id = str(signal.get('channel_id', ''))
+                channel_name = channel_id_to_name.get(channel_id, '').lower()
+
+                # Check if it's a PA channel (contains 'pa' in name)
+                if any(x in channel_name for x in ['pa', 'price-action']):
+                    pa_signals.append(signal)
+                else:
+                    regular_signals.append(signal)
+
+            # Process regular signals
+            regular_profit = [s for s in regular_signals if s.get('status', '').lower() == 'profit']
+            regular_stoploss = [s for s in regular_signals if s.get('status', '').lower() in ['stoploss', 'stop_loss']]
+
+            # Process PA signals
+            pa_profit = [s for s in pa_signals if s.get('status', '').lower() == 'profit']
+            pa_stoploss = [s for s in pa_signals if s.get('status', '').lower() in ['stoploss', 'stop_loss']]
+
+            # Calculate overall statistics
+            total_regular = len([s for s in regular_signals if s.get('status', '').lower() in ['profit', 'stoploss', 'stop_loss']])
+            total_pa = len([s for s in pa_signals if s.get('status', '').lower() in ['profit', 'stoploss', 'stop_loss']])
+            total_signals = total_regular + total_pa
+
+            regular_profit_count = len(regular_profit)
+            regular_sl_count = len(regular_stoploss)
+            pa_profit_count = len(pa_profit)
+            pa_sl_count = len(pa_stoploss)
+
+            total_profit = regular_profit_count + pa_profit_count
+            total_sl = regular_sl_count + pa_sl_count
+
+            # Calculate win rates
+            regular_win_rate = (regular_profit_count / total_regular * 100) if total_regular > 0 else 0
+            pa_win_rate = (pa_profit_count / total_pa * 100) if total_pa > 0 else 0
+            overall_win_rate = (total_profit / total_signals * 100) if total_signals > 0 else 0
+
+            # Create embed
             embed = discord.Embed(
                 title=f"📊 {period.title()} Trading Report",
                 description=f"Performance summary for the current {period}",
-                color=0x00FF00 if win_rate >= 50 else 0xFF0000
+                color=0x00FF00 if overall_win_rate >= 50 else 0xFF0000
             )
 
             embed.add_field(
-                name="📅 Date Range",
+                name="Date Range",
                 value=f"{date_range['display_start']} - {date_range['display_end']}",
                 inline=False
             )
 
-            embed.add_field(
-                name="📈 Overview",
-                value=f"**Total Signals:** {total_signals}\n"
-                      f"**Win Rate:** {win_rate:.1f}%\n"
-                      f"**Profit:** {profit_count} ({profit_count/total_signals*100:.1f}%)\n"
-                      f"**Stop Loss:** {stoploss_count} ({stoploss_count/total_signals*100:.1f}%)",
-                inline=False
-            )
-
-            # Build profit trades list
-            if profit_signals:
-                profit_lines = []
-                for signal in profit_signals[:15]:
-                    first_limit = f" | {signal['limits'][0]}" if signal.get('limits') else ""
-                    profit_lines.append(
-                        f"#{signal['id']} | {signal['instrument']} | {signal['direction'].upper()}{first_limit} 🟢"
-                    )
-
-                profit_text = "\n".join(profit_lines)
-                if len(profit_signals) > 15:
-                    profit_text += f"\n... and {len(profit_signals) - 15} more"
-
+            # Regular Signals Section
+            if total_regular > 0:
                 embed.add_field(
-                    name=f"💰 Profited Trades ({profit_count})",
-                    value=profit_text,
-                    inline=False
+                    name="Regular Signals",
+                    value=f"**Total:** {total_regular} | **Win Rate:** {regular_win_rate:.1f}%\n"
+                          f"**Profit:** {regular_profit_count} | **Stop Loss:** {regular_sl_count}",
+                    inline=True
                 )
 
-            # Build stop loss trades list
-            if stoploss_signals:
-                sl_lines = []
-                for signal in stoploss_signals[:15]:
-                    sl_value = f" | {signal['stop_loss']}" if signal.get('stop_loss') else ""
-                    sl_lines.append(
-                        f"#{signal['id']} | {signal['instrument']} | {signal['direction'].upper()}{sl_value} 🛑"
+            # PA Signals Section
+            if total_pa > 0:
+                embed.add_field(
+                    name="PA Signals",
+                    value=f"**Total:** {total_pa} | **Win Rate:** {pa_win_rate:.1f}%\n"
+                          f"**Profit:** {pa_profit_count} | **Stop Loss:** {pa_sl_count}",
+                    inline=True
+                )
+
+            # Build REGULAR TRADES section (profit first, then stop loss)
+            if total_regular > 0:
+                trade_lines = []
+
+                # Add profit trades
+                for signal in regular_profit:
+                    # Format first limit with additional count
+                    limits = signal.get('limits', [])
+                    if limits:
+                        first_limit = format_price(limits[0]['price_level'], signal['instrument'])
+                        if len(limits) > 1:
+                            limit_display = f"{first_limit}, +{len(limits) - 1} more"
+                        else:
+                            limit_display = first_limit
+                    else:
+                        limit_display = "N/A"
+
+                    trade_lines.append(
+                        f"#{signal['id']} | {signal['instrument']} | {limit_display} | {signal['direction'].upper()} 🟢"
                     )
 
-                sl_text = "\n".join(sl_lines)
-                if len(stoploss_signals) > 15:
-                    sl_text += f"\n... and {len(stoploss_signals) - 15} more"
+                # Add stop loss trades
+                for signal in regular_stoploss:
+                    # Format stop loss
+                    sl_value = format_price(signal.get('stop_loss'), signal['instrument']) if signal.get('stop_loss') else "N/A"
+                    trade_lines.append(
+                        f"#{signal['id']} | {signal['instrument']} | SL: {sl_value} | {signal['direction'].upper()} 🛑"
+                    )
 
+                if trade_lines:
+                    trades_text = "\n".join(trade_lines)
+                    embed.add_field(
+                        name=f"Regular Trades ({total_regular})",
+                        value=trades_text,
+                        inline=False
+                    )
+
+            # Build PA TRADES section (profit first, then stop loss)
+            if total_pa > 0:
+                pa_trade_lines = []
+
+                # Add profit trades
+                for signal in pa_profit:
+                    # Format first limit with additional count
+                    limits = signal.get('limits', [])
+                    if limits:
+                        first_limit = format_price(limits[0]['price_level'], signal['instrument'])
+                        if len(limits) > 1:
+                            limit_display = f"{first_limit}, +{len(limits) - 1} more"
+                        else:
+                            limit_display = first_limit
+                    else:
+                        limit_display = "N/A"
+
+                    pa_trade_lines.append(
+                        f"#{signal['id']} | {signal['instrument']} | {limit_display} | {signal['direction'].upper()} 🟢"
+                    )
+
+                # Add stop loss trades
+                for signal in pa_stoploss:
+                    # Format stop loss
+                    sl_value = format_price(signal.get('stop_loss'), signal['instrument']) if signal.get('stop_loss') else "N/A"
+                    pa_trade_lines.append(
+                        f"#{signal['id']} | {signal['instrument']} | SL: {sl_value} | {signal['direction'].upper()} 🛑"
+                    )
+
+                if pa_trade_lines:
+                    pa_trades_text = "\n".join(pa_trade_lines)
+                    embed.add_field(
+                        name=f"PA Trades ({total_pa})",
+                        value=pa_trades_text,
+                        inline=False
+                    )
+
+            # Add live proof link from profit_channel
+            profit_channel_id = channels_data.get('profit_channel')
+            if profit_channel_id:
+                profit_channel_url = f"https://discord.com/channels/{ctx.guild.id}/{profit_channel_id}"
                 embed.add_field(
-                    name=f"🛑 Stop Loss Trades ({stoploss_count})",
-                    value=sl_text,
+                    name="Live Proof",
+                    value=f"{profit_channel_url}",
                     inline=False
                 )
 
