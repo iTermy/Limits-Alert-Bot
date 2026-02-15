@@ -91,6 +91,70 @@ class MessageHandler:
         # Check for reply-to-alert management
         await self.check_alert_management_reply(message)
 
+    async def _react_to_original_signal(self, signal: dict, action_taken: str):
+        """
+        Add a reaction to the original signal message based on the action taken
+
+        Args:
+            signal: Signal dictionary containing message_id and channel_id
+            action_taken: The action that was performed (e.g., "cancelled", "marked as PROFIT")
+        """
+        try:
+            # Get the original message ID and channel ID
+            message_id = signal.get('message_id')
+            channel_id = signal.get('channel_id')
+
+            # Skip if this is a manual signal or missing info
+            if not message_id or not channel_id or str(message_id).startswith('manual_'):
+                self.logger.debug(f"Skipping original message reaction - manual signal or missing IDs")
+                return
+
+            # Fetch the original signal message
+            try:
+                channel = self.bot.get_channel(int(channel_id))
+                if not channel:
+                    # Try fetching the channel
+                    channel = await self.bot.fetch_channel(int(channel_id))
+
+                if not channel:
+                    self.logger.warning(f"Could not find channel {channel_id} for original signal")
+                    return
+
+                original_message = await channel.fetch_message(int(message_id))
+
+            except discord.NotFound:
+                self.logger.warning(f"Original signal message {message_id} not found")
+                return
+            except discord.Forbidden:
+                self.logger.warning(f"No permission to access message {message_id}")
+                return
+            except Exception as e:
+                self.logger.error(f"Error fetching original message: {e}")
+                return
+
+            # Add the appropriate reaction based on action
+            if action_taken == "cancelled":
+                await self.safe_add_reaction(original_message, "❌")
+            elif action_taken == "marked as PROFIT":
+                await self.safe_add_reaction(original_message, "💰")
+            elif action_taken == "marked as BREAKEVEN":
+                await self.safe_add_reaction(original_message, "➖")
+            elif action_taken == "marked as STOP LOSS":
+                await self.safe_add_reaction(original_message, "🛑")
+            elif action_taken == "reactivated":
+                # Remove the X and add check and recycle
+                try:
+                    await original_message.remove_reaction("❌", self.bot.user)
+                except:
+                    pass
+                await self.safe_add_reaction(original_message, "♻️")
+
+            self.logger.info(f"Added reaction to original signal message {message_id} for action: {action_taken}")
+
+        except Exception as e:
+            # Don't fail the whole operation if reaction fails
+            self.logger.error(f"Error adding reaction to original signal: {e}", exc_info=True)
+
     async def check_alert_management_reply(self, message: discord.Message):
         """
         Check if message is a reply to an alert message to manage a signal
@@ -287,6 +351,31 @@ class MessageHandler:
 
             if success and action_taken:
                 logger.info(f"Successfully processed command, sending confirmation")
+
+                # Update reactions on alert message (referenced message)
+                if action_taken == "cancelled":
+                    try:
+                        await referenced.remove_reaction("✅", self.bot.user)
+                    except:
+                        pass  # Reaction might not exist
+                    await referenced.add_reaction("❌")
+                elif action_taken == "marked as PROFIT":
+                    await referenced.add_reaction("💰")
+                elif action_taken == "marked as BREAKEVEN":
+                    await referenced.add_reaction("➖")
+                elif action_taken == "marked as STOP LOSS":
+                    await referenced.add_reaction("🛑")
+                elif action_taken == "reactivated":
+                    try:
+                        await referenced.remove_reaction("❌", self.bot.user)
+                    except:
+                        pass
+                    await referenced.add_reaction("✅")
+                    await referenced.add_reaction("♻️")
+
+                # ALSO react to the original signal message
+                await self._react_to_original_signal(signal, action_taken)
+
                 # React to the command message
                 await message.add_reaction("👍")
 
