@@ -3,13 +3,20 @@ pattern_parsers.py
 Channel-specific pattern-based parsers for trading signals
 """
 import re
-import MetaTrader5 as mt5
 from typing import Optional, List, Set, Dict
 from utils.logger import get_logger
 from . import ParsedSignal, INSTRUMENT_MAPPINGS
 from .validators import validate_signal
 
 logger = get_logger("parser.pattern_parsers")
+
+# Optional import for stock parsing
+try:
+    import MetaTrader5 as mt5
+    MT5_AVAILABLE = True
+except ImportError:
+    MT5_AVAILABLE = False
+    logger.warning("MetaTrader5 not available - stock parsing will be disabled")
 
 # ============================================================================
 # CONSTANTS
@@ -349,8 +356,32 @@ def extract_keywords(text: str) -> List[str]:
     return keywords
 
 
-def determine_limits_and_stop(numbers: List[float], direction: str) -> tuple:
-    """Determine which numbers are limits and which is stop loss"""
+def determine_limits_and_stop(numbers: List[float], direction: str,
+                             channel_name: str = None) -> tuple:
+    """
+    Determine which numbers are limits and which is stop loss
+
+    Special handling for tolls channel:
+    - All numbers are treated as limits
+    - Stop loss is automatically set to 0 (long) or 99999 (short)
+    """
+    # Check if this is the tolls channel
+    is_tolls_channel = channel_name and 'toll' in channel_name.lower()
+
+    if is_tolls_channel:
+        # For tolls channel: all numbers are limits, auto-set stop loss
+        if len(numbers) < 1:
+            return None, None
+
+        limits = numbers
+        # Set automatic stop loss based on direction
+        stop_loss = 0.0 if direction == 'long' else 99999.0
+
+        logger.debug(f"Tolls channel: Using all {len(limits)} number(s) as limits, "
+                    f"auto-setting stop to {stop_loss} for {direction}")
+        return limits, stop_loss
+
+    # Normal channel logic (requires at least 2 numbers)
     if len(numbers) < 2:
         return None, None
 
@@ -416,9 +447,17 @@ class CorePatternParser:
 
             # Extract numbers
             numbers = extract_numbers(cleaned)
-            if len(numbers) < 2:
+
+            # Check if this is the tolls channel
+            is_tolls_channel = channel_name and 'toll' in channel_name.lower()
+
+            # For tolls channel, allow single number (just a limit, no stop)
+            # For regular channels, require at least 2 numbers (limits + stop)
+            min_numbers = 1 if is_tolls_channel else 2
+
+            if len(numbers) < min_numbers:
                 if not _internal_call:
-                    logger.debug("Not enough numbers found")
+                    logger.debug(f"Not enough numbers found (need {min_numbers}, got {len(numbers)})")
                 return None
 
             # Extract instrument
@@ -442,8 +481,8 @@ class CorePatternParser:
                     logger.debug("No direction found")
                 return None
 
-            # Determine limits and stop loss
-            limits, stop_loss = determine_limits_and_stop(numbers, direction)
+            # Determine limits and stop loss (pass channel_name for tolls handling)
+            limits, stop_loss = determine_limits_and_stop(numbers, direction, channel_name)
             if not limits or stop_loss is None:
                 if not _internal_call:
                     logger.debug("Could not determine limits and stop loss")
@@ -502,6 +541,10 @@ class StockPatternParser:
 
     def _initialize_mt5(self):
         """Initialize MT5 connection for symbol checking"""
+        if not MT5_AVAILABLE:
+            logger.warning("MT5 module not available, stock parsing disabled")
+            return
+
         try:
             if not mt5.initialize():
                 logger.warning("MT5 initialization failed, stock parsing disabled")
@@ -557,8 +600,8 @@ class StockPatternParser:
             if not direction:
                 return None
 
-            # Determine limits and stop loss
-            limits, stop_loss = determine_limits_and_stop(numbers, direction)
+            # Determine limits and stop loss (pass channel_name for tolls handling)
+            limits, stop_loss = determine_limits_and_stop(numbers, direction, channel_name)
             if not limits or stop_loss is None:
                 return None
 

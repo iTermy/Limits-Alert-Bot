@@ -14,7 +14,7 @@ logger = get_logger("parser.validators")
 
 # Step 1: Check if message is a signal
 def is_potential_signal(message: str, trading_keywords: List[str],
-                        instrument_mappings: dict) -> bool:
+                        instrument_mappings: dict, channel_name: str = None) -> bool:
     """
     Check if message could be a trading signal
 
@@ -22,6 +22,7 @@ def is_potential_signal(message: str, trading_keywords: List[str],
         message: The message to check
         trading_keywords: List of trading-related keywords
         instrument_mappings: Dictionary of instrument mappings
+        channel_name: Discord channel name (for tolls channel detection)
 
     Returns:
         True if message appears to be a signal
@@ -31,7 +32,15 @@ def is_potential_signal(message: str, trading_keywords: List[str],
     text = _remove_index_symbols(message)
 
     numbers = _extract_numbers(text)
-    if len(numbers) < 2:
+
+    # Check if this is the tolls channel
+    is_tolls_channel = channel_name and 'toll' in channel_name.lower()
+
+    # For tolls channel, allow single number (just a limit)
+    # For regular channels, require at least 2 numbers (limits + stop)
+    min_numbers = 1 if is_tolls_channel else 2
+
+    if len(numbers) < min_numbers:
         return False
 
     # Check for trading-related keywords

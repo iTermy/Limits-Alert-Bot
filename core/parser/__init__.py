@@ -167,7 +167,7 @@ class EnhancedSignalParser:
         logger.debug(f"Message: {message[:100]}...")
 
         # Step 1: Pre-validation - is this a potential signal?
-        if not is_potential_signal(message, TRADING_KEYWORDS, INSTRUMENT_MAPPINGS):
+        if not is_potential_signal(message, TRADING_KEYWORDS, INSTRUMENT_MAPPINGS, channel_name):
             logger.debug(f"Not a potential signal: {message[:50]}...")
             return None
 
