@@ -418,6 +418,8 @@ class StreamingPriceMonitor:
                 spread=spread,
                 spread_buffer_enabled=spread_buffer_enabled
             )
+            # Add reaction to original signal message for limit hit
+            await self._react_to_original_signal(signal, "🎯")
             await self._process_limit_hit(signal, limit, current_price)
 
             # CRITICAL: Update in-memory flag immediately
@@ -459,6 +461,64 @@ class StreamingPriceMonitor:
                     # CRITICAL: Update in-memory flag
                     limit['approaching_alert_sent'] = True
 
+    async def _react_to_original_signal(self, signal: Dict, emoji: str):
+        """
+        Add a reaction to the original signal message
+
+        Args:
+            signal: Signal dictionary containing message_id and channel_id
+            emoji: The emoji to add as a reaction
+        """
+        try:
+            # Get the original message ID and channel ID
+            message_id = signal.get('message_id')
+            channel_id = signal.get('channel_id')
+
+            # Skip if this is a manual signal or missing info
+            if not message_id or not channel_id or str(message_id).startswith('manual_'):
+                logger.debug(f"Skipping original message reaction - manual signal or missing IDs")
+                return
+
+            # Fetch the original signal message
+            try:
+                channel = self.bot.get_channel(int(channel_id))
+                if not channel:
+                    # Try fetching the channel
+                    channel = await self.bot.fetch_channel(int(channel_id))
+
+                if not channel:
+                    logger.warning(f"Could not find channel {channel_id} for original signal")
+                    return
+
+                original_message = await channel.fetch_message(int(message_id))
+
+            except discord.NotFound:
+                logger.warning(f"Original signal message {message_id} not found")
+                return
+            except discord.Forbidden:
+                logger.warning(f"No permission to access message {message_id}")
+                return
+            except Exception as e:
+                logger.error(f"Error fetching original message: {e}")
+                return
+
+            # Add the reaction
+            try:
+                await original_message.add_reaction(emoji)
+                logger.info(f"Added {emoji} reaction to original signal message {message_id}")
+            except discord.NotFound:
+                logger.warning(f"Could not add reaction to message {message_id} - message not found")
+            except discord.Forbidden:
+                logger.warning(f"Could not add reaction to message {message_id} - missing permissions")
+            except discord.HTTPException as e:
+                logger.warning(f"Could not add reaction to message {message_id} - HTTP error: {e}")
+            except Exception as e:
+                logger.error(f"Unexpected error adding reaction: {e}", exc_info=False)
+
+        except Exception as e:
+            # Don't fail the whole operation if reaction fails
+            logger.error(f"Error adding reaction to original signal: {e}", exc_info=True)
+
     async def _check_stop_loss(self, signal: Dict, current_price: float, direction: str):
         """
         Check if stop loss is hit
@@ -480,6 +540,8 @@ class StreamingPriceMonitor:
         if is_hit:
             # Stop loss alerts never show spread
             await self.alert_system.send_stop_loss_alert(signal, current_price)
+            # Add reaction to original signal message
+            await self._react_to_original_signal(signal, "🛑")
             await self._process_stop_loss_hit(signal)
             self.stats['stop_losses_hit'] += 1
 
