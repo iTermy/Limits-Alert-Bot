@@ -5,5 +5,13 @@
   "connection_timeout": 30,
   "alert_cooldown_minutes": 5,
   "cleanup_days": 30,
-  "debug_mode": true
+  "debug_mode": true,
+  "spread_buffer_enabled": true,
+  "spread_buffer_config": {
+    "apply_to_approaching": true,
+    "apply_to_hit": true,
+    "apply_to_stop_loss": false,
+    "fallback_spread": 0.0,
+    "log_buffer_usage": true
+  }
 }

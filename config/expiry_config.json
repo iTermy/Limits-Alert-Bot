@@ -1,0 +1,14 @@
+{
+  "session_times": {
+    "forex": {
+      "daily_close": "17:00",
+      "timezone": "America/New_York"
+    },
+    "commodity": {
+      "daily_close": "14:30",
+      "timezone": "America/New_York"
+    }
+  },
+  "expiry_check_interval": 300,
+  "default_expiry_type": "day_end"
+}

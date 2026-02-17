@@ -46,6 +46,12 @@ class MessageHandler:
                     self._allowed_channels.add(int(self.bot.channels_config['alert_channel']))
                 if 'command_channel' in self.bot.channels_config:
                     self._allowed_channels.add(int(self.bot.channels_config['command_channel']))
+                # NEW: Add PA alert channel
+                if 'pa-alert-channel' in self.bot.channels_config:
+                    self._allowed_channels.add(int(self.bot.channels_config['pa-alert-channel']))
+                # NEW: Add toll alert channel
+                if 'toll-alert-channel' in self.bot.channels_config:
+                    self._allowed_channels.add(int(self.bot.channels_config['toll-alert-channel']))
 
         return self._allowed_channels
 
@@ -87,6 +93,70 @@ class MessageHandler:
 
         # Check for reply-to-alert management
         await self.check_alert_management_reply(message)
+
+    async def _react_to_original_signal(self, signal: dict, action_taken: str):
+        """
+        Add a reaction to the original signal message based on the action taken
+
+        Args:
+            signal: Signal dictionary containing message_id and channel_id
+            action_taken: The action that was performed (e.g., "cancelled", "marked as PROFIT")
+        """
+        try:
+            # Get the original message ID and channel ID
+            message_id = signal.get('message_id')
+            channel_id = signal.get('channel_id')
+
+            # Skip if this is a manual signal or missing info
+            if not message_id or not channel_id or str(message_id).startswith('manual_'):
+                self.logger.debug(f"Skipping original message reaction - manual signal or missing IDs")
+                return
+
+            # Fetch the original signal message
+            try:
+                channel = self.bot.get_channel(int(channel_id))
+                if not channel:
+                    # Try fetching the channel
+                    channel = await self.bot.fetch_channel(int(channel_id))
+
+                if not channel:
+                    self.logger.warning(f"Could not find channel {channel_id} for original signal")
+                    return
+
+                original_message = await channel.fetch_message(int(message_id))
+
+            except discord.NotFound:
+                self.logger.warning(f"Original signal message {message_id} not found")
+                return
+            except discord.Forbidden:
+                self.logger.warning(f"No permission to access message {message_id}")
+                return
+            except Exception as e:
+                self.logger.error(f"Error fetching original message: {e}")
+                return
+
+            # Add the appropriate reaction based on action
+            if action_taken == "cancelled":
+                await self.safe_add_reaction(original_message, "❌")
+            elif action_taken == "marked as PROFIT":
+                await self.safe_add_reaction(original_message, "💰")
+            elif action_taken == "marked as BREAKEVEN":
+                await self.safe_add_reaction(original_message, "➖")
+            elif action_taken == "marked as STOP LOSS":
+                await self.safe_add_reaction(original_message, "🛑")
+            elif action_taken == "reactivated":
+                # Remove the X and add check and recycle
+                try:
+                    await original_message.remove_reaction("❌", self.bot.user)
+                except:
+                    pass
+                await self.safe_add_reaction(original_message, "♻️")
+
+            self.logger.info(f"Added reaction to original signal message {message_id} for action: {action_taken}")
+
+        except Exception as e:
+            # Don't fail the whole operation if reaction fails
+            self.logger.error(f"Error adding reaction to original signal: {e}", exc_info=True)
 
     async def check_alert_management_reply(self, message: discord.Message):
         """
@@ -191,19 +261,29 @@ class MessageHandler:
                     action_taken = "cancelled"
                     logger.debug(f"Cancel result: {success}")
 
-                elif command in ("profit", "win", "tp", "hit"):
+
+                elif command in ("profit", "win", "tp"):
                     logger.debug(f"Processing profit command for signal {signal_id}")
                     success = await asyncio.wait_for(
                         self.signal_db.manually_set_signal_status(
                             signal_id, 'profit', f"Set via alert reply by {message.author.name}"
+
                         ),
                         timeout=5.0
                     )
                     action_taken = "marked as PROFIT"
-
                     # Send profit alert to profit channel if successful
                     if success:
                         await self.send_profit_alert(signal, message.author, profit_amount)
+                elif command in ("hit",):
+                    logger.debug(f"Processing hit command for signal {signal_id}")
+                    success = await asyncio.wait_for(
+                        self.signal_db.manually_set_signal_status(
+                            signal_id, 'hit', f"Set via alert reply by {message.author.name}"
+                        ),
+                        timeout=5.0
+                    )
+                    action_taken = "marked as HIT"
 
                 elif command in ("breakeven", "be"):
                     logger.debug(f"Processing breakeven command for signal {signal_id}")
@@ -274,6 +354,31 @@ class MessageHandler:
 
             if success and action_taken:
                 logger.info(f"Successfully processed command, sending confirmation")
+
+                # Update reactions on alert message (referenced message)
+                if action_taken == "cancelled":
+                    try:
+                        await referenced.remove_reaction("✅", self.bot.user)
+                    except:
+                        pass  # Reaction might not exist
+                    await referenced.add_reaction("❌")
+                elif action_taken == "marked as PROFIT":
+                    await referenced.add_reaction("💰")
+                elif action_taken == "marked as BREAKEVEN":
+                    await referenced.add_reaction("➖")
+                elif action_taken == "marked as STOP LOSS":
+                    await referenced.add_reaction("🛑")
+                elif action_taken == "reactivated":
+                    try:
+                        await referenced.remove_reaction("❌", self.bot.user)
+                    except:
+                        pass
+                    await referenced.add_reaction("✅")
+                    await referenced.add_reaction("♻️")
+
+                # ALSO react to the original signal message
+                await self._react_to_original_signal(signal, action_taken)
+
                 # React to the command message
                 await message.add_reaction("👍")
 
@@ -295,6 +400,8 @@ class MessageHandler:
 
                 embed.set_footer(text=f"Via alert reply")
 
+                # Send role ping before embed (similar to limit hit alerts)
+                await message.channel.send("<@&1334203997107650662>")
                 await message.channel.send(embed=embed)
 
                 logger.info(f"Signal {signal_id} {action_taken} via alert reply by {message.author.name}")
@@ -588,6 +695,16 @@ class MessageHandler:
             parsed = parse_signal(message.content, channel_name)
 
             if parsed:
+                # Special handling for toll signals - set stop loss to impossible values
+                # so they effectively have no stop loss
+                if channel_name and 'toll' in channel_name.lower():
+                    if parsed.direction.lower() == 'long':
+                        parsed.stop_loss = 0
+                        self.logger.info(f"Toll signal detected (long) - setting stop_loss to 0 (effectively no SL)")
+                    else:  # short
+                        parsed.stop_loss = 99999
+                        self.logger.info(f"Toll signal detected (short) - setting stop_loss to 99999 (effectively no SL)")
+
                 success, signal_id = await self.signal_db.save_signal(
                     parsed,
                     str(message.id),
@@ -654,6 +771,15 @@ class MessageHandler:
         parsed = parse_signal(after.content, channel_name)
 
         if parsed:
+            # Special handling for toll signals - set stop loss to impossible values
+            if channel_name and 'toll' in channel_name.lower():
+                if parsed.direction.lower() == 'long':
+                    parsed.stop_loss = 0
+                    self.logger.info(f"Toll signal edit detected (long) - setting stop_loss to 0")
+                else:  # short
+                    parsed.stop_loss = 99999
+                    self.logger.info(f"Toll signal edit detected (short) - setting stop_loss to 99999")
+
             success = await self.signal_db.update_signal_from_edit(str(after.id), parsed)
 
             if success:

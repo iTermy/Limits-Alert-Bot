@@ -1,12 +1,13 @@
 """
 Alert System - Handles all alert generation and sending for the price monitor
 Enhanced with message ID tracking for reply-based status management
+ENHANCED: Shows spread value in alerts when spread buffer is enabled
 """
 
 import asyncio
 import logging
 from typing import Dict, Optional
-from datetime import datetime
+from datetime import datetime, timezone
 from enum import Enum
 import discord
 
@@ -33,6 +34,7 @@ class AlertSystem:
     - Handles limit hit and stop loss alerts
     - Tracks alert statistics
     - Stores alert message IDs for reply-based management
+    - Shows spread value when spread buffer is enabled
     """
 
     def __init__(self, alert_channel: Optional[discord.TextChannel] = None, bot=None):
@@ -44,6 +46,11 @@ class AlertSystem:
             bot: Discord bot instance for fetching channels
         """
         self.alert_channel = alert_channel
+        self.pa_alert_channel = None
+        self.toll_alert_channel = None
+        self._load_pa_channels()
+        self._load_toll_channels()
+
         self.bot = bot
 
         # Alert message tracking - maps alert message ID to signal ID
@@ -63,6 +70,110 @@ class AlertSystem:
         """Update the alert channel"""
         self.alert_channel = channel
         logger.info(f"Alert channel set to #{channel.name} ({channel.id})")
+
+    def _load_pa_channels(self):
+        """Load PA channel IDs from config"""
+        try:
+            from pathlib import Path
+            import json
+
+            config_path = Path(__file__).parent.parent / 'config' / 'channels.json'
+            with open(config_path, 'r') as f:
+                config = json.load(f)
+
+            # Get PA channel IDs
+            monitored = config.get('monitored_channels', {})
+            self.pa_channel_ids = set()
+
+            for channel_name, channel_id in monitored.items():
+                if 'pa' in channel_name.lower() or 'price-action' in channel_name.lower():
+                    self.pa_channel_ids.add(str(channel_id))
+
+            logger.info(f"Loaded {len(self.pa_channel_ids)} PA channel IDs: {self.pa_channel_ids}")
+
+        except Exception as e:
+            logger.error(f"Failed to load PA channels: {e}")
+            self.pa_channel_ids = set()
+
+    def _load_toll_channels(self):
+        """Load toll channel IDs from config"""
+        try:
+            from pathlib import Path
+            import json
+
+            config_path = Path(__file__).parent.parent / 'config' / 'channels.json'
+            with open(config_path, 'r') as f:
+                config = json.load(f)
+
+            # Get toll channel IDs
+            monitored = config.get('monitored_channels', {})
+            self.toll_channel_ids = set()
+
+            for channel_name, channel_id in monitored.items():
+                if 'toll' in channel_name.lower():
+                    self.toll_channel_ids.add(str(channel_id))
+
+            logger.info(f"Loaded {len(self.toll_channel_ids)} toll channel IDs: {self.toll_channel_ids}")
+
+        except Exception as e:
+            logger.error(f"Failed to load toll channels: {e}")
+            self.toll_channel_ids = set()
+
+    def set_pa_channel(self, channel: discord.TextChannel):
+        """Set the PA alert channel"""
+        self.pa_alert_channel = channel
+        logger.info(f"PA alert channel set: #{channel.name} ({channel.id})")
+
+    def set_toll_channel(self, channel: discord.TextChannel):
+        """Set the toll alert channel"""
+        self.toll_alert_channel = channel
+        logger.info(f"Toll alert channel set: #{channel.name} ({channel.id})")
+
+    def is_pa_signal(self, signal: Dict) -> bool:
+        """Check if signal originated from a PA channel"""
+        channel_id = str(signal.get('channel_id', ''))
+        is_pa = channel_id in self.pa_channel_ids
+        if is_pa:
+            logger.debug(f"Signal {signal.get('signal_id')} identified as PA signal (channel: {channel_id})")
+        return is_pa
+
+    def is_toll_signal(self, signal: Dict) -> bool:
+        """Check if signal originated from a toll channel"""
+        channel_id = str(signal.get('channel_id', ''))
+        is_toll = channel_id in self.toll_channel_ids
+        if is_toll:
+            logger.debug(f"Signal {signal.get('signal_id')} identified as toll signal (channel: {channel_id})")
+        return is_toll
+
+    def _get_alert_channel(self, signal: Dict) -> discord.TextChannel:
+        """
+        Determine which alert channel to use based on signal source
+
+        Args:
+            signal: Signal dictionary with channel_id
+
+        Returns:
+            Alert channel to use
+        """
+        # Check toll signals first (more specific)
+        if self.is_toll_signal(signal):
+            if self.toll_alert_channel:
+                logger.debug(f"Routing to toll alert channel for signal {signal.get('signal_id')}")
+                return self.toll_alert_channel
+            else:
+                logger.warning(f"Toll signal detected but no toll alert channel configured, using main channel")
+                return self.alert_channel
+
+        # Check PA signals
+        if self.is_pa_signal(signal):
+            if self.pa_alert_channel:
+                logger.debug(f"Routing to PA alert channel for signal {signal.get('signal_id')}")
+                return self.pa_alert_channel
+            else:
+                logger.warning(f"PA signal detected but no PA alert channel configured, using main channel")
+                return self.alert_channel
+
+        return self.alert_channel
 
     def _format_price(self, price: float) -> str:
         """Format price with appropriate decimal places"""
@@ -110,7 +221,9 @@ class AlertSystem:
         """
         return self.alert_messages.get(str(message_id))
 
-    async def send_approaching_alert(self, signal: Dict, limit: Dict, current_price: float, distance_pips: float) -> bool:
+    async def send_approaching_alert(self, signal: Dict, limit: Dict, current_price: float,
+                                    distance_formatted: str, spread: float = None,
+                                    spread_buffer_enabled: bool = False) -> bool:
         """
         Send alert for approaching limit
         ONLY sends for the FIRST limit (sequence_number == 1)
@@ -120,12 +233,16 @@ class AlertSystem:
             limit: Limit dictionary with sequence_number
             current_price: Current market price
             distance_pips: Distance to limit in pips
+            spread: Current spread value (optional)
+            spread_buffer_enabled: Whether spread buffer is enabled
 
         Returns:
             True if alert was sent successfully
         """
-        if not self.alert_channel:
-            logger.warning("No alert channel configured")
+        target_channel = self._get_alert_channel(signal)
+
+        if not target_channel:
+            logger.error("No alert channel configured")
             return False
 
         # ONLY send approaching alert for the first limit
@@ -139,23 +256,31 @@ class AlertSystem:
                 title="🟡 First Limit Approaching",
                 description=f"**{signal['instrument']}** {signal['direction'].upper()}",
                 color=0xFFA500,  # Orange
-                timestamp=datetime.utcnow()
+                timestamp=datetime.now(timezone.utc)
             )
 
             # Add fields
             embed.add_field(
-                name="Limit Details",
+                name="Limit Details:",
                 value=f"Limit #{limit['sequence_number']}: {self._format_price(limit['price_level'])}",
                 inline=False
             )
+
+            # Current price with optional spread
+            if spread_buffer_enabled and spread and spread > 0:
+                price_display = f"{self._format_price(current_price + spread)}"
+            else:
+                price_display = self._format_price(current_price)
+
             embed.add_field(
                 name="Current Price",
-                value=self._format_price(current_price),
+                value=price_display,
                 inline=True
             )
+
             embed.add_field(
                 name="Distance",
-                value=f"{distance_pips:.1f} pips",
+                value=distance_formatted,
                 inline=True
             )
             embed.add_field(
@@ -167,17 +292,6 @@ class AlertSystem:
             # Add message link if available
             if signal.get('message_id') and signal.get('channel_id'):
                 if not str(signal['message_id']).startswith('manual_'):
-                    # Get channel name
-                    channel_name = "unknown-channel"
-                    try:
-                        # Try to get channel from cache first, then fetch if needed
-                        channel = self.bot.get_channel(int(signal['channel_id']))
-                        if not channel:
-                            channel = await self.bot.fetch_channel(int(signal['channel_id']))
-                        channel_name = channel.name
-                    except Exception as e:
-                        logger.debug(f"Could not get channel name for {signal['channel_id']}: {e}")
-
                     # Get guild ID from the bot's first guild if not provided
                     guild_id = signal.get('guild_id')
                     if not guild_id and self.bot.guilds:
@@ -192,8 +306,8 @@ class AlertSystem:
 
             embed.set_footer(text=f"Signal #{signal['signal_id']} • Reply to manage")
 
-            await self.alert_channel.send("<@&1334203997107650662>")
-            message = await self.alert_channel.send(embed=embed)
+            await target_channel.send("<@&1334203997107650662>")
+            message = await target_channel.send(embed=embed)
 
             # Track this alert message
             self.track_alert_message(message.id, signal['signal_id'])
@@ -210,7 +324,8 @@ class AlertSystem:
             self.stats['errors'] += 1
             return False
 
-    async def send_limit_hit_alert(self, signal: Dict, limit: Dict, current_price: float) -> bool:
+    async def send_limit_hit_alert(self, signal: Dict, limit: Dict, current_price: float,
+                                   spread: float = None, spread_buffer_enabled: bool = False) -> bool:
         """
         Send alert for limit hit
 
@@ -218,12 +333,16 @@ class AlertSystem:
             signal: Signal dictionary
             limit: Limit dictionary
             current_price: Current market price
+            spread: Current spread value (optional)
+            spread_buffer_enabled: Whether spread buffer is enabled
 
         Returns:
             True if alert was sent successfully
         """
-        if not self.alert_channel:
-            logger.warning("No alert channel configured")
+        target_channel = self._get_alert_channel(signal)
+
+        if not target_channel:
+            logger.error("No alert channel configured")
             return False
 
         try:
@@ -239,18 +358,25 @@ class AlertSystem:
                 title=title,
                 description=f"**{signal['instrument']}** {signal['direction'].upper()}",
                 color=0x00FF00,  # Green
-                timestamp=datetime.utcnow()
+                timestamp=datetime.now(timezone.utc)
             )
 
-            # Add fields
+            # Add limit price
             embed.add_field(
-                name="Limit Hit",
+                name="Limit Hit:",
                 value=f"Limit #{limit['sequence_number']}: {self._format_price(limit['price_level'])}",
                 inline=False
             )
+
+            # Hit price with optional spread
+            if spread_buffer_enabled and spread and spread > 0:
+                price_display = f"{self._format_price(current_price + spread)}"
+            else:
+                price_display = self._format_price(current_price)
+
             embed.add_field(
                 name="Hit Price",
-                value=self._format_price(current_price),
+                value=price_display,
                 inline=True
             )
 
@@ -267,17 +393,6 @@ class AlertSystem:
             # Add message link if available
             if signal.get('message_id') and signal.get('channel_id'):
                 if not str(signal['message_id']).startswith('manual_'):
-                    # Get channel name
-                    channel_name = "unknown-channel"
-                    try:
-                        # Try to get channel from cache first, then fetch if needed
-                        channel = self.bot.get_channel(int(signal['channel_id']))
-                        if not channel:
-                            channel = await self.bot.fetch_channel(int(signal['channel_id']))
-                        channel_name = channel.name
-                    except Exception as e:
-                        logger.debug(f"Could not get channel name for {signal['channel_id']}: {e}")
-
                     # Get guild ID from the bot's first guild if not provided
                     guild_id = signal.get('guild_id')
                     if not guild_id and self.bot.guilds:
@@ -306,8 +421,8 @@ class AlertSystem:
 
             embed.set_footer(text=f"Signal #{signal['signal_id']} • Reply to manage")
 
-            await self.alert_channel.send("<@&1334203997107650662>")
-            message = await self.alert_channel.send(embed=embed)
+            await target_channel.send("<@&1334203997107650662>")
+            message = await target_channel.send(embed=embed)
 
             # Track this alert message
             self.track_alert_message(message.id, signal['signal_id'])
@@ -327,6 +442,7 @@ class AlertSystem:
     async def send_stop_loss_alert(self, signal: Dict, current_price: float) -> bool:
         """
         Send alert for stop loss hit
+        NOTE: Stop loss alerts NEVER show spread (exact prices only)
 
         Args:
             signal: Signal dictionary
@@ -335,8 +451,10 @@ class AlertSystem:
         Returns:
             True if alert was sent successfully
         """
-        if not self.alert_channel:
-            logger.warning("No alert channel configured")
+        target_channel = self._get_alert_channel(signal)
+
+        if not target_channel:
+            logger.error("No alert channel configured")
             return False
 
         try:
@@ -344,43 +462,24 @@ class AlertSystem:
                 title="🛑 Stop Loss Hit!",
                 description=f"**{signal['instrument']}** {signal['direction'].upper()}",
                 color=0xFF0000,  # Red
-                timestamp=datetime.utcnow()
+                timestamp=datetime.now(timezone.utc)
             )
 
-            # Add fields
+            # Add fields - NO SPREAD for stop loss
             embed.add_field(
                 name="Stop Loss Level",
                 value=self._format_price(signal['stop_loss']),
-                inline=True
+                inline=False
             )
             embed.add_field(
                 name="Hit Price",
                 value=self._format_price(current_price),
-                inline=True
+                inline=False
             )
-
-            # Show progress
-            if 'limits_hit' in signal and 'total_limits' in signal:
-                embed.add_field(
-                    name="Limits Hit Before SL",
-                    value=f"{signal['limits_hit']}/{signal['total_limits']}",
-                    inline=True
-                )
 
             # Add message link if available
             if signal.get('message_id') and signal.get('channel_id'):
                 if not str(signal['message_id']).startswith('manual_'):
-                    # Get channel name
-                    channel_name = "unknown-channel"
-                    try:
-                        # Try to get channel from cache first, then fetch if needed
-                        channel = self.bot.get_channel(int(signal['channel_id']))
-                        if not channel:
-                            channel = await self.bot.fetch_channel(int(signal['channel_id']))
-                        channel_name = channel.name
-                    except Exception as e:
-                        logger.debug(f"Could not get channel name for {signal['channel_id']}: {e}")
-
                     # Get guild ID from the bot's first guild if not provided
                     guild_id = signal.get('guild_id')
                     if not guild_id and self.bot.guilds:
@@ -402,8 +501,8 @@ class AlertSystem:
 
             embed.set_footer(text=f"Signal #{signal['signal_id']} • Status changed to STOP_LOSS • Reply to manage")
 
-            await self.alert_channel.send("<@&1334203997107650662>")
-            message = await self.alert_channel.send(embed=embed)
+            await target_channel.send("<@&1334203997107650662>")
+            message = await target_channel.send(embed=embed)
 
             # Track this alert message
             self.track_alert_message(message.id, signal['signal_id'])

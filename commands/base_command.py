@@ -15,7 +15,6 @@ class BaseCog(commands.Cog):
         self.signal_db = bot.signal_db
 
     def is_admin(self, user: discord.User) -> bool:
-        """Check if user is an admin"""
         if hasattr(user, 'guild_permissions'):
             return user.id in self.bot.admin_ids or user.guild_permissions.administrator
         return user.id in self.bot.admin_ids

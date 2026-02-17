@@ -114,10 +114,8 @@ class TradingBot(commands.Bot):
     async def load_extensions(self):
         """Load all command cogs"""
         extensions = [
-            'commands.general_commands',
-            'commands.signal_commands',
-            'commands.admin_commands',
-            'commands.feed_commands'
+            'commands.bot_commands',
+            'commands.signal_commands'
         ]
 
         for extension in extensions:
@@ -174,6 +172,10 @@ class TradingBot(commands.Bot):
                     allowed_channels.add(int(self.channels_config['alert_channel']))
                 if 'command_channel' in self.channels_config:
                     allowed_channels.add(int(self.channels_config['command_channel']))
+                if 'pa-alert-channel' in self.channels_config:
+                    allowed_channels.add(int(self.channels_config['pa-alert-channel']))
+                if 'toll-alert-channel' in self.channels_config:
+                    allowed_channels.add(int(self.channels_config['toll-alert-channel']))
 
             # Only process messages in allowed channels
             if message.channel.id not in allowed_channels:
@@ -239,7 +241,7 @@ class TradingBot(commands.Bot):
         """Initialize the price monitoring system"""
         self.logger.info("Starting price monitor initialization...")
         try:
-            from price_feeds.monitor import PriceMonitor
+            from price_feeds.streaming_monitor import StreamingPriceMonitor as PriceMonitor
 
             # Create monitor instance - use self.monitor not self.price_monitor
             self.monitor = PriceMonitor(

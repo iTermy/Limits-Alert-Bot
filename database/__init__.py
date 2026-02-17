@@ -3,8 +3,6 @@ Database module initialization and global instances
 """
 from .database_manager import DatabaseManager
 
-# Import SignalDatabase (will be created in signal_operations module)
-# This is a forward declaration - we'll create this module next
 SignalDatabase = None
 
 # Global database instance
