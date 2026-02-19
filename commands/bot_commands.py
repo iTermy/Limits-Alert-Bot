@@ -262,7 +262,6 @@ class BotCommands(BaseCog):
                     await conn.execute("DELETE FROM status_changes")
                     await conn.execute("DELETE FROM limits")
                     await conn.execute("DELETE FROM signals")
-                    await conn.commit()
 
                 await confirm_msg.edit(
                     content=f"✅ Deleted {total_signals} signals | Cleared by {ctx.author.name}"

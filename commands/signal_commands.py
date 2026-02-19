@@ -354,8 +354,7 @@ class SignalCommands(BaseCog):
 
         from database import db
         async with db.get_connection() as conn:
-            await conn.execute("DELETE FROM signals WHERE id = ?", (signal_id,))
-            await conn.commit()
+            await conn.execute("DELETE FROM signals WHERE id = $1", signal_id)
 
         embed = discord.Embed(
             title="🗑️ Signal Deleted",

@@ -6,6 +6,21 @@ from datetime import datetime
 import pytz
 from database.models import SignalStatus
 from core.parser import ParsedSignal
+
+
+def _parse_dt(value):
+    """Convert ISO string or datetime to timezone-aware datetime, or None."""
+    if value is None:
+        return None
+    if hasattr(value, 'tzinfo'):
+        import pytz
+        return value if value.tzinfo else pytz.UTC.localize(value)
+    from datetime import datetime
+    s = str(value)
+    if '+' in s or s.endswith('Z'):
+        return datetime.fromisoformat(s.replace('Z', '+00:00'))
+    import pytz
+    return pytz.UTC.localize(datetime.fromisoformat(s))
 from utils.logger import get_logger
 
 logger = get_logger("signal_db.lifecycle")
@@ -59,30 +74,25 @@ class LifecycleManager:
             # (since we're cancelling, we bypass normal transition rules)
             try:
                 async with self.db.get_connection() as conn:
-                    now = datetime.now(pytz.UTC).isoformat()
+                    now = datetime.now(pytz.UTC)
 
                     # Update signal status
                     await conn.execute("""
                         UPDATE signals 
-                        SET status = ?, updated_at = ?, closed_at = ?, closed_reason = ?
-                        WHERE id = ?
-                    """, (SignalStatus.CANCELLED, now, now, 'manual', signal['id']))
-
+                        SET status = $1, updated_at = $2, closed_at = $3, closed_reason = $4
+                        WHERE id = $5
+                    """, SignalStatus.CANCELLED, now, now, 'manual', signal['id'])
                     # Record status change
                     await conn.execute("""
                         INSERT INTO status_changes (signal_id, old_status, new_status, change_type, reason)
-                        VALUES (?, ?, ?, ?, ?)
-                    """, (signal['id'], signal['status'], SignalStatus.CANCELLED, 'manual', 'User cancelled'))
-
+                        VALUES ($1, $2, $3, $4, $5)
+                    """, signal['id'], signal['status'], SignalStatus.CANCELLED, 'manual', 'User cancelled')
                     # Cancel all pending limits
                     await conn.execute("""
                         UPDATE limits 
                         SET status = 'cancelled' 
-                        WHERE signal_id = ? AND status = 'pending'
-                    """, (signal['id'],))
-
-                    await conn.commit()
-
+                        WHERE signal_id = $1 AND status = 'pending'
+                    """, signal['id'],)
                 logger.info(f"Successfully cancelled signal {signal['id']}")
                 return True
 
@@ -110,7 +120,7 @@ class LifecycleManager:
             logger.debug(f"Attempting to reactivate signal {signal_id}")
 
             # Get current signal state with limits
-            signal_query = "SELECT * FROM signals WHERE id = ?"
+            signal_query = "SELECT * FROM signals WHERE id = $1"
             signal = await db_manager.fetch_one(signal_query, (signal_id,))
 
             if not signal:
@@ -127,30 +137,25 @@ class LifecycleManager:
             # Directly update without going through validation
             try:
                 async with db_manager.get_connection() as conn:
-                    now = datetime.now(pytz.UTC).isoformat()
+                    now = datetime.now(pytz.UTC)
 
                     # Clear closed_at and update status
                     await conn.execute("""
                         UPDATE signals 
-                        SET status = ?, closed_at = NULL, closed_reason = NULL, updated_at = ?
-                        WHERE id = ?
-                    """, (new_status, now, signal_id))
-
+                        SET status = $1, closed_at = NULL, closed_reason = NULL, updated_at = $2
+                        WHERE id = $3
+                    """, new_status, now, signal_id)
                     # Record status change
                     await conn.execute("""
                         INSERT INTO status_changes (signal_id, old_status, new_status, change_type, reason)
-                        VALUES (?, ?, ?, ?, ?)
-                    """, (signal_id, SignalStatus.CANCELLED, new_status, 'manual', 'Signal reactivated'))
-
+                        VALUES ($1, $2, $3, $4, $5)
+                    """, signal_id, SignalStatus.CANCELLED, new_status, 'manual', 'Signal reactivated')
                     # Reactivate cancelled limits as pending
                     await conn.execute("""
                         UPDATE limits 
                         SET status = 'pending' 
-                        WHERE signal_id = ? AND status = 'cancelled'
-                    """, (signal_id,))
-
-                    await conn.commit()
-
+                        WHERE signal_id = $1 AND status = 'cancelled'
+                    """, signal_id,)
                 logger.info(f"Successfully reactivated signal {signal_id} to status {new_status}")
                 return True
 
@@ -187,7 +192,7 @@ class LifecycleManager:
 
             # Get current signal
             signal = await db_manager.fetch_one(
-                "SELECT * FROM signals WHERE id = ?",
+                "SELECT * FROM signals WHERE id = $1",
                 (signal_id,)
             )
 
@@ -205,47 +210,42 @@ class LifecycleManager:
             # For manual overrides, bypass validation and directly update
             try:
                 async with db_manager.get_connection() as conn:
-                    now = datetime.now(pytz.UTC).isoformat()
+                    now = datetime.now(pytz.UTC)
 
                     # Update based on whether it's a final status
                     if SignalStatus.is_final(new_status):
                         await conn.execute("""
                             UPDATE signals 
-                            SET status = ?, updated_at = ?, closed_at = ?, closed_reason = ?
-                            WHERE id = ?
-                        """, (new_status, now, now, 'manual', signal_id))
+                            SET status = $1, updated_at = $2, closed_at = $3, closed_reason = $4
+                            WHERE id = $5
+                        """, new_status, now, now, 'manual', signal_id)
                     else:
                         # If reverting from final to non-final, clear closed_at
                         await conn.execute("""
                             UPDATE signals 
-                            SET status = ?, updated_at = ?, closed_at = NULL, closed_reason = NULL
-                            WHERE id = ?
-                        """, (new_status, now, signal_id))
-
+                            SET status = $1, updated_at = $2, closed_at = NULL, closed_reason = NULL
+                            WHERE id = $3
+                        """, new_status, now, signal_id)
                     # Record status change
                     await conn.execute("""
                         INSERT INTO status_changes (signal_id, old_status, new_status, change_type, reason)
-                        VALUES (?, ?, ?, ?, ?)
-                    """, (signal_id, old_status, new_status, 'manual', reason or 'Manual override'))
-
+                        VALUES ($1, $2, $3, $4, $5)
+                    """, signal_id, old_status, new_status, 'manual', reason or 'Manual override')
                     # Handle limits based on new status
                     if SignalStatus.is_final(new_status):
                         # Cancel any pending limits
                         await conn.execute("""
                             UPDATE limits 
                             SET status = 'cancelled' 
-                            WHERE signal_id = ? AND status = 'pending'
-                        """, (signal_id,))
+                            WHERE signal_id = $1 AND status = 'pending'
+                        """, signal_id,)
                     elif new_status == SignalStatus.ACTIVE:
                         # If reverting to active, reactivate cancelled limits
                         await conn.execute("""
                             UPDATE limits 
                             SET status = 'pending' 
-                            WHERE signal_id = ? AND status = 'cancelled'
-                        """, (signal_id,))
-
-                    await conn.commit()
-
+                            WHERE signal_id = $1 AND status = 'cancelled'
+                        """, signal_id,)
                 logger.info(f"Successfully set signal {signal_id} status: {old_status} -> {new_status}")
                 return True
 
@@ -323,16 +323,14 @@ class LifecycleManager:
                     # Update the most recent status change reason
                     await conn.execute("""
                         UPDATE status_changes 
-                        SET reason = ?, change_type = 'manual'
-                        WHERE signal_id = ? 
+                        SET reason = $1, change_type = 'manual'
+                        WHERE signal_id = $2 
                         AND new_status = 'hit'
                         AND id = (
                             SELECT MAX(id) FROM status_changes 
-                            WHERE signal_id = ? AND new_status = 'hit'
+                            WHERE signal_id = $3 AND new_status = 'hit'
                         )
-                    """, (reason, signal_id, signal_id))
-                    await conn.commit()
-
+                    """, reason, signal_id, signal_id)
                 return True
             else:
                 logger.error(f"Failed to process limit hit for signal {signal_id}")
@@ -387,9 +385,8 @@ class LifecycleManager:
             signal = await signal_db.db.fetch_one("""
                 SELECT direction, stop_loss, status 
                 FROM signals 
-                WHERE id = ?
-            """, (signal_id,))
-
+                WHERE id = $1
+            """, signal_id,)
             if not signal or signal['status'] not in [SignalStatus.HIT]:
                 return False
 
@@ -450,7 +447,7 @@ class LifecycleManager:
 
             # Get current signal
             signal = await db_manager.fetch_one(
-                "SELECT * FROM signals WHERE id = ?",
+                "SELECT * FROM signals WHERE id = $1",
                 (signal_id,)
             )
 
@@ -474,23 +471,20 @@ class LifecycleManager:
             # Update signal expiry
             try:
                 async with db_manager.get_connection() as conn:
-                    now = datetime.now(pytz.UTC).isoformat()
+                    now = datetime.now(pytz.UTC)
 
                     # Update expiry type and time
                     await conn.execute("""
                         UPDATE signals 
-                        SET expiry_type = ?, expiry_time = ?, updated_at = ?
-                        WHERE id = ?
-                    """, (expiry_type, new_expiry_time, now, signal_id))
-
+                        SET expiry_type = $1, expiry_time = $2, updated_at = $3
+                        WHERE id = $4
+                    """, expiry_type, _parse_dt(new_expiry_time), now, signal_id)
                     # Record the change in status_changes table for audit
                     await conn.execute("""
                         INSERT INTO status_changes (signal_id, old_status, new_status, change_type, reason)
-                        VALUES (?, ?, ?, ?, ?)
+                        VALUES ($1, $2, $3, $4, $5)
                     """, (signal_id, signal['status'], signal['status'], 'manual',
                          f'Expiry changed from {signal["expiry_type"]} to {expiry_type}'))
-
-                    await conn.commit()
 
                 # Log the change
                 old_expiry = signal['expiry_type'] or 'none'
@@ -521,12 +515,12 @@ class LifecycleManager:
         Returns:
             Number of signals expired
         """
-        # now = datetime.now(pytz.UTC).isoformat()
+        # now = datetime.now(pytz.UTC)
 
         # Find expired signals
         query = """
             SELECT id, status FROM signals
-            WHERE status IN (?, ?)
+            WHERE status IN ($1, $2)
             AND expiry_time IS NOT NULL
             AND expiry_time < CURRENT_TIMESTAMP
         """
@@ -550,26 +544,21 @@ class LifecycleManager:
 
                     await conn.execute("""
                         UPDATE signals
-                        SET status = ?, updated_at = CURRENT_TIMESTAMP, closed_at = CURRENT_TIMESTAMP, closed_reason = ?
-                        WHERE id = ?
-                    """, (SignalStatus.CANCELLED, 'automatic', signal_id))
-
+                        SET status = $1, updated_at = CURRENT_TIMESTAMP, closed_at = CURRENT_TIMESTAMP, closed_reason = $2
+                        WHERE id = $3
+                    """, SignalStatus.CANCELLED, 'automatic', signal_id)
                     # Record status change
                     await conn.execute("""
                         INSERT INTO status_changes (signal_id, old_status, new_status, change_type, reason)
-                        VALUES (?, ?, ?, ?, ?)
-                    """, (signal_id, old_status, SignalStatus.CANCELLED, 'automatic', 'Expired'))
-
+                        VALUES ($1, $2, $3, $4, $5)
+                    """, signal_id, old_status, SignalStatus.CANCELLED, 'automatic', 'Expired')
                     # Cancel pending limits
                     await conn.execute("""
                         UPDATE limits
                         SET status = 'cancelled'
-                        WHERE signal_id = ? AND status = 'pending'
-                    """, (signal_id,))
-
+                        WHERE signal_id = $1 AND status = 'pending'
+                    """, signal_id,)
                     count += 1
-
-                await conn.commit()
 
         except Exception as e:
             logger.error(f"Error expiring signals: {e}", exc_info=True)

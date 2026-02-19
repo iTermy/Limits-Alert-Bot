@@ -8,6 +8,19 @@ from .schema import initialize_database
 from .models import SignalStatus, LimitStatus, StatusTransitions
 from utils.logger import get_logger
 
+
+def _parse_dt(value):
+    """Convert ISO string or datetime to timezone-aware datetime, or None."""
+    if value is None:
+        return None
+    if hasattr(value, 'tzinfo'):
+        return value if value.tzinfo else __import__('pytz').UTC.localize(value)
+    s = str(value)
+    from datetime import datetime
+    if '+' in s or s.endswith('Z'):
+        return datetime.fromisoformat(s.replace('Z', '+00:00'))
+    return __import__('pytz').UTC.localize(datetime.fromisoformat(s))
+
 logger = get_logger("database")
 
 
@@ -194,7 +207,7 @@ class DatabaseManager(BaseConnectionManager):
 
         # Get current signal
         signal = await self.fetch_one(
-            "SELECT * FROM signals WHERE id = ?",
+            "SELECT * FROM signals WHERE id = $1",
             (signal_id,)
         )
 
@@ -216,15 +229,15 @@ class DatabaseManager(BaseConnectionManager):
             from datetime import datetime
             import pytz
 
-            now = datetime.now(pytz.UTC).isoformat()
+            now = datetime.now(pytz.UTC)
 
             query = """
                 UPDATE signals 
-                SET expiry_type = ?, expiry_time = ?, updated_at = ?
-                WHERE id = ?
+                SET expiry_type = $1, expiry_time = $2, updated_at = $3
+                WHERE id = $4
             """
 
-            rows = await self.execute(query, (expiry_type, new_expiry_time, now, signal_id))
+            rows = await self.execute(query, (expiry_type, _parse_dt(new_expiry_time), now, signal_id))
 
             if rows > 0:
                 logger.info(f"Updated expiry for signal {signal_id} to {expiry_type}")

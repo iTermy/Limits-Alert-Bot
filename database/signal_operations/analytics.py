@@ -52,7 +52,7 @@ class AnalyticsManager:
         tracking_query = """
             SELECT COUNT(*) as count 
             FROM signals 
-            WHERE status IN (?, ?)
+            WHERE status IN ($1, $2)
         """
         result = await db_manager.fetch_one(
             tracking_query,
@@ -132,7 +132,7 @@ class AnalyticsManager:
                 AVG(limits_hit) as avg_limits_hit,
                 MAX(limits_hit) as max_limits_hit
             FROM signals
-            WHERE instrument = ?
+            WHERE instrument = $1
         """
 
         stats = await db_manager.fetch_one(query, (instrument,))
@@ -143,7 +143,7 @@ class AnalyticsManager:
                 id, status, created_at, closed_at,
                 limits_hit, total_limits
             FROM signals
-            WHERE instrument = ? 
+            WHERE instrument = $1 
             AND status IN ('profit', 'breakeven', 'stop_loss')
             ORDER BY closed_at DESC
             LIMIT 10
@@ -176,7 +176,7 @@ class AnalyticsManager:
                 COUNT(CASE WHEN status = 'stop_loss' THEN 1 END) as stop_loss,
                 COUNT(CASE WHEN status = 'cancelled' THEN 1 END) as cancelled
             FROM signals
-            WHERE created_at >= datetime('now', '-' || ? || ' days')
+            WHERE created_at >= NOW() - ($1 || ' days')::INTERVAL
             GROUP BY DATE(created_at)
             ORDER BY date DESC
         """
@@ -318,11 +318,11 @@ class AnalyticsManager:
                     ELSE s.updated_at
                 END as completion_time
             FROM signals s
-            WHERE s.status IN (?, ?, ?)
+            WHERE s.status IN ($1, $2, $3)
             AND (
-                (s.closed_at IS NOT NULL AND s.closed_at >= ? AND s.closed_at <= ?)
+                (s.closed_at IS NOT NULL AND s.closed_at >= $4 AND s.closed_at <= $5)
                 OR 
-                (s.closed_at IS NULL AND s.updated_at >= ? AND s.updated_at <= ?)
+                (s.closed_at IS NULL AND s.updated_at >= $6 AND s.updated_at <= $7)
             )
             ORDER BY completion_time DESC
         """
