@@ -7,11 +7,12 @@ import os
 import sys
 from dotenv import load_dotenv
 
+# Load .env from the project root before any other imports that may read env vars.
+_here = os.path.dirname(os.path.abspath(__file__))
+load_dotenv(dotenv_path=os.path.join(_here, ".env"))
+
 from utils.logger import logger
 from core.bot import TradingBot
-
-# Load environment variables
-load_dotenv()
 
 # Get bot token
 DISCORD_TOKEN = os.getenv('DISCORD_BOT_TOKEN')

@@ -455,7 +455,10 @@ class SignalCommands(BaseCog):
         else:
             embed.add_field(name="Source", value="Manual Entry", inline=False)
 
-        embed.set_footer(text=f"Created {signal['created_at']}")
+        created_at = signal['created_at']
+        if hasattr(created_at, 'strftime'):
+            created_at = created_at.strftime('%Y-%m-%d %H:%M UTC')
+        embed.set_footer(text=f"Created {created_at}")
 
         await ctx.send(embed=embed)
 

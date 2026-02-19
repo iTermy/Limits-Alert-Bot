@@ -30,15 +30,15 @@ class DatabaseManager(BaseConnectionManager):
     Maintains backward compatibility with the original interface
     """
 
-    def __init__(self, db_path: str = "data/trading_bot.db"):
+    def __init__(self, db_url: str = None):
         """
         Initialize enhanced database manager
 
         Args:
-            db_path: Path to SQLite database file
+            db_url: PostgreSQL connection string. Falls back to SUPABASE_DB_URL env var.
         """
         # Initialize base connection manager
-        super().__init__(db_path)
+        super().__init__(db_url)
 
         # Initialize base operations handler
         self._ops = BaseOperations(self)

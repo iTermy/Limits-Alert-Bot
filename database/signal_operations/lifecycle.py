@@ -21,6 +21,8 @@ def _parse_dt(value):
         return datetime.fromisoformat(s.replace('Z', '+00:00'))
     import pytz
     return pytz.UTC.localize(datetime.fromisoformat(s))
+
+
 from utils.logger import get_logger
 
 logger = get_logger("signal_db.lifecycle")
@@ -310,9 +312,9 @@ class LifecycleManager:
             # - Updates signal status to HIT
             # - Sets first_limit_hit_time
             # - Records status change in audit
-            result = await self.process_limit_hit(
-                limit_id=first_limit['id'],
-                hit_price=first_limit['price_level']  # Use limit price as hit price
+            result = await self.db.mark_limit_hit(
+                first_limit['id'],
+                first_limit['price_level']  # Use limit price as hit price
             )
 
             if result and result.get('signal_id'):
@@ -386,7 +388,7 @@ class LifecycleManager:
                 SELECT direction, stop_loss, status 
                 FROM signals 
                 WHERE id = $1
-            """, signal_id,)
+            """, (signal_id,))
             if not signal or signal['status'] not in [SignalStatus.HIT]:
                 return False
 
@@ -483,8 +485,8 @@ class LifecycleManager:
                     await conn.execute("""
                         INSERT INTO status_changes (signal_id, old_status, new_status, change_type, reason)
                         VALUES ($1, $2, $3, $4, $5)
-                    """, (signal_id, signal['status'], signal['status'], 'manual',
-                         f'Expiry changed from {signal["expiry_type"]} to {expiry_type}'))
+                    """, signal_id, signal['status'], signal['status'], 'manual',
+                         f'Expiry changed from {signal["expiry_type"]} to {expiry_type}')
 
                 # Log the change
                 old_expiry = signal['expiry_type'] or 'none'

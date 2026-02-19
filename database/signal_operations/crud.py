@@ -8,6 +8,17 @@ from database.models import SignalStatus
 from core.parser import ParsedSignal
 from utils.logger import get_logger
 
+
+def _to_dt(value) -> datetime:
+    """Return a timezone-aware datetime from either a datetime object or an ISO string."""
+    if isinstance(value, datetime):
+        return value if value.tzinfo else pytz.UTC.localize(value)
+    s = str(value)
+    if '+' in s or s.endswith('Z'):
+        return datetime.fromisoformat(s.replace('Z', '+00:00'))
+    return pytz.UTC.localize(datetime.fromisoformat(s))
+
+
 logger = get_logger("signal_db.crud")
 
 
@@ -250,7 +261,7 @@ class CrudOperations:
 
             # Add time remaining for expiry
             if signal.get('expiry_time'):
-                expiry = datetime.fromisoformat(signal['expiry_time'])
+                expiry = _to_dt(signal['expiry_time'])
                 now = datetime.now(pytz.UTC)
                 if expiry.tzinfo is None:
                     expiry = pytz.UTC.localize(expiry)
@@ -354,7 +365,7 @@ async def get_active_signals_detailed_sorted(self, instrument: str = None,
 
         # Add time remaining for expiry
         if signal.get('expiry_time'):
-            expiry = datetime.fromisoformat(signal['expiry_time'])
+            expiry = _to_dt(signal['expiry_time'])
             now = datetime.now(pytz.UTC)
             if expiry.tzinfo is None:
                 expiry = pytz.UTC.localize(expiry)

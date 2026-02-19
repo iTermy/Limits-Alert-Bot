@@ -63,7 +63,7 @@ class AnalyticsManager:
         # Today's performance
         today_start = datetime.now(pytz.UTC).replace(
             hour=0, minute=0, second=0, microsecond=0
-        ).isoformat()
+        )
 
         today_stats = await db_manager.get_performance_stats(
             start_date=today_start
@@ -102,9 +102,7 @@ class AnalyticsManager:
         else:  # 'all'
             start_date = None
 
-        start_date_str = start_date.isoformat() if start_date else None
-
-        return await db_manager.get_performance_stats(start_date=start_date_str)
+        return await db_manager.get_performance_stats(start_date=start_date)
 
     async def get_instrument_performance(self, db_manager, instrument: str) -> Dict[str, Any]:
         """
@@ -126,7 +124,7 @@ class AnalyticsManager:
                 COUNT(CASE WHEN status = 'cancelled' THEN 1 END) as cancelled,
                 COUNT(CASE WHEN status IN ('active', 'hit') THEN 1 END) as active,
                 ROUND(
-                    CAST(COUNT(CASE WHEN status = 'profit' THEN 1 END) AS FLOAT) / 
+                    CAST(COUNT(CASE WHEN status = 'profit' THEN 1 END) AS NUMERIC) / 
                     NULLIF(COUNT(CASE WHEN status IN ('profit', 'breakeven', 'stop_loss') THEN 1 END), 0) * 100, 2
                 ) as win_rate,
                 AVG(limits_hit) as avg_limits_hit,
@@ -261,8 +259,8 @@ class AnalyticsManager:
             week_end = week_start + timedelta(days=7) - timedelta(seconds=1)
 
             return {
-                'start': week_start.isoformat(),
-                'end': week_end.isoformat(),
+                'start': week_start,
+                'end': week_end,
                 'display_start': week_start.strftime('%B %d, %Y'),
                 'display_end': week_end.strftime('%B %d, %Y')
             }
@@ -280,8 +278,8 @@ class AnalyticsManager:
             month_end = next_month - timedelta(seconds=1)
 
             return {
-                'start': month_start.isoformat(),
-                'end': month_end.isoformat(),
+                'start': month_start,
+                'end': month_end,
                 'display_start': month_start.strftime('%B %d, %Y'),
                 'display_end': month_end.strftime('%B %d, %Y')
             }
@@ -290,13 +288,13 @@ class AnalyticsManager:
             raise ValueError(f"Invalid period: {period}")
 
 
-    async def get_period_signals_with_results(self, start_date: str, end_date: str) -> List[Dict[str, Any]]:
+    async def get_period_signals_with_results(self, start_date, end_date) -> List[Dict[str, Any]]:
         """
         Get all signals with final results (profit/breakeven/stop_loss) within a date range
 
         Args:
-            start_date: ISO format start date
-            end_date: ISO format end date
+            start_date: Start datetime (datetime object or ISO format string)
+            end_date: End datetime (datetime object or ISO format string)
 
         Returns:
             List of signals with their results

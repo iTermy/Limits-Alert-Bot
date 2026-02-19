@@ -298,7 +298,7 @@ class BaseOperations:
                 COUNT(CASE WHEN status = 'breakeven' THEN 1 END) as breakeven,
                 COUNT(CASE WHEN status = 'stop_loss' THEN 1 END) as stop_loss,
                 ROUND(
-                    CAST(COUNT(CASE WHEN status = 'profit' THEN 1 END) AS FLOAT) /
+                    CAST(COUNT(CASE WHEN status = 'profit' THEN 1 END) AS NUMERIC) /
                     NULLIF(COUNT(*), 0) * 100, 2
                 ) as win_rate
             FROM signals
