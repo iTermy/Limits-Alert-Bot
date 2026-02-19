@@ -36,6 +36,7 @@ class BotCommands(BaseCog):
             "`!delete <id>` - Delete signal\n"
             "`!info <id>` - Signal details\n"
             "`!report [day/week/month]` - Trading report\n"
+            "`!tolls [day/week/month]` - Tolls trading report\n"
             "`!profit <id>` - Mark as profit\n"
             "`!sl <id>` - Mark as stop loss\n"
             "`!cancel <id>` - Cancel signal"

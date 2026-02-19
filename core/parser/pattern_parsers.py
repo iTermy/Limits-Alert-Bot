@@ -363,7 +363,9 @@ def determine_limits_and_stop(numbers: List[float], direction: str,
 
     Special handling for tolls channel:
     - All numbers are treated as limits
-    - Stop loss is automatically set to 0 (long) or 99999 (short)
+    - Stop loss is automatically set to ±5 from the appropriate limit:
+      * Long: min(limits) - 5 (5 below the lowest limit)
+      * Short: max(limits) + 5 (5 above the highest limit)
     """
     # Check if this is the tolls channel
     is_tolls_channel = channel_name and 'toll' in channel_name.lower()
@@ -375,10 +377,17 @@ def determine_limits_and_stop(numbers: List[float], direction: str,
 
         limits = numbers
         # Set automatic stop loss based on direction
-        stop_loss = 0.0 if direction == 'long' else 99999.0
+        if direction == 'long':
+            # For long: stop is 5 below the lowest limit
+            lowest_limit = min(limits)
+            stop_loss = lowest_limit - 5.0
+        else:  # short
+            # For short: stop is 5 above the highest limit
+            highest_limit = max(limits)
+            stop_loss = highest_limit + 5.0
 
         logger.debug(f"Tolls channel: Using all {len(limits)} number(s) as limits, "
-                    f"auto-setting stop to {stop_loss} for {direction}")
+                    f"auto-setting stop to {stop_loss} ({direction})")
         return limits, stop_loss
 
     # Normal channel logic (requires at least 2 numbers)
