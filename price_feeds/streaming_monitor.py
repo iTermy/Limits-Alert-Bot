@@ -548,10 +548,9 @@ class StreamingPriceMonitor:
     async def _mark_approaching_sent(self, limit_id: int):
         """Mark that approaching alert has been sent"""
         try:
-            query = "UPDATE limits SET approaching_alert_sent = 1 WHERE id = ?"
+            query = "UPDATE limits SET approaching_alert_sent = TRUE WHERE id = $1"
             async with self.db.get_connection() as conn:
-                await conn.execute(query, (limit_id,))
-                await conn.commit()
+                await conn.execute(query, limit_id)
         except Exception as e:
             logger.error(f"Failed to mark approaching sent: {e}")
 

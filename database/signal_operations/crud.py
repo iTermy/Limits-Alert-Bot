@@ -8,6 +8,17 @@ from database.models import SignalStatus
 from core.parser import ParsedSignal
 from utils.logger import get_logger
 
+
+def _to_dt(value) -> datetime:
+    """Return a timezone-aware datetime from either a datetime object or an ISO string."""
+    if isinstance(value, datetime):
+        return value if value.tzinfo else pytz.UTC.localize(value)
+    s = str(value)
+    if '+' in s or s.endswith('Z'):
+        return datetime.fromisoformat(s.replace('Z', '+00:00'))
+    return pytz.UTC.localize(datetime.fromisoformat(s))
+
+
 logger = get_logger("signal_db.crud")
 
 
@@ -90,7 +101,7 @@ class CrudOperations:
         Returns:
             Signal data or None
         """
-        query = "SELECT * FROM signals WHERE message_id = ?"
+        query = "SELECT * FROM signals WHERE message_id = $1"
         return await self.db.fetch_one(query, (message_id,))
 
     async def get_signal_with_limits(self, signal_id: int) -> Optional[Dict[str, Any]]:
@@ -104,7 +115,7 @@ class CrudOperations:
             Signal data with limits
         """
         # Get signal
-        signal_query = "SELECT * FROM signals WHERE id = ?"
+        signal_query = "SELECT * FROM signals WHERE id = $1"
         signal = await self.db.fetch_one(signal_query, (signal_id,))
 
         if not signal:
@@ -113,7 +124,7 @@ class CrudOperations:
         # Get all limits (pending and hit)
         limits_query = """
             SELECT * FROM limits 
-            WHERE signal_id = ? 
+            WHERE signal_id = $1 
             ORDER BY sequence_number
         """
         limits = await self.db.fetch_all(limits_query, (signal_id,))
@@ -152,9 +163,9 @@ class CrudOperations:
             # Update signal basic info
             update_query = """
                 UPDATE signals 
-                SET instrument = ?, direction = ?, stop_loss = ?, 
-                    expiry_type = ?, total_limits = ?, updated_at = CURRENT_TIMESTAMP
-                WHERE id = ?
+                SET instrument = $1, direction = $2, stop_loss = $3, 
+                    expiry_type = $4, total_limits = $5, updated_at = CURRENT_TIMESTAMP
+                WHERE id = $6
             """
             await self.db.execute(
                 update_query,
@@ -166,14 +177,14 @@ class CrudOperations:
             # Get existing limits that were hit
             hit_limits_query = """
                 SELECT price_level FROM limits 
-                WHERE signal_id = ? AND status = 'hit'
+                WHERE signal_id = $1 AND status = 'hit'
                 ORDER BY sequence_number
             """
             hit_limits = await self.db.fetch_all(hit_limits_query, (signal_id,))
             hit_prices = [l['price_level'] for l in hit_limits]
 
             # Delete old limits
-            delete_limits = "DELETE FROM limits WHERE signal_id = ?"
+            delete_limits = "DELETE FROM limits WHERE signal_id = $1"
             await self.db.execute(delete_limits, (signal_id,))
 
             # Insert new limits, preserving hit status for matching prices
@@ -182,15 +193,14 @@ class CrudOperations:
                     # Re-insert as hit
                     await self.db.execute("""
                         INSERT INTO limits (signal_id, price_level, sequence_number, status, hit_time)
-                        VALUES (?, ?, ?, 'hit', CURRENT_TIMESTAMP)
-                    """, (signal_id, level, idx + 1))
+                        VALUES ($1, $2, $3, 'hit', CURRENT_TIMESTAMP)
+                    """, signal_id, level, idx + 1)
                 else:
                     # Insert as pending
                     await self.db.execute("""
                         INSERT INTO limits (signal_id, price_level, sequence_number, status)
-                        VALUES (?, ?, ?, 'pending')
-                    """, (signal_id, level, idx + 1))
-
+                        VALUES ($1, $2, $3, 'pending')
+                    """, signal_id, level, idx + 1)
             logger.info(f"Updated signal {signal_id} from edited message")
             return True
 
@@ -214,23 +224,19 @@ class CrudOperations:
                 s.*,
                 COUNT(DISTINCT l.id) as total_limit_count,
                 COUNT(DISTINCT CASE WHEN l.status = 'hit' THEN l.id END) as hit_limit_count,
-                GROUP_CONCAT(
-                    CASE WHEN l.status = 'pending' THEN l.price_level END
-                    ORDER BY l.sequence_number
-                ) as pending_limits_str,
-                GROUP_CONCAT(
-                    CASE WHEN l.status = 'hit' THEN l.price_level END
-                    ORDER BY l.sequence_number
-                ) as hit_limits_str
+                STRING_AGG(
+                    (CASE WHEN l.status = 'pending' THEN l.price_level END)::TEXT, ',' ORDER BY l.sequence_number) as pending_limits_str,
+                STRING_AGG(
+                    (CASE WHEN l.status = 'hit' THEN l.price_level END)::TEXT, ',' ORDER BY l.sequence_number) as hit_limits_str
             FROM signals s
             LEFT JOIN limits l ON s.id = l.signal_id
-            WHERE s.status IN (?, ?)
+            WHERE s.status IN ($1, $2)
         """
 
         params = [SignalStatus.ACTIVE, SignalStatus.HIT]
 
         if instrument:
-            base_query += " AND s.instrument = ?"
+            base_query += " AND s.instrument = $3"
             params.append(instrument)
 
         base_query += " GROUP BY s.id ORDER BY s.created_at DESC"
@@ -255,7 +261,7 @@ class CrudOperations:
 
             # Add time remaining for expiry
             if signal.get('expiry_time'):
-                expiry = datetime.fromisoformat(signal['expiry_time'])
+                expiry = _to_dt(signal['expiry_time'])
                 now = datetime.now(pytz.UTC)
                 if expiry.tzinfo is None:
                     expiry = pytz.UTC.localize(expiry)
@@ -304,24 +310,20 @@ async def get_active_signals_detailed_sorted(self, instrument: str = None,
             s.*,
             COUNT(DISTINCT l.id) as total_limit_count,
             COUNT(DISTINCT CASE WHEN l.status = 'hit' THEN l.id END) as hit_limit_count,
-            GROUP_CONCAT(
-                CASE WHEN l.status = 'pending' THEN l.price_level END
-                ORDER BY l.sequence_number
-            ) as pending_limits_str,
-            GROUP_CONCAT(
-                CASE WHEN l.status = 'hit' THEN l.price_level END
-                ORDER BY l.sequence_number
-            ) as hit_limits_str,
+            STRING_AGG(
+                (CASE WHEN l.status = 'pending' THEN l.price_level END)::TEXT, ',' ORDER BY l.sequence_number) as pending_limits_str,
+            STRING_AGG(
+                (CASE WHEN l.status = 'hit' THEN l.price_level END)::TEXT, ',' ORDER BY l.sequence_number) as hit_limits_str,
             MIN(CASE WHEN l.status = 'pending' THEN l.price_level END) as first_pending_limit
         FROM signals s
         LEFT JOIN limits l ON s.id = l.signal_id
-        WHERE s.status IN (?, ?)
+        WHERE s.status IN ($1, $2)
     """
 
     params = [SignalStatus.ACTIVE, SignalStatus.HIT]
 
     if instrument:
-        base_query += " AND s.instrument = ?"
+        base_query += " AND s.instrument = $3"
         params.append(instrument)
 
     base_query += " GROUP BY s.id"
@@ -363,7 +365,7 @@ async def get_active_signals_detailed_sorted(self, instrument: str = None,
 
         # Add time remaining for expiry
         if signal.get('expiry_time'):
-            expiry = datetime.fromisoformat(signal['expiry_time'])
+            expiry = _to_dt(signal['expiry_time'])
             now = datetime.now(pytz.UTC)
             if expiry.tzinfo is None:
                 expiry = pytz.UTC.localize(expiry)

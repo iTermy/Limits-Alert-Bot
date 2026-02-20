@@ -1,6 +1,9 @@
 """
 Database module initialization and global instances
 """
+from dotenv import load_dotenv
+load_dotenv()
+
 from .database_manager import DatabaseManager
 
 SignalDatabase = None

@@ -94,7 +94,14 @@ def format_time_remaining(expiry_time: str) -> str:
         return "No expiry"
 
     try:
-        expiry = datetime.fromisoformat(expiry_time)
+        if isinstance(expiry_time, datetime):
+            expiry = expiry_time if expiry_time.tzinfo else pytz.UTC.localize(expiry_time)
+        else:
+            s = str(expiry_time)
+            if '+' in s or s.endswith('Z'):
+                expiry = datetime.fromisoformat(s.replace('Z', '+00:00'))
+            else:
+                expiry = pytz.UTC.localize(datetime.fromisoformat(s))
         now = datetime.now(pytz.UTC)
 
         if expiry.tzinfo is None:

@@ -36,6 +36,7 @@ class BotCommands(BaseCog):
             "`!delete <id>` - Delete signal\n"
             "`!info <id>` - Signal details\n"
             "`!report [day/week/month]` - Trading report\n"
+            "`!tolls [day/week/month]` - Tolls trading report\n"
             "`!profit <id>` - Mark as profit\n"
             "`!sl <id>` - Mark as stop loss\n"
             "`!cancel <id>` - Cancel signal"
@@ -261,7 +262,6 @@ class BotCommands(BaseCog):
                     await conn.execute("DELETE FROM status_changes")
                     await conn.execute("DELETE FROM limits")
                     await conn.execute("DELETE FROM signals")
-                    await conn.commit()
 
                 await confirm_msg.edit(
                     content=f"✅ Deleted {total_signals} signals | Cleared by {ctx.author.name}"

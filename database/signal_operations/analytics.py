@@ -52,7 +52,7 @@ class AnalyticsManager:
         tracking_query = """
             SELECT COUNT(*) as count 
             FROM signals 
-            WHERE status IN (?, ?)
+            WHERE status IN ($1, $2)
         """
         result = await db_manager.fetch_one(
             tracking_query,
@@ -63,7 +63,7 @@ class AnalyticsManager:
         # Today's performance
         today_start = datetime.now(pytz.UTC).replace(
             hour=0, minute=0, second=0, microsecond=0
-        ).isoformat()
+        )
 
         today_stats = await db_manager.get_performance_stats(
             start_date=today_start
@@ -102,9 +102,7 @@ class AnalyticsManager:
         else:  # 'all'
             start_date = None
 
-        start_date_str = start_date.isoformat() if start_date else None
-
-        return await db_manager.get_performance_stats(start_date=start_date_str)
+        return await db_manager.get_performance_stats(start_date=start_date)
 
     async def get_instrument_performance(self, db_manager, instrument: str) -> Dict[str, Any]:
         """
@@ -126,13 +124,13 @@ class AnalyticsManager:
                 COUNT(CASE WHEN status = 'cancelled' THEN 1 END) as cancelled,
                 COUNT(CASE WHEN status IN ('active', 'hit') THEN 1 END) as active,
                 ROUND(
-                    CAST(COUNT(CASE WHEN status = 'profit' THEN 1 END) AS FLOAT) / 
+                    CAST(COUNT(CASE WHEN status = 'profit' THEN 1 END) AS NUMERIC) / 
                     NULLIF(COUNT(CASE WHEN status IN ('profit', 'breakeven', 'stop_loss') THEN 1 END), 0) * 100, 2
                 ) as win_rate,
                 AVG(limits_hit) as avg_limits_hit,
                 MAX(limits_hit) as max_limits_hit
             FROM signals
-            WHERE instrument = ?
+            WHERE instrument = $1
         """
 
         stats = await db_manager.fetch_one(query, (instrument,))
@@ -143,7 +141,7 @@ class AnalyticsManager:
                 id, status, created_at, closed_at,
                 limits_hit, total_limits
             FROM signals
-            WHERE instrument = ? 
+            WHERE instrument = $1 
             AND status IN ('profit', 'breakeven', 'stop_loss')
             ORDER BY closed_at DESC
             LIMIT 10
@@ -176,7 +174,7 @@ class AnalyticsManager:
                 COUNT(CASE WHEN status = 'stop_loss' THEN 1 END) as stop_loss,
                 COUNT(CASE WHEN status = 'cancelled' THEN 1 END) as cancelled
             FROM signals
-            WHERE created_at >= datetime('now', '-' || ? || ' days')
+            WHERE created_at >= NOW() - ($1 || ' days')::INTERVAL
             GROUP BY DATE(created_at)
             ORDER BY date DESC
         """
@@ -261,8 +259,8 @@ class AnalyticsManager:
             week_end = week_start + timedelta(days=7) - timedelta(seconds=1)
 
             return {
-                'start': week_start.isoformat(),
-                'end': week_end.isoformat(),
+                'start': week_start,
+                'end': week_end,
                 'display_start': week_start.strftime('%B %d, %Y'),
                 'display_end': week_end.strftime('%B %d, %Y')
             }
@@ -280,8 +278,8 @@ class AnalyticsManager:
             month_end = next_month - timedelta(seconds=1)
 
             return {
-                'start': month_start.isoformat(),
-                'end': month_end.isoformat(),
+                'start': month_start,
+                'end': month_end,
                 'display_start': month_start.strftime('%B %d, %Y'),
                 'display_end': month_end.strftime('%B %d, %Y')
             }
@@ -290,13 +288,13 @@ class AnalyticsManager:
             raise ValueError(f"Invalid period: {period}")
 
 
-    async def get_period_signals_with_results(self, start_date: str, end_date: str) -> List[Dict[str, Any]]:
+    async def get_period_signals_with_results(self, start_date, end_date) -> List[Dict[str, Any]]:
         """
         Get all signals with final results (profit/breakeven/stop_loss) within a date range
 
         Args:
-            start_date: ISO format start date
-            end_date: ISO format end date
+            start_date: Start datetime (datetime object or ISO format string)
+            end_date: End datetime (datetime object or ISO format string)
 
         Returns:
             List of signals with their results
@@ -318,11 +316,11 @@ class AnalyticsManager:
                     ELSE s.updated_at
                 END as completion_time
             FROM signals s
-            WHERE s.status IN (?, ?, ?)
+            WHERE s.status IN ($1, $2, $3)
             AND (
-                (s.closed_at IS NOT NULL AND s.closed_at >= ? AND s.closed_at <= ?)
+                (s.closed_at IS NOT NULL AND s.closed_at >= $4 AND s.closed_at <= $5)
                 OR 
-                (s.closed_at IS NULL AND s.updated_at >= ? AND s.updated_at <= ?)
+                (s.closed_at IS NULL AND s.updated_at >= $6 AND s.updated_at <= $7)
             )
             ORDER BY completion_time DESC
         """
