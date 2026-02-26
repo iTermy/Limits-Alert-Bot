@@ -95,7 +95,17 @@ class TPConfig:
                 "crypto":    {"type": "dollars", "value": 50.0,  "description": "Cryptocurrencies"},
                 "oil":       {"type": "dollars", "value": 0.5,   "description": "Oil commodities"},
             },
-            "overrides": {}
+            "scalp_defaults": {
+                "forex":     {"type": "pips",    "value": 3.0,   "description": "Scalp - Standard forex pairs"},
+                "forex_jpy": {"type": "pips",    "value": 5.0,   "description": "Scalp - JPY pairs (auto-detected)"},
+                "metals":    {"type": "dollars", "value": 2.0,   "description": "Scalp - Gold, Silver, etc."},
+                "indices":   {"type": "dollars", "value": 10.0,  "description": "Scalp - Stock indices"},
+                "stocks":    {"type": "dollars", "value": 0.5,   "description": "Scalp - Individual stocks"},
+                "crypto":    {"type": "dollars", "value": 20.0,  "description": "Scalp - Cryptocurrencies"},
+                "oil":       {"type": "dollars", "value": 0.2,   "description": "Scalp - Oil commodities"},
+            },
+            "overrides": {},
+            "scalp_overrides": {},
         }
         self._save_config(config)
         return config
@@ -107,16 +117,23 @@ class TPConfig:
                 self.config = self._create_default_config()
                 return
 
-        for asset_class, settings in self.config["defaults"].items():
-            if not isinstance(settings, dict):
-                logger.error(f"Invalid TP settings for {asset_class}")
-                continue
-            if "type" not in settings:
-                settings["type"] = self.ASSET_CLASS_TYPES.get(asset_class, "dollars")
-            if "value" not in settings:
-                settings["value"] = 5.0
-            if "description" not in settings:
-                settings["description"] = f"Default for {asset_class}"
+        # Ensure scalp sections exist (migration for older configs)
+        if "scalp_defaults" not in self.config:
+            self.config["scalp_defaults"] = self._create_default_config()["scalp_defaults"]
+        if "scalp_overrides" not in self.config:
+            self.config["scalp_overrides"] = {}
+
+        for section in ("defaults", "scalp_defaults"):
+            for asset_class, settings in self.config[section].items():
+                if not isinstance(settings, dict):
+                    logger.error(f"Invalid TP settings for {asset_class} in {section}")
+                    continue
+                if "type" not in settings:
+                    settings["type"] = self.ASSET_CLASS_TYPES.get(asset_class, "dollars")
+                if "value" not in settings:
+                    settings["value"] = 5.0
+                if "description" not in settings:
+                    settings["description"] = f"Default for {asset_class}"
 
     def _save_config(self, config: Dict = None):
         if config is None:
@@ -180,9 +197,24 @@ class TPConfig:
     # Public API
     # ------------------------------------------------------------------
 
-    def _get_config_for_symbol(self, symbol: str) -> Dict:
-        """Return {type, value} for a symbol, respecting overrides."""
+    def _get_config_for_symbol(self, symbol: str, scalp: bool = False) -> Dict:
+        """Return {type, value} for a symbol, respecting overrides and scalp mode."""
         s = symbol.upper()
+
+        if scalp:
+            # Check scalp overrides first
+            if s in self.config.get("scalp_overrides", {}):
+                ov = self.config["scalp_overrides"][s]
+                return {"type": ov["type"], "value": ov["value"]}
+            # Fall back to scalp defaults
+            asset_class = self.determine_asset_class(s)
+            scalp_defaults = self.config.get("scalp_defaults", {})
+            if asset_class in scalp_defaults:
+                d = scalp_defaults[asset_class]
+                return {"type": d["type"], "value": d["value"]}
+            # If no scalp config found, fall through to regular config
+
+        # Regular (setup) path
         if s in self.config["overrides"]:
             ov = self.config["overrides"][s]
             return {"type": ov["type"], "value": ov["value"]}
@@ -195,19 +227,20 @@ class TPConfig:
         logger.warning(f"No TP config for {s}, using fallback $5")
         return {"type": "dollars", "value": 5.0}
 
-    def get_tp_value(self, symbol: str) -> float:
+    def get_tp_value(self, symbol: str, scalp: bool = False) -> float:
         """
         Return the TP threshold in its native unit (pips or dollars).
         Use this to compare against calculate_pnl().
         """
-        return self._get_config_for_symbol(symbol)["value"]
+        return self._get_config_for_symbol(symbol, scalp=scalp)["value"]
 
-    def get_tp_type(self, symbol: str) -> TPType:
+    def get_tp_type(self, symbol: str, scalp: bool = False) -> TPType:
         """Return 'pips' or 'dollars' for the symbol."""
-        return self._get_config_for_symbol(symbol)["type"]  # type: ignore
+        return self._get_config_for_symbol(symbol, scalp=scalp)["type"]  # type: ignore
 
     def calculate_pnl(self, symbol: str, direction: str,
-                      entry_price: float, current_price: float) -> float:
+                      entry_price: float, current_price: float,
+                      scalp: bool = False) -> float:
         """
         Calculate P&L for a single limit position in native units.
 
@@ -219,11 +252,12 @@ class TPConfig:
             direction: 'long' or 'short'
             entry_price: hit_price of the limit
             current_price: current market price (bid for long, ask for short)
+            scalp: Whether to use scalp TP config
 
         Returns:
             P&L in native units (pips or dollars)
         """
-        tp_type = self.get_tp_type(symbol)
+        tp_type = self.get_tp_type(symbol, scalp=scalp)
 
         if direction == "long":
             raw_diff = current_price - entry_price
@@ -237,7 +271,7 @@ class TPConfig:
             return raw_diff
 
     def set_override(self, symbol: str, value: float, tp_type: TPType,
-                     set_by: str = "User") -> bool:
+                     set_by: str = "User", scalp: bool = False) -> bool:
         """Set a per-symbol TP override. Returns True on success."""
         if tp_type not in ("pips", "dollars"):
             logger.error(f"Invalid TP type: {tp_type}")
@@ -246,21 +280,26 @@ class TPConfig:
             logger.error(f"TP value must be positive, got {value}")
             return False
 
-        self.config["overrides"][symbol.upper()] = {
+        section = "scalp_overrides" if scalp else "overrides"
+        if section not in self.config:
+            self.config[section] = {}
+
+        self.config[section][symbol.upper()] = {
             "type": tp_type,
             "value": value,
             "set_by": set_by,
             "set_at": datetime.now(timezone.utc).isoformat(),
         }
         self._save_config()
-        logger.info(f"Set TP override: {symbol.upper()} = {value} {tp_type}")
+        logger.info(f"Set {'scalp ' if scalp else ''}TP override: {symbol.upper()} = {value} {tp_type}")
         return True
 
     def set_default(self, asset_class: str, value: float, tp_type: TPType,
-                    set_by: str = "User") -> bool:
+                    set_by: str = "User", scalp: bool = False) -> bool:
         """Update the default TP for an asset class. Returns True on success."""
-        if asset_class not in self.config["defaults"]:
-            logger.error(f"Unknown asset class: {asset_class}")
+        section = "scalp_defaults" if scalp else "defaults"
+        if asset_class not in self.config.get(section, {}):
+            logger.error(f"Unknown asset class: {asset_class} in {section}")
             return False
         if tp_type not in ("pips", "dollars"):
             logger.error(f"Invalid TP type: {tp_type}")
@@ -269,19 +308,20 @@ class TPConfig:
             logger.error(f"TP value must be positive, got {value}")
             return False
 
-        self.config["defaults"][asset_class]["value"] = value
-        self.config["defaults"][asset_class]["type"] = tp_type
+        self.config[section][asset_class]["value"] = value
+        self.config[section][asset_class]["type"] = tp_type
         self._save_config()
-        logger.info(f"Set TP default: {asset_class} = {value} {tp_type}")
+        logger.info(f"Set {'scalp ' if scalp else ''}TP default: {asset_class} = {value} {tp_type}")
         return True
 
-    def remove_override(self, symbol: str) -> bool:
+    def remove_override(self, symbol: str, scalp: bool = False) -> bool:
         """Remove a per-symbol override. Returns True if one existed."""
         s = symbol.upper()
-        if s in self.config["overrides"]:
-            del self.config["overrides"][s]
+        section = "scalp_overrides" if scalp else "overrides"
+        if s in self.config.get(section, {}):
+            del self.config[section][s]
             self._save_config()
-            logger.info(f"Removed TP override: {s}")
+            logger.info(f"Removed {'scalp ' if scalp else ''}TP override: {s}")
             return True
         return False
 
@@ -291,30 +331,35 @@ class TPConfig:
         self._validate_config()
         logger.info("TP configuration reloaded")
 
-    def get_display_info(self, symbol: str = None) -> Dict:
+    def get_display_info(self, symbol: str = None, scalp: bool = False) -> Dict:
         """Return formatted config dict for display in Discord."""
         if symbol:
             s = symbol.upper()
-            cfg = self._get_config_for_symbol(s)
+            cfg = self._get_config_for_symbol(s, scalp=scalp)
             asset_class = self.determine_asset_class(s)
-            is_override = s in self.config["overrides"]
+            section = "scalp_overrides" if scalp else "overrides"
+            is_override = s in self.config.get(section, {})
             result = {
                 "symbol": s,
                 "type": cfg["type"],
                 "value": cfg["value"],
                 "asset_class": asset_class,
                 "is_override": is_override,
+                "scalp": scalp,
             }
             if is_override:
-                ov = self.config["overrides"][s]
+                ov = self.config[section][s]
                 result["set_by"] = ov.get("set_by", "Unknown")
                 result["set_at"] = ov.get("set_at", "Unknown")
             return result
 
         return {
             "defaults": self.config["defaults"],
+            "scalp_defaults": self.config.get("scalp_defaults", {}),
             "overrides": self.config["overrides"],
+            "scalp_overrides": self.config.get("scalp_overrides", {}),
             "total_overrides": len(self.config["overrides"]),
+            "total_scalp_overrides": len(self.config.get("scalp_overrides", {})),
         }
 
     def format_value(self, symbol: str, value: float) -> str:

@@ -65,7 +65,8 @@ class DatabaseManager(BaseConnectionManager):
     # Delegate all operations to the operations handler
     async def insert_signal(self, message_id: str, channel_id: str, instrument: str,
                            direction: str, stop_loss: float, expiry_type: str = None,
-                           expiry_time: str = None, total_limits: int = 0) -> int:
+                           expiry_time: str = None, total_limits: int = 0,
+                           scalp: bool = False) -> int:
         """
         Insert a new signal with enhanced tracking
 
@@ -78,13 +79,14 @@ class DatabaseManager(BaseConnectionManager):
             expiry_type: Expiry type (day_end, week_end, etc.)
             expiry_time: Calculated expiry timestamp
             total_limits: Total number of limit orders
+            scalp: Whether this is a scalp signal
 
         Returns:
             Signal ID
         """
         return await self._ops.insert_signal(
             message_id, channel_id, instrument, direction,
-            stop_loss, expiry_type, expiry_time, total_limits
+            stop_loss, expiry_type, expiry_time, total_limits, scalp
         )
 
     async def insert_limits(self, signal_id: int, price_levels: List[float]):

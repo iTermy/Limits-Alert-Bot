@@ -40,6 +40,9 @@ HIGH_VALUE_INSTRUMENTS = {
 LONG_KEYWORDS = ['long', 'buy']
 SHORT_KEYWORDS = ['short', 'sell']
 
+# Channels that are always treated as scalps regardless of message content
+SCALP_CHANNELS = {'scalps', 'gold-pa-signals', 'gold-tolls-map'}
+
 # Expiry patterns
 EXPIRY_PATTERNS = {
     'vth': 'week_end',
@@ -422,6 +425,21 @@ def determine_limits_and_stop(numbers: List[float], direction: str,
     return None, None
 
 
+def is_scalp(text: str, channel_name: str = None) -> bool:
+    """
+    Determine if a signal is a scalp.
+
+    Returns True if:
+    - The channel is in SCALP_CHANNELS, OR
+    - The message text contains the word 'scalp'
+    """
+    if channel_name and channel_name.lower() in SCALP_CHANNELS:
+        return True
+    if re.search(r'\bscalp\b', text, re.IGNORECASE):
+        return True
+    return False
+
+
 # ============================================================================
 # CORE PATTERN PARSER
 # ============================================================================
@@ -503,6 +521,9 @@ class CorePatternParser:
             # Extract keywords
             keywords = extract_keywords(cleaned)
 
+            # Determine if this is a scalp
+            scalp = is_scalp(message, channel_name)
+
             # Create signal
             signal = ParsedSignal(
                 instrument=instrument,
@@ -513,7 +534,8 @@ class CorePatternParser:
                 raw_text=message,
                 parse_method='core',
                 keywords=keywords,
-                channel_name=channel_name
+                channel_name=channel_name,
+                scalp=scalp
             )
 
             # Validate before returning
@@ -620,6 +642,9 @@ class StockPatternParser:
             # Extract keywords
             keywords = extract_keywords(cleaned)
 
+            # Determine if this is a scalp
+            scalp = is_scalp(message, channel_name)
+
             # Create signal
             signal = ParsedSignal(
                 instrument=instrument,
@@ -630,7 +655,8 @@ class StockPatternParser:
                 raw_text=message,
                 parse_method='stock',
                 keywords=keywords,
-                channel_name=channel_name
+                channel_name=channel_name,
+                scalp=scalp
             )
 
             # Validate before returning

@@ -48,7 +48,8 @@ class BaseOperations:
 
     async def insert_signal(self, message_id: str, channel_id: str, instrument: str,
                             direction: str, stop_loss: float, expiry_type: str = None,
-                            expiry_time: str = None, total_limits: int = 0) -> int:
+                            expiry_time: str = None, total_limits: int = 0,
+                            scalp: bool = False) -> int:
         """
         Insert a new signal with enhanced tracking
 
@@ -58,19 +59,19 @@ class BaseOperations:
         query = """
             INSERT INTO signals (
                 message_id, channel_id, instrument, direction,
-                stop_loss, expiry_type, expiry_time, total_limits, status
+                stop_loss, expiry_type, expiry_time, total_limits, status, scalp
             )
-            VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9)
+            VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10)
             RETURNING id
         """
 
         signal_id = await self.db.execute(
             query,
             (message_id, channel_id, instrument, direction, stop_loss,
-             expiry_type, _parse_dt(expiry_time), total_limits, SignalStatus.ACTIVE)
+             expiry_type, _parse_dt(expiry_time), total_limits, SignalStatus.ACTIVE, scalp)
         )
 
-        logger.info(f"Inserted signal {signal_id} for {instrument} {direction} with {total_limits} limits")
+        logger.info(f"Inserted signal {signal_id} for {instrument} {direction} with {total_limits} limits (scalp={scalp})")
         return signal_id
 
     async def insert_limits(self, signal_id: int, price_levels: List[float]):
@@ -219,6 +220,7 @@ class BaseOperations:
                 s.status,
                 s.limits_hit,
                 s.total_limits,
+                s.scalp,
                 l.id as limit_id,
                 l.price_level,
                 l.sequence_number,
@@ -248,6 +250,7 @@ class BaseOperations:
                     'status': row['status'],
                     'limits_hit': row['limits_hit'],
                     'total_limits': row['total_limits'],
+                    'scalp': row['scalp'] or False,
                     'pending_limits': []
                 }
             if row['limit_id']:

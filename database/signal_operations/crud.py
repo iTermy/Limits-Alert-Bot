@@ -77,7 +77,8 @@ class CrudOperations:
                 stop_loss=parsed_signal.stop_loss,
                 expiry_type=parsed_signal.expiry_type,
                 expiry_time=expiry_time,
-                total_limits=len(parsed_signal.limits) if parsed_signal.limits else 0
+                total_limits=len(parsed_signal.limits) if parsed_signal.limits else 0,
+                scalp=getattr(parsed_signal, 'scalp', False)
             )
 
             # Insert limits with sequence numbers
