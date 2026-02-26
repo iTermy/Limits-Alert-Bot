@@ -13,10 +13,11 @@ def _to_dt(value) -> datetime:
     """Return a timezone-aware datetime from either a datetime object or an ISO string."""
     if isinstance(value, datetime):
         return value if value.tzinfo else pytz.UTC.localize(value)
-    s = str(value)
-    if '+' in s or s.endswith('Z'):
-        return datetime.fromisoformat(s.replace('Z', '+00:00'))
-    return pytz.UTC.localize(datetime.fromisoformat(s))
+    s = str(value).replace('Z', '+00:00')
+    dt = datetime.fromisoformat(s)
+    if dt.tzinfo is None:
+        return pytz.UTC.localize(dt)
+    return dt
 
 
 logger = get_logger("signal_db.crud")

@@ -16,11 +16,12 @@ def _parse_dt(value):
         import pytz
         return value if value.tzinfo else pytz.UTC.localize(value)
     from datetime import datetime
-    s = str(value)
-    if '+' in s or s.endswith('Z'):
-        return datetime.fromisoformat(s.replace('Z', '+00:00'))
     import pytz
-    return pytz.UTC.localize(datetime.fromisoformat(s))
+    s = str(value).replace('Z', '+00:00')
+    dt = datetime.fromisoformat(s)
+    if dt.tzinfo is None:
+        return pytz.UTC.localize(dt)
+    return dt
 
 
 from utils.logger import get_logger

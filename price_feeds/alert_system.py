@@ -62,6 +62,7 @@ class AlertSystem:
             'approaching_sent': 0,
             'hit_sent': 0,
             'stop_loss_sent': 0,
+            'auto_tp_sent': 0,
             'total_alerts': 0,
             'errors': 0
         }
@@ -519,6 +520,162 @@ class AlertSystem:
             self.stats['errors'] += 1
             return False
 
+    async def send_auto_tp_alert(self, signal: Dict, hit_limits: list,
+                                  last_pnl: float, tp_config) -> bool:
+        """
+        Send auto take-profit alerts to both the alert channel and the profit channel.
+
+        Mirrors what happens on a manual 'profit' reply:
+          - Role ping + profit embed → alert channel (same channel as limit-hit alerts)
+          - Profit embed → profit_channel (from channels.json)
+
+        Args:
+            signal:      Signal dict (needs signal_id, instrument, direction,
+                         message_id, channel_id, total_limits)
+            hit_limits:  Ordered list of hit limit dicts (with hit_price, sequence_number)
+            last_pnl:    P&L of the last hit limit in native units
+            tp_config:   TPConfig instance for formatting
+
+        Returns:
+            True if at least the alert-channel message was sent successfully.
+        """
+        target_channel = self._get_alert_channel(signal)
+        if not target_channel:
+            logger.error("send_auto_tp_alert: no alert channel configured")
+            return False
+
+        instrument = signal['instrument']
+        direction = signal['direction'].upper()
+        pnl_display = tp_config.format_value(instrument, last_pnl)
+        num_hit = len(hit_limits)
+        total = signal.get('total_limits', num_hit)
+
+        # Build source link
+        message_url = None
+        if signal.get('message_id') and signal.get('channel_id'):
+            if not str(signal['message_id']).startswith('manual_'):
+                guild_id = signal.get('guild_id')
+                if not guild_id and self.bot and self.bot.guilds:
+                    guild_id = self.bot.guilds[0].id
+                if guild_id:
+                    message_url = (
+                        f"https://discord.com/channels/{guild_id}"
+                        f"/{signal['channel_id']}/{signal['message_id']}"
+                    )
+
+        # --- Build the embed ---
+        embed = discord.Embed(
+            title="💰 Auto Take-Profit Triggered!",
+            description=f"**{instrument}** {direction}",
+            color=0x00FF00,
+            timestamp=datetime.now(timezone.utc)
+        )
+
+        embed.add_field(name="Profit", value=f"**+{pnl_display}**", inline=True)
+        embed.add_field(name="Direction", value=direction, inline=True)
+        embed.add_field(name="Limits Hit", value=f"{num_hit}/{total}", inline=True)
+
+        # Show each hit limit with its P&L
+        if hit_limits:
+            limits_lines = []
+            for lim in hit_limits:
+                seq = lim.get('sequence_number', '?')
+                price = lim.get('price_level') or lim.get('hit_price', '?')
+                limits_lines.append(f"Limit #{seq}: {self._format_price(price)} ✅")
+            embed.add_field(
+                name="Hit Limits",
+                value="\n".join(limits_lines),
+                inline=False
+            )
+
+        if message_url:
+            embed.add_field(name="Original Signal", value=message_url, inline=False)
+
+        embed.set_footer(text=f"Signal #{signal['signal_id']} • Auto TP • Reply to manage")
+
+        # --- Send to alert channel ---
+        try:
+            await target_channel.send("<@&1334203997107650662>")
+            alert_message = await target_channel.send(embed=embed)
+            self.track_alert_message(alert_message.id, signal['signal_id'])
+            self.stats['auto_tp_sent'] += 1
+            self.stats['total_alerts'] += 1
+            logger.info(f"Auto-TP alert sent for signal {signal['signal_id']} to alert channel")
+        except Exception as e:
+            logger.error(f"Failed to send auto-TP alert to alert channel: {e}", exc_info=True)
+            self.stats['errors'] += 1
+            return False
+
+        # --- Send to profit channel ---
+        try:
+            profit_channel = await self._get_profit_channel()
+            if profit_channel:
+                profit_embed = discord.Embed(
+                    title="💰 PROFIT Alert",
+                    description=f"Signal #{signal['signal_id']} has been marked as **PROFIT** (Auto TP)",
+                    color=0x00FF00,
+                    timestamp=datetime.now(timezone.utc)
+                )
+                profit_embed.add_field(name="Symbol", value=instrument, inline=True)
+                profit_embed.add_field(name="Position", value=direction, inline=True)
+                profit_embed.add_field(name="Profit", value=f"**+{pnl_display}**", inline=True)
+
+                if hit_limits:
+                    limits_lines = []
+                    for lim in hit_limits:
+                        seq = lim.get('sequence_number', '?')
+                        price = lim.get('price_level') or lim.get('hit_price', '?')
+                        limits_lines.append(f"Limit #{seq}: {self._format_price(price)} ✅")
+                    profit_embed.add_field(
+                        name="Limits",
+                        value="\n".join(limits_lines),
+                        inline=True
+                    )
+
+                if signal.get('stop_loss'):
+                    profit_embed.add_field(
+                        name="Stop Loss",
+                        value=self._format_price(signal['stop_loss']),
+                        inline=True
+                    )
+
+                if message_url:
+                    profit_embed.add_field(
+                        name="Original Signal",
+                        value=f"[View Message]({message_url})",
+                        inline=False
+                    )
+
+                profit_embed.set_footer(text="Auto Take-Profit")
+                await profit_channel.send(embed=profit_embed)
+                logger.info(f"Auto-TP profit alert sent for signal {signal['signal_id']} to profit channel")
+            else:
+                logger.warning("send_auto_tp_alert: no profit_channel configured, skipping")
+        except Exception as e:
+            # Don't fail the whole call if only the profit channel send fails
+            logger.error(f"Failed to send auto-TP alert to profit channel: {e}", exc_info=True)
+
+        return True
+
+    async def _get_profit_channel(self) -> Optional[discord.TextChannel]:
+        """Load and return the profit channel from channels.json."""
+        try:
+            from pathlib import Path
+            import json
+            config_path = Path(__file__).resolve().parent.parent / 'config' / 'channels.json'
+            with open(config_path, 'r') as f:
+                channels_config = json.load(f)
+            profit_channel_id = channels_config.get('profit_channel')
+            if not profit_channel_id:
+                return None
+            channel = self.bot.get_channel(int(profit_channel_id))
+            if not channel:
+                channel = await self.bot.fetch_channel(int(profit_channel_id))
+            return channel
+        except Exception as e:
+            logger.error(f"Could not load profit channel: {e}")
+            return None
+
     def get_stats(self) -> Dict:
         """Get alert system statistics"""
         return {
@@ -526,6 +683,7 @@ class AlertSystem:
                 'approaching': self.stats['approaching_sent'],
                 'hit': self.stats['hit_sent'],
                 'stop_loss': self.stats['stop_loss_sent'],
+                'auto_tp': self.stats['auto_tp_sent'],
                 'total': self.stats['total_alerts']
             },
             'errors': self.stats['errors'],

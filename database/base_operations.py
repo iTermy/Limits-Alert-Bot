@@ -11,13 +11,21 @@ logger = get_logger("database.operations")
 
 
 def _parse_dt(value) -> Optional[datetime]:
-    """Convert an ISO string or datetime to a timezone-aware datetime, or return None."""
+    """Convert an ISO string or datetime to a timezone-aware datetime, or return None.
+
+    Handles all ISO formats including negative UTC offsets like -05:00 (EST/EDT).
+    Only assumes UTC for truly naive strings (no timezone info at all).
+    """
     if value is None:
         return None
     if isinstance(value, datetime):
         return value if value.tzinfo else pytz.UTC.localize(value)
-    return datetime.fromisoformat(str(value)).replace(tzinfo=pytz.UTC) if '+' not in str(value) and 'Z' not in str(value) \
-        else datetime.fromisoformat(str(value).replace('Z', '+00:00'))
+    s = str(value).replace('Z', '+00:00')
+    dt = datetime.fromisoformat(s)
+    # Only localize to UTC if the string had no timezone component at all
+    if dt.tzinfo is None:
+        return pytz.UTC.localize(dt)
+    return dt
 
 
 class BaseOperations:
@@ -268,6 +276,24 @@ class BaseOperations:
             (limit_id,)
         )
         return rows > 0
+
+    async def get_hit_limits_for_signal(self, signal_id: int) -> List[Dict[str, Any]]:
+        """
+        Return all hit limits for a signal ordered by sequence_number.
+        Includes hit_price (actual fill price) for P&L calculations.
+        """
+        query = """
+            SELECT id AS limit_id,
+                   sequence_number,
+                   price_level,
+                   hit_price,
+                   hit_time
+            FROM limits
+            WHERE signal_id = $1 AND status = 'hit'
+            ORDER BY sequence_number
+        """
+        rows = await self.db.fetch_all(query, (signal_id,))
+        return [dict(r) for r in rows]
 
     async def get_performance_stats(self, start_date: str = None, end_date: str = None,
                                     instrument: str = None) -> Dict[str, Any]:

@@ -183,6 +183,18 @@ class SignalDatabase:
         """
         return await self._lifecycle.process_limit_hit(limit_id, actual_price, self)
 
+    async def get_hit_limits_for_signal(self, signal_id: int) -> List[Dict[str, Any]]:
+        """
+        Return all hit limits for a signal with hit_price for P&L calculations.
+
+        Args:
+            signal_id: Signal ID
+
+        Returns:
+            List of dicts with limit_id, sequence_number, price_level, hit_price, hit_time
+        """
+        return await self.db.get_hit_limits_for_signal(signal_id)
+
     async def check_and_update_stop_loss(self, signal_id: int, current_price: float) -> bool:
         """
         Check if stop loss is hit and update status

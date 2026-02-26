@@ -285,6 +285,9 @@ class BotCommands(BaseCog):
             if hasattr(self.bot, 'monitor') and self.bot.monitor:
                 if hasattr(self.bot.monitor, 'alert_config'):
                     self.bot.monitor.alert_config.reload_config()
+                if hasattr(self.bot.monitor, 'tp_config'):
+                    self.bot.monitor.tp_config.reload_config()
+                    self.bot.monitor.tp_monitor.tp_config = self.bot.monitor.tp_config
 
             await ctx.send("✅ Configuration reloaded")
             self.logger.info(f"Config reloaded by {ctx.author.name}")

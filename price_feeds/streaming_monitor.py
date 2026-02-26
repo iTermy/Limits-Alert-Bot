@@ -15,6 +15,8 @@ from price_feeds.feed_health_monitor import FeedHealthMonitor
 from price_feeds.price_stream_manager import PriceStreamManager
 from price_feeds.alert_config import AlertDistanceConfig
 from price_feeds.alert_system import AlertSystem
+from price_feeds.tp_config import TPConfig
+from price_feeds.tp_monitor import AutoTPMonitor
 from utils.logger import get_logger
 from utils.config_loader import load_settings
 
@@ -45,6 +47,13 @@ class StreamingPriceMonitor:
         self.alert_config = AlertDistanceConfig()
         self.stream_manager = PriceStreamManager()
         self.alert_system = AlertSystem(bot=bot)
+        self.tp_config = TPConfig()
+        self.tp_monitor = AutoTPMonitor(
+            tp_config=self.tp_config,
+            signal_db=signal_db,
+            db=db,
+            alert_system=self.alert_system,
+        )
 
         # Connect alert system to message handler
         if hasattr(bot, 'message_handler') and bot.message_handler:
@@ -239,6 +248,11 @@ class StreamingPriceMonitor:
             # Subscribe to all needed symbols
             await self.stream_manager.bulk_subscribe(list(symbols_needed))
 
+            # Pre-populate TP hit-limit cache for any signals already in HIT status
+            for signal in signals:
+                if signal.get('status') == 'hit':
+                    await self.tp_monitor.refresh_hit_limits(signal['signal_id'])
+
             logger.info(f"Loaded {len(signals)} active signals across {len(symbols_needed)} symbols")
 
         except Exception as e:
@@ -280,6 +294,10 @@ class StreamingPriceMonitor:
                     if symbol not in self.symbol_to_signals:
                         self.symbol_to_signals[symbol] = []
                     self.symbol_to_signals[symbol].append(signal_id)
+
+                    # Keep TP cache fresh for HIT signals
+                    if signal.get('status') == 'hit':
+                        await self.tp_monitor.refresh_hit_limits(signal_id)
 
                 if symbols_to_add or symbols_to_remove:
                     logger.info(f"Signal refresh: +{len(symbols_to_add)} -{len(symbols_to_remove)} symbols")
@@ -345,6 +363,19 @@ class StreamingPriceMonitor:
         # Check stop loss
         if signal.get('stop_loss'):
             await self._check_stop_loss(signal, current_price, direction)
+
+        # Check auto take-profit (runs for any HIT signal that has hit limits cached)
+        if signal.get('status') == 'hit':
+            tp_triggered = await self.tp_monitor.check_signal(
+                signal,
+                current_bid=price_data['bid'],
+                current_ask=price_data['ask'],
+            )
+            if tp_triggered:
+                # React to original signal message with profit emoji
+                await self._react_to_original_signal(signal, "💰")
+                # Remove signal from active tracking
+                await self._maybe_unsubscribe_symbol(signal['instrument'], signal['signal_id'])
 
     async def _check_limit(self, signal: Dict, limit: Dict, current_price: float, direction: str):
         """
@@ -563,10 +594,17 @@ class StreamingPriceMonitor:
             )
 
             if result.get('all_limits_hit'):
-                logger.info(f"All limits hit for signal {signal['signal_id']}")
-
-                # Remove from active signals and unsubscribe if no other signals need this symbol
-                await self._maybe_unsubscribe_symbol(signal['instrument'], signal['signal_id'])
+                logger.info(f"All limits hit for signal {signal['signal_id']} — refreshing TP cache, continuing to watch for auto-TP")
+                # Refresh TP cache so the final limit's hit_price is included
+                await self.tp_monitor.refresh_hit_limits(signal['signal_id'])
+                # Keep signal status as 'hit' so TP checks keep running
+                signal['status'] = 'hit'
+                # Do NOT unsubscribe here — let auto-TP (or manual close/SL) handle that
+            else:
+                # Signal is now HIT — refresh TP hit-limit cache so TP checks start immediately
+                await self.tp_monitor.refresh_hit_limits(signal['signal_id'])
+                # Update in-memory status so _check_signal starts running TP checks
+                signal['status'] = 'hit'
 
         except Exception as e:
             logger.error(f"Failed to process limit hit: {e}")
@@ -582,7 +620,8 @@ class StreamingPriceMonitor:
             if success:
                 logger.info(f"Signal {signal['signal_id']} marked as stop loss")
 
-                # Remove from active tracking
+                # Remove from active tracking and TP cache
+                self.tp_monitor.evict_signal(signal['signal_id'])
                 await self._maybe_unsubscribe_symbol(signal['instrument'], signal['signal_id'])
 
         except Exception as e:
@@ -601,8 +640,9 @@ class StreamingPriceMonitor:
                 del self.symbol_to_signals[symbol]
                 logger.info(f"Unsubscribed from {symbol} (no active signals)")
 
-        # Remove from active signals
+        # Remove from active signals and TP cache
         self.active_signals.pop(completed_signal_id, None)
+        self.tp_monitor.evict_signal(completed_signal_id)
 
     def get_stats(self) -> Dict:
         """Get monitoring statistics"""

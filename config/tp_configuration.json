@@ -1,0 +1,40 @@
+{
+  "defaults": {
+    "forex": {
+      "type": "pips",
+      "value": 10.0,
+      "description": "Standard forex pairs"
+    },
+    "forex_jpy": {
+      "type": "pips",
+      "value": 10.0,
+      "description": "JPY pairs (auto-detected)"
+    },
+    "metals": {
+      "type": "dollars",
+      "value": 5.0,
+      "description": "Gold, Silver, etc."
+    },
+    "indices": {
+      "type": "dollars",
+      "value": 20.0,
+      "description": "Stock indices"
+    },
+    "stocks": {
+      "type": "dollars",
+      "value": 1.0,
+      "description": "Individual stocks"
+    },
+    "crypto": {
+      "type": "dollars",
+      "value": 50.0,
+      "description": "Cryptocurrencies"
+    },
+    "oil": {
+      "type": "dollars",
+      "value": 0.5,
+      "description": "Oil commodities"
+    }
+  },
+  "overrides": {}
+}

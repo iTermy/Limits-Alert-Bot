@@ -115,7 +115,8 @@ class TradingBot(commands.Bot):
         """Load all command cogs"""
         extensions = [
             'commands.bot_commands',
-            'commands.signal_commands'
+            'commands.signal_commands',
+            'commands.tp_commands',
         ]
 
         for extension in extensions:

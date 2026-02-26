@@ -15,11 +15,12 @@ def _parse_dt(value):
         return None
     if hasattr(value, 'tzinfo'):
         return value if value.tzinfo else __import__('pytz').UTC.localize(value)
-    s = str(value)
     from datetime import datetime
-    if '+' in s or s.endswith('Z'):
-        return datetime.fromisoformat(s.replace('Z', '+00:00'))
-    return __import__('pytz').UTC.localize(datetime.fromisoformat(s))
+    s = str(value).replace('Z', '+00:00')
+    dt = datetime.fromisoformat(s)
+    if dt.tzinfo is None:
+        return __import__('pytz').UTC.localize(dt)
+    return dt
 
 logger = get_logger("database")
 
@@ -172,6 +173,10 @@ class DatabaseManager(BaseConnectionManager):
             Success status
         """
         return await self._ops.mark_hit_alert_sent(limit_id)
+
+    async def get_hit_limits_for_signal(self, signal_id: int) -> List[Dict[str, Any]]:
+        """Return all hit limits for a signal with hit_price for P&L calculations."""
+        return await self._ops.get_hit_limits_for_signal(signal_id)
 
     async def get_performance_stats(self, start_date: str = None, end_date: str = None,
                                    instrument: str = None) -> Dict[str, Any]:
