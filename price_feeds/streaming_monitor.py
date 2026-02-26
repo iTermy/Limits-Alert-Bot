@@ -9,6 +9,8 @@ import asyncio
 import logging
 from typing import Dict, List
 from datetime import datetime
+from datetime import time as dtime
+import pytz
 import discord
 from price_feeds.feed_health_monitor import FeedHealthMonitor
 
@@ -186,6 +188,29 @@ class StreamingPriceMonitor:
         """
         self._reload_spread_buffer_setting()
         return self._spread_buffer_enabled
+
+    def _is_spread_hour(self) -> bool:
+        """
+        Check whether the current time falls within the daily spread hour.
+
+        Spread hour runs from 5:00 PM to 6:00 PM US/Eastern (America/New_York)
+        on weekdays (Monday–Friday).  During this window broker spreads widen
+        significantly, causing false limit/stop hits.
+
+        Returns:
+            True if we are currently in spread hour, False otherwise.
+        """
+        est = pytz.timezone('America/New_York')
+        now_est = datetime.now(est)
+
+        # Weekends have no spread hour (forex is closed / near-closed anyway)
+        if now_est.weekday() >= 5:   # 5 = Saturday, 6 = Sunday
+            return False
+
+        spread_start = dtime(17, 0)  # 5:00 PM EST
+        spread_end   = dtime(18, 0)  # 6:00 PM EST
+
+        return spread_start <= now_est.time() < spread_end
 
     async def start(self):
         """Start the streaming monitor"""
@@ -443,6 +468,21 @@ class StreamingPriceMonitor:
 
         # Check if hit (with in-memory flag check)
         if is_hit and not limit.get('hit_alert_sent', False):
+            # --- Spread hour guard ---
+            # During the 5-6 PM EST spread hour, broker spreads widen wildly and
+            # can trigger false limit hits.  Instead of recording the hit, cancel
+            # the entire signal and send a single informational embed.
+            if self._is_spread_hour():
+                logger.info(
+                    f"Spread hour: suppressing limit hit for signal "
+                    f"{signal['signal_id']} limit #{limit['sequence_number']} "
+                    f"({signal['instrument']} @ {current_price:.5f})"
+                )
+                await self.alert_system.send_spread_hour_cancel_alert(signal, current_price)
+                await self._react_to_original_signal(signal, "❌")
+                await self._process_spread_hour_cancel(signal)
+                return  # All subsequent limit/SL checks for this signal are moot
+
             # ENHANCED: Pass spread and buffer status to alert system
             await self.alert_system.send_limit_hit_alert(
                 signal, limit, current_price,
@@ -569,6 +609,17 @@ class StreamingPriceMonitor:
             is_hit = current_price >= stop_loss
 
         if is_hit:
+            # --- Spread hour guard ---
+            if self._is_spread_hour():
+                logger.info(
+                    f"Spread hour: suppressing stop loss hit for signal "
+                    f"{signal['signal_id']} ({signal['instrument']} @ {current_price:.5f})"
+                )
+                await self.alert_system.send_spread_hour_cancel_alert(signal, current_price)
+                await self._react_to_original_signal(signal, "❌")
+                await self._process_spread_hour_cancel(signal)
+                return
+
             # Stop loss alerts never show spread
             await self.alert_system.send_stop_loss_alert(signal, current_price)
             # Add reaction to original signal message
@@ -645,6 +696,34 @@ class StreamingPriceMonitor:
 
         except Exception as e:
             logger.error(f"Failed to process stop loss: {e}")
+
+    async def _process_spread_hour_cancel(self, signal: Dict):
+        """
+        Cancel a signal that was falsely triggered during spread hour.
+
+        The signal is marked cancelled with closed_reason='automatic' so it
+        appears in reports with a clear audit trail.  It is removed from
+        active tracking and the symbol subscription is cleaned up if nothing
+        else needs it.
+        """
+        signal_id = signal['signal_id']
+        try:
+            success = await self.signal_db.manually_set_signal_status(
+                signal_id,
+                'cancelled',
+                reason='spread_hour_auto_cancel',
+                db_manager=self.db,
+                closed_reason='automatic'
+            )
+            if success:
+                logger.info(f"Signal {signal_id} cancelled due to spread hour hit")
+                self.tp_monitor.evict_signal(signal_id)
+                await self._maybe_unsubscribe_symbol(signal['instrument'], signal_id)
+                self.stats['spread_hour_cancels'] = self.stats.get('spread_hour_cancels', 0) + 1
+            else:
+                logger.error(f"Failed to cancel signal {signal_id} for spread hour")
+        except Exception as e:
+            logger.error(f"Error cancelling signal {signal_id} for spread hour: {e}")
 
     async def _maybe_unsubscribe_symbol(self, symbol: str, completed_signal_id: int):
         """Unsubscribe from symbol if no other active signals need it"""

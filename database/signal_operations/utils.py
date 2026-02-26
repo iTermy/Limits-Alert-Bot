@@ -25,25 +25,28 @@ def calculate_expiry(expiry_type: str) -> Optional[str]:
     now = datetime.now(est)
 
     if expiry_type == 'day_end':
-        # End of current trading day (5 PM EST)
-        expiry = now.replace(hour=17, minute=0, second=0, microsecond=0)
-        if now.hour >= 17:
-            # If past 5 PM, set to next day
+        # End of current trading day (4:45 PM EST — 15 min before spread hour)
+        expiry = now.replace(hour=16, minute=45, second=0, microsecond=0)
+        if now >= expiry:
+            # If at or past 4:45 PM, set to next trading day
             expiry += timedelta(days=1)
 
     elif expiry_type == 'week_end':
-        # End of trading week (Friday 5 PM EST)
+        # End of trading week (Friday 4:45 PM EST)
         days_until_friday = (4 - now.weekday()) % 7
-        if days_until_friday == 0 and now.hour >= 17:
+        if days_until_friday == 0 and now >= now.replace(hour=16, minute=45, second=0, microsecond=0):
             days_until_friday = 7
         expiry = now + timedelta(days=days_until_friday)
-        expiry = expiry.replace(hour=17, minute=0, second=0, microsecond=0)
+        expiry = expiry.replace(hour=16, minute=45, second=0, microsecond=0)
 
     elif expiry_type == 'month_end':
-        # Last trading day of month
+        # Last trading day of month at 4:45 PM EST
+        # Use est.localize() (not tzinfo=est) to get the correct modern UTC offset.
+        # Passing tzinfo=est directly to datetime() uses pytz's LMT offset, which
+        # is wrong by several minutes.
         next_month = now.month + 1 if now.month < 12 else 1
         year = now.year if now.month < 12 else now.year + 1
-        first_of_next = datetime(year, next_month, 1, 17, 0, 0, tzinfo=est)
+        first_of_next = est.localize(datetime(year, next_month, 1, 16, 45, 0))
         # Go back to last weekday
         last_day = first_of_next - timedelta(days=1)
         while last_day.weekday() > 4:  # Saturday = 5, Sunday = 6
@@ -52,8 +55,8 @@ def calculate_expiry(expiry_type: str) -> Optional[str]:
 
     else:
         # Default to day end
-        expiry = now.replace(hour=17, minute=0, second=0, microsecond=0)
-        if now.hour >= 17:
+        expiry = now.replace(hour=16, minute=45, second=0, microsecond=0)
+        if now >= expiry:
             expiry += timedelta(days=1)
 
     return expiry.isoformat()

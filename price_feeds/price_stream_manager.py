@@ -180,6 +180,11 @@ class PriceStreamManager:
         async with self.price_lock:
             self.latest_prices.pop(symbol, None)
 
+        # Remove from health monitor tracking so stale entries don't
+        # trigger false feed-down alerts after the symbol is unsubscribed
+        if self.health_monitor:
+            self.health_monitor.clear_symbol(symbol)
+
     async def bulk_subscribe(self, symbols: List[str]):
         """
         Subscribe to multiple symbols at once

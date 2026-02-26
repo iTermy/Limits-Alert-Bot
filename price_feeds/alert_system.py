@@ -63,6 +63,7 @@ class AlertSystem:
             'hit_sent': 0,
             'stop_loss_sent': 0,
             'auto_tp_sent': 0,
+            'spread_hour_cancelled': 0,
             'total_alerts': 0,
             'errors': 0
         }
@@ -518,6 +519,102 @@ class AlertSystem:
 
         except Exception as e:
             logger.error(f"Failed to send stop loss alert: {e}")
+            self.stats['errors'] += 1
+            return False
+
+    async def send_spread_hour_cancel_alert(self, signal: Dict, current_price: float) -> bool:
+        """
+        Send a single informational embed when a signal is hit during spread hour
+        (5–6 PM EST weekdays) and is automatically cancelled.
+
+        A role ping is sent so traders are notified of the cancellation.
+
+        Args:
+            signal: Signal dictionary
+            current_price: The price that triggered the (rejected) hit
+
+        Returns:
+            True if the embed was sent successfully
+        """
+        target_channel = self._get_alert_channel(signal)
+        if not target_channel:
+            logger.error("No alert channel configured for spread hour cancel alert")
+            return False
+
+        try:
+            embed = discord.Embed(
+                title="🕔 Spread Hour — Signal Auto-Cancelled",
+                description=(
+                    f"**{signal['instrument']}** {signal['direction'].upper()} was triggered "
+                    f"during the **5–6 PM EST spread hour** and has been automatically cancelled."
+                ),
+                color=0xFFA500,   # Orange — informational, not a real hit or loss
+                timestamp=datetime.now(timezone.utc)
+            )
+
+            embed.add_field(
+                name="Trigger Price",
+                value=self._format_price(current_price),
+                inline=True
+            )
+            embed.add_field(
+                name="Stop Loss Level",
+                value=self._format_price(signal['stop_loss']),
+                inline=True
+            )
+
+            # Show remaining pending limits so the trader knows what to re-enter
+            pending = signal.get('pending_limits', [])
+            if pending:
+                levels = "  |  ".join(
+                    self._format_price(lim['price_level']) for lim in pending
+                )
+                embed.add_field(
+                    name=f"Pending Limits ({len(pending)})",
+                    value=levels,
+                    inline=False
+                )
+
+            # Source link
+            if signal.get('message_id') and signal.get('channel_id'):
+                if not str(signal['message_id']).startswith('manual_'):
+                    guild_id = signal.get('guild_id')
+                    if not guild_id and self.bot and self.bot.guilds:
+                        guild_id = self.bot.guilds[0].id
+                    message_url = (
+                        f"https://discord.com/channels/"
+                        f"{guild_id}/{signal['channel_id']}/{signal['message_id']}"
+                    )
+                    embed.add_field(name="Source", value=message_url, inline=False)
+
+            embed.add_field(
+                name="ℹ️ What happened?",
+                value=(
+                    "Broker spreads widen significantly between 5–6 PM EST each weekday "
+                    "as liquidity providers roll positions.  This hit was likely caused by "
+                    "spread, not a genuine price move.  The signal has been cancelled to "
+                    "protect the trade record."
+                ),
+                inline=False
+            )
+
+            embed.set_footer(text=f"Signal #{signal['signal_id']} • Auto-cancelled (spread hour)")
+
+            await target_channel.send("<@&1334203997107650662>")
+            message = await target_channel.send(embed=embed)
+
+            self.track_alert_message(message.id, signal['signal_id'])
+            self.stats['spread_hour_cancelled'] += 1
+            self.stats['total_alerts'] += 1
+
+            logger.info(
+                f"Spread hour cancel alert sent for signal {signal['signal_id']} "
+                f"({signal['instrument']} @ {self._format_price(current_price)})"
+            )
+            return True
+
+        except Exception as e:
+            logger.error(f"Failed to send spread hour cancel alert: {e}")
             self.stats['errors'] += 1
             return False
 
