@@ -11,6 +11,10 @@ import discord
 from discord.ext import commands
 from typing import Optional, List, Dict
 from datetime import datetime
+from price_feeds.tp_config import TPConfig
+
+ASSET_CLASSES = ["forex", "forex_jpy", "metals", "indices", "stocks", "crypto", "oil"]
+VALID_TP_TYPES = ["pips", "dollars"]
 
 logger = get_logger("signal_commands")
 
@@ -150,6 +154,7 @@ class SignalCommands(BaseCog):
 
     def __init__(self, bot):
         super().__init__(bot)
+        self.tp_config = TPConfig()
 
     @commands.command(name="signal")
     async def add_signal(
@@ -515,9 +520,226 @@ class SignalCommands(BaseCog):
     async def set_stop_loss(self, ctx: commands.Context, signal_id: int):
         await self.set_signal_status(ctx, signal_id, "stop_loss")
 
-    @commands.command(name="cancel", aliases=["nm"], description="Cancel a signal")
-    async def set_cancelled(self, ctx: commands.Context, signal_id: int):
-        await self.set_signal_status(ctx, signal_id, "cancelled")
+    @commands.command(name="cancel", aliases=["nm"], description="Cancel a signal or bulk cancel signals")
+    async def set_cancelled(self, ctx: commands.Context, *, args: str = None):
+        """
+        Cancel signals. Supports:
+          !cancel <id>                              - Cancel a specific signal
+          !cancel gold longs/shorts/both setups     - Cancel gold setup signals
+          !cancel gold longs/shorts/both pa         - Cancel gold price action signals
+          !cancel gold longs/shorts/both tolls      - Cancel gold toll signals
+          !cancel gold longs/shorts/both everything - Cancel all gold signals
+          !cancel all <PAIR>                        - Cancel all signals for a pair (e.g. !cancel all EURUSD)
+          !cancel all <CURRENCY>                    - Cancel all signals containing a currency (e.g. !cancel all EUR)
+        For detailed help: !help cancel
+        """
+        if args is None:
+            await ctx.send("❌ Usage: `!cancel <id>` or `!cancel gold longs/shorts/both <type>` or `!cancel all <PAIR/CURRENCY>`\nSee `!help cancel` for full details.")
+            return
+
+        args = args.strip()
+
+        # --- !cancel <integer id> ---
+        if args.isdigit():
+            await self.set_signal_status(ctx, int(args), "cancelled")
+            return
+
+        # Normalise to lowercase for matching
+        args_lower = args.lower()
+
+        # --- !cancel all <PAIR or CURRENCY> ---
+        if args_lower.startswith("all "):
+            target = args[4:].strip().upper()
+            await self._bulk_cancel_by_target(ctx, target)
+            return
+
+        # --- !cancel gold ... ---
+        if args_lower.startswith("gold"):
+            tokens = args_lower.split()
+            # tokens[0] = "gold", tokens[1] = direction, tokens[2] = type
+            if len(tokens) < 3:
+                await ctx.send("❌ Usage: `!cancel gold <longs|shorts|both> <setups|pa|tolls|everything>`\nSee `!help cancel` for details.")
+                return
+
+            direction_token = tokens[1]
+            type_token = tokens[2]
+
+            if direction_token not in ("longs", "shorts", "both"):
+                await ctx.send("❌ Direction must be `longs`, `shorts`, or `both`.")
+                return
+
+            if type_token not in ("setups", "pa", "priceaction", "price_action", "tolls", "everything"):
+                await ctx.send("❌ Type must be `setups`, `pa`, `tolls`, or `everything`.")
+                return
+
+            # Map direction
+            direction_filter = None if direction_token == "both" else direction_token.rstrip("s")  # longs->long, shorts->short
+
+            # Map type to channel category
+            channel_category = None
+            if type_token in ("pa", "priceaction", "price_action"):
+                channel_category = "pa"
+            elif type_token == "tolls":
+                channel_category = "tolls"
+            elif type_token == "setups":
+                channel_category = "setups"
+            # "everything" -> channel_category stays None (all categories)
+
+            await self._bulk_cancel_gold(ctx, direction_filter, channel_category)
+            return
+
+        # Unrecognised syntax
+        await ctx.send("❌ Unrecognised cancel syntax. See `!help cancel` for usage.")
+
+    # ── Bulk cancel helpers ────────────────────────────────────────────────
+
+    async def _load_channel_name_map(self):
+        """Return {channel_id_str: channel_name_lower} from channels.json"""
+        import json
+        from pathlib import Path
+        channels_file = Path(__file__).resolve().parent.parent / 'config' / 'channels.json'
+        try:
+            with open(channels_file, 'r') as f:
+                channels_data = json.load(f)
+            monitored = channels_data.get('monitored_channels', {})
+            return {str(cid): name.lower() for name, cid in monitored.items()}
+        except Exception as e:
+            logger.warning(f"Could not load channels.json: {e}")
+            return {}
+
+    def _channel_category(self, channel_name: str) -> str:
+        """Classify a channel name as 'tolls', 'pa', 'setups', or 'other'."""
+        if 'toll' in channel_name:
+            return 'tolls'
+        if 'pa' in channel_name or 'price' in channel_name or 'action' in channel_name:
+            return 'pa'
+        return 'setups'
+
+    async def _get_active_signals_for_instrument(self, instrument: str):
+        """Fetch all active/hit signals for an instrument (case-insensitive)."""
+        from database import db
+        async with db.get_connection() as conn:
+            rows = await conn.fetch(
+                """SELECT id, instrument, direction, channel_id
+                   FROM signals
+                   WHERE UPPER(instrument) = $1
+                     AND status IN ('active', 'hit')""",
+                instrument.upper()
+            )
+        return [dict(r) for r in rows]
+
+    async def _cancel_signal_ids(self, signal_ids: list, reason: str) -> int:
+        """Cancel a list of signal IDs. Returns number successfully cancelled."""
+        if not signal_ids:
+            return 0
+        count = 0
+        for sid in signal_ids:
+            success = await self.signal_db.manually_set_signal_status(
+                sid, 'cancelled', reason
+            )
+            if success:
+                count += 1
+        return count
+
+    async def _bulk_cancel_gold(self, ctx, direction_filter, channel_category):
+        """
+        Cancel active XAUUSD/GOLD signals filtered by direction and channel category.
+        direction_filter: 'long' | 'short' | None (both)
+        channel_category: 'setups' | 'pa' | 'tolls' | None (all)
+        """
+        loading = await ctx.send("🔄 Finding signals to cancel...")
+
+        channel_map = await self._load_channel_name_map()
+
+        # Fetch all active gold signals
+        from database import db
+        async with db.get_connection() as conn:
+            rows = await conn.fetch(
+                """SELECT id, instrument, direction, channel_id
+                   FROM signals
+                   WHERE UPPER(instrument) IN ('XAUUSD', 'GOLD')
+                     AND status IN ('active', 'hit')"""
+            )
+        signals = [dict(r) for r in rows]
+
+        # Filter by direction
+        if direction_filter:
+            signals = [s for s in signals if s['direction'].lower() == direction_filter]
+
+        # Filter by channel category
+        if channel_category:
+            filtered = []
+            for s in signals:
+                ch_name = channel_map.get(str(s['channel_id']), '')
+                if self._channel_category(ch_name) == channel_category:
+                    filtered.append(s)
+            signals = filtered
+
+        if not signals:
+            dir_label = direction_filter.title() + "s" if direction_filter else "Long/Short"
+            cat_label = channel_category.title() if channel_category else "All"
+            await loading.edit(content=f"ℹ️ No active Gold {dir_label} {cat_label} signals found.")
+            return
+
+        signal_ids = [s['id'] for s in signals]
+        cancelled = await self._cancel_signal_ids(
+            signal_ids, f"Bulk cancel by {ctx.author.name}"
+        )
+
+        dir_label = direction_filter.title() + "s" if direction_filter else "Longs & Shorts"
+        cat_label = channel_category.title() if channel_category else "All Categories"
+
+        embed = discord.Embed(
+            title="🚫 Bulk Cancel Complete",
+            description=f"Cancelled **{cancelled}/{len(signal_ids)}** Gold {dir_label} ({cat_label}) signals",
+            color=0xFFA500
+        )
+        embed.set_footer(text=f"Actioned by {ctx.author.name}")
+        await loading.edit(content=None, embed=embed)
+
+    async def _bulk_cancel_by_target(self, ctx, target: str):
+        """
+        Cancel all active signals whose instrument contains `target`.
+        Works for exact pairs (EURUSD) and currencies (EUR).
+        """
+        loading = await ctx.send(f"🔄 Finding signals for `{target}` to cancel...")
+
+        from database import db
+        async with db.get_connection() as conn:
+            rows = await conn.fetch(
+                """SELECT id, instrument, direction
+                   FROM signals
+                   WHERE UPPER(instrument) LIKE $1
+                     AND status IN ('active', 'hit')""",
+                f"%{target.upper()}%"
+            )
+        signals = [dict(r) for r in rows]
+
+        if not signals:
+            await loading.edit(content=f"ℹ️ No active signals found matching `{target}`.")
+            return
+
+        signal_ids = [s['id'] for s in signals]
+        cancelled = await self._cancel_signal_ids(
+            signal_ids, f"Bulk cancel by {ctx.author.name}"
+        )
+
+        # Summarise by instrument
+        instruments = {}
+        for s in signals:
+            instruments[s['instrument']] = instruments.get(s['instrument'], 0) + 1
+
+        embed = discord.Embed(
+            title="🚫 Bulk Cancel Complete",
+            description=f"Cancelled **{cancelled}/{len(signal_ids)}** signals matching `{target}`",
+            color=0xFFA500
+        )
+        summary = "\n".join(f"• {instr}: {cnt} signal(s)" for instr, cnt in sorted(instruments.items()))
+        embed.add_field(name="Instruments", value=summary or "—", inline=False)
+        embed.set_footer(text=f"Actioned by {ctx.author.name}")
+        await loading.edit(content=None, embed=embed)
+
+    # ── End bulk cancel helpers ────────────────────────────────────────────
 
     @commands.command(name="setexpiry", description="Set signal expiry")
     async def set_expiry(self, ctx: commands.Context, signal_id: int, expiry_type: str):
@@ -1120,6 +1342,205 @@ class SignalCommands(BaseCog):
             )
             await loading_msg.edit(content=None, embed=error_embed)
             logger.error(f"Error in tolls report command: {e}")
+
+
+    # ── Take-Profit commands ───────────────────────────────────────────────
+
+    @commands.command(name="tp")
+    async def tp_command(self, ctx: commands.Context, subcommand: str = None, *args):
+        """
+        Take-profit configuration.
+
+          !tp config [symbol]       — Show TP config (all, or for one symbol)
+          !tp set <target> <value> [pips|dollars]  — Set TP threshold (admin)
+          !tp remove <symbol>       — Remove per-symbol override (admin)
+
+        See !help tp for full details.
+        """
+        if subcommand is None:
+            await ctx.send("Usage: `!tp config`, `!tp set`, `!tp remove` — see `!help tp` for details.")
+            return
+
+        sub = subcommand.lower()
+
+        if sub == "config":
+            symbol = args[0] if args else None
+            await self._tp_show(ctx, symbol)
+
+        elif sub == "set":
+            if not self.is_admin(ctx.author):
+                await ctx.send("❌ You don't have permission to use this command.")
+                return
+            if len(args) < 2:
+                await ctx.send("❌ Usage: `!tp set <target> <value> [pips|dollars]`")
+                return
+            target, value = args[0], args[1]
+            tp_type = args[2] if len(args) >= 3 else None
+            await self._tp_set(ctx, target, value, tp_type)
+
+        elif sub == "remove":
+            if not self.is_admin(ctx.author):
+                await ctx.send("❌ You don't have permission to use this command.")
+                return
+            if not args:
+                await ctx.send("❌ Usage: `!tp remove <symbol>`")
+                return
+            await self._tp_remove(ctx, args[0])
+
+        else:
+            await ctx.send(f"❌ Unknown subcommand `{subcommand}`. See `!help tp` for usage.")
+
+    async def _tp_show(self, ctx: commands.Context, symbol: str = None):
+        """Show TP config for a symbol, or all config."""
+        try:
+            if symbol:
+                symbol = symbol.upper()
+                info = self.tp_config.get_display_info(symbol)
+                value_str = self.tp_config.format_value(symbol, info["value"])
+
+                embed = discord.Embed(
+                    title=f"TP Config — {info['symbol']}",
+                    color=discord.Color.blue(),
+                )
+                embed.add_field(name="Asset Class", value=info["asset_class"], inline=True)
+                embed.add_field(name="TP Threshold", value=value_str, inline=True)
+                embed.add_field(name="Source", value="Override" if info["is_override"] else "Default", inline=True)
+
+                if info["is_override"]:
+                    embed.add_field(name="Set By", value=info.get("set_by", "Unknown"), inline=True)
+                    set_at = info.get("set_at", "")
+                    if set_at:
+                        try:
+                            dt = datetime.fromisoformat(set_at.replace("Z", "+00:00"))
+                            embed.add_field(name="Set At", value=dt.strftime("%Y-%m-%d %H:%M UTC"), inline=True)
+                        except Exception:
+                            embed.add_field(name="Set At", value=set_at[:19], inline=True)
+
+                embed.set_footer(text="Auto-TP triggers when last limit hits threshold and earlier limits are combined breakeven")
+                await ctx.send(embed=embed)
+
+            else:
+                info = self.tp_config.get_display_info()
+
+                embed = discord.Embed(
+                    title="Auto Take-Profit Configuration",
+                    color=discord.Color.blue(),
+                )
+
+                defaults_lines = []
+                for cls, settings in info["defaults"].items():
+                    val_str = f"{settings['value']:.1f} pips" if settings["type"] == "pips" else f"${settings['value']:.2f}"
+                    defaults_lines.append(f"**{cls}**: {val_str}")
+
+                embed.add_field(
+                    name="Defaults",
+                    value="\n".join(defaults_lines) or "None",
+                    inline=False,
+                )
+
+                if info["overrides"]:
+                    override_lines = []
+                    for sym, ov in info["overrides"].items():
+                        val_str = f"{ov['value']:.1f} pips" if ov["type"] == "pips" else f"${ov['value']:.2f}"
+                        override_lines.append(f"**{sym}**: {val_str} _(by {ov.get('set_by', '?')})_")
+                    embed.add_field(
+                        name=f"Per-Symbol Overrides ({info['total_overrides']})",
+                        value="\n".join(override_lines),
+                        inline=False,
+                    )
+                else:
+                    embed.add_field(name="Per-Symbol Overrides", value="None", inline=False)
+
+                embed.set_footer(text="Use !tp set and !tp remove to manage thresholds")
+                await ctx.send(embed=embed)
+
+        except Exception as e:
+            self.logger.error(f"Error in tp config: {e}", exc_info=True)
+            await ctx.send(f"❌ Error fetching TP config: {e}")
+
+    async def _tp_set(self, ctx: commands.Context, target: str, value: str, tp_type: str = None):
+        """Set TP threshold for an asset class or symbol."""
+        try:
+            try:
+                float_value = float(value)
+            except ValueError:
+                await ctx.send(f"❌ Invalid value `{value}` — must be a number.")
+                return
+
+            if float_value <= 0:
+                await ctx.send("❌ TP value must be positive.")
+                return
+
+            target_lower = target.lower()
+            target_upper = target.upper()
+
+            if tp_type is not None:
+                tp_type_lower = tp_type.lower()
+                if tp_type_lower not in VALID_TP_TYPES:
+                    await ctx.send(f"❌ Invalid type `{tp_type}`. Valid types: {', '.join(VALID_TP_TYPES)}")
+                    return
+            else:
+                tp_type_lower = self.tp_config.get_tp_type(target_upper)
+
+            if target_lower in ASSET_CLASSES:
+                success = self.tp_config.set_default(target_lower, float_value, tp_type_lower, set_by=ctx.author.name)
+                label = f"**{target_lower}** (default)"
+            else:
+                success = self.tp_config.set_override(target_upper, float_value, tp_type_lower, set_by=ctx.author.name)
+                label = f"**{target_upper}** (override)"
+
+            if not success:
+                await ctx.send(f"❌ Failed to set TP for `{target}`. Check logs for details.")
+                return
+
+            val_display = f"{float_value:.1f} pips" if tp_type_lower == "pips" else f"${float_value:.2f}"
+
+            # Reload live monitor config
+            if hasattr(self.bot, "monitor") and self.bot.monitor:
+                if hasattr(self.bot.monitor, "tp_config"):
+                    self.bot.monitor.tp_config.reload_config()
+                    self.bot.monitor.tp_monitor.tp_config = self.bot.monitor.tp_config
+
+            embed = discord.Embed(title="TP Configuration Updated", color=discord.Color.green())
+            embed.add_field(name="Target", value=label, inline=True)
+            embed.add_field(name="New TP Threshold", value=val_display, inline=True)
+            embed.set_footer(text=f"Set by {ctx.author.name}")
+            await ctx.send(embed=embed)
+
+        except Exception as e:
+            self.logger.error(f"Error in tp set: {e}", exc_info=True)
+            await ctx.send(f"❌ Error setting TP: {e}")
+
+    async def _tp_remove(self, ctx: commands.Context, symbol: str):
+        """Remove a per-symbol TP override."""
+        try:
+            symbol_upper = symbol.upper()
+            removed = self.tp_config.remove_override(symbol_upper)
+
+            if hasattr(self.bot, "monitor") and self.bot.monitor:
+                if hasattr(self.bot.monitor, "tp_config"):
+                    self.bot.monitor.tp_config.reload_config()
+                    self.bot.monitor.tp_monitor.tp_config = self.bot.monitor.tp_config
+
+            if removed:
+                fallback_val = self.tp_config.get_tp_value(symbol_upper)
+                fallback_display = self.tp_config.format_value(symbol_upper, fallback_val)
+                asset_class = self.tp_config.determine_asset_class(symbol_upper)
+
+                embed = discord.Embed(title="TP Override Removed", color=discord.Color.green())
+                embed.add_field(name="Symbol", value=symbol_upper, inline=True)
+                embed.add_field(name="Now Using", value=f"{asset_class} default: {fallback_display}", inline=True)
+                await ctx.send(embed=embed)
+            else:
+                await ctx.send(
+                    f"No override found for `{symbol_upper}`. It was already using the asset-class default."
+                )
+
+        except Exception as e:
+            self.logger.error(f"Error in tp remove: {e}", exc_info=True)
+            await ctx.send(f"❌ Error removing TP override: {e}")
+
+    # ── End Take-Profit commands ───────────────────────────────────────────
 
 
 async def setup(bot):
