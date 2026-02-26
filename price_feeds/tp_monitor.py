@@ -154,6 +154,8 @@ class AutoTPMonitor:
                     signal_id,
                     "profit",
                     reason,
+                    result_pips=last_pnl,
+                    closed_reason="automatic",
                 ),
                 timeout=5.0,
             )

@@ -6,6 +6,7 @@ import discord
 from typing import Optional
 from utils.embed_factory import EmbedFactory
 from utils.logger import get_logger
+from price_feeds.tp_config import TPConfig
 
 logger = get_logger("message_handler")
 
@@ -16,6 +17,7 @@ class MessageHandler:
         self.bot = bot
         self.logger = bot.logger
         self.signal_db = bot.signal_db
+        self.tp_config = TPConfig()
         # We'll need access to the alert system to check alert messages
         self.alert_system = None  # Will be set by monitor when initialized
         logger.info("MessageHandler initialized, alert_system is None initially")
@@ -138,6 +140,8 @@ class MessageHandler:
             # Add the appropriate reaction based on action
             if action_taken == "cancelled":
                 await self.safe_add_reaction(original_message, "❌")
+            elif action_taken == "marked as HIT":
+                await self.safe_add_reaction(original_message, "🎯")
             elif action_taken == "marked as PROFIT":
                 await self.safe_add_reaction(original_message, "💰")
             elif action_taken == "marked as BREAKEVEN":
@@ -264,10 +268,12 @@ class MessageHandler:
 
                 elif command in ("profit", "win", "tp"):
                     logger.debug(f"Processing profit command for signal {signal_id}")
+                    # Use TP threshold from config as the recorded result
+                    profit_result_pips = self.tp_config.get_tp_value(signal['instrument'])
                     success = await asyncio.wait_for(
                         self.signal_db.manually_set_signal_status(
-                            signal_id, 'profit', f"Set via alert reply by {message.author.name}"
-
+                            signal_id, 'profit', f"Set via alert reply by {message.author.name}",
+                            result_pips=profit_result_pips,
                         ),
                         timeout=5.0
                     )
@@ -297,9 +303,26 @@ class MessageHandler:
 
                 elif command in ("sl", "stop", "stoploss", "stop loss"):
                     logger.debug(f"Processing stop loss command for signal {signal_id}")
+                    # Sum P&L of all hit limits at the stop loss price
+                    sl_result_pips = None
+                    try:
+                        hit_limits = await self.signal_db.get_hit_limits_for_signal(signal_id)
+                        stop_price = signal.get('stop_loss')
+                        if hit_limits and stop_price:
+                            combined = 0.0
+                            for lim in hit_limits:
+                                entry = lim.get('hit_price') or lim.get('price_level')
+                                if entry is not None:
+                                    combined += self.tp_config.calculate_pnl(
+                                        signal['instrument'], signal['direction'], entry, stop_price
+                                    )
+                            sl_result_pips = combined
+                    except Exception as e:
+                        logger.warning(f"Could not calculate SL result_pips for signal {signal_id}: {e}")
                     success = await asyncio.wait_for(
                         self.signal_db.manually_set_signal_status(
-                            signal_id, 'stop_loss', f"Set via alert reply by {message.author.name}"
+                            signal_id, 'stop_loss', f"Set via alert reply by {message.author.name}",
+                            result_pips=sl_result_pips,
                         ),
                         timeout=5.0
                     )
@@ -362,6 +385,8 @@ class MessageHandler:
                     except:
                         pass  # Reaction might not exist
                     await referenced.add_reaction("❌")
+                elif action_taken == "marked as HIT":
+                    await referenced.add_reaction("🎯")
                 elif action_taken == "marked as PROFIT":
                     await referenced.add_reaction("💰")
                 elif action_taken == "marked as BREAKEVEN":
@@ -607,9 +632,12 @@ class MessageHandler:
                     self.logger.info(f"Cancel command result: {success}")
 
                 elif command in ("profit", "win", "tp"):
+                    # Use TP threshold from config as the recorded result
+                    profit_result_pips = self.tp_config.get_tp_value(signal['instrument'])
                     success = await asyncio.wait_for(
                         self.signal_db.manually_set_signal_status(
-                            signal['id'], 'profit', f"Set by {message.author.name}"
+                            signal['id'], 'profit', f"Set by {message.author.name}",
+                            result_pips=profit_result_pips,
                         ),
                         timeout=5.0
                     )
@@ -625,9 +653,26 @@ class MessageHandler:
                     action_taken = "marked as BREAKEVEN"
 
                 elif command in ("sl", "stop", "stoploss", "stop loss"):
+                    # Sum P&L of all hit limits at the stop loss price
+                    sl_result_pips = None
+                    try:
+                        hit_limits = await self.signal_db.get_hit_limits_for_signal(signal['id'])
+                        stop_price = signal.get('stop_loss')
+                        if hit_limits and stop_price:
+                            combined = 0.0
+                            for lim in hit_limits:
+                                entry = lim.get('hit_price') or lim.get('price_level')
+                                if entry is not None:
+                                    combined += self.tp_config.calculate_pnl(
+                                        signal['instrument'], signal['direction'], entry, stop_price
+                                    )
+                            sl_result_pips = combined
+                    except Exception as e:
+                        logger.warning(f"Could not calculate SL result_pips for signal {signal['id']}: {e}")
                     success = await asyncio.wait_for(
                         self.signal_db.manually_set_signal_status(
-                            signal['id'], 'stop_loss', f"Set by {message.author.name}"
+                            signal['id'], 'stop_loss', f"Set by {message.author.name}",
+                            result_pips=sl_result_pips,
                         ),
                         timeout=5.0
                     )
@@ -664,6 +709,8 @@ class MessageHandler:
                     except:
                         pass  # Reaction might not exist
                     await referenced.add_reaction("❌")
+                elif action_taken == "marked as HIT":
+                    await referenced.add_reaction("🎯")
                 elif action_taken == "marked as PROFIT":
                     await referenced.add_reaction("💰")
                 elif action_taken == "marked as BREAKEVEN":

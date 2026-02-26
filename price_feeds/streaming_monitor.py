@@ -135,8 +135,8 @@ class StreamingPriceMonitor:
             try:
                 with open(config_path, 'r') as f:
                     health_config = json.load(f)
-                    admin_user_id_str = health_config.get('582358569542877184')
-                    if admin_user_id_str and admin_user_id_str != '582358569542877184':
+                    admin_user_id_str = health_config.get('admin_user_id')
+                    if admin_user_id_str:
                         admin_user_id = int(admin_user_id_str)
             except Exception as e:
                 logger.warning(f"Could not load admin user ID: {e}")
@@ -612,9 +612,28 @@ class StreamingPriceMonitor:
     async def _process_stop_loss_hit(self, signal: Dict):
         """Process stop loss hit"""
         try:
+            # Calculate combined P&L for all hit limits at the stop loss price
+            sl_result_pips = None
+            try:
+                hit_limits = await self.signal_db.get_hit_limits_for_signal(signal['signal_id'])
+                stop_price = signal.get('stop_loss')
+                if hit_limits and stop_price:
+                    combined = 0.0
+                    for lim in hit_limits:
+                        entry = lim.get('hit_price') or lim.get('price_level')
+                        if entry is not None:
+                            combined += self.tp_config.calculate_pnl(
+                                signal['instrument'], signal['direction'], entry, stop_price
+                            )
+                    sl_result_pips = combined
+            except Exception as e:
+                logger.warning(f"Could not calculate SL result_pips for signal {signal['signal_id']}: {e}")
+
             success = await self.signal_db.manually_set_signal_status(
                 signal['signal_id'],
-                'stop_loss'
+                'stop_loss',
+                result_pips=sl_result_pips,
+                closed_reason='automatic',
             )
 
             if success:

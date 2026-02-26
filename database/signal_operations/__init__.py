@@ -118,6 +118,22 @@ class SignalDatabase:
         """
         return await self._crud.get_active_signals_detailed(instrument)
 
+    async def get_active_signals_detailed_sorted(self, instrument: str = None,
+                                                 sort_by: str = 'recent',
+                                                 limit: int = None) -> List[Dict[str, Any]]:
+        """
+        Get detailed active signals with sorting options
+
+        Args:
+            instrument: Optional filter by instrument
+            sort_by: Sort method ('recent', 'oldest', 'progress')
+            limit: Optional limit on number of results
+
+        Returns:
+            List of signals with detailed information
+        """
+        return await self._crud.get_active_signals_detailed_sorted(instrument, sort_by, limit)
+
     async def get_signals_for_tracking(self) -> List[Dict[str, Any]]:
         """
         Get all signals that need price tracking (wrapper for DB method)
@@ -155,7 +171,9 @@ class SignalDatabase:
         return await self._lifecycle.reactivate_cancelled_signal(signal_id, parsed_signal, self.db)
 
     async def manually_set_signal_status(self, signal_id: int, new_status: str,
-                                        reason: str = None) -> bool:
+                                        reason: str = None,
+                                        result_pips: float = None,
+                                        closed_reason: str = None) -> bool:
         """
         Manually set a signal's status (for admin override)
         Bypasses validation for manual overrides
@@ -164,11 +182,16 @@ class SignalDatabase:
             signal_id: Signal ID
             new_status: New status to set
             reason: Optional reason for manual change
+            result_pips: Optional P&L in pips or dollars to record on the signal
+            closed_reason: Override for closed_reason column ('manual' or 'automatic')
 
         Returns:
             Success status
         """
-        return await self._lifecycle.manually_set_signal_status(signal_id, new_status, reason, self.db)
+        return await self._lifecycle.manually_set_signal_status(
+            signal_id, new_status, reason, self.db,
+            result_pips=result_pips, closed_reason=closed_reason
+        )
 
     async def process_limit_hit(self, limit_id: int, actual_price: float = None) -> Dict[str, Any]:
         """

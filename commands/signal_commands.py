@@ -485,10 +485,33 @@ class SignalCommands(BaseCog):
             await ctx.send(f"❌ Signal #{signal_id} not found")
             return
 
+        # Calculate result_pips for profit and stop_loss
+        result_pips = None
+        if status == 'profit':
+            # Use the TP threshold from config as the recorded result
+            result_pips = self.tp_config.get_tp_value(signal['instrument'])
+        elif status == 'stop_loss':
+            # Sum P&L of all hit limits using stop_loss price as the exit price
+            try:
+                hit_limits = await self.signal_db.get_hit_limits_for_signal(signal_id)
+                stop_price = signal.get('stop_loss')
+                if hit_limits and stop_price:
+                    combined = 0.0
+                    for lim in hit_limits:
+                        entry = lim.get('hit_price') or lim.get('price_level')
+                        if entry is not None:
+                            combined += self.tp_config.calculate_pnl(
+                                signal['instrument'], signal['direction'], entry, stop_price
+                            )
+                    result_pips = combined
+            except Exception as e:
+                logger.warning(f"Could not calculate SL result_pips for signal {signal_id}: {e}")
+
         success = await self.signal_db.manually_set_signal_status(
             signal_id,
             status,
-            f"Manual override by {ctx.author.name}"
+            f"Manual override by {ctx.author.name}",
+            result_pips=result_pips,
         )
 
         if success:
@@ -508,7 +531,7 @@ class SignalCommands(BaseCog):
             await ctx.send("❌ Failed to update signal status")
 
     # Shortcut commands for status changes
-    @commands.command(name="profit", aliases=["tp"], description="Mark signal as profit")
+    @commands.command(name="profit", aliases=[], description="Mark signal as profit")
     async def set_profit(self, ctx: commands.Context, signal_id: int):
         await self.set_signal_status(ctx, signal_id, "profit")
 

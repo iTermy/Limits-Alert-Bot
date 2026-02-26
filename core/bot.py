@@ -9,7 +9,6 @@ from utils.logger import get_logger
 from utils.config_loader import config
 from database import db
 from database import initialize_signal_db
-from utils.logger import get_logger
 
 logger = get_logger('bot')
 

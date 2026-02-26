@@ -381,8 +381,9 @@ class AlertSystem:
                 inline=True
             )
 
-            # Calculate progress
-            progress = signal.get('limits_hit', 0) + 1
+            # Calculate progress — use sequence_number of the hit limit (always current)
+            # rather than signal['limits_hit'] which may be stale when limits fire rapidly
+            progress = limit['sequence_number']
             total = signal.get('total_limits', 1)
 
             embed.add_field(
