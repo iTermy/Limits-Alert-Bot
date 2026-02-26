@@ -195,13 +195,13 @@ class CrudOperations:
                     await self.db.execute("""
                         INSERT INTO limits (signal_id, price_level, sequence_number, status, hit_time)
                         VALUES ($1, $2, $3, 'hit', CURRENT_TIMESTAMP)
-                    """, signal_id, level, idx + 1)
+                    """, (signal_id, level, idx + 1))
                 else:
                     # Insert as pending
                     await self.db.execute("""
                         INSERT INTO limits (signal_id, price_level, sequence_number, status)
                         VALUES ($1, $2, $3, 'pending')
-                    """, signal_id, level, idx + 1)
+                    """, (signal_id, level, idx + 1))
             logger.info(f"Updated signal {signal_id} from edited message")
             return True
 

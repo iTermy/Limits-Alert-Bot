@@ -2,7 +2,7 @@
   "defaults": {
     "forex": {
       "type": "pips",
-      "value": 10.0,
+      "value": 5.0,
       "description": "Standard forex pairs"
     },
     "forex_jpy": {
