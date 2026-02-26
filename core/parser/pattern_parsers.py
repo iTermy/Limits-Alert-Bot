@@ -359,70 +359,101 @@ def extract_keywords(text: str) -> List[str]:
     return keywords
 
 
+def validate_limits_order(limits: List[float], direction: str) -> bool:
+    """
+    Validate that limits are in the expected order for the given direction.
+
+    For SHORT: limits must be in ascending order (lowest → highest).
+               Traders list entry levels from lower to higher as price rises.
+    For LONG:  limits must be in descending order (highest → lowest).
+               Traders list entry levels from higher to lower as price falls.
+
+    A single limit always passes (nothing to order-check).
+
+    Returns:
+        True if the order is correct (or only one limit provided)
+    """
+    if len(limits) <= 1:
+        return True
+
+    if direction == 'short':
+        # Ascending: each limit must be >= the previous
+        return all(limits[i] <= limits[i + 1] for i in range(len(limits) - 1))
+    else:  # long
+        # Descending: each limit must be <= the previous
+        return all(limits[i] >= limits[i + 1] for i in range(len(limits) - 1))
+
+
 def determine_limits_and_stop(numbers: List[float], direction: str,
                              channel_name: str = None) -> tuple:
     """
-    Determine which numbers are limits and which is stop loss
+    Determine which numbers are limits and which is stop loss.
+
+    Numbers are taken in the order provided — no reordering is performed.
+    If the limits are not in the expected order for the given direction, the
+    signal is rejected (returns None, None) to surface typos such as a
+    misplaced decimal point or a transposed digit.
+
+    Expected convention (how traders write signals):
+      - SHORT: limits ascending  (e.g. 1.1800, 1.1810, 1.1820  → stop above all)
+      - LONG:  limits descending (e.g. 1.1820, 1.1810, 1.1800  → stop below all)
 
     Special handling for tolls channel:
-    - All numbers are treated as limits
+    - All numbers are treated as limits (no stop loss in the message)
     - Stop loss is automatically set to ±5 from the appropriate limit:
       * Long: min(limits) - 5 (5 below the lowest limit)
       * Short: max(limits) + 5 (5 above the highest limit)
+    - Single-number messages are valid (one limit, no stop loss required)
     """
     # Check if this is the tolls channel
     is_tolls_channel = channel_name and 'toll' in channel_name.lower()
 
     if is_tolls_channel:
-        # For tolls channel: all numbers are limits, auto-set stop loss
         if len(numbers) < 1:
             return None, None
 
         limits = numbers
-        # Set automatic stop loss based on direction
         if direction == 'long':
-            # For long: stop is 5 below the lowest limit
             lowest_limit = min(limits)
             stop_loss = lowest_limit - 5.0
         else:  # short
-            # For short: stop is 5 above the highest limit
             highest_limit = max(limits)
             stop_loss = highest_limit + 5.0
 
         logger.debug(f"Tolls channel: Using all {len(limits)} number(s) as limits, "
-                    f"auto-setting stop to {stop_loss} ({direction})")
+                     f"auto-setting stop to {stop_loss} ({direction})")
         return limits, stop_loss
 
     # Normal channel logic (requires at least 2 numbers)
     if len(numbers) < 2:
         return None, None
 
-    # Try last number as stop loss (most common pattern)
+    # Last number is the stop loss (primary convention)
     stop_loss = numbers[-1]
     limits = numbers[:-1]
 
-    if validate_limits_and_stop(limits, stop_loss, direction):
-        return limits, stop_loss
+    if not validate_limits_and_stop(limits, stop_loss, direction):
+        # Try first number as stop loss (alternative convention)
+        stop_loss = numbers[0]
+        limits = numbers[1:]
+        if not validate_limits_and_stop(limits, stop_loss, direction):
+            logger.debug(
+                f"Stop loss validation failed for {direction} with numbers {numbers}"
+            )
+            return None, None
 
-    # Try first number as stop loss (alternative pattern)
-    stop_loss = numbers[0]
-    limits = numbers[1:]
+    # Validate that limits are in the expected order — no auto-sort fallback.
+    # Out-of-order limits almost always indicate a typo (e.g. missing decimal,
+    # wrong digit) rather than a valid signal.
+    if not validate_limits_order(limits, direction):
+        logger.debug(
+            f"Limits order validation failed for {direction}: {limits} "
+            f"(expected {'ascending' if direction == 'short' else 'descending'}). "
+            f"Signal rejected as likely typo."
+        )
+        return None, None
 
-    if validate_limits_and_stop(limits, stop_loss, direction):
-        return limits, stop_loss
-
-    # If neither works, try to find the most logical stop
-    if direction == 'long':
-        stop_loss = min(numbers)
-        limits = [n for n in numbers if n != stop_loss]
-    else:
-        stop_loss = max(numbers)
-        limits = [n for n in numbers if n != stop_loss]
-
-    if limits and validate_limits_and_stop(limits, stop_loss, direction):
-        return limits, stop_loss
-
-    return None, None
+    return limits, stop_loss
 
 
 def is_scalp(text: str, channel_name: str = None) -> bool:
@@ -528,7 +559,7 @@ class CorePatternParser:
             signal = ParsedSignal(
                 instrument=instrument,
                 direction=direction,
-                limits=sorted(limits, reverse=(direction == 'long')),
+                limits=limits,
                 stop_loss=stop_loss,
                 expiry_type=expiry_type,
                 raw_text=message,
@@ -649,7 +680,7 @@ class StockPatternParser:
             signal = ParsedSignal(
                 instrument=instrument,
                 direction=direction,
-                limits=sorted(limits, reverse=(direction == 'long')),
+                limits=limits,
                 stop_loss=stop_loss,
                 expiry_type=expiry_type,
                 raw_text=message,
