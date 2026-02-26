@@ -269,7 +269,7 @@ class MessageHandler:
                 elif command in ("profit", "win", "tp"):
                     logger.debug(f"Processing profit command for signal {signal_id}")
                     # Use TP threshold from config as the recorded result
-                    profit_result_pips = self.tp_config.get_tp_value(signal['instrument'])
+                    profit_result_pips = self.tp_config.get_tp_value(signal['instrument'], scalp=signal.get('scalp', False))
                     success = await asyncio.wait_for(
                         self.signal_db.manually_set_signal_status(
                             signal_id, 'profit', f"Set via alert reply by {message.author.name}",
@@ -314,7 +314,8 @@ class MessageHandler:
                                 entry = lim.get('hit_price') or lim.get('price_level')
                                 if entry is not None:
                                     combined += self.tp_config.calculate_pnl(
-                                        signal['instrument'], signal['direction'], entry, stop_price
+                                        signal['instrument'], signal['direction'], entry, stop_price,
+                                        scalp=signal.get('scalp', False)
                                     )
                             sl_result_pips = combined
                     except Exception as e:
@@ -633,7 +634,7 @@ class MessageHandler:
 
                 elif command in ("profit", "win", "tp"):
                     # Use TP threshold from config as the recorded result
-                    profit_result_pips = self.tp_config.get_tp_value(signal['instrument'])
+                    profit_result_pips = self.tp_config.get_tp_value(signal['instrument'], scalp=signal.get('scalp', False))
                     success = await asyncio.wait_for(
                         self.signal_db.manually_set_signal_status(
                             signal['id'], 'profit', f"Set by {message.author.name}",
@@ -664,7 +665,8 @@ class MessageHandler:
                                 entry = lim.get('hit_price') or lim.get('price_level')
                                 if entry is not None:
                                     combined += self.tp_config.calculate_pnl(
-                                        signal['instrument'], signal['direction'], entry, stop_price
+                                        signal['instrument'], signal['direction'], entry, stop_price,
+                                        scalp=signal.get('scalp', False)
                                     )
                             sl_result_pips = combined
                     except Exception as e:

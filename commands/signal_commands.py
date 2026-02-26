@@ -391,6 +391,7 @@ class SignalCommands(BaseCog):
 
         embed.add_field(name="Direction", value=signal['direction'].upper(), inline=True)
         embed.add_field(name="Status", value=signal['status'].upper(), inline=True)
+        embed.add_field(name="Type", value="⚡ Scalp" if signal.get('scalp') else "📊 Setup", inline=True)
 
         stop_loss_formatted = format_price(signal['stop_loss'], signal['instrument']) if signal['stop_loss'] else "N/A"
         embed.add_field(name="Stop Loss", value=stop_loss_formatted, inline=True)
@@ -489,7 +490,7 @@ class SignalCommands(BaseCog):
         result_pips = None
         if status == 'profit':
             # Use the TP threshold from config as the recorded result
-            result_pips = self.tp_config.get_tp_value(signal['instrument'])
+            result_pips = self.tp_config.get_tp_value(signal['instrument'], scalp=signal.get('scalp', False))
         elif status == 'stop_loss':
             # Sum P&L of all hit limits using stop_loss price as the exit price
             try:
@@ -501,7 +502,8 @@ class SignalCommands(BaseCog):
                         entry = lim.get('hit_price') or lim.get('price_level')
                         if entry is not None:
                             combined += self.tp_config.calculate_pnl(
-                                signal['instrument'], signal['direction'], entry, stop_price
+                                signal['instrument'], signal['direction'], entry, stop_price,
+                                scalp=signal.get('scalp', False)
                             )
                     result_pips = combined
             except Exception as e:

@@ -166,14 +166,14 @@ class CrudOperations:
             update_query = """
                 UPDATE signals 
                 SET instrument = $1, direction = $2, stop_loss = $3, 
-                    expiry_type = $4, total_limits = $5, updated_at = CURRENT_TIMESTAMP
-                WHERE id = $6
+                    expiry_type = $4, total_limits = $5, scalp = $6, updated_at = CURRENT_TIMESTAMP
+                WHERE id = $7
             """
             await self.db.execute(
                 update_query,
                 (parsed_signal.instrument, parsed_signal.direction,
                  parsed_signal.stop_loss, parsed_signal.expiry_type,
-                 len(parsed_signal.limits), signal_id)
+                 len(parsed_signal.limits), getattr(parsed_signal, 'scalp', False), signal_id)
             )
 
             # Get existing limits that were hit
