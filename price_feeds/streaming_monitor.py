@@ -468,6 +468,33 @@ class StreamingPriceMonitor:
 
         # Check if hit (with in-memory flag check)
         if is_hit and not limit.get('hit_alert_sent', False):
+            # --- News mode guard ---
+            # If a news event window is active for this instrument, auto-cancel
+            # the signal instead of recording the hit.
+            news_event = None
+            if hasattr(self.bot, 'news_manager') and self.bot.news_manager:
+                news_event = self.bot.news_manager.is_news_active_for(signal['instrument'])
+
+            if news_event is not None:
+                signal_id = signal['signal_id']
+                # Evict from active tracking IMMEDIATELY (before any awaits) so
+                # that concurrent limit checks for other limits on this same signal
+                # bail out early and don't fire duplicate alerts.
+                if signal_id not in self.active_signals:
+                    return  # Already being handled by a concurrent check
+                self.active_signals.pop(signal_id, None)
+
+                logger.info(
+                    f"News mode: suppressing limit hit for signal "
+                    f"{signal_id} limit #{limit['sequence_number']} "
+                    f"({signal['instrument']} @ {current_price:.5f}) "
+                    f"— event: {news_event}"
+                )
+                await self.alert_system.send_news_cancel_alert(signal, current_price, news_event)
+                await self._react_to_original_signal(signal, "❌")
+                await self._process_news_cancel(signal, news_event)
+                return  # All subsequent limit/SL checks for this signal are moot
+
             # --- Spread hour guard ---
             # During the 5-6 PM EST spread hour, broker spreads widen wildly and
             # can trigger false limit hits.  Instead of recording the hit, cancel
@@ -500,6 +527,11 @@ class StreamingPriceMonitor:
 
         # Check if approaching (first limit only)
         elif not is_hit and not limit.get('approaching_alert_sent', False):
+            # Suppress approaching alerts during active news windows
+            if hasattr(self.bot, 'news_manager') and self.bot.news_manager:
+                if self.bot.news_manager.is_news_active_for(signal['instrument']):
+                    return
+
             if limit['sequence_number'] == 1:
                 try:
                     approaching_distance = self.alert_config.get_approaching_distance(
@@ -724,6 +756,34 @@ class StreamingPriceMonitor:
                 logger.error(f"Failed to cancel signal {signal_id} for spread hour")
         except Exception as e:
             logger.error(f"Error cancelling signal {signal_id} for spread hour: {e}")
+
+    async def _process_news_cancel(self, signal: Dict, news_event) -> None:
+        """
+        Cancel a signal that was triggered during an active news window.
+
+        Mirrors _process_spread_hour_cancel but records the reason as
+        'news_auto_cancel' so it is distinct in reports and audit logs.
+        """
+        signal_id = signal['signal_id']
+        try:
+            success = await self.signal_db.manually_set_signal_status(
+                signal_id,
+                'cancelled',
+                reason=f'news_auto_cancel:{news_event.category.upper()}',
+                closed_reason='automatic'
+            )
+            if success:
+                logger.info(
+                    f"Signal {signal_id} cancelled due to news mode "
+                    f"(event: {news_event})"
+                )
+                self.tp_monitor.evict_signal(signal_id)
+                await self._maybe_unsubscribe_symbol(signal['instrument'], signal_id)
+                self.stats['news_cancelled'] = self.stats.get('news_cancelled', 0) + 1
+            else:
+                logger.error(f"Failed to cancel signal {signal_id} for news mode")
+        except Exception as e:
+            logger.error(f"Error cancelling signal {signal_id} for news mode: {e}")
 
     async def _maybe_unsubscribe_symbol(self, symbol: str, completed_signal_id: int):
         """Unsubscribe from symbol if no other active signals need it"""

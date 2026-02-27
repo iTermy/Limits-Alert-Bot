@@ -44,6 +44,12 @@ class TradingBot(commands.Bot):
         self.expiry_manager = None
         self.monitor = None  # Changed from price_monitor to monitor for consistency
 
+        # News mode manager — tracks active news windows
+        from core.news_manager import NewsManager
+        self.news_manager = NewsManager()
+        self.news_manager.load_from_file()
+        self.news_manager.start_cleanup_task()
+
         # Admin user IDs
         self.admin_ids = [582358569542877184]  # Replace with actual admin IDs
 
@@ -110,6 +116,7 @@ class TradingBot(commands.Bot):
         extensions = [
             'commands.bot_commands',
             'commands.signal_commands',
+            'commands.news_commands',
         ]
 
         for extension in extensions:
@@ -241,6 +248,9 @@ class TradingBot(commands.Bot):
             # Initialize and start monitoring
             await self.monitor.initialize()
             await self.monitor.start()
+
+            # Re-start the news manager cleanup task now that we have an alert system
+            self.news_manager.start_cleanup_task(alert_system=self.monitor.alert_system)
 
             self.logger.info("Price monitoring system initialized and started")
             self.logger.info(f"Alert system created with {len(self.monitor.alert_system.alert_messages)} tracked messages")

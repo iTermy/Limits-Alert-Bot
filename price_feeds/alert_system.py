@@ -618,6 +618,130 @@ class AlertSystem:
             self.stats['errors'] += 1
             return False
 
+    async def send_news_cancel_alert(
+        self,
+        signal: Dict,
+        current_price: float,
+        news_event,        # NewsEvent — typed loosely to avoid circular import
+    ) -> bool:
+        """
+        Send a compact alert when a signal is auto-cancelled during a news window.
+        Includes a role ping.
+        """
+        target_channel = self._get_alert_channel(signal)
+        if not target_channel:
+            logger.error("No alert channel configured for news cancel alert")
+            return False
+
+        try:
+            import pytz
+            EST = pytz.timezone('America/New_York')
+            news_time_est = news_event.news_time.astimezone(EST)
+
+            # Build a compact summary of the signal's limits
+            all_limits = signal.get('limits', signal.get('pending_limits', []))
+            if all_limits:
+                limit_prices = "  |  ".join(
+                    self._format_price(
+                        lim['price_level'] if isinstance(lim, dict) else lim
+                    )
+                    for lim in sorted(
+                        all_limits,
+                        key=lambda l: l['sequence_number'] if isinstance(l, dict) else 0
+                    )
+                )
+            else:
+                limit_prices = "—"
+
+            signal_summary = (
+                f"**{signal['instrument']}** {signal['direction'].upper()}\n"
+                f"Limits: {limit_prices}\n"
+                f"SL: {self._format_price(signal['stop_loss'])}"
+            )
+
+            embed = discord.Embed(
+                title="📰 Signal Cancelled — News",
+                description=(
+                    f"The following signal was cancelled due to news "
+                    f"({news_event.category.upper()} @ "
+                    f"{news_time_est.strftime('%I:%M %p')} EST):\n\n"
+                    f"{signal_summary}"
+                ),
+                color=0x5865F2,
+                timestamp=datetime.now(timezone.utc),
+            )
+
+            embed.set_footer(
+                text=f"Signal #{signal['signal_id']} • Auto-cancelled (news mode)"
+            )
+
+            # Source link
+            if signal.get('message_id') and signal.get('channel_id'):
+                if not str(signal['message_id']).startswith('manual_'):
+                    guild_id = signal.get('guild_id')
+                    if not guild_id and self.bot and self.bot.guilds:
+                        guild_id = self.bot.guilds[0].id
+                    message_url = (
+                        f"https://discord.com/channels/"
+                        f"{guild_id}/{signal['channel_id']}/{signal['message_id']}"
+                    )
+                    embed.add_field(name="Source", value=message_url, inline=False)
+
+            # Role ping + embed
+            await target_channel.send("<@&1334203997107650662>")
+            message = await target_channel.send(embed=embed)
+
+            self.track_alert_message(message.id, signal['signal_id'])
+            self.stats['news_cancelled'] = self.stats.get('news_cancelled', 0) + 1
+            self.stats['total_alerts'] += 1
+
+            logger.info(
+                f"News cancel alert sent for signal {signal['signal_id']} "
+                f"({signal['instrument']} @ {self._format_price(current_price)})"
+            )
+            return True
+
+        except Exception as e:
+            logger.error(f"Failed to send news cancel alert: {e}")
+            self.stats['errors'] += 1
+            return False
+
+    async def send_news_activated_alert(self, news_event) -> bool:
+        """
+        Send a small informational embed when a news window becomes active.
+        No role ping.
+        """
+        if not self.alert_channel:
+            logger.warning("No alert channel configured for news activated alert")
+            return False
+
+        try:
+            import pytz
+            EST = pytz.timezone('America/New_York')
+            news_time_est = news_event.news_time.astimezone(EST)
+            start_est = news_event.start_time.astimezone(EST)
+            end_est = news_event.end_time.astimezone(EST)
+
+            embed = discord.Embed(
+                title="📰 News Mode Active",
+                description=(
+                    f"News window activated for **{news_event.category.upper()}**\n"
+                    f"{start_est.strftime('%I:%M %p')} → {end_est.strftime('%I:%M %p')} EST"
+                ),
+                color=0x5865F2,
+                timestamp=datetime.now(timezone.utc),
+            )
+            embed.set_footer(text=f"Event #{news_event.event_id} • Signals will be auto-cancelled if hit")
+
+            await self.alert_channel.send(embed=embed)
+            self.stats['total_alerts'] += 1
+            logger.info(f"News activated alert sent for event #{news_event.event_id} ({news_event.category.upper()})")
+            return True
+
+        except Exception as e:
+            logger.error(f"Failed to send news activated alert: {e}")
+            self.stats['errors'] += 1
+            return False
     async def send_auto_tp_alert(self, signal: Dict, hit_limits: list,
                                   last_pnl: float, tp_config) -> bool:
         """
