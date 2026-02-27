@@ -33,6 +33,27 @@ class ParsedSignal:
     parse_method: str  # high_confidence/stock/ai
     keywords: list[str] = field(default_factory=list)
     channel_name: str = None
+    scalp: bool = False
+
+
+class RejectedSignal:
+    """
+    Sentinel returned when a message looks like a signal but is definitively
+    malformed (e.g. limits are out of order, indicating a typo).
+
+    Distinct from None (which means "not a signal at all") so that callers
+    can react with ❌ to prompt the user to fix and re-edit the message.
+    """
+    def __init__(self, reason: str = ""):
+        self.reason = reason
+
+    def __bool__(self):
+        return False  # still falsy so existing `if result:` guards stay safe
+
+
+class LimitsOrderError(Exception):
+    """Raised by pattern parsers when limit prices are out of the expected order."""
+    pass
 
 
 # ============================================================================
@@ -187,15 +208,19 @@ class EnhancedSignalParser:
         result = None
 
         # Try channel-specific parser first
-        if channel_type == 'stock':
-            logger.debug("→ Routing to StockPatternParser")
-            result = self._parse_with_stock_parser(message, channel_name)
-        elif channel_type == 'crypto':
-            logger.debug("→ Routing to CryptoPatternParser")
-            result = self._parse_with_crypto_parser(message, channel_name)
-        else:  # core
-            logger.debug("→ Routing to CorePatternParser")
-            result = self._parse_with_core_parser(message, channel_name)
+        try:
+            if channel_type == 'stock':
+                logger.debug("→ Routing to StockPatternParser")
+                result = self._parse_with_stock_parser(message, channel_name)
+            elif channel_type == 'crypto':
+                logger.debug("→ Routing to CryptoPatternParser")
+                result = self._parse_with_crypto_parser(message, channel_name)
+            else:  # core
+                logger.debug("→ Routing to CorePatternParser")
+                result = self._parse_with_core_parser(message, channel_name)
+        except LimitsOrderError as e:
+            logger.info(f"Signal rejected — limits out of order (likely typo): {e}")
+            return RejectedSignal(reason=str(e))
 
         # Step 4: AI fallback if pattern parsing failed
         if not result:
@@ -238,6 +263,7 @@ class EnhancedSignalParser:
             self._crypto_parser = CryptoPatternParser(self.channel_config)
 
         return self._crypto_parser.parse(message, channel_name)
+
 
     def _parse_with_ai(self, message: str,
                       channel_name: str) -> Optional[ParsedSignal]:
@@ -324,6 +350,8 @@ def cleanup_parser():
 # Export main components
 __all__ = [
     'ParsedSignal',
+    'RejectedSignal',
+    'LimitsOrderError',
     'EnhancedSignalParser',
     'parse_signal',
     'initialize_parser',

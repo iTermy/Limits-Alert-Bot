@@ -20,8 +20,91 @@ class BotCommands(BaseCog):
         await ctx.send(f"Latency: {latency}ms")
 
     @commands.command(name='help')
-    async def help_command(self, ctx: commands.Context):
-        """Show available commands"""
+    async def help_command(self, ctx: commands.Context, *, topic: str = None):
+        """Show available commands, or detailed help for a topic (e.g. !help cancel)"""
+
+        # ── Subcommand: !help cancel ──
+        if topic and topic.lower() == "cancel":
+            embed = discord.Embed(
+                title="🚫 Cancel Command — Detailed Help",
+                description="Cancel one signal or bulk-cancel groups of signals.",
+                color=0xFF6600
+            )
+            embed.add_field(
+                name="Cancel a specific signal",
+                value="`!cancel <id>` — cancel signal by its ID",
+                inline=False
+            )
+            embed.add_field(
+                name="Cancel Gold signals by type",
+                value=(
+                    "`!cancel gold longs setups` — cancel active Gold long setups\n"
+                    "`!cancel gold shorts setups` — cancel active Gold short setups\n"
+                    "`!cancel gold both setups` — cancel active Gold long & short setups\n"
+                    "`!cancel gold longs pa` — cancel active Gold long price action\n"
+                    "`!cancel gold shorts pa` — cancel active Gold short price action\n"
+                    "`!cancel gold both pa` — cancel active Gold long & short price action\n"
+                    "`!cancel gold longs tolls` — cancel active Gold long tolls\n"
+                    "`!cancel gold shorts tolls` — cancel active Gold short tolls\n"
+                    "`!cancel gold both tolls` — cancel active Gold long & short tolls\n"
+                    "`!cancel gold longs everything` — cancel ALL active Gold longs\n"
+                    "`!cancel gold shorts everything` — cancel ALL active Gold shorts\n"
+                    "`!cancel gold both everything` — cancel ALL active Gold signals"
+                ),
+                inline=False
+            )
+            embed.add_field(
+                name="Cancel by instrument pair",
+                value="`!cancel all EURUSD` — cancel all active signals for EURUSD",
+                inline=False
+            )
+            embed.add_field(
+                name="Cancel by currency",
+                value=(
+                    "`!cancel all EUR` — cancel all active signals whose instrument contains EUR\n"
+                    "`!cancel all USD` — cancel all active signals whose instrument contains USD"
+                ),
+                inline=False
+            )
+            embed.set_footer(text="All bulk cancels only affect signals with status 'active' or 'hit'.")
+            await ctx.send(embed=embed)
+            return
+
+        if topic and topic.lower() == "tp":
+            embed = discord.Embed(
+                title="Take-Profit Command — Detailed Help",
+                description="View and manage auto take-profit thresholds.",
+                color=0x00BFFF
+            )
+            embed.add_field(
+                name="Show config",
+                value=(
+                    "`!tp config` — show all defaults and per-symbol overrides\n"
+                    "`!tp config <symbol>` — show TP config for a specific symbol (e.g. `!tp config XAUUSD`)"
+                ),
+                inline=False
+            )
+            embed.add_field(
+                name="Set TP threshold (admin)",
+                value=(
+                    "`!tp set <class> <value>` — set asset-class default (e.g. `!tp set metals 5`)\n"
+                    "`!tp set <symbol> <value>` — set per-symbol override (e.g. `!tp set XAUUSD 5`)\n"
+                    "`!tp set <target> <value> pips` — specify pips (e.g. `!tp set forex 10 pips`)\n"
+                    "`!tp set <target> <value> dollars` — specify dollars (e.g. `!tp set XAUUSD 5 dollars`)\n\n"
+                    "Valid asset classes: forex, forex_jpy, metals, indices, stocks, crypto, oil"
+                ),
+                inline=False
+            )
+            embed.add_field(
+                name="Remove override (admin)",
+                value="`!tp remove <symbol>` — remove per-symbol override, reverting to asset-class default (e.g. `!tp remove XAUUSD`)",
+                inline=False
+            )
+            embed.set_footer(text="Auto-TP triggers when the last limit hits the threshold and earlier limits are combined breakeven.")
+            await ctx.send(embed=embed)
+            return
+
+        # ── Default: main help page ──
         embed = discord.Embed(
             title="📚 Bot Commands",
             description="Available commands for the trading bot",
@@ -39,7 +122,8 @@ class BotCommands(BaseCog):
             "`!tolls [day/week/month]` - Tolls trading report\n"
             "`!profit <id>` - Mark as profit\n"
             "`!sl <id>` - Mark as stop loss\n"
-            "`!cancel <id>` - Cancel signal"
+            "`!cancel` - Cancel signals — see `!help cancel` for all options\n"
+            "`!tp` - Take-profit config — see `!help tp` for all options"
         )
         embed.add_field(name="Signal Commands", value=signal_cmds, inline=False)
 
@@ -285,6 +369,9 @@ class BotCommands(BaseCog):
             if hasattr(self.bot, 'monitor') and self.bot.monitor:
                 if hasattr(self.bot.monitor, 'alert_config'):
                     self.bot.monitor.alert_config.reload_config()
+                if hasattr(self.bot.monitor, 'tp_config'):
+                    self.bot.monitor.tp_config.reload_config()
+                    self.bot.monitor.tp_monitor.tp_config = self.bot.monitor.tp_config
 
             await ctx.send("✅ Configuration reloaded")
             self.logger.info(f"Config reloaded by {ctx.author.name}")

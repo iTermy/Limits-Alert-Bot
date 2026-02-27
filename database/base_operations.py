@@ -11,13 +11,21 @@ logger = get_logger("database.operations")
 
 
 def _parse_dt(value) -> Optional[datetime]:
-    """Convert an ISO string or datetime to a timezone-aware datetime, or return None."""
+    """Convert an ISO string or datetime to a timezone-aware datetime, or return None.
+
+    Handles all ISO formats including negative UTC offsets like -05:00 (EST/EDT).
+    Only assumes UTC for truly naive strings (no timezone info at all).
+    """
     if value is None:
         return None
     if isinstance(value, datetime):
         return value if value.tzinfo else pytz.UTC.localize(value)
-    return datetime.fromisoformat(str(value)).replace(tzinfo=pytz.UTC) if '+' not in str(value) and 'Z' not in str(value) \
-        else datetime.fromisoformat(str(value).replace('Z', '+00:00'))
+    s = str(value).replace('Z', '+00:00')
+    dt = datetime.fromisoformat(s)
+    # Only localize to UTC if the string had no timezone component at all
+    if dt.tzinfo is None:
+        return pytz.UTC.localize(dt)
+    return dt
 
 
 class BaseOperations:
@@ -40,7 +48,8 @@ class BaseOperations:
 
     async def insert_signal(self, message_id: str, channel_id: str, instrument: str,
                             direction: str, stop_loss: float, expiry_type: str = None,
-                            expiry_time: str = None, total_limits: int = 0) -> int:
+                            expiry_time: str = None, total_limits: int = 0,
+                            scalp: bool = False) -> int:
         """
         Insert a new signal with enhanced tracking
 
@@ -50,19 +59,19 @@ class BaseOperations:
         query = """
             INSERT INTO signals (
                 message_id, channel_id, instrument, direction,
-                stop_loss, expiry_type, expiry_time, total_limits, status
+                stop_loss, expiry_type, expiry_time, total_limits, status, scalp
             )
-            VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9)
+            VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10)
             RETURNING id
         """
 
         signal_id = await self.db.execute(
             query,
             (message_id, channel_id, instrument, direction, stop_loss,
-             expiry_type, _parse_dt(expiry_time), total_limits, SignalStatus.ACTIVE)
+             expiry_type, _parse_dt(expiry_time), total_limits, SignalStatus.ACTIVE, scalp)
         )
 
-        logger.info(f"Inserted signal {signal_id} for {instrument} {direction} with {total_limits} limits")
+        logger.info(f"Inserted signal {signal_id} for {instrument} {direction} with {total_limits} limits (scalp={scalp})")
         return signal_id
 
     async def insert_limits(self, signal_id: int, price_levels: List[float]):
@@ -211,6 +220,7 @@ class BaseOperations:
                 s.status,
                 s.limits_hit,
                 s.total_limits,
+                s.scalp,
                 l.id as limit_id,
                 l.price_level,
                 l.sequence_number,
@@ -240,6 +250,7 @@ class BaseOperations:
                     'status': row['status'],
                     'limits_hit': row['limits_hit'],
                     'total_limits': row['total_limits'],
+                    'scalp': row['scalp'] or False,
                     'pending_limits': []
                 }
             if row['limit_id']:
@@ -268,6 +279,24 @@ class BaseOperations:
             (limit_id,)
         )
         return rows > 0
+
+    async def get_hit_limits_for_signal(self, signal_id: int) -> List[Dict[str, Any]]:
+        """
+        Return all hit limits for a signal ordered by sequence_number.
+        Includes hit_price (actual fill price) for P&L calculations.
+        """
+        query = """
+            SELECT id AS limit_id,
+                   sequence_number,
+                   price_level,
+                   hit_price,
+                   hit_time
+            FROM limits
+            WHERE signal_id = $1 AND status = 'hit'
+            ORDER BY sequence_number
+        """
+        rows = await self.db.fetch_all(query, (signal_id,))
+        return [dict(r) for r in rows]
 
     async def get_performance_stats(self, start_date: str = None, end_date: str = None,
                                     instrument: str = None) -> Dict[str, Any]:

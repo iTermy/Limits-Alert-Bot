@@ -9,12 +9,16 @@ import asyncio
 import logging
 from typing import Dict, List
 from datetime import datetime
+from datetime import time as dtime
+import pytz
 import discord
 from price_feeds.feed_health_monitor import FeedHealthMonitor
 
 from price_feeds.price_stream_manager import PriceStreamManager
 from price_feeds.alert_config import AlertDistanceConfig
 from price_feeds.alert_system import AlertSystem
+from price_feeds.tp_config import TPConfig
+from price_feeds.tp_monitor import AutoTPMonitor
 from utils.logger import get_logger
 from utils.config_loader import load_settings
 
@@ -45,6 +49,13 @@ class StreamingPriceMonitor:
         self.alert_config = AlertDistanceConfig()
         self.stream_manager = PriceStreamManager()
         self.alert_system = AlertSystem(bot=bot)
+        self.tp_config = TPConfig()
+        self.tp_monitor = AutoTPMonitor(
+            tp_config=self.tp_config,
+            signal_db=signal_db,
+            db=db,
+            alert_system=self.alert_system,
+        )
 
         # Connect alert system to message handler
         if hasattr(bot, 'message_handler') and bot.message_handler:
@@ -126,8 +137,8 @@ class StreamingPriceMonitor:
             try:
                 with open(config_path, 'r') as f:
                     health_config = json.load(f)
-                    admin_user_id_str = health_config.get('582358569542877184')
-                    if admin_user_id_str and admin_user_id_str != '582358569542877184':
+                    admin_user_id_str = health_config.get('admin_user_id')
+                    if admin_user_id_str:
                         admin_user_id = int(admin_user_id_str)
             except Exception as e:
                 logger.warning(f"Could not load admin user ID: {e}")
@@ -177,6 +188,29 @@ class StreamingPriceMonitor:
         """
         self._reload_spread_buffer_setting()
         return self._spread_buffer_enabled
+
+    def _is_spread_hour(self) -> bool:
+        """
+        Check whether the current time falls within the daily spread hour.
+
+        Spread hour runs from 5:00 PM to 6:00 PM US/Eastern (America/New_York)
+        on weekdays (Monday–Friday).  During this window broker spreads widen
+        significantly, causing false limit/stop hits.
+
+        Returns:
+            True if we are currently in spread hour, False otherwise.
+        """
+        est = pytz.timezone('America/New_York')
+        now_est = datetime.now(est)
+
+        # Weekends have no spread hour (forex is closed / near-closed anyway)
+        if now_est.weekday() >= 5:   # 5 = Saturday, 6 = Sunday
+            return False
+
+        spread_start = dtime(17, 0)  # 5:00 PM EST
+        spread_end   = dtime(18, 0)  # 6:00 PM EST
+
+        return spread_start <= now_est.time() < spread_end
 
     async def start(self):
         """Start the streaming monitor"""
@@ -239,6 +273,11 @@ class StreamingPriceMonitor:
             # Subscribe to all needed symbols
             await self.stream_manager.bulk_subscribe(list(symbols_needed))
 
+            # Pre-populate TP hit-limit cache for any signals already in HIT status
+            for signal in signals:
+                if signal.get('status') == 'hit':
+                    await self.tp_monitor.refresh_hit_limits(signal['signal_id'])
+
             logger.info(f"Loaded {len(signals)} active signals across {len(symbols_needed)} symbols")
 
         except Exception as e:
@@ -280,6 +319,10 @@ class StreamingPriceMonitor:
                     if symbol not in self.symbol_to_signals:
                         self.symbol_to_signals[symbol] = []
                     self.symbol_to_signals[symbol].append(signal_id)
+
+                    # Keep TP cache fresh for HIT signals
+                    if signal.get('status') == 'hit':
+                        await self.tp_monitor.refresh_hit_limits(signal_id)
 
                 if symbols_to_add or symbols_to_remove:
                     logger.info(f"Signal refresh: +{len(symbols_to_add)} -{len(symbols_to_remove)} symbols")
@@ -345,6 +388,19 @@ class StreamingPriceMonitor:
         # Check stop loss
         if signal.get('stop_loss'):
             await self._check_stop_loss(signal, current_price, direction)
+
+        # Check auto take-profit (runs for any HIT signal that has hit limits cached)
+        if signal.get('status') == 'hit':
+            tp_triggered = await self.tp_monitor.check_signal(
+                signal,
+                current_bid=price_data['bid'],
+                current_ask=price_data['ask'],
+            )
+            if tp_triggered:
+                # React to original signal message with profit emoji
+                await self._react_to_original_signal(signal, "💰")
+                # Remove signal from active tracking
+                await self._maybe_unsubscribe_symbol(signal['instrument'], signal['signal_id'])
 
     async def _check_limit(self, signal: Dict, limit: Dict, current_price: float, direction: str):
         """
@@ -412,6 +468,48 @@ class StreamingPriceMonitor:
 
         # Check if hit (with in-memory flag check)
         if is_hit and not limit.get('hit_alert_sent', False):
+            # --- News mode guard ---
+            # If a news event window is active for this instrument, auto-cancel
+            # the signal instead of recording the hit.
+            news_event = None
+            if hasattr(self.bot, 'news_manager') and self.bot.news_manager:
+                news_event = self.bot.news_manager.is_news_active_for(signal['instrument'])
+
+            if news_event is not None:
+                signal_id = signal['signal_id']
+                # Evict from active tracking IMMEDIATELY (before any awaits) so
+                # that concurrent limit checks for other limits on this same signal
+                # bail out early and don't fire duplicate alerts.
+                if signal_id not in self.active_signals:
+                    return  # Already being handled by a concurrent check
+                self.active_signals.pop(signal_id, None)
+
+                logger.info(
+                    f"News mode: suppressing limit hit for signal "
+                    f"{signal_id} limit #{limit['sequence_number']} "
+                    f"({signal['instrument']} @ {current_price:.5f}) "
+                    f"— event: {news_event}"
+                )
+                await self.alert_system.send_news_cancel_alert(signal, current_price, news_event)
+                await self._react_to_original_signal(signal, "❌")
+                await self._process_news_cancel(signal, news_event)
+                return  # All subsequent limit/SL checks for this signal are moot
+
+            # --- Spread hour guard ---
+            # During the 5-6 PM EST spread hour, broker spreads widen wildly and
+            # can trigger false limit hits.  Instead of recording the hit, cancel
+            # the entire signal and send a single informational embed.
+            if self._is_spread_hour():
+                logger.info(
+                    f"Spread hour: suppressing limit hit for signal "
+                    f"{signal['signal_id']} limit #{limit['sequence_number']} "
+                    f"({signal['instrument']} @ {current_price:.5f})"
+                )
+                await self.alert_system.send_spread_hour_cancel_alert(signal, current_price)
+                await self._react_to_original_signal(signal, "❌")
+                await self._process_spread_hour_cancel(signal)
+                return  # All subsequent limit/SL checks for this signal are moot
+
             # ENHANCED: Pass spread and buffer status to alert system
             await self.alert_system.send_limit_hit_alert(
                 signal, limit, current_price,
@@ -429,6 +527,11 @@ class StreamingPriceMonitor:
 
         # Check if approaching (first limit only)
         elif not is_hit and not limit.get('approaching_alert_sent', False):
+            # Suppress approaching alerts during active news windows
+            if hasattr(self.bot, 'news_manager') and self.bot.news_manager:
+                if self.bot.news_manager.is_news_active_for(signal['instrument']):
+                    return
+
             if limit['sequence_number'] == 1:
                 try:
                     approaching_distance = self.alert_config.get_approaching_distance(
@@ -538,6 +641,17 @@ class StreamingPriceMonitor:
             is_hit = current_price >= stop_loss
 
         if is_hit:
+            # --- Spread hour guard ---
+            if self._is_spread_hour():
+                logger.info(
+                    f"Spread hour: suppressing stop loss hit for signal "
+                    f"{signal['signal_id']} ({signal['instrument']} @ {current_price:.5f})"
+                )
+                await self.alert_system.send_spread_hour_cancel_alert(signal, current_price)
+                await self._react_to_original_signal(signal, "❌")
+                await self._process_spread_hour_cancel(signal)
+                return
+
             # Stop loss alerts never show spread
             await self.alert_system.send_stop_loss_alert(signal, current_price)
             # Add reaction to original signal message
@@ -563,10 +677,17 @@ class StreamingPriceMonitor:
             )
 
             if result.get('all_limits_hit'):
-                logger.info(f"All limits hit for signal {signal['signal_id']}")
-
-                # Remove from active signals and unsubscribe if no other signals need this symbol
-                await self._maybe_unsubscribe_symbol(signal['instrument'], signal['signal_id'])
+                logger.info(f"All limits hit for signal {signal['signal_id']} — refreshing TP cache, continuing to watch for auto-TP")
+                # Refresh TP cache so the final limit's hit_price is included
+                await self.tp_monitor.refresh_hit_limits(signal['signal_id'])
+                # Keep signal status as 'hit' so TP checks keep running
+                signal['status'] = 'hit'
+                # Do NOT unsubscribe here — let auto-TP (or manual close/SL) handle that
+            else:
+                # Signal is now HIT — refresh TP hit-limit cache so TP checks start immediately
+                await self.tp_monitor.refresh_hit_limits(signal['signal_id'])
+                # Update in-memory status so _check_signal starts running TP checks
+                signal['status'] = 'hit'
 
         except Exception as e:
             logger.error(f"Failed to process limit hit: {e}")
@@ -574,19 +695,95 @@ class StreamingPriceMonitor:
     async def _process_stop_loss_hit(self, signal: Dict):
         """Process stop loss hit"""
         try:
+            # Calculate combined P&L for all hit limits at the stop loss price
+            sl_result_pips = None
+            try:
+                hit_limits = await self.signal_db.get_hit_limits_for_signal(signal['signal_id'])
+                stop_price = signal.get('stop_loss')
+                if hit_limits and stop_price:
+                    combined = 0.0
+                    for lim in hit_limits:
+                        entry = lim.get('hit_price') or lim.get('price_level')
+                        if entry is not None:
+                            combined += self.tp_config.calculate_pnl(
+                                signal['instrument'], signal['direction'], entry, stop_price
+                            )
+                    sl_result_pips = combined
+            except Exception as e:
+                logger.warning(f"Could not calculate SL result_pips for signal {signal['signal_id']}: {e}")
+
             success = await self.signal_db.manually_set_signal_status(
                 signal['signal_id'],
-                'stop_loss'
+                'stop_loss',
+                result_pips=sl_result_pips,
+                closed_reason='automatic',
             )
 
             if success:
                 logger.info(f"Signal {signal['signal_id']} marked as stop loss")
 
-                # Remove from active tracking
+                # Remove from active tracking and TP cache
+                self.tp_monitor.evict_signal(signal['signal_id'])
                 await self._maybe_unsubscribe_symbol(signal['instrument'], signal['signal_id'])
 
         except Exception as e:
             logger.error(f"Failed to process stop loss: {e}")
+
+    async def _process_spread_hour_cancel(self, signal: Dict):
+        """
+        Cancel a signal that was falsely triggered during spread hour.
+
+        The signal is marked cancelled with closed_reason='automatic' so it
+        appears in reports with a clear audit trail.  It is removed from
+        active tracking and the symbol subscription is cleaned up if nothing
+        else needs it.
+        """
+        signal_id = signal['signal_id']
+        try:
+            success = await self.signal_db.manually_set_signal_status(
+                signal_id,
+                'cancelled',
+                reason='spread_hour_auto_cancel',
+                db_manager=self.db,
+                closed_reason='automatic'
+            )
+            if success:
+                logger.info(f"Signal {signal_id} cancelled due to spread hour hit")
+                self.tp_monitor.evict_signal(signal_id)
+                await self._maybe_unsubscribe_symbol(signal['instrument'], signal_id)
+                self.stats['spread_hour_cancels'] = self.stats.get('spread_hour_cancels', 0) + 1
+            else:
+                logger.error(f"Failed to cancel signal {signal_id} for spread hour")
+        except Exception as e:
+            logger.error(f"Error cancelling signal {signal_id} for spread hour: {e}")
+
+    async def _process_news_cancel(self, signal: Dict, news_event) -> None:
+        """
+        Cancel a signal that was triggered during an active news window.
+
+        Mirrors _process_spread_hour_cancel but records the reason as
+        'news_auto_cancel' so it is distinct in reports and audit logs.
+        """
+        signal_id = signal['signal_id']
+        try:
+            success = await self.signal_db.manually_set_signal_status(
+                signal_id,
+                'cancelled',
+                reason=f'news_auto_cancel:{news_event.category.upper()}',
+                closed_reason='automatic'
+            )
+            if success:
+                logger.info(
+                    f"Signal {signal_id} cancelled due to news mode "
+                    f"(event: {news_event})"
+                )
+                self.tp_monitor.evict_signal(signal_id)
+                await self._maybe_unsubscribe_symbol(signal['instrument'], signal_id)
+                self.stats['news_cancelled'] = self.stats.get('news_cancelled', 0) + 1
+            else:
+                logger.error(f"Failed to cancel signal {signal_id} for news mode")
+        except Exception as e:
+            logger.error(f"Error cancelling signal {signal_id} for news mode: {e}")
 
     async def _maybe_unsubscribe_symbol(self, symbol: str, completed_signal_id: int):
         """Unsubscribe from symbol if no other active signals need it"""
@@ -601,8 +798,9 @@ class StreamingPriceMonitor:
                 del self.symbol_to_signals[symbol]
                 logger.info(f"Unsubscribed from {symbol} (no active signals)")
 
-        # Remove from active signals
+        # Remove from active signals and TP cache
         self.active_signals.pop(completed_signal_id, None)
+        self.tp_monitor.evict_signal(completed_signal_id)
 
     def get_stats(self) -> Dict:
         """Get monitoring statistics"""

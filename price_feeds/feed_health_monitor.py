@@ -179,6 +179,19 @@ class FeedHealthMonitor:
         """
         self.last_seen[feed][symbol] = datetime.now()
 
+    def clear_symbol(self, symbol: str):
+        """
+        Remove a symbol from all last_seen tracking.
+        Should be called when a symbol is unsubscribed (e.g. DB cleared).
+        This prevents stale entries from triggering false feed-down alerts.
+
+        Args:
+            symbol: Internal format symbol to remove
+        """
+        for feed_data in self.last_seen.values():
+            feed_data.pop(symbol, None)
+        logger.debug(f"Cleared health tracking for symbol: {symbol}")
+
     async def check_feed_health(self):
         """
         Check health of all feeds
@@ -199,15 +212,23 @@ class FeedHealthMonitor:
 
     async def _check_feed(self, feed_name: str, stale_threshold: timedelta, now: datetime):
         """Check health of a specific feed"""
-        # Get subscribed symbols for this feed
-        feed_symbols = self.last_seen.get(feed_name, {})
+        # Only check symbols that are currently actively subscribed.
+        # self.last_seen retains entries forever, so filtering by active subscriptions
+        # prevents ghost alerts for symbols whose signals have been cleared from the DB.
+        active_symbols = getattr(self.stream_manager, 'subscribed_symbols', set())
+
+        feed_last_seen = self.last_seen.get(feed_name, {})
+        feed_symbols = {
+            sym: ts for sym, ts in feed_last_seen.items()
+            if sym in active_symbols
+        }
 
         if not feed_symbols:
-            # No symbols subscribed for this feed
+            # No active subscriptions for this feed
             self.feed_status[feed_name] = 'idle'
             return
 
-        # Check each symbol
+        # Check each actively subscribed symbol
         stale_symbols = []
 
         for symbol, last_update in feed_symbols.items():

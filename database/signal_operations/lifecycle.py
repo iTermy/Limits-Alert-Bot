@@ -16,11 +16,12 @@ def _parse_dt(value):
         import pytz
         return value if value.tzinfo else pytz.UTC.localize(value)
     from datetime import datetime
-    s = str(value)
-    if '+' in s or s.endswith('Z'):
-        return datetime.fromisoformat(s.replace('Z', '+00:00'))
     import pytz
-    return pytz.UTC.localize(datetime.fromisoformat(s))
+    s = str(value).replace('Z', '+00:00')
+    dt = datetime.fromisoformat(s)
+    if dt.tzinfo is None:
+        return pytz.UTC.localize(dt)
+    return dt
 
 
 from utils.logger import get_logger
@@ -170,7 +171,9 @@ class LifecycleManager:
             return False
 
     async def manually_set_signal_status(self, signal_id: int, new_status: str,
-                                        reason: str, db_manager) -> bool:
+                                        reason: str, db_manager,
+                                        result_pips: float = None,
+                                        closed_reason: str = None) -> bool:
         """
         Manually set a signal's status (for admin override)
         Bypasses validation for manual overrides
@@ -180,6 +183,9 @@ class LifecycleManager:
             new_status: New status to set
             reason: Optional reason for manual change
             db_manager: Database manager instance
+            result_pips: Optional P&L in pips or dollars to record on the signal
+            closed_reason: Override for closed_reason column ('manual' or 'automatic').
+                           Defaults to 'manual' if not provided.
 
         Returns:
             Success status
@@ -209,6 +215,9 @@ class LifecycleManager:
                 logger.info(f"Signal {signal_id} already has status {new_status}")
                 return True
 
+            # Determine closed_reason: caller can override, otherwise default to 'manual'
+            effective_closed_reason = closed_reason if closed_reason is not None else 'manual'
+
             # For manual overrides, bypass validation and directly update
             try:
                 async with db_manager.get_connection() as conn:
@@ -216,23 +225,34 @@ class LifecycleManager:
 
                     # Update based on whether it's a final status
                     if SignalStatus.is_final(new_status):
-                        await conn.execute("""
-                            UPDATE signals 
-                            SET status = $1, updated_at = $2, closed_at = $3, closed_reason = $4
-                            WHERE id = $5
-                        """, new_status, now, now, 'manual', signal_id)
+                        if result_pips is not None:
+                            await conn.execute("""
+                                UPDATE signals 
+                                SET status = $1, updated_at = $2, closed_at = $3,
+                                    closed_reason = $4, result_pips = $5
+                                WHERE id = $6
+                            """, new_status, now, now, effective_closed_reason,
+                                result_pips, signal_id)
+                        else:
+                            await conn.execute("""
+                                UPDATE signals 
+                                SET status = $1, updated_at = $2, closed_at = $3, closed_reason = $4
+                                WHERE id = $5
+                            """, new_status, now, now, effective_closed_reason, signal_id)
                     else:
-                        # If reverting from final to non-final, clear closed_at
+                        # If reverting from final to non-final, clear closed_at and result_pips
                         await conn.execute("""
                             UPDATE signals 
-                            SET status = $1, updated_at = $2, closed_at = NULL, closed_reason = NULL
+                            SET status = $1, updated_at = $2, closed_at = NULL,
+                                closed_reason = NULL, result_pips = NULL
                             WHERE id = $3
                         """, new_status, now, signal_id)
                     # Record status change
                     await conn.execute("""
                         INSERT INTO status_changes (signal_id, old_status, new_status, change_type, reason)
                         VALUES ($1, $2, $3, $4, $5)
-                    """, signal_id, old_status, new_status, 'manual', reason or 'Manual override')
+                    """, signal_id, old_status, new_status, effective_closed_reason,
+                        reason or 'Manual override')
                     # Handle limits based on new status
                     if SignalStatus.is_final(new_status):
                         # Cancel any pending limits
@@ -248,7 +268,8 @@ class LifecycleManager:
                             SET status = 'pending' 
                             WHERE signal_id = $1 AND status = 'cancelled'
                         """, signal_id,)
-                logger.info(f"Successfully set signal {signal_id} status: {old_status} -> {new_status}")
+                logger.info(f"Successfully set signal {signal_id} status: {old_status} -> {new_status}"
+                            + (f" (result_pips={result_pips:.4f})" if result_pips is not None else ""))
                 return True
 
             except Exception as e:
@@ -274,29 +295,33 @@ class LifecycleManager:
         try:
             from database.models import SignalStatus
 
-            # Get the signal with all its limits
-            signal = await self.get_signal_with_limits(signal_id)
+            # Get the signal with all its limits via CRUD query
+            signal_query = "SELECT * FROM signals WHERE id = $1"
+            signal_row = await self.db.fetch_one(signal_query, (signal_id,))
 
-            if not signal:
+            if not signal_row:
                 logger.error(f"Signal {signal_id} not found")
                 return False
 
+            # Get limits separately
+            limits = await self.db.fetch_all(
+                "SELECT * FROM limits WHERE signal_id = $1 ORDER BY sequence_number",
+                (signal_id,)
+            )
+
             # Check if signal is in ACTIVE status
-            if signal['status'] != SignalStatus.ACTIVE:
-                logger.warning(f"Signal {signal_id} is not ACTIVE (status: {signal['status']})")
+            if signal_row['status'] != SignalStatus.ACTIVE:
+                logger.warning(f"Signal {signal_id} is not ACTIVE (status: {signal_row['status']})")
                 # For non-active signals, just change the status directly
-                return await self.manually_set_signal_status(signal_id, SignalStatus.HIT, reason)
+                return await self.manually_set_signal_status(signal_id, SignalStatus.HIT, reason, self.db)
 
             # Find the first pending limit (lowest sequence number)
-            pending_limits = [
-                l for l in signal.get('limits', [])
-                if l.get('status') == 'pending'
-            ]
+            pending_limits = [l for l in limits if l.get('status') == 'pending']
 
             if not pending_limits:
                 logger.warning(f"Signal {signal_id} has no pending limits")
                 # No pending limits, just change status
-                return await self.manually_set_signal_status(signal_id, SignalStatus.HIT, reason)
+                return await self.manually_set_signal_status(signal_id, SignalStatus.HIT, reason, self.db)
 
             # Sort by sequence number and get first
             first_limit = min(pending_limits, key=lambda l: l.get('sequence_number', 999))
@@ -306,12 +331,7 @@ class LifecycleManager:
                 f"(price: {first_limit['price_level']})"
             )
 
-            # Use the existing process_limit_hit method which:
-            # - Marks limit as hit
-            # - Sets hit_alert_sent = 1
-            # - Updates signal status to HIT
-            # - Sets first_limit_hit_time
-            # - Records status change in audit
+            # Use the existing mark_limit_hit method
             result = await self.db.mark_limit_hit(
                 first_limit['id'],
                 first_limit['price_level']  # Use limit price as hit price
@@ -320,9 +340,8 @@ class LifecycleManager:
             if result and result.get('signal_id'):
                 logger.info(f"Signal {signal_id} manually marked as HIT via limit hit")
 
-                # Update the status change reason to reflect it was manual
+                # Update the most recent status change reason to reflect manual action
                 async with self.db.get_connection() as conn:
-                    # Update the most recent status change reason
                     await conn.execute("""
                         UPDATE status_changes 
                         SET reason = $1, change_type = 'manual'

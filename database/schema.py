@@ -35,6 +35,7 @@ async def initialize_database(db_manager):
 
                 total_limits INTEGER DEFAULT 0,
                 limits_hit   INTEGER DEFAULT 0,
+                scalp        BOOLEAN DEFAULT FALSE,
 
                 created_at TIMESTAMPTZ DEFAULT NOW(),
                 updated_at TIMESTAMPTZ DEFAULT NOW(),
@@ -102,6 +103,9 @@ async def initialize_database(db_manager):
 
         await _create_indexes(conn)
 
+        # Run migrations for any new columns added to existing tables
+        await _run_migrations(conn)
+
     logger.info("Database schema initialized successfully")
 
 
@@ -128,3 +132,29 @@ async def _create_indexes(conn):
         await conn.execute(index_query)
 
     logger.debug(f"Created {len(indexes)} database indexes")
+
+
+async def _run_migrations(conn):
+    """
+    Run migrations to add new columns to existing tables.
+    Uses IF NOT EXISTS pattern to be idempotent.
+    """
+    migrations = [
+        # Add scalp column to signals table (stage12_tp_system)
+        """
+        DO $$
+        BEGIN
+            IF NOT EXISTS (
+                SELECT 1 FROM information_schema.columns
+                WHERE table_name = 'signals' AND column_name = 'scalp'
+            ) THEN
+                ALTER TABLE signals ADD COLUMN scalp BOOLEAN DEFAULT FALSE;
+            END IF;
+        END $$;
+        """,
+    ]
+
+    for migration in migrations:
+        await conn.execute(migration)
+
+    logger.debug(f"Ran {len(migrations)} database migrations")

@@ -15,11 +15,12 @@ def _parse_dt(value):
         return None
     if hasattr(value, 'tzinfo'):
         return value if value.tzinfo else __import__('pytz').UTC.localize(value)
-    s = str(value)
     from datetime import datetime
-    if '+' in s or s.endswith('Z'):
-        return datetime.fromisoformat(s.replace('Z', '+00:00'))
-    return __import__('pytz').UTC.localize(datetime.fromisoformat(s))
+    s = str(value).replace('Z', '+00:00')
+    dt = datetime.fromisoformat(s)
+    if dt.tzinfo is None:
+        return __import__('pytz').UTC.localize(dt)
+    return dt
 
 logger = get_logger("database")
 
@@ -64,7 +65,8 @@ class DatabaseManager(BaseConnectionManager):
     # Delegate all operations to the operations handler
     async def insert_signal(self, message_id: str, channel_id: str, instrument: str,
                            direction: str, stop_loss: float, expiry_type: str = None,
-                           expiry_time: str = None, total_limits: int = 0) -> int:
+                           expiry_time: str = None, total_limits: int = 0,
+                           scalp: bool = False) -> int:
         """
         Insert a new signal with enhanced tracking
 
@@ -77,13 +79,14 @@ class DatabaseManager(BaseConnectionManager):
             expiry_type: Expiry type (day_end, week_end, etc.)
             expiry_time: Calculated expiry timestamp
             total_limits: Total number of limit orders
+            scalp: Whether this is a scalp signal
 
         Returns:
             Signal ID
         """
         return await self._ops.insert_signal(
             message_id, channel_id, instrument, direction,
-            stop_loss, expiry_type, expiry_time, total_limits
+            stop_loss, expiry_type, expiry_time, total_limits, scalp
         )
 
     async def insert_limits(self, signal_id: int, price_levels: List[float]):
@@ -172,6 +175,10 @@ class DatabaseManager(BaseConnectionManager):
             Success status
         """
         return await self._ops.mark_hit_alert_sent(limit_id)
+
+    async def get_hit_limits_for_signal(self, signal_id: int) -> List[Dict[str, Any]]:
+        """Return all hit limits for a signal with hit_price for P&L calculations."""
+        return await self._ops.get_hit_limits_for_signal(signal_id)
 
     async def get_performance_stats(self, start_date: str = None, end_date: str = None,
                                    instrument: str = None) -> Dict[str, Any]:

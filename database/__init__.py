@@ -1,8 +1,12 @@
 """
 Database module initialization and global instances
 """
+import os
 from dotenv import load_dotenv
-load_dotenv()
+
+# Load .env relative to this file so it works regardless of working directory
+_here = os.path.dirname(os.path.abspath(__file__))
+load_dotenv(dotenv_path=os.path.join(_here, '..', '.env'))
 
 from .database_manager import DatabaseManager
 

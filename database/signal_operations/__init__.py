@@ -2,33 +2,11 @@
 Signal-specific database operations main module
 """
 from typing import Optional, List, Dict, Any, Tuple
-from enum import Enum
 from core.parser import ParsedSignal
 from utils.logger import get_logger
 
 
 logger = get_logger("signal_db")
-
-
-class SignalStatus(Enum):
-    """Signal status enumeration"""
-    ACTIVE = 'active'
-    HIT = 'hit'
-    PROFIT = 'profit'
-    BREAKEVEN = 'breakeven'
-    STOP_LOSS = 'stop_loss'
-    CANCELLED = 'cancelled'
-
-    @classmethod
-    def is_final(cls, status: str) -> bool:
-        """Check if status is final"""
-        return status in [cls.PROFIT.value, cls.BREAKEVEN.value,
-                         cls.STOP_LOSS.value, cls.CANCELLED.value]
-
-    @classmethod
-    def is_trackable(cls, status: str) -> bool:
-        """Check if status requires price tracking"""
-        return status in [cls.ACTIVE.value, cls.HIT.value]
 
 
 class SignalDatabase:
@@ -118,6 +96,22 @@ class SignalDatabase:
         """
         return await self._crud.get_active_signals_detailed(instrument)
 
+    async def get_active_signals_detailed_sorted(self, instrument: str = None,
+                                                 sort_by: str = 'recent',
+                                                 limit: int = None) -> List[Dict[str, Any]]:
+        """
+        Get detailed active signals with sorting options
+
+        Args:
+            instrument: Optional filter by instrument
+            sort_by: Sort method ('recent', 'oldest', 'progress')
+            limit: Optional limit on number of results
+
+        Returns:
+            List of signals with detailed information
+        """
+        return await self._crud.get_active_signals_detailed_sorted(instrument, sort_by, limit)
+
     async def get_signals_for_tracking(self) -> List[Dict[str, Any]]:
         """
         Get all signals that need price tracking (wrapper for DB method)
@@ -155,7 +149,9 @@ class SignalDatabase:
         return await self._lifecycle.reactivate_cancelled_signal(signal_id, parsed_signal, self.db)
 
     async def manually_set_signal_status(self, signal_id: int, new_status: str,
-                                        reason: str = None) -> bool:
+                                        reason: str = None,
+                                        result_pips: float = None,
+                                        closed_reason: str = None) -> bool:
         """
         Manually set a signal's status (for admin override)
         Bypasses validation for manual overrides
@@ -164,11 +160,16 @@ class SignalDatabase:
             signal_id: Signal ID
             new_status: New status to set
             reason: Optional reason for manual change
+            result_pips: Optional P&L in pips or dollars to record on the signal
+            closed_reason: Override for closed_reason column ('manual' or 'automatic')
 
         Returns:
             Success status
         """
-        return await self._lifecycle.manually_set_signal_status(signal_id, new_status, reason, self.db)
+        return await self._lifecycle.manually_set_signal_status(
+            signal_id, new_status, reason, self.db,
+            result_pips=result_pips, closed_reason=closed_reason
+        )
 
     async def process_limit_hit(self, limit_id: int, actual_price: float = None) -> Dict[str, Any]:
         """
@@ -183,18 +184,17 @@ class SignalDatabase:
         """
         return await self._lifecycle.process_limit_hit(limit_id, actual_price, self)
 
-    async def check_and_update_stop_loss(self, signal_id: int, current_price: float) -> bool:
+    async def get_hit_limits_for_signal(self, signal_id: int) -> List[Dict[str, Any]]:
         """
-        Check if stop loss is hit and update status
+        Return all hit limits for a signal with hit_price for P&L calculations.
 
         Args:
             signal_id: Signal ID
-            current_price: Current market price
 
         Returns:
-            True if stop loss was hit
+            List of dicts with limit_id, sequence_number, price_level, hit_price, hit_time
         """
-        return await self._lifecycle.check_and_update_stop_loss(signal_id, current_price, self)
+        return await self.db.get_hit_limits_for_signal(signal_id)
 
     async def manually_set_signal_expiry(self, signal_id: int, expiry_type: str,
                                         custom_datetime: str = None) -> bool:
@@ -233,26 +233,6 @@ class SignalDatabase:
         """
         return await self._analytics.get_statistics(self.db)
 
-    # ==================== Helper Methods ====================
-
-    def _calculate_expiry(self, expiry_type: str) -> Optional[str]:
-        """
-        Calculate expiry timestamp based on type
-
-        Args:
-            expiry_type: Type of expiry
-
-        Returns:
-            ISO format timestamp or None
-        """
-        from .utils import calculate_expiry
-        return calculate_expiry(expiry_type)
-
-    def _get_status_emoji(self, status: str) -> str:
-        """Get emoji for status display"""
-        from .utils import get_status_emoji
-        return get_status_emoji(status)
-
     async def get_trading_period_range(self, period: str = 'week') -> Dict[str, Any]:
         """
         Get the date range for the current trading period
@@ -277,21 +257,3 @@ class SignalDatabase:
             List of signals with their results
         """
         return await self._analytics.get_period_signals_with_results(start_date, end_date)
-
-    async def get_week_performance_summary(self) -> Dict[str, Any]:
-        """
-        Get current week's performance summary
-
-        Returns:
-            Dictionary with week's performance metrics
-        """
-        return await self._analytics.get_week_performance_summary()
-
-    async def get_month_performance_summary(self) -> Dict[str, Any]:
-        """
-        Get current month's performance summary
-
-        Returns:
-            Dictionary with month's performance metrics
-        """
-        return await self._analytics.get_month_performance_summary()
