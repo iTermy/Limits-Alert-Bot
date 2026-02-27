@@ -1,6 +1,5 @@
 """
-Trading Bot Core - Main bot class with modular architecture
-Fixed to properly connect alert system to message handler
+Trading Bot Core - Main bot class
 """
 import discord
 from discord.ext import commands, tasks
@@ -59,19 +58,16 @@ class TradingBot(commands.Bot):
         # Load channel configuration SECOND
         await self.load_config()
 
-        # Initialize message handler THIRD (before monitor)
         from discord_handlers.message_handler import MessageHandler
         self.message_handler = MessageHandler(self)
         self.logger.info("Message handler initialized")
 
-        # Initialize price monitoring FOURTH (after message handler)
         await self.initialize_price_monitor()
 
-        # CRITICAL: Connect alert system to message handler
+        # Connect alert system to message handler
         if self.monitor and self.message_handler:
             self.message_handler.alert_system = self.monitor.alert_system
-            self.logger.info(f"Connected alert system to message handler")
-            self.logger.info(f"Alert system is tracking {len(self.monitor.alert_system.alert_messages)} messages")
+            self.logger.info("Connected alert system to message handler")
         else:
             self.logger.error("Failed to connect alert system - monitor or message_handler is None")
 
@@ -79,7 +75,6 @@ class TradingBot(commands.Bot):
         from core.expiry_manager import ExpiryManager
         self.expiry_manager = ExpiryManager(self)
 
-        # Load command extensions
         await self.load_extensions()
 
         # Start background tasks
@@ -115,7 +110,6 @@ class TradingBot(commands.Bot):
         extensions = [
             'commands.bot_commands',
             'commands.signal_commands',
-            # tp_commands merged into signal_commands
         ]
 
         for extension in extensions:
@@ -130,16 +124,10 @@ class TradingBot(commands.Bot):
         self.logger.info(f"Bot logged in as {self.user.name} ({self.user.id})")
         self.logger.info(f"Connected to {len(self.guilds)} guild(s)")
 
-        # Double-check the connection after everything is ready
-        if self.monitor and self.message_handler:
-            # Ensure connection is still valid
-            if not self.message_handler.alert_system:
-                self.message_handler.alert_system = self.monitor.alert_system
-                self.logger.info("Re-connected alert system in on_ready")
-
-            # Log status
-            tracked_count = len(self.monitor.alert_system.alert_messages) if self.monitor.alert_system else 0
-            self.logger.info(f"Alert system status: {tracked_count} tracked messages")
+        # Ensure alert system connection is valid (guard against race conditions)
+        if self.monitor and self.message_handler and not self.message_handler.alert_system:
+            self.message_handler.alert_system = self.monitor.alert_system
+            self.logger.info("Re-connected alert system in on_ready")
 
         # Set bot status
         await self.change_presence(

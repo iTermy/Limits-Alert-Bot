@@ -2,33 +2,11 @@
 Signal-specific database operations main module
 """
 from typing import Optional, List, Dict, Any, Tuple
-from enum import Enum
 from core.parser import ParsedSignal
 from utils.logger import get_logger
 
 
 logger = get_logger("signal_db")
-
-
-class SignalStatus(Enum):
-    """Signal status enumeration"""
-    ACTIVE = 'active'
-    HIT = 'hit'
-    PROFIT = 'profit'
-    BREAKEVEN = 'breakeven'
-    STOP_LOSS = 'stop_loss'
-    CANCELLED = 'cancelled'
-
-    @classmethod
-    def is_final(cls, status: str) -> bool:
-        """Check if status is final"""
-        return status in [cls.PROFIT.value, cls.BREAKEVEN.value,
-                         cls.STOP_LOSS.value, cls.CANCELLED.value]
-
-    @classmethod
-    def is_trackable(cls, status: str) -> bool:
-        """Check if status requires price tracking"""
-        return status in [cls.ACTIVE.value, cls.HIT.value]
 
 
 class SignalDatabase:
@@ -218,19 +196,6 @@ class SignalDatabase:
         """
         return await self.db.get_hit_limits_for_signal(signal_id)
 
-    async def check_and_update_stop_loss(self, signal_id: int, current_price: float) -> bool:
-        """
-        Check if stop loss is hit and update status
-
-        Args:
-            signal_id: Signal ID
-            current_price: Current market price
-
-        Returns:
-            True if stop loss was hit
-        """
-        return await self._lifecycle.check_and_update_stop_loss(signal_id, current_price, self)
-
     async def manually_set_signal_expiry(self, signal_id: int, expiry_type: str,
                                         custom_datetime: str = None) -> bool:
         """
@@ -268,26 +233,6 @@ class SignalDatabase:
         """
         return await self._analytics.get_statistics(self.db)
 
-    # ==================== Helper Methods ====================
-
-    def _calculate_expiry(self, expiry_type: str) -> Optional[str]:
-        """
-        Calculate expiry timestamp based on type
-
-        Args:
-            expiry_type: Type of expiry
-
-        Returns:
-            ISO format timestamp or None
-        """
-        from .utils import calculate_expiry
-        return calculate_expiry(expiry_type)
-
-    def _get_status_emoji(self, status: str) -> str:
-        """Get emoji for status display"""
-        from .utils import get_status_emoji
-        return get_status_emoji(status)
-
     async def get_trading_period_range(self, period: str = 'week') -> Dict[str, Any]:
         """
         Get the date range for the current trading period
@@ -312,21 +257,3 @@ class SignalDatabase:
             List of signals with their results
         """
         return await self._analytics.get_period_signals_with_results(start_date, end_date)
-
-    async def get_week_performance_summary(self) -> Dict[str, Any]:
-        """
-        Get current week's performance summary
-
-        Returns:
-            Dictionary with week's performance metrics
-        """
-        return await self._analytics.get_week_performance_summary()
-
-    async def get_month_performance_summary(self) -> Dict[str, Any]:
-        """
-        Get current month's performance summary
-
-        Returns:
-            Dictionary with month's performance metrics
-        """
-        return await self._analytics.get_month_performance_summary()

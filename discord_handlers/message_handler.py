@@ -1,5 +1,5 @@
 """
-Message Handler - Debug version with extra logging for alert reply feature
+Message Handler
 """
 import re
 import discord
@@ -48,10 +48,8 @@ class MessageHandler:
                     self._allowed_channels.add(int(self.bot.channels_config['alert_channel']))
                 if 'command_channel' in self.bot.channels_config:
                     self._allowed_channels.add(int(self.bot.channels_config['command_channel']))
-                # NEW: Add PA alert channel
                 if 'pa-alert-channel' in self.bot.channels_config:
                     self._allowed_channels.add(int(self.bot.channels_config['pa-alert-channel']))
-                # NEW: Add toll alert channel
                 if 'toll-alert-channel' in self.bot.channels_config:
                     self._allowed_channels.add(int(self.bot.channels_config['toll-alert-channel']))
 
@@ -72,18 +70,9 @@ class MessageHandler:
         if message.author.bot:
             return
 
-        # CHECK: Only process messages in allowed channels
-        print(self.is_allowed_channel(message.channel.id))
         if not self.is_allowed_channel(message.channel.id):
             # Silently ignore messages in non-trading channels
             return
-
-        # Debug logging for replies
-        if message.reference:
-            logger.debug(f"Message is a reply from {message.author.name}: '{message.content}'")
-            logger.debug(f"Alert system available: {self.alert_system is not None}")
-            if self.alert_system:
-                logger.debug(f"Tracked alert messages: {len(self.alert_system.alert_messages)}")
 
         # Check if message is in monitored channel
         if message.channel.id in self.bot.monitored_channels:

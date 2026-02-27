@@ -103,7 +103,7 @@ class ConfigLoader:
             if not filepath.exists():
                 with open(filepath, 'w') as f:
                     json.dump(default_content, f, indent=2)
-                print(f"Created default {filename}")
+                logger.info(f"Created default {filename}")
 
     def load(self, filename: str, reload: bool = False) -> Dict[str, Any]:
         """
