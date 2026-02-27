@@ -728,9 +728,19 @@ class MessageHandler:
     async def process_signal(self, message: discord.Message):
         """Process a potential trading signal with enhanced parsing"""
         try:
-            from core.parser import parse_signal
+            from core.parser import parse_signal, RejectedSignal
             channel_name = self.get_channel_name(message.channel.id)
             parsed = parse_signal(message.content, channel_name)
+
+            if isinstance(parsed, RejectedSignal):
+                # Signal looks valid but is malformed (e.g. out-of-order limits = typo).
+                # React ❌ so the user knows to fix and re-edit the message.
+                await self.safe_add_reaction(message, "❌")
+                self.logger.info(
+                    f"Signal rejected as malformed (likely typo) in message {message.id}: "
+                    f"{parsed.reason}"
+                )
+                return
 
             if parsed:
                 success, signal_id = await self.signal_db.save_signal(
@@ -791,12 +801,21 @@ class MessageHandler:
 
         existing = await self.signal_db.get_signal_by_message_id(str(after.id))
         if not existing:
+            await after.clear_reactions()
             await self.process_signal(after)
             return
 
-        from core.parser import parse_signal
+        from core.parser import parse_signal, RejectedSignal
         channel_name = self.get_channel_name(after.channel.id)
         parsed = parse_signal(after.content, channel_name)
+
+        if isinstance(parsed, RejectedSignal):
+            await after.clear_reactions()
+            await after.add_reaction("❌")
+            self.logger.info(
+                f"Signal edit rejected as malformed (likely typo): {after.id}: {parsed.reason}"
+            )
+            return
 
         if parsed:
             success = await self.signal_db.update_signal_from_edit(str(after.id), parsed)

@@ -420,6 +420,13 @@ def determine_limits_and_stop(numbers: List[float], direction: str,
             highest_limit = max(limits)
             stop_loss = highest_limit + 5.0
 
+        # Validate order — tolls signals are subject to the same typo checks
+        if len(limits) > 1 and not validate_limits_order(limits, direction):
+            from . import LimitsOrderError
+            raise LimitsOrderError(
+                f"{direction} tolls limits not {'ascending' if direction == 'short' else 'descending'}: {limits}"
+            )
+
         logger.debug(f"Tolls channel: Using all {len(limits)} number(s) as limits, "
                      f"auto-setting stop to {stop_loss} ({direction})")
         return limits, stop_loss
@@ -446,12 +453,10 @@ def determine_limits_and_stop(numbers: List[float], direction: str,
     # Out-of-order limits almost always indicate a typo (e.g. missing decimal,
     # wrong digit) rather than a valid signal.
     if not validate_limits_order(limits, direction):
-        logger.debug(
-            f"Limits order validation failed for {direction}: {limits} "
-            f"(expected {'ascending' if direction == 'short' else 'descending'}). "
-            f"Signal rejected as likely typo."
+        from . import LimitsOrderError
+        raise LimitsOrderError(
+            f"{direction} limits not {'ascending' if direction == 'short' else 'descending'}: {limits}"
         )
-        return None, None
 
     return limits, stop_loss
 
@@ -544,7 +549,11 @@ class CorePatternParser:
             if not limits or stop_loss is None:
                 if not _internal_call:
                     logger.debug("Could not determine limits and stop loss")
-                return None
+                from . import LimitsOrderError
+                raise LimitsOrderError(
+                    f"Could not resolve limits/stop for {instrument} {direction} "
+                    f"with numbers {numbers}"
+                )
 
             # Extract expiry
             expiry_type = extract_expiry(cleaned, channel_name, self.channel_config)
@@ -580,6 +589,9 @@ class CorePatternParser:
             return None
 
         except Exception as e:
+            from . import LimitsOrderError
+            if isinstance(e, LimitsOrderError):
+                raise
             if not _internal_call:
                 logger.error(f"Core parsing error: {e}")
             return None
@@ -665,7 +677,11 @@ class StockPatternParser:
             # Determine limits and stop loss (pass channel_name for tolls handling)
             limits, stop_loss = determine_limits_and_stop(numbers, direction, channel_name)
             if not limits or stop_loss is None:
-                return None
+                from . import LimitsOrderError
+                raise LimitsOrderError(
+                    f"Could not resolve limits/stop for {instrument} {direction} "
+                    f"with numbers {numbers}"
+                )
 
             # Extract expiry
             expiry_type = extract_expiry(cleaned, channel_name, self.channel_config)
@@ -698,6 +714,9 @@ class StockPatternParser:
             return None
 
         except Exception as e:
+            from . import LimitsOrderError
+            if isinstance(e, LimitsOrderError):
+                raise
             logger.error(f"Stock parsing error: {e}")
             return None
 
