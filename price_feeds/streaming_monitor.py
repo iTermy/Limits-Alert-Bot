@@ -117,7 +117,7 @@ class StreamingPriceMonitor:
                             logger.error(f"Failed to set PA alert channel: {e}")
                     else:
                         logger.warning("No PA alert channel configured in channels.json")
-                    # NEW: Setup toll alert channel
+                    # Setup toll alert channel
                     toll_channel_id = config.get('toll-alert-channel')
                     if toll_channel_id:
                         try:
@@ -128,6 +128,17 @@ class StreamingPriceMonitor:
                             logger.error(f"Failed to set toll alert channel: {e}")
                     else:
                         logger.warning("No toll alert channel configured in channels.json")
+                    # Setup general-tolls alert channel
+                    general_toll_alert_id = config.get('general-tolls-alert')
+                    if general_toll_alert_id:
+                        try:
+                            general_toll_channel = await self.bot.fetch_channel(int(general_toll_alert_id))
+                            self.alert_system.set_general_toll_channel(general_toll_channel)
+                            logger.info(f"General-toll alert channel set: #{general_toll_channel.name}")
+                        except Exception as e:
+                            logger.error(f"Failed to set general-toll alert channel: {e}")
+                    else:
+                        logger.warning("No general-tolls-alert channel configured in channels.json")
             except Exception as e:
                 logger.error(f"Error setting up alert channel: {e}")
 
@@ -552,17 +563,18 @@ class StreamingPriceMonitor:
                     )
 
                     # ENHANCED: Send alert with spread info
-                    await self.alert_system.send_approaching_alert(
+                    sent = await self.alert_system.send_approaching_alert(
                         signal, limit, current_price, formatted_distance,
                         spread=spread,
                         spread_buffer_enabled=spread_buffer_enabled
                     )
 
-                    # Mark as sent in database
-                    await self._mark_approaching_sent(limit['limit_id'])
+                    if sent:
+                        # Mark as sent in database
+                        await self._mark_approaching_sent(limit['limit_id'])
 
-                    # CRITICAL: Update in-memory flag
-                    limit['approaching_alert_sent'] = True
+                        # CRITICAL: Update in-memory flag
+                        limit['approaching_alert_sent'] = True
 
     async def _react_to_original_signal(self, signal: Dict, emoji: str):
         """

@@ -105,8 +105,9 @@ class AutoTPMonitor:
             logger.warning(f"Signal {signal_id}: last limit has no entry price, skipping TP check")
             return False
 
-        last_pnl = self.tp_config.calculate_pnl(instrument, direction, last_entry, close_price)
-        tp_threshold = self.tp_config.get_tp_value(instrument)
+        scalp = signal.get('scalp', False)
+        last_pnl = self.tp_config.calculate_pnl(instrument, direction, last_entry, close_price, scalp=scalp)
+        tp_threshold = self.tp_config.get_tp_value(instrument, scalp=scalp)
 
         # Tiny epsilon to guard against floating-point rounding errors
         EPSILON = 1e-9
@@ -124,7 +125,7 @@ class AutoTPMonitor:
                     logger.warning(f"Signal {signal_id}: limit {lim.get('limit_id')} has no entry price")
                     continue
                 combined_earlier_pnl += self.tp_config.calculate_pnl(
-                    instrument, direction, entry, close_price
+                    instrument, direction, entry, close_price, scalp=scalp
                 )
 
             if combined_earlier_pnl < -EPSILON:

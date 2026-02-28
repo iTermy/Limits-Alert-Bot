@@ -52,6 +52,8 @@ class MessageHandler:
                     self._allowed_channels.add(int(self.bot.channels_config['pa-alert-channel']))
                 if 'toll-alert-channel' in self.bot.channels_config:
                     self._allowed_channels.add(int(self.bot.channels_config['toll-alert-channel']))
+                if 'general-tolls-alert' in self.bot.channels_config and self.bot.channels_config['general-tolls-alert']:
+                    self._allowed_channels.add(int(self.bot.channels_config['general-tolls-alert']))
 
         return self._allowed_channels
 

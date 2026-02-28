@@ -14,11 +14,13 @@
     "crypto-alt-trades": "1403532013511905434",
     "price-action-trades": "1402972075446239303",
     "gold-pa-signals": "1402972221953019986",
-    "gold-tolls-map": "1472685381315989730"
+    "gold-tolls-map": "1472685381315989730",
+    "general-tolls": "1477339674166169911"
   },
   "alert_channel": "1402971805890773005",
   "pa-alert-channel": "1442668785990631435",
   "toll-alert-channel": "1472685910549332113",
+  "general-tolls-alert": "1477339631900168284",
   "command_channel": "1402971848731398174",
   "profit_channel": "1414288228206514279",
   "channel_settings": {
@@ -70,6 +72,9 @@
     "gold-tolls-map": {
       "default_expiry": "day_end",
       "default_instrument": "XAUUSD"
+    },
+    "general-tolls": {
+      "default_expiry": "day_end"
     }
   }
 }
