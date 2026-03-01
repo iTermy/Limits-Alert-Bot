@@ -1621,8 +1621,6 @@ class TradingCommands(BaseCog):
                 value = info['value']
                 is_override = info['is_override']
 
-                # Format value nicely
-                type_units = {'pips': 'pips', 'dollars': '$', 'percentage': '%'}
                 if dist_type == 'dollars':
                     val_str = f"${value}"
                 elif dist_type == 'percentage':
@@ -1649,58 +1647,55 @@ class TradingCommands(BaseCog):
                 await ctx.send(embed=embed)
 
             else:
-                # Show all defaults and overrides
                 info = self.alert_dist_config.get_config_display()
                 defaults = info['defaults']
                 overrides = info['overrides']
 
-                embed = discord.Embed(
+                def _fmt_val(t, v):
+                    if t == 'dollars':
+                        return f"${v}"
+                    elif t == 'percentage':
+                        return f"{v}%"
+                    return f"{v} pips"
+
+                # ── Page 1: defaults (always fits) ──
+                def_lines = [
+                    f"`{ac}` → {_fmt_val(cfg['type'], cfg['value'])}"
+                    for ac, cfg in defaults.items()
+                ]
+                embed1 = discord.Embed(
                     title="Alert Distance Configuration",
-                    description="Approaching-alert thresholds per asset class and per-symbol overrides.",
+                    description=f"{len(overrides)} per-symbol override(s) total.",
                     color=0x00BFFF,
                 )
-
-                # Defaults
-                def_lines = []
-                for ac, cfg in defaults.items():
-                    t = cfg['type']
-                    v = cfg['value']
-                    if t == 'dollars':
-                        v_str = f"${v}"
-                    elif t == 'percentage':
-                        v_str = f"{v}%"
-                    else:
-                        v_str = f"{v} pips"
-                    def_lines.append(f"`{ac}` → {v_str} ({t})")
-                embed.add_field(
+                embed1.add_field(
                     name="Asset-Class Defaults",
                     value="\n".join(def_lines) or "None",
                     inline=False,
                 )
+                await ctx.send(embed=embed1)
 
-                # Overrides
-                if overrides:
-                    ov_lines = []
-                    for sym, cfg in overrides.items():
-                        t = cfg['type']
-                        v = cfg['value']
-                        if t == 'dollars':
-                            v_str = f"${v}"
-                        elif t == 'percentage':
-                            v_str = f"{v}%"
-                        else:
-                            v_str = f"{v} pips"
-                        ov_lines.append(f"`{sym}` → {v_str} ({t})  _(by {cfg.get('set_by', '?')})_")
+                if not overrides:
+                    return
+
+                # ── Paginate overrides: ~15 per embed to stay well under 1024 chars ──
+                PAGE_SIZE = 15
+                ov_items = sorted(overrides.items())
+                total_pages = (len(ov_items) + PAGE_SIZE - 1) // PAGE_SIZE
+
+                for page_num, start in enumerate(range(0, len(ov_items), PAGE_SIZE), start=1):
+                    chunk = ov_items[start:start + PAGE_SIZE]
+                    lines = [
+                        f"`{sym}` → {_fmt_val(cfg['type'], cfg['value'])}"
+                        for sym, cfg in chunk
+                    ]
+                    embed = discord.Embed(color=0x00BFFF)
                     embed.add_field(
-                        name=f"Per-Symbol Overrides ({len(overrides)})",
-                        value="\n".join(ov_lines),
+                        name=f"Per-Symbol Overrides ({len(overrides)}) — Page {page_num}/{total_pages}",
+                        value="\n".join(lines),
                         inline=False,
                     )
-                else:
-                    embed.add_field(name="Per-Symbol Overrides", value="None", inline=False)
-
-                embed.set_footer(text="Use !alertdist set <target> <value> [type] to update")
-                await ctx.send(embed=embed)
+                    await ctx.send(embed=embed)
 
         except Exception as e:
             self.logger.error(f"Error in alertdist config: {e}", exc_info=True)

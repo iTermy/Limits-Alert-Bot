@@ -226,20 +226,10 @@ class BotCommands(BaseCog):
             "`!sl <id>` - Mark as stop loss\n"
             "`!cancel` - Cancel signals — see `!help cancel` for all options\n"
             "`!tp` - Take-profit config — see `!help tp` for all options\n"
-            "`!alertdist` - Alert distance config — see `!help alertdist` for all options"
+            "`!alertdist` - Alert distance config — see `!help alertdist` for all options\n"
+            "`!news` - News mode — see `!help news` for all options"
         )
         embed.add_field(name="Signal Commands", value=signal_cmds, inline=False)
-
-        # News commands
-        news_cmds = (
-            "`!news <category> <time> [window] [tz:<tz>] [date:<date>]` - Schedule news window\n"
-            "`!news now [category]` - Activate immediate open-ended news window\n"
-            "`!news off` - Deactivate all open-ended windows\n"
-            "`!newslist` - Show all scheduled/active news events\n"
-            "`!newsclear [id]` - Remove a news event (or all)\n"
-            "  └ See `!help news` for full details and tag options"
-        )
-        embed.add_field(name="📰 News Mode", value=news_cmds, inline=False)
 
         # Bot commands
         bot_cmds = (
