@@ -1,5 +1,5 @@
 """
-Signal Commands
+Trading Commands — signal management + news mode, combined.
 """
 from .base_command import BaseCog
 from utils.logger import get_logger
@@ -12,11 +12,20 @@ from discord.ext import commands
 from typing import Optional, List, Dict
 from datetime import datetime
 from price_feeds.tp_config import TPConfig
+import pytz
+from core.news_manager import (
+    NewsManager,
+    NewsEvent,
+    FOREX_CURRENCIES,
+    NAMED_CATEGORIES,
+    parse_news_command,
+)
 
 ASSET_CLASSES = ["forex", "forex_jpy", "metals", "indices", "stocks", "crypto", "oil"]
 VALID_TP_TYPES = ["pips", "dollars"]
 
-logger = get_logger("signal_commands")
+logger = get_logger("trading_commands")
+EST = pytz.timezone('America/New_York')
 
 
 class ActiveSignalsView(discord.ui.View):
@@ -149,8 +158,8 @@ class ActiveSignalsView(discord.ui.View):
             await interaction.response.edit_message(embed=self.get_page_embed(), view=self)
 
 
-class SignalCommands(BaseCog):
-    """Signal management commands"""
+class TradingCommands(BaseCog):
+    """Signal management and news mode commands"""
 
     def __init__(self, bot):
         super().__init__(bot)
@@ -892,9 +901,6 @@ class SignalCommands(BaseCog):
 
             signals = enriched_signals
 
-            # Get channel names for categorization
-            from utils.config_loader import config
-
             # Load channels.json directly
             import json
             from pathlib import Path
@@ -907,6 +913,7 @@ class SignalCommands(BaseCog):
             except Exception as e:
                 logger.warning(f"Could not load channels.json: {e}")
                 monitored_channels = {}
+                channels_data = {}
 
             # Create reverse mapping: channel_id -> channel_name
             channel_id_to_name = {str(channel_id): name for name, channel_id in monitored_channels.items()}
@@ -920,10 +927,8 @@ class SignalCommands(BaseCog):
                 channel_id = str(signal.get('channel_id', ''))
                 channel_name = channel_id_to_name.get(channel_id, '').lower()
 
-                # Check if it's a toll channel (contains 'toll' in name) - exclude from report
                 if 'toll' in channel_name:
                     toll_signals.append(signal)
-                # Check if it's a PA channel (contains 'pa' in name)
                 elif any(x in channel_name for x in ['pa', 'price-action']):
                     pa_signals.append(signal)
                 else:
@@ -937,19 +942,25 @@ class SignalCommands(BaseCog):
             pa_profit = [s for s in pa_signals if s.get('status', '').lower() == 'profit']
             pa_stoploss = [s for s in pa_signals if s.get('status', '').lower() in ['stoploss', 'stop_loss']]
 
+            # Process toll signals
+            toll_profit = [s for s in toll_signals if s.get('status', '').lower() == 'profit']
+            toll_stoploss = [s for s in toll_signals if s.get('status', '').lower() in ['stoploss', 'stop_loss']]
+
             # Apply filter if specified
             if filter_normalized == 'stoploss':
-                # Only show stop loss signals
                 regular_profit = []
                 pa_profit = []
+                toll_profit = []
             elif filter_normalized == 'profit':
-                # Only show profit signals
                 regular_stoploss = []
                 pa_stoploss = []
+                toll_stoploss = []
 
             # Check if filter resulted in no signals
             if filter_normalized:
-                filtered_count = len(regular_profit) + len(regular_stoploss) + len(pa_profit) + len(pa_stoploss)
+                filtered_count = (len(regular_profit) + len(regular_stoploss) +
+                                  len(pa_profit) + len(pa_stoploss) +
+                                  len(toll_profit) + len(toll_stoploss))
                 if filtered_count == 0:
                     filter_label = "stop loss" if filter_normalized == 'stoploss' else "profit"
                     embed = discord.Embed(
@@ -965,19 +976,24 @@ class SignalCommands(BaseCog):
                 [s for s in regular_signals if s.get('status', '').lower() in ['profit', 'stoploss', 'stop_loss']])
             total_pa = len(
                 [s for s in pa_signals if s.get('status', '').lower() in ['profit', 'stoploss', 'stop_loss']])
-            total_signals = total_regular + total_pa
+            total_tolls = len(
+                [s for s in toll_signals if s.get('status', '').lower() in ['profit', 'stoploss', 'stop_loss']])
+            total_signals = total_regular + total_pa + total_tolls
 
             regular_profit_count = len(regular_profit)
             regular_sl_count = len(regular_stoploss)
             pa_profit_count = len(pa_profit)
             pa_sl_count = len(pa_stoploss)
+            toll_profit_count = len(toll_profit)
+            toll_sl_count = len(toll_stoploss)
 
-            total_profit = regular_profit_count + pa_profit_count
-            total_sl = regular_sl_count + pa_sl_count
+            total_profit = regular_profit_count + pa_profit_count + toll_profit_count
+            total_sl = regular_sl_count + pa_sl_count + toll_sl_count
 
             # Calculate win rates
             regular_win_rate = (regular_profit_count / total_regular * 100) if total_regular > 0 else 0
             pa_win_rate = (pa_profit_count / total_pa * 100) if total_pa > 0 else 0
+            toll_win_rate = (toll_profit_count / total_tolls * 100) if total_tolls > 0 else 0
             overall_win_rate = (total_profit / total_signals * 100) if total_signals > 0 else 0
 
             # Create embed
@@ -992,22 +1008,16 @@ class SignalCommands(BaseCog):
 
             embed = discord.Embed(
                 title=f"📊 {period.title()} Trading Report{title_suffix}",
-                description=f"Performance summary for the current {period}{description_suffix}",
+                description=f"Date: {date_range['display_start']} - {date_range['display_end']}",
                 color=0x00FF00 if overall_win_rate >= 50 else 0xFF0000
-            )
-
-            embed.add_field(
-                name="Date Range",
-                value=f"{date_range['display_start']} - {date_range['display_end']}",
-                inline=False
             )
 
             # Regular Signals Section
             if total_regular > 0:
                 embed.add_field(
                     name="Regular Signals",
-                    value=f"**Total:** {total_regular} | **Win Rate:** {regular_win_rate:.1f}%\n"
-                          f"**Profit:** {regular_profit_count} | **Stop Loss:** {regular_sl_count}",
+                    value=f"Total: {total_regular} | Win Rate: {regular_win_rate:.1f}%\n"
+                          f"Profit: {regular_profit_count} | Stop Loss: {regular_sl_count}",
                     inline=True
                 )
 
@@ -1015,8 +1025,17 @@ class SignalCommands(BaseCog):
             if total_pa > 0:
                 embed.add_field(
                     name="PA Signals",
-                    value=f"**Total:** {total_pa} | **Win Rate:** {pa_win_rate:.1f}%\n"
-                          f"**Profit:** {pa_profit_count} | **Stop Loss:** {pa_sl_count}",
+                    value=f"Total: {total_pa} | Win Rate: {pa_win_rate:.1f}%\n"
+                          f"Profit: {pa_profit_count} | Stop Loss: {pa_sl_count}",
+                    inline=True
+                )
+
+            # Tolls Signals Section
+            if total_tolls > 0:
+                embed.add_field(
+                    name="Tolls Signals",
+                    value=f"Total: {total_tolls} | Win Rate: {toll_win_rate:.1f}%\n"
+                          f"Profit: {toll_profit_count} | Stop Loss: {toll_sl_count}",
                     inline=True
                 )
 
@@ -1024,26 +1043,18 @@ class SignalCommands(BaseCog):
             if total_regular > 0:
                 trade_lines = []
 
-                # Add profit trades
                 for signal in regular_profit:
-                    # Format first limit with additional count
                     limits = signal.get('limits', [])
                     if limits:
                         first_limit = format_price(limits[0]['price_level'], signal['instrument'])
-                        if len(limits) > 1:
-                            limit_display = f"{first_limit}, +{len(limits) - 1} more"
-                        else:
-                            limit_display = first_limit
+                        limit_display = f"{first_limit}, +{len(limits) - 1} more" if len(limits) > 1 else first_limit
                     else:
                         limit_display = "N/A"
-
                     trade_lines.append(
                         f"#{signal['id']} | {signal['instrument']} | {limit_display} | {signal['direction'].upper()} 🟢"
                     )
 
-                # Add stop loss trades
                 for signal in regular_stoploss:
-                    # Format stop loss
                     sl_value = format_price(signal.get('stop_loss'), signal['instrument']) if signal.get(
                         'stop_loss') else "N/A"
                     trade_lines.append(
@@ -1051,10 +1062,9 @@ class SignalCommands(BaseCog):
                     )
 
                 if trade_lines:
-                    trades_text = cap_field_value(trade_lines)
                     embed.add_field(
                         name=f"Regular Trades ({total_regular})",
-                        value=trades_text,
+                        value=cap_field_value(trade_lines),
                         inline=False
                     )
 
@@ -1062,26 +1072,18 @@ class SignalCommands(BaseCog):
             if total_pa > 0:
                 pa_trade_lines = []
 
-                # Add profit trades
                 for signal in pa_profit:
-                    # Format first limit with additional count
                     limits = signal.get('limits', [])
                     if limits:
                         first_limit = format_price(limits[0]['price_level'], signal['instrument'])
-                        if len(limits) > 1:
-                            limit_display = f"{first_limit}, +{len(limits) - 1} more"
-                        else:
-                            limit_display = first_limit
+                        limit_display = f"{first_limit}, +{len(limits) - 1} more" if len(limits) > 1 else first_limit
                     else:
                         limit_display = "N/A"
-
                     pa_trade_lines.append(
                         f"#{signal['id']} | {signal['instrument']} | {limit_display} | {signal['direction'].upper()} 🟢"
                     )
 
-                # Add stop loss trades
                 for signal in pa_stoploss:
-                    # Format stop loss
                     sl_value = format_price(signal.get('stop_loss'), signal['instrument']) if signal.get(
                         'stop_loss') else "N/A"
                     pa_trade_lines.append(
@@ -1089,10 +1091,38 @@ class SignalCommands(BaseCog):
                     )
 
                 if pa_trade_lines:
-                    pa_trades_text = cap_field_value(pa_trade_lines)
                     embed.add_field(
                         name=f"PA Trades ({total_pa})",
-                        value=pa_trades_text,
+                        value=cap_field_value(pa_trade_lines),
+                        inline=False
+                    )
+
+            # Build TOLLS TRADES section (profit first, then stop loss)
+            if total_tolls > 0:
+                toll_trade_lines = []
+
+                for signal in toll_profit:
+                    limits = signal.get('limits', [])
+                    if limits:
+                        first_limit = format_price(limits[0]['price_level'], signal['instrument'])
+                        limit_display = f"{first_limit}, +{len(limits) - 1} more" if len(limits) > 1 else first_limit
+                    else:
+                        limit_display = "N/A"
+                    toll_trade_lines.append(
+                        f"#{signal['id']} | {signal['instrument']} | {limit_display} | {signal['direction'].upper()} 🟢"
+                    )
+
+                for signal in toll_stoploss:
+                    sl_value = format_price(signal.get('stop_loss'), signal['instrument']) if signal.get(
+                        'stop_loss') else "N/A"
+                    toll_trade_lines.append(
+                        f"#{signal['id']} | {signal['instrument']} | SL: {sl_value} | {signal['direction'].upper()} 🛑"
+                    )
+
+                if toll_trade_lines:
+                    embed.add_field(
+                        name=f"Tolls Trades ({total_tolls})",
+                        value=cap_field_value(toll_trade_lines),
                         inline=False
                     )
 
@@ -1121,253 +1151,137 @@ class SignalCommands(BaseCog):
             await loading_msg.edit(content=None, embed=error_embed)
             logger.error(f"Error in report command: {e}")
 
-    @commands.command(name="tolls", description="Generate tolls trading report")
-    async def generate_tolls_report(
-            self,
-            ctx: commands.Context,
-            period: str = "week",
-            filter_type: str = None
-    ):
-        """
-        Generate a trading report for tolls signals only
 
-        Args:
-            period: 'day', 'week', or 'month'
-            filter_type: Optional - 'stoploss', 'sl', 'profit', 'win' to filter results
+    # ── News mode commands ─────────────────────────────────────────────────
+
+    @commands.command(
+        name='news',
+        description='Schedule a news window that auto-cancels signals when hit',
+    )
+    async def news(self, ctx: commands.Context, *, args: str = None):
         """
-        if period.lower() not in ['day', 'week', 'month']:
-            await ctx.send("❌ Period must be 'day', 'week', or 'month'")
+        Schedule a news window.
+
+        Usage:
+            !news <category> <time> [window_minutes]
+
+        Examples:
+            !news USD 12:30pm 15
+            !news gold 8:30am
+            !news all 14:00 30
+            !news JPY 9:30am 20
+        """
+        if not args:
+            await ctx.send(
+                "❌ Usage: `!news <category> <time> [window_minutes]`\n"
+                "Example: `!news USD 12:30pm 15`\n"
+                "Categories: any currency code (USD, EUR, GBP…), `gold`, `oil`, `btc`, `crypto`, or `all`"
+            )
             return
 
-        # Normalize filter type
-        filter_normalized = None
-        if filter_type:
-            filter_lower = filter_type.lower()
-            if filter_lower in ['stoploss', 'sl', 'stop', 'stop_loss']:
-                filter_normalized = 'stoploss'
-            elif filter_lower in ['profit', 'win', 'tp']:
-                filter_normalized = 'profit'
-            else:
-                await ctx.send("❌ Filter must be 'stoploss'/'sl' or 'profit'/'win'")
-                return
-
-        # Update loading message based on filter
-        if filter_normalized:
-            loading_msg = await ctx.send(f"📊 Generating {period} tolls report ({filter_normalized} only)...")
-        else:
-            loading_msg = await ctx.send(f"📊 Generating {period} tolls report...")
-
-        def cap_field_value(lines: list, max_length: int = 1024) -> str:
-            """
-            Cap field value to max_length by truncating lines and adding summary.
-            """
-            if not lines:
-                return ""
-
-            result_lines = []
-            current_length = 0
-            omitted_count = 0
-
-            for line in lines:
-                line_length = len(line) + 1
-                if current_length + line_length > max_length - 50:
-                    omitted_count = len(lines) - len(result_lines)
-                    break
-                result_lines.append(line)
-                current_length += line_length
-
-            result = "\n".join(result_lines)
-            if omitted_count > 0:
-                result += f"\n... +{omitted_count} more signal{'s' if omitted_count > 1 else ''}"
-
-            return result
-
         try:
-            date_range = await self.signal_db.get_trading_period_range(period)
-            start_date = date_range['start']
-            end_date = date_range['end']
+            category, news_time_utc, window_minutes = parse_news_command(args)
+        except ValueError as e:
+            await ctx.send(f"❌ {e}")
+            return
 
-            signals = await self.signal_db.get_period_signals_with_results(
-                start_date,
-                end_date
-            )
+        news_manager: NewsManager = self.bot.news_manager
+        event = news_manager.add_event(
+            category=category,
+            news_time=news_time_utc,
+            window_minutes=window_minutes,
+            created_by=str(ctx.author),
+        )
 
-            if not signals:
-                embed = discord.Embed(
-                    title=f"📊 {period.title()} Tolls Report",
-                    description=f"No signals found for the current {period}",
-                    color=0xFFA500
-                )
-                await loading_msg.edit(content=None, embed=embed)
-                return
+        news_est = news_time_utc.astimezone(EST)
+        start_est = event.start_time.astimezone(EST)
+        end_est = event.end_time.astimezone(EST)
 
-            # Fetch full signal details with limits for each signal
-            enriched_signals = []
-            for signal in signals:
-                full_signal = await self.signal_db.get_signal_with_limits(signal['id'])
-                if full_signal:
-                    full_signal['status'] = signal['status']
-                    full_signal['channel_id'] = signal['channel_id']
-                    enriched_signals.append(full_signal)
+        embed = discord.Embed(
+            title="📰 News Mode Scheduled",
+            description=(
+                f"Signals matching **{category.upper()}** will be automatically cancelled "
+                f"if hit during this window."
+            ),
+            color=0x5865F2,
+        )
+        embed.add_field(name="Category", value=category.upper(), inline=True)
+        embed.add_field(name="News Time", value=news_est.strftime('%I:%M %p EST'), inline=True)
+        embed.add_field(name="Window", value=f"±{window_minutes} min", inline=True)
+        embed.add_field(
+            name="Active From → To",
+            value=f"{start_est.strftime('%I:%M %p')} → {end_est.strftime('%I:%M %p')} EST",
+            inline=False,
+        )
+        embed.set_footer(text=f"Event #{event.event_id} • Set by {ctx.author}")
 
-            signals = enriched_signals
+        await ctx.send(embed=embed)
+        logger.info(f"News event #{event.event_id} scheduled by {ctx.author}: {event}")
 
-            # Get channel names for filtering
-            from utils.config_loader import config
-            import json
-            from pathlib import Path
+    @commands.command(
+        name='newslist',
+        aliases=['newsstatus', 'newsmode'],
+        description='Show all pending / active news events',
+    )
+    async def newslist(self, ctx: commands.Context):
+        """Show all upcoming and currently-active news windows."""
+        news_manager: NewsManager = self.bot.news_manager
+        events = news_manager.get_all_events()
 
-            channels_file = Path(__file__).resolve().parent.parent / 'config' / 'channels.json'
-            try:
-                with open(channels_file, 'r') as f:
-                    channels_data = json.load(f)
-                monitored_channels = channels_data.get('monitored_channels', {})
-            except Exception as e:
-                logger.warning(f"Could not load channels.json: {e}")
-                monitored_channels = {}
+        if not events:
+            await ctx.send("ℹ️ No news events are currently scheduled.")
+            return
 
-            # Create reverse mapping
-            channel_id_to_name = {str(channel_id): name for name, channel_id in monitored_channels.items()}
+        embed = discord.Embed(title="📰 Scheduled News Events", color=0x5865F2)
 
-            # Filter only toll signals
-            toll_signals = []
-            for signal in signals:
-                channel_id = str(signal.get('channel_id', ''))
-                channel_name = channel_id_to_name.get(channel_id, '').lower()
-                if 'toll' in channel_name:
-                    toll_signals.append(signal)
+        import datetime as dt
+        now = dt.datetime.now(pytz.utc)
 
-            if not toll_signals:
-                embed = discord.Embed(
-                    title=f"📊 {period.title()} Tolls Report",
-                    description=f"No tolls signals found for the current {period}",
-                    color=0xFFA500
-                )
-                await loading_msg.edit(content=None, embed=embed)
-                return
-
-            # Separate by result
-            toll_profit = [s for s in toll_signals if s.get('status', '').lower() == 'profit']
-            toll_stoploss = [s for s in toll_signals if s.get('status', '').lower() in ['stoploss', 'stop_loss']]
-
-            # Apply filter if specified
-            if filter_normalized == 'stoploss':
-                toll_profit = []
-            elif filter_normalized == 'profit':
-                toll_stoploss = []
-
-            # Check if filter resulted in no signals
-            if filter_normalized:
-                filtered_count = len(toll_profit) + len(toll_stoploss)
-                if filtered_count == 0:
-                    filter_label = "stop loss" if filter_normalized == 'stoploss' else "profit"
-                    embed = discord.Embed(
-                        title=f"📊 {period.title()} Tolls Report - {filter_label.title()} Only",
-                        description=f"No {filter_label} tolls signals found for the current {period}",
-                        color=0xFFA500
-                    )
-                    await loading_msg.edit(content=None, embed=embed)
-                    return
-
-            # Calculate statistics
-            total_tolls = len(
-                [s for s in toll_signals if s.get('status', '').lower() in ['profit', 'stoploss', 'stop_loss']])
-            toll_profit_count = len(toll_profit)
-            toll_sl_count = len(toll_stoploss)
-            toll_win_rate = (toll_profit_count / total_tolls * 100) if total_tolls > 0 else 0
-
-            # Create embed
-            title_suffix = ""
-            description_suffix = ""
-            if filter_normalized == 'stoploss':
-                title_suffix = " - Stop Losses Only"
-                description_suffix = " (stop loss signals only)"
-            elif filter_normalized == 'profit':
-                title_suffix = " - Profits Only"
-                description_suffix = " (profit signals only)"
-
-            embed = discord.Embed(
-                title=f"📊 {period.title()} Tolls Report{title_suffix}",
-                description=f"Tolls performance summary for the current {period}{description_suffix}",
-                color=0x00FF00 if toll_win_rate >= 50 else 0xFF0000
-            )
+        for event in events:
+            start_est = event.start_time.astimezone(EST)
+            end_est = event.end_time.astimezone(EST)
+            status = "🟢 **ACTIVE NOW**" if event.is_active(now) else "🕐 Upcoming"
 
             embed.add_field(
-                name="Date Range",
-                value=f"{date_range['display_start']} - {date_range['display_end']}",
-                inline=False
+                name=f"#{event.event_id}  {event.category.upper()}",
+                value=(
+                    f"{status}\n"
+                    f"Window: {start_est.strftime('%I:%M %p')} → {end_est.strftime('%I:%M %p')} EST\n"
+                    f"Set by: {event.created_by}"
+                ),
+                inline=False,
             )
 
-            # Tolls Statistics
-            if total_tolls > 0:
-                embed.add_field(
-                    name="Tolls Signals",
-                    value=f"**Total:** {total_tolls} | **Win Rate:** {toll_win_rate:.1f}%\n"
-                          f"**Profit:** {toll_profit_count} | **Stop Loss:** {toll_sl_count}",
-                    inline=False
-                )
+        await ctx.send(embed=embed)
 
-            # Build trades section
-            if total_tolls > 0:
-                trade_lines = []
+    @commands.command(
+        name='newsclear',
+        aliases=['newsdel', 'newsremove'],
+        description='Remove a news event by ID, or clear all events',
+    )
+    async def newsclear(self, ctx: commands.Context, event_id: int = None):
+        """
+        Remove a scheduled news event.
 
-                # Add profit trades
-                for signal in toll_profit:
-                    limits = signal.get('limits', [])
-                    if limits:
-                        first_limit = format_price(limits[0]['price_level'], signal['instrument'])
-                        if len(limits) > 1:
-                            limit_display = f"{first_limit}, +{len(limits) - 1} more"
-                        else:
-                            limit_display = first_limit
-                    else:
-                        limit_display = "N/A"
+        Usage:
+            !newsclear 3      → remove event #3
+            !newsclear        → remove all events
+        """
+        news_manager: NewsManager = self.bot.news_manager
 
-                    trade_lines.append(
-                        f"#{signal['id']} | {signal['instrument']} | {limit_display} | {signal['direction'].upper()} 🟢"
-                    )
+        if event_id is None:
+            events = news_manager.get_all_events()
+            count = len(events)
+            for ev in events:
+                news_manager.remove_event(ev.event_id)
+            await ctx.send(f"🗑️ Removed all {count} scheduled news event(s).")
+            return
 
-                # Add stop loss trades
-                for signal in toll_stoploss:
-                    sl_value = format_price(signal.get('stop_loss'), signal['instrument']) if signal.get(
-                        'stop_loss') else "N/A"
-                    trade_lines.append(
-                        f"#{signal['id']} | {signal['instrument']} | SL: {sl_value} | {signal['direction'].upper()} 🛑"
-                    )
-
-                if trade_lines:
-                    trades_text = cap_field_value(trade_lines)
-                    embed.add_field(
-                        name=f"Tolls Trades ({total_tolls})",
-                        value=trades_text,
-                        inline=False
-                    )
-
-            # Add toll alert channel link
-            toll_alert_channel_id = channels_data.get('toll-alert-channel')
-            if toll_alert_channel_id:
-                toll_alert_url = f"https://discord.com/channels/{ctx.guild.id}/{toll_alert_channel_id}"
-                embed.add_field(
-                    name="Toll Alerts",
-                    value=f"{toll_alert_url}",
-                    inline=False
-                )
-
-            embed.set_footer(
-                text=f"Report generated at {datetime.utcnow().strftime('%Y-%m-%d %H:%M')} UTC"
-            )
-
-            await loading_msg.edit(content=None, embed=embed)
-
-        except Exception as e:
-            error_embed = discord.Embed(
-                title="❌ Error Generating Tolls Report",
-                description=f"An error occurred: {str(e)}",
-                color=0xFF0000
-            )
-            await loading_msg.edit(content=None, embed=error_embed)
-            logger.error(f"Error in tolls report command: {e}")
-
+        removed = news_manager.remove_event(event_id)
+        if removed:
+            await ctx.send(f"✅ News event #{event_id} removed.")
+        else:
+            await ctx.send(f"❌ No news event with ID #{event_id} found.")
 
     # ── Take-Profit commands ───────────────────────────────────────────────
 
@@ -1570,4 +1484,4 @@ class SignalCommands(BaseCog):
 
 async def setup(bot):
     """Setup function for Discord.py to load this cog"""
-    await bot.add_cog(SignalCommands(bot))
+    await bot.add_cog(TradingCommands(bot))

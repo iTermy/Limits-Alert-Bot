@@ -48,6 +48,7 @@ class AlertSystem:
         self.alert_channel = alert_channel
         self.pa_alert_channel = None
         self.toll_alert_channel = None
+        self.general_toll_alert_channel = None
         self._load_pa_channels()
         self._load_toll_channels()
 
@@ -110,16 +111,23 @@ class AlertSystem:
             # Get toll channel IDs
             monitored = config.get('monitored_channels', {})
             self.toll_channel_ids = set()
+            self.general_toll_channel_ids = set()
 
             for channel_name, channel_id in monitored.items():
-                if 'toll' in channel_name.lower():
+                if not channel_id:
+                    continue
+                if channel_name.lower() == 'general-tolls':
+                    self.general_toll_channel_ids.add(str(channel_id))
+                elif 'toll' in channel_name.lower():
                     self.toll_channel_ids.add(str(channel_id))
 
             logger.info(f"Loaded {len(self.toll_channel_ids)} toll channel IDs: {self.toll_channel_ids}")
+            logger.info(f"Loaded {len(self.general_toll_channel_ids)} general-toll channel IDs: {self.general_toll_channel_ids}")
 
         except Exception as e:
             logger.error(f"Failed to load toll channels: {e}")
             self.toll_channel_ids = set()
+            self.general_toll_channel_ids = set()
 
     def set_pa_channel(self, channel: discord.TextChannel):
         """Set the PA alert channel"""
@@ -130,6 +138,11 @@ class AlertSystem:
         """Set the toll alert channel"""
         self.toll_alert_channel = channel
         logger.info(f"Toll alert channel set: #{channel.name} ({channel.id})")
+
+    def set_general_toll_channel(self, channel: discord.TextChannel):
+        """Set the general-tolls alert channel"""
+        self.general_toll_alert_channel = channel
+        logger.info(f"General-toll alert channel set: #{channel.name} ({channel.id})")
 
     def is_pa_signal(self, signal: Dict) -> bool:
         """Check if signal originated from a PA channel"""
@@ -147,6 +160,14 @@ class AlertSystem:
             logger.debug(f"Signal {signal.get('signal_id')} identified as toll signal (channel: {channel_id})")
         return is_toll
 
+    def is_general_toll_signal(self, signal: Dict) -> bool:
+        """Check if signal originated from the general-tolls channel"""
+        channel_id = str(signal.get('channel_id', ''))
+        is_general = channel_id in self.general_toll_channel_ids
+        if is_general:
+            logger.debug(f"Signal {signal.get('signal_id')} identified as general-toll signal (channel: {channel_id})")
+        return is_general
+
     def _get_alert_channel(self, signal: Dict) -> discord.TextChannel:
         """
         Determine which alert channel to use based on signal source
@@ -157,6 +178,15 @@ class AlertSystem:
         Returns:
             Alert channel to use
         """
+        # Check general-toll signals (most specific — its own channel)
+        if self.is_general_toll_signal(signal):
+            if self.general_toll_alert_channel:
+                logger.debug(f"Routing to general-toll alert channel for signal {signal.get('signal_id')}")
+                return self.general_toll_alert_channel
+            else:
+                logger.warning("General-toll signal detected but no general-toll alert channel configured, using main channel")
+                return self.alert_channel
+
         # Check toll signals first (more specific)
         if self.is_toll_signal(signal):
             if self.toll_alert_channel:
