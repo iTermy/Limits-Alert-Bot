@@ -310,18 +310,19 @@ class LifecycleManager:
             )
 
             # Check if signal is in ACTIVE status
+            if signal_row['status'] == SignalStatus.HIT:
+                logger.info(f"Signal {signal_id} is already HIT — no-op for manual hit")
+                return False  # Caller uses False to skip TP re-init (already running)
             if signal_row['status'] != SignalStatus.ACTIVE:
-                logger.warning(f"Signal {signal_id} is not ACTIVE (status: {signal_row['status']})")
-                # For non-active signals, just change the status directly
-                return await self.manually_set_signal_status(signal_id, SignalStatus.HIT, reason, self.db)
+                logger.warning(f"Signal {signal_id} is not ACTIVE (status: {signal_row['status']}), cannot manually mark as HIT")
+                return False
 
             # Find the first pending limit (lowest sequence number)
             pending_limits = [l for l in limits if l.get('status') == 'pending']
 
             if not pending_limits:
-                logger.warning(f"Signal {signal_id} has no pending limits")
-                # No pending limits, just change status
-                return await self.manually_set_signal_status(signal_id, SignalStatus.HIT, reason, self.db)
+                logger.warning(f"Signal {signal_id} has no pending limits, cannot manually mark as HIT")
+                return False
 
             # Sort by sequence number and get first
             first_limit = min(pending_limits, key=lambda l: l.get('sequence_number', 999))

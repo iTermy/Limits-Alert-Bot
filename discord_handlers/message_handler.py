@@ -52,6 +52,8 @@ class MessageHandler:
                     self._allowed_channels.add(int(self.bot.channels_config['pa-alert-channel']))
                 if 'toll-alert-channel' in self.bot.channels_config:
                     self._allowed_channels.add(int(self.bot.channels_config['toll-alert-channel']))
+                if 'general-tolls-alert' in self.bot.channels_config and self.bot.channels_config['general-tolls-alert']:
+                    self._allowed_channels.add(int(self.bot.channels_config['general-tolls-alert']))
 
         return self._allowed_channels
 
@@ -272,13 +274,25 @@ class MessageHandler:
                         await self.send_profit_alert(signal, message.author, profit_amount)
                 elif command in ("hit",):
                     logger.debug(f"Processing hit command for signal {signal_id}")
-                    success = await asyncio.wait_for(
-                        self.signal_db.manually_set_signal_status(
-                            signal_id, 'hit', f"Set via alert reply by {message.author.name}"
+                    transitioned = await asyncio.wait_for(
+                        self.signal_db.manually_set_signal_to_hit(
+                            signal_id, f"Set via alert reply by {message.author.name}"
                         ),
                         timeout=5.0
                     )
-                    action_taken = "marked as HIT"
+                    if transitioned:
+                        # Populate TP cache immediately so auto-TP starts on the next tick
+                        if hasattr(self.bot, 'monitor') and self.bot.monitor:
+                            monitor = self.bot.monitor
+                            await monitor.tp_monitor.refresh_hit_limits(signal_id)
+                            if signal_id in monitor.active_signals:
+                                monitor.active_signals[signal_id]['status'] = 'hit'
+                        success = True
+                        action_taken = "marked as HIT"
+                    else:
+                        # Already HIT — nothing to do
+                        success = False
+                        action_taken = None
 
                 elif command in ("breakeven", "be"):
                     logger.debug(f"Processing breakeven command for signal {signal_id}")

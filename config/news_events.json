@@ -1,13 +1,4 @@
 {
   "next_id": 5,
-  "events": [
-    {
-      "event_id": 4,
-      "category": "USD",
-      "news_time": "2026-02-27T21:00:00+00:00",
-      "window_minutes": 10,
-      "created_by": "itermy",
-      "created_at": "2026-02-27T20:52:49.690585+00:00"
-    }
-  ]
+  "events": []
 }

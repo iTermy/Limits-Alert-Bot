@@ -148,6 +148,20 @@ class SignalDatabase:
         """
         return await self._lifecycle.reactivate_cancelled_signal(signal_id, parsed_signal, self.db)
 
+    async def manually_set_signal_to_hit(self, signal_id: int, reason: str) -> bool:
+        """
+        Manually mark a signal as HIT by hitting its first pending limit.
+        Only acts when the signal is currently ACTIVE (no-op if already HIT).
+
+        Args:
+            signal_id: Signal ID
+            reason: Reason for manual hit (for audit trail)
+
+        Returns:
+            True if the signal was transitioned to HIT, False if already HIT or on error.
+        """
+        return await self._lifecycle.manually_set_signal_to_hit(signal_id, reason)
+
     async def manually_set_signal_status(self, signal_id: int, new_status: str,
                                         reason: str = None,
                                         result_pips: float = None,

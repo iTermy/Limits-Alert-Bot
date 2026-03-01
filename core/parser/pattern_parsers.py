@@ -41,7 +41,7 @@ LONG_KEYWORDS = ['long', 'buy']
 SHORT_KEYWORDS = ['short', 'sell']
 
 # Channels that are always treated as scalps regardless of message content
-SCALP_CHANNELS = {'scalps', 'gold-pa-signals', 'gold-tolls-map'}
+SCALP_CHANNELS = {'scalps', 'gold-pa-signals', 'gold-tolls-map', 'general-tolls'}
 
 # Expiry patterns
 EXPIRY_PATTERNS = {
@@ -405,8 +405,42 @@ def determine_limits_and_stop(numbers: List[float], direction: str,
       * Short: max(limits) + 5 (5 above the highest limit)
     - Single-number messages are valid (one limit, no stop loss required)
     """
-    # Check if this is the tolls channel
-    is_tolls_channel = channel_name and 'toll' in channel_name.lower()
+    # Check if this is the gold tolls channel (auto-infers SL)
+    is_tolls_channel = channel_name and 'toll' in channel_name.lower() and channel_name.lower() != 'general-tolls'
+
+    # Check if this is the general-tolls channel (SL is provided, standard parsing)
+    is_general_tolls = channel_name and channel_name.lower() == 'general-tolls'
+
+    if is_general_tolls:
+        # General tolls: SL is explicit (standard last/first number convention).
+        # Requires at least 2 numbers (at least one limit + SL).
+        if len(numbers) < 2:
+            return None, None
+
+        # Last number is the stop loss (primary convention)
+        stop_loss = numbers[-1]
+        limits = numbers[:-1]
+
+        if not validate_limits_and_stop(limits, stop_loss, direction):
+            # Try first number as stop loss (alternative convention)
+            stop_loss = numbers[0]
+            limits = numbers[1:]
+            if not validate_limits_and_stop(limits, stop_loss, direction):
+                logger.debug(
+                    f"General tolls stop loss validation failed for {direction} with numbers {numbers}"
+                )
+                return None, None
+
+        if not validate_limits_order(limits, direction):
+            from . import LimitsOrderError
+            raise LimitsOrderError(
+                f"{direction} general-tolls limits not {'ascending' if direction == 'short' else 'descending'}: {limits}"
+            )
+
+        logger.debug(
+            f"General tolls: {len(limits)} limit(s), stop={stop_loss} ({direction})"
+        )
+        return limits, stop_loss
 
     if is_tolls_channel:
         if len(numbers) < 1:
@@ -511,12 +545,15 @@ class CorePatternParser:
             # Extract numbers
             numbers = extract_numbers(cleaned)
 
-            # Check if this is the tolls channel
-            is_tolls_channel = channel_name and 'toll' in channel_name.lower()
+            # Check if this is the gold tolls channel (single-number messages allowed)
+            is_gold_tolls_channel = (
+                channel_name and 'toll' in channel_name.lower()
+                and channel_name.lower() != 'general-tolls'
+            )
 
-            # For tolls channel, allow single number (just a limit, no stop)
-            # For regular channels, require at least 2 numbers (limits + stop)
-            min_numbers = 1 if is_tolls_channel else 2
+            # For gold tolls channel, allow single number (just a limit, no stop)
+            # General tolls and regular channels require at least 2 numbers (limits + stop)
+            min_numbers = 1 if is_gold_tolls_channel else 2
 
             if len(numbers) < min_numbers:
                 if not _internal_call:
