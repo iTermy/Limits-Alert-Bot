@@ -12,6 +12,7 @@ from discord.ext import commands
 from typing import Optional, List, Dict
 from datetime import datetime
 from price_feeds.tp_config import TPConfig
+from price_feeds.alert_config import AlertDistanceConfig
 import pytz
 from core.news_manager import (
     NewsManager,
@@ -19,6 +20,7 @@ from core.news_manager import (
     FOREX_CURRENCIES,
     NAMED_CATEGORIES,
     parse_news_command,
+    EST,
 )
 
 ASSET_CLASSES = ["forex", "forex_jpy", "metals", "indices", "stocks", "crypto", "oil"]
@@ -164,6 +166,7 @@ class TradingCommands(BaseCog):
     def __init__(self, bot):
         super().__init__(bot)
         self.tp_config = TPConfig()
+        self.alert_dist_config = AlertDistanceConfig()
 
     @commands.command(name="signal")
     async def add_signal(
@@ -1160,27 +1163,81 @@ class TradingCommands(BaseCog):
     )
     async def news(self, ctx: commands.Context, *, args: str = None):
         """
-        Schedule a news window.
+        Schedule a news window, or use special subcommands.
 
         Usage:
-            !news <category> <time> [window_minutes]
+            !news <category> <time> [window] [tz:<tz>] [date:<date>]
+            !news now [category]   → open-ended window active immediately (default: all)
+            !news off              → deactivate all 'now' windows
+
+        Tags (optional, add in any order):
+            tz:<timezone>  — timezone for the time, e.g. tz:UTC  tz:EST  tz:London  (default: EST)
+            date:<date>    — specific date, e.g. date:2025-06-15  date:06/15  date:tomorrow
 
         Examples:
             !news USD 12:30pm 15
-            !news gold 8:30am
-            !news all 14:00 30
-            !news JPY 9:30am 20
+            !news gold 8:30am tz:UTC
+            !news all 14:00 30 date:2025-06-20
+            !news JPY 9:30am date:tomorrow tz:CET
+            !news now
+            !news now USD
+            !news off
         """
         if not args:
             await ctx.send(
-                "❌ Usage: `!news <category> <time> [window_minutes]`\n"
-                "Example: `!news USD 12:30pm 15`\n"
-                "Categories: any currency code (USD, EUR, GBP…), `gold`, `oil`, `btc`, `crypto`, or `all`"
+                "❌ Usage: `!news <category> <time> [window] [tz:<tz>] [date:<date>]`\n"
+                "Or: `!news now [category]` / `!news off`\n"
+                "Categories: any currency code (USD, EUR, GBP…), `gold`, `oil`, `btc`, `crypto`, or `all`\n"
+                "Timezone tag example: `tz:UTC`  `tz:EST`  `tz:London`  `tz:CET`\n"
+                "Date tag example: `date:2025-06-15`  `date:06/15`  `date:tomorrow`"
             )
             return
 
+        tokens = args.strip().split()
+        subcommand = tokens[0].lower()
+
+        # ── !news off ──────────────────────────────────────────────────────
+        if subcommand == 'off':
+            news_manager: NewsManager = self.bot.news_manager
+            removed = news_manager.remove_now_events()
+            if removed:
+                await ctx.send(f"✅ Deactivated {removed} open-ended news window(s).")
+            else:
+                await ctx.send("ℹ️ No open-ended news windows were active.")
+            return
+
+        # ── !news now [category] ───────────────────────────────────────────
+        if subcommand == 'now':
+            category = tokens[1].upper() if len(tokens) >= 2 else 'ALL'
+            now_utc = __import__('datetime').datetime.now(pytz.utc)
+            news_manager: NewsManager = self.bot.news_manager
+            event = news_manager.add_event(
+                category=category,
+                news_time=now_utc,
+                window_minutes=0,       # start_time == news_time; end_time is far future
+                created_by=str(ctx.author),
+                is_now_mode=True,
+                display_tz='EST',
+            )
+            embed = discord.Embed(
+                title="📰 News Mode — ACTIVE NOW",
+                description=(
+                    f"Signals matching **{category}** will be automatically cancelled "
+                    f"until you run `!news off`."
+                ),
+                color=0xFF4444,
+            )
+            embed.add_field(name="Category", value=category, inline=True)
+            embed.add_field(name="Activated", value="Immediately", inline=True)
+            embed.add_field(name="Ends", value="Manual (`!news off`)", inline=True)
+            embed.set_footer(text=f"Event #{event.event_id} • Set by {ctx.author}")
+            await ctx.send(embed=embed)
+            logger.info(f"News NOW event #{event.event_id} activated by {ctx.author} for {category}")
+            return
+
+        # ── Normal scheduled news ──────────────────────────────────────────
         try:
-            category, news_time_utc, window_minutes = parse_news_command(args)
+            category, news_time_utc, window_minutes, tz_label = parse_news_command(args)
         except ValueError as e:
             await ctx.send(f"❌ {e}")
             return
@@ -1191,11 +1248,24 @@ class TradingCommands(BaseCog):
             news_time=news_time_utc,
             window_minutes=window_minutes,
             created_by=str(ctx.author),
+            display_tz=tz_label,
         )
 
         news_est = news_time_utc.astimezone(EST)
         start_est = event.start_time.astimezone(EST)
         end_est = event.end_time.astimezone(EST)
+
+        # Also show in original timezone if not EST
+        tz_display = f"{news_est.strftime('%I:%M %p')} EST"
+        if tz_label not in ('EST', 'EDT', 'ET'):
+            import pytz as _pytz
+            from core.news_manager import resolve_timezone
+            try:
+                orig_tz = resolve_timezone(tz_label)
+                orig_time = news_time_utc.astimezone(orig_tz)
+                tz_display = f"{orig_time.strftime('%I:%M %p')} {tz_label} ({news_est.strftime('%I:%M %p')} EST)"
+            except Exception:
+                pass
 
         embed = discord.Embed(
             title="📰 News Mode Scheduled",
@@ -1206,7 +1276,7 @@ class TradingCommands(BaseCog):
             color=0x5865F2,
         )
         embed.add_field(name="Category", value=category.upper(), inline=True)
-        embed.add_field(name="News Time", value=news_est.strftime('%I:%M %p EST'), inline=True)
+        embed.add_field(name="News Time", value=tz_display, inline=True)
         embed.add_field(name="Window", value=f"±{window_minutes} min", inline=True)
         embed.add_field(
             name="Active From → To",
@@ -1238,19 +1308,32 @@ class TradingCommands(BaseCog):
         now = dt.datetime.now(pytz.utc)
 
         for event in events:
-            start_est = event.start_time.astimezone(EST)
-            end_est = event.end_time.astimezone(EST)
-            status = "🟢 **ACTIVE NOW**" if event.is_active(now) else "🕐 Upcoming"
-
-            embed.add_field(
-                name=f"#{event.event_id}  {event.category.upper()}",
-                value=(
-                    f"{status}\n"
-                    f"Window: {start_est.strftime('%I:%M %p')} → {end_est.strftime('%I:%M %p')} EST\n"
-                    f"Set by: {event.created_by}"
-                ),
-                inline=False,
-            )
+            if event.is_now_mode:
+                status = "🔴 **ACTIVE NOW** (open-ended)"
+                window_str = "Until `!news off`"
+                embed.add_field(
+                    name=f"#{event.event_id}  {event.category.upper()}",
+                    value=(
+                        f"{status}\n"
+                        f"Window: {window_str}\n"
+                        f"Set by: {event.created_by}"
+                    ),
+                    inline=False,
+                )
+            else:
+                start_est = event.start_time.astimezone(EST)
+                end_est = event.end_time.astimezone(EST)
+                status = "🟢 **ACTIVE NOW**" if event.is_active(now) else "🕐 Upcoming"
+                tz_note = f" ({event.display_tz})" if event.display_tz not in ('EST', 'EDT', 'ET') else ""
+                embed.add_field(
+                    name=f"#{event.event_id}  {event.category.upper()}{tz_note}",
+                    value=(
+                        f"{status}\n"
+                        f"Window: {start_est.strftime('%I:%M %p')} → {end_est.strftime('%I:%M %p')} EST\n"
+                        f"Set by: {event.created_by}"
+                    ),
+                    inline=False,
+                )
 
         await ctx.send(embed=embed)
 
@@ -1480,6 +1563,260 @@ class TradingCommands(BaseCog):
             await ctx.send(f"❌ Error removing TP override: {e}")
 
     # ── End Take-Profit commands ───────────────────────────────────────────
+
+    # ── Alert Distance commands ────────────────────────────────────────────
+
+    @commands.command(
+        name='alertdist',
+        aliases=['alertdistance', 'adist'],
+        description='View or manage approaching-alert distance configuration',
+    )
+    async def alertdist_command(self, ctx: commands.Context, subcommand: str = None, *args):
+        """
+        View and manage alert distance thresholds.
+
+        Usage:
+            !alertdist config [symbol]          — Show config (all, or for one symbol)
+            !alertdist set <target> <value> [type]  — Set threshold (admin)
+            !alertdist remove <symbol>          — Remove per-symbol override (admin)
+
+        See !help alertdist for full details.
+        """
+        if not subcommand:
+            await ctx.send("Usage: `!alertdist config`, `!alertdist set`, `!alertdist remove` — see `!help alertdist` for details.")
+            return
+
+        sub = subcommand.lower()
+
+        if sub == 'config':
+            symbol = args[0] if args else None
+            await self._adist_show(ctx, symbol)
+
+        elif sub == 'set':
+            if len(args) < 2:
+                await ctx.send("❌ Usage: `!alertdist set <target> <value> [pips|dollars|percentage]`")
+                return
+            target = args[0]
+            value = args[1]
+            dist_type = args[2] if len(args) >= 3 else None
+            await self._adist_set(ctx, target, value, dist_type)
+
+        elif sub == 'remove':
+            if not args:
+                await ctx.send("❌ Usage: `!alertdist remove <symbol>`")
+                return
+            await self._adist_remove(ctx, args[0])
+
+        else:
+            await ctx.send(f"❌ Unknown subcommand `{subcommand}`. See `!help alertdist` for usage.")
+
+    async def _adist_show(self, ctx: commands.Context, symbol: str = None):
+        """Show alert distance config — for one symbol or all defaults/overrides."""
+        try:
+            if symbol:
+                symbol_upper = symbol.upper()
+                info = self.alert_dist_config.get_config_display(symbol_upper)
+                asset_class = info['asset_class']
+                dist_type = info['type']
+                value = info['value']
+                is_override = info['is_override']
+
+                # Format value nicely
+                type_units = {'pips': 'pips', 'dollars': '$', 'percentage': '%'}
+                if dist_type == 'dollars':
+                    val_str = f"${value}"
+                elif dist_type == 'percentage':
+                    val_str = f"{value}%"
+                else:
+                    val_str = f"{value} pips"
+
+                source = "Per-symbol override" if is_override else f"{asset_class} default"
+
+                embed = discord.Embed(
+                    title=f"Alert Distance — {symbol_upper}",
+                    color=0x00BFFF,
+                )
+                embed.add_field(name="Symbol", value=symbol_upper, inline=True)
+                embed.add_field(name="Distance", value=val_str, inline=True)
+                embed.add_field(name="Type", value=dist_type, inline=True)
+                embed.add_field(name="Asset Class", value=asset_class, inline=True)
+                embed.add_field(name="Source", value=source, inline=True)
+
+                if is_override:
+                    embed.add_field(name="Set By", value=info.get('set_by', 'Unknown'), inline=True)
+
+                embed.set_footer(text="Use !alertdist set / remove to manage thresholds")
+                await ctx.send(embed=embed)
+
+            else:
+                # Show all defaults and overrides
+                info = self.alert_dist_config.get_config_display()
+                defaults = info['defaults']
+                overrides = info['overrides']
+
+                embed = discord.Embed(
+                    title="Alert Distance Configuration",
+                    description="Approaching-alert thresholds per asset class and per-symbol overrides.",
+                    color=0x00BFFF,
+                )
+
+                # Defaults
+                def_lines = []
+                for ac, cfg in defaults.items():
+                    t = cfg['type']
+                    v = cfg['value']
+                    if t == 'dollars':
+                        v_str = f"${v}"
+                    elif t == 'percentage':
+                        v_str = f"{v}%"
+                    else:
+                        v_str = f"{v} pips"
+                    def_lines.append(f"`{ac}` → {v_str} ({t})")
+                embed.add_field(
+                    name="Asset-Class Defaults",
+                    value="\n".join(def_lines) or "None",
+                    inline=False,
+                )
+
+                # Overrides
+                if overrides:
+                    ov_lines = []
+                    for sym, cfg in overrides.items():
+                        t = cfg['type']
+                        v = cfg['value']
+                        if t == 'dollars':
+                            v_str = f"${v}"
+                        elif t == 'percentage':
+                            v_str = f"{v}%"
+                        else:
+                            v_str = f"{v} pips"
+                        ov_lines.append(f"`{sym}` → {v_str} ({t})  _(by {cfg.get('set_by', '?')})_")
+                    embed.add_field(
+                        name=f"Per-Symbol Overrides ({len(overrides)})",
+                        value="\n".join(ov_lines),
+                        inline=False,
+                    )
+                else:
+                    embed.add_field(name="Per-Symbol Overrides", value="None", inline=False)
+
+                embed.set_footer(text="Use !alertdist set <target> <value> [type] to update")
+                await ctx.send(embed=embed)
+
+        except Exception as e:
+            self.logger.error(f"Error in alertdist config: {e}", exc_info=True)
+            await ctx.send(f"❌ Error fetching alert distance config: {e}")
+
+    async def _adist_set(self, ctx: commands.Context, target: str, value: str, dist_type: str = None):
+        """Set alert distance threshold for an asset class or per-symbol."""
+        try:
+            try:
+                float_value = float(value)
+            except ValueError:
+                await ctx.send(f"❌ Invalid value `{value}` — must be a number.")
+                return
+
+            if float_value <= 0:
+                await ctx.send("❌ Distance value must be positive.")
+                return
+
+            target_lower = target.lower()
+            target_upper = target.upper()
+
+            VALID_DIST_TYPES = ['pips', 'dollars', 'percentage']
+
+            if dist_type is not None:
+                dist_type_lower = dist_type.lower()
+                if dist_type_lower not in VALID_DIST_TYPES:
+                    await ctx.send(f"❌ Invalid type `{dist_type}`. Valid types: pips, dollars, percentage")
+                    return
+            else:
+                # Infer type from existing config for this target
+                if target_lower in ASSET_CLASSES:
+                    existing = self.alert_dist_config.config['defaults'].get(target_lower, {})
+                    dist_type_lower = existing.get('type', 'pips')
+                else:
+                    existing_cfg = self.alert_dist_config._get_config_for_symbol(target_upper)
+                    dist_type_lower = existing_cfg.get('type', 'pips')
+
+            if target_lower in ASSET_CLASSES:
+                # Update asset-class default
+                if target_lower not in self.alert_dist_config.config['defaults']:
+                    await ctx.send(f"❌ Unknown asset class `{target_lower}`. Valid: {', '.join(ASSET_CLASSES)}")
+                    return
+                self.alert_dist_config.config['defaults'][target_lower]['value'] = float_value
+                self.alert_dist_config.config['defaults'][target_lower]['type'] = dist_type_lower
+                self.alert_dist_config._save_config()
+                label = f"**{target_lower}** (default)"
+            else:
+                # Set per-symbol override
+                success = self.alert_dist_config.set_override(
+                    target_upper, float_value, dist_type_lower, set_by=ctx.author.name
+                )
+                if not success:
+                    await ctx.send(f"❌ Failed to set alert distance for `{target}`. Check logs.")
+                    return
+                label = f"**{target_upper}** (override)"
+
+            # Format for display
+            if dist_type_lower == 'dollars':
+                val_display = f"${float_value}"
+            elif dist_type_lower == 'percentage':
+                val_display = f"{float_value}%"
+            else:
+                val_display = f"{float_value} pips"
+
+            # Reload live monitor config
+            if hasattr(self.bot, 'monitor') and self.bot.monitor:
+                if hasattr(self.bot.monitor, 'alert_config'):
+                    self.bot.monitor.alert_config.reload_config()
+
+            embed = discord.Embed(title="Alert Distance Updated", color=discord.Color.green())
+            embed.add_field(name="Target", value=label, inline=True)
+            embed.add_field(name="New Threshold", value=val_display, inline=True)
+            embed.add_field(name="Type", value=dist_type_lower, inline=True)
+            embed.set_footer(text=f"Set by {ctx.author.name}")
+            await ctx.send(embed=embed)
+
+        except Exception as e:
+            self.logger.error(f"Error in alertdist set: {e}", exc_info=True)
+            await ctx.send(f"❌ Error setting alert distance: {e}")
+
+    async def _adist_remove(self, ctx: commands.Context, symbol: str):
+        """Remove a per-symbol alert distance override."""
+        try:
+            symbol_upper = symbol.upper()
+            removed = self.alert_dist_config.remove_override(symbol_upper)
+
+            if hasattr(self.bot, 'monitor') and self.bot.monitor:
+                if hasattr(self.bot.monitor, 'alert_config'):
+                    self.bot.monitor.alert_config.reload_config()
+
+            if removed:
+                fallback_cfg = self.alert_dist_config._get_config_for_symbol(symbol_upper)
+                t = fallback_cfg['type']
+                v = fallback_cfg['value']
+                if t == 'dollars':
+                    fallback_str = f"${v}"
+                elif t == 'percentage':
+                    fallback_str = f"{v}%"
+                else:
+                    fallback_str = f"{v} pips"
+                asset_class = self.alert_dist_config._determine_asset_class(symbol_upper)
+
+                embed = discord.Embed(title="Alert Distance Override Removed", color=discord.Color.green())
+                embed.add_field(name="Symbol", value=symbol_upper, inline=True)
+                embed.add_field(name="Now Using", value=f"{asset_class} default: {fallback_str}", inline=True)
+                await ctx.send(embed=embed)
+            else:
+                await ctx.send(
+                    f"No override found for `{symbol_upper}`. It was already using the asset-class default."
+                )
+
+        except Exception as e:
+            self.logger.error(f"Error in alertdist remove: {e}", exc_info=True)
+            await ctx.send(f"❌ Error removing alert distance override: {e}")
+
+    # ── End Alert Distance commands ────────────────────────────────────────
 
 
 async def setup(bot):

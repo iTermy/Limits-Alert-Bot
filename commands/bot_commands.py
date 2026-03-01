@@ -104,6 +104,108 @@ class BotCommands(BaseCog):
             await ctx.send(embed=embed)
             return
 
+        if topic and topic.lower() in ("alertdist", "alertdistance", "adist"):
+            embed = discord.Embed(
+                title="Alert Distance Command — Detailed Help",
+                description="View and manage the approaching-alert distance thresholds.\nThis controls how close price must get to a limit before an 'approaching' alert fires.",
+                color=0x00BFFF
+            )
+            embed.add_field(
+                name="Show config",
+                value=(
+                    "`!alertdist config` — show all asset-class defaults and per-symbol overrides\n"
+                    "`!alertdist config <symbol>` — show config for a specific symbol (e.g. `!alertdist config XAUUSD`)"
+                ),
+                inline=False
+            )
+            embed.add_field(
+                name="Set threshold (admin)",
+                value=(
+                    "`!alertdist set <class> <value>` — set asset-class default (e.g. `!alertdist set metals 8`)\n"
+                    "`!alertdist set <symbol> <value>` — set per-symbol override (e.g. `!alertdist set XAUUSD 5`)\n"
+                    "`!alertdist set <target> <value> pips` — force pips type\n"
+                    "`!alertdist set <target> <value> dollars` — force dollars type\n"
+                    "`!alertdist set <target> <value> percentage` — force percentage type\n\n"
+                    "Valid asset classes: forex, forex_jpy, metals, indices, stocks, crypto, oil\n"
+                    "Aliases: `!alertdistance`, `!adist`"
+                ),
+                inline=False
+            )
+            embed.add_field(
+                name="Remove per-symbol override (admin)",
+                value="`!alertdist remove <symbol>` — remove override, reverting to asset-class default (e.g. `!alertdist remove XAUUSD`)",
+                inline=False
+            )
+            embed.add_field(
+                name="Distance types",
+                value=(
+                    "**pips** — used for forex pairs (e.g. 10 pips)\n"
+                    "**dollars** — used for metals, oil (e.g. $8.00)\n"
+                    "**percentage** — used for indices, crypto (e.g. 0.5%)"
+                ),
+                inline=False
+            )
+            embed.set_footer(text="If no type is specified, the existing type for that target is preserved.")
+            await ctx.send(embed=embed)
+            return
+
+        if topic and topic.lower() in ("news",):
+            embed = discord.Embed(
+                title="📰 News Command — Detailed Help",
+                description="Schedule news windows that auto-cancel signals hit during the window.",
+                color=0x5865F2
+            )
+            embed.add_field(
+                name="Schedule a news window",
+                value=(
+                    "`!news <category> <time> [window] [tz:<tz>] [date:<date>]`\n"
+                    "Example: `!news USD 12:30pm 15` — USD news at 12:30 PM EST, ±15 min window\n"
+                    "Example: `!news gold 8:30am tz:UTC` — Gold news at 8:30 AM UTC\n"
+                    "Example: `!news all 14:00 30 date:2025-06-20` — All pairs on a specific date"
+                ),
+                inline=False
+            )
+            embed.add_field(
+                name="Immediate / open-ended window",
+                value=(
+                    "`!news now` — activate news mode immediately for ALL pairs\n"
+                    "`!news now USD` — activate immediately for USD pairs only\n"
+                    "`!news off` — deactivate all open-ended windows"
+                ),
+                inline=False
+            )
+            embed.add_field(
+                name="Tags (optional)",
+                value=(
+                    "`tz:<timezone>` — timezone for the time (default: EST)\n"
+                    "  e.g. `tz:UTC`  `tz:GMT`  `tz:CET`  `tz:London`  `tz:JST`\n"
+                    "`date:<date>` — specific date (default: today)\n"
+                    "  e.g. `date:2025-06-15`  `date:06/15`  `date:tomorrow`"
+                ),
+                inline=False
+            )
+            embed.add_field(
+                name="Categories",
+                value=(
+                    "Any currency code: `USD`, `EUR`, `GBP`, `JPY`, etc.\n"
+                    "Named: `gold`, `oil`, `btc`, `eth`, `crypto`\n"
+                    "`all` — affects every instrument"
+                ),
+                inline=False
+            )
+            embed.add_field(
+                name="Managing events",
+                value=(
+                    "`!newslist` — show all scheduled and active events\n"
+                    "`!newsclear <id>` — remove a specific event\n"
+                    "`!newsclear` — remove all events"
+                ),
+                inline=False
+            )
+            embed.set_footer(text="Window is ±N minutes around the news time. Default window is 10 minutes.")
+            await ctx.send(embed=embed)
+            return
+
         # ── Default: main help page ──
         embed = discord.Embed(
             title="📚 Bot Commands",
@@ -123,9 +225,21 @@ class BotCommands(BaseCog):
             "`!profit <id>` - Mark as profit\n"
             "`!sl <id>` - Mark as stop loss\n"
             "`!cancel` - Cancel signals — see `!help cancel` for all options\n"
-            "`!tp` - Take-profit config — see `!help tp` for all options"
+            "`!tp` - Take-profit config — see `!help tp` for all options\n"
+            "`!alertdist` - Alert distance config — see `!help alertdist` for all options"
         )
         embed.add_field(name="Signal Commands", value=signal_cmds, inline=False)
+
+        # News commands
+        news_cmds = (
+            "`!news <category> <time> [window] [tz:<tz>] [date:<date>]` - Schedule news window\n"
+            "`!news now [category]` - Activate immediate open-ended news window\n"
+            "`!news off` - Deactivate all open-ended windows\n"
+            "`!newslist` - Show all scheduled/active news events\n"
+            "`!newsclear [id]` - Remove a news event (or all)\n"
+            "  └ See `!help news` for full details and tag options"
+        )
+        embed.add_field(name="📰 News Mode", value=news_cmds, inline=False)
 
         # Bot commands
         bot_cmds = (
