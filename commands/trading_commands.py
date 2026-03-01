@@ -7,6 +7,7 @@ from utils.formatting import (
     format_price, is_crypto_symbol,
     is_index_symbol, get_status_emoji
 )
+import asyncio
 import discord
 from discord.ext import commands
 from typing import Optional, List, Dict
@@ -551,7 +552,37 @@ class TradingCommands(BaseCog):
 
     @commands.command(name="hit", description="Mark signal as hit")
     async def set_hit(self, ctx: commands.Context, signal_id: int):
-        await self.set_signal_status(ctx, signal_id, "hit")
+        """Manually mark a signal as HIT, treating limit 1 as hit and starting auto-TP."""
+        try:
+            transitioned = await asyncio.wait_for(
+                self.signal_db.manually_set_signal_to_hit(
+                    signal_id, f"Manually set to HIT by {ctx.author.name}"
+                ),
+                timeout=5.0
+            )
+        except asyncio.TimeoutError:
+            await ctx.send("❌ Operation timed out. Please try again.")
+            return
+        except Exception as e:
+            self.logger.error(f"Error in !hit command for signal {signal_id}: {e}", exc_info=True)
+            await ctx.send("❌ Error processing hit command.")
+            return
+
+        if transitioned:
+            # Populate TP cache immediately so auto-TP starts on the next tick
+            if hasattr(self.bot, 'monitor') and self.bot.monitor:
+                monitor = self.bot.monitor
+                await monitor.tp_monitor.refresh_hit_limits(signal_id)
+                if signal_id in monitor.active_signals:
+                    monitor.active_signals[signal_id]['status'] = 'hit'
+            await ctx.send(f"✅ Signal {signal_id} marked as HIT (limit 1 hit, auto-TP active)")
+        else:
+            # Either already HIT or not in a valid state
+            signal = await self.signal_db.get_signal_with_limits(signal_id)
+            if signal and signal.get('status') == 'hit':
+                await ctx.send(f"ℹ️ Signal {signal_id} is already HIT — auto-TP is already active.")
+            else:
+                await ctx.send(f"❌ Could not mark signal {signal_id} as HIT. Signal must be in ACTIVE status.")
 
     @commands.command(name="stoploss", aliases=["sl"], description="Mark signal as stop loss")
     async def set_stop_loss(self, ctx: commands.Context, signal_id: int):
