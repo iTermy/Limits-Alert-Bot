@@ -542,6 +542,26 @@ class TradingCommands(BaseCog):
             embed.set_footer(text=f"Changed by {ctx.author.name}")
 
             await ctx.send(embed=embed)
+
+            # Update the persistent alert embed
+            status_to_event = {
+                'profit': 'profit', 'breakeven': 'breakeven',
+                'stop_loss': 'stop_loss', 'cancelled': 'cancelled',
+                'active': 'reactivated', 'hit': 'hit',
+            }
+            embed_event = status_to_event.get(status)
+            if embed_event:
+                try:
+                    alert_system = (
+                        self.bot.monitor.alert_system
+                        if hasattr(self.bot, 'monitor') and self.bot.monitor else None
+                    )
+                    if alert_system:
+                        await alert_system.update_embed_for_signal_id(
+                            signal_id, embed_event,
+                        )
+                except Exception as _ue:
+                    logger.warning(f"Could not update embed after setstatus: {_ue}")
         else:
             await ctx.send("❌ Failed to update signal status")
 
@@ -576,6 +596,17 @@ class TradingCommands(BaseCog):
                 if signal_id in monitor.active_signals:
                     monitor.active_signals[signal_id]['status'] = 'hit'
             await ctx.send(f"✅ Signal {signal_id} marked as HIT (limit 1 hit, auto-TP active)")
+
+            # Update the persistent alert embed
+            try:
+                alert_system = (
+                    self.bot.monitor.alert_system
+                    if hasattr(self.bot, 'monitor') and self.bot.monitor else None
+                )
+                if alert_system:
+                    await alert_system.update_embed_for_signal_id(signal_id, 'hit')
+            except Exception as _ue:
+                logger.warning(f"Could not update embed after !hit: {_ue}")
         else:
             # Either already HIT or not in a valid state
             signal = await self.signal_db.get_signal_with_limits(signal_id)
@@ -701,12 +732,22 @@ class TradingCommands(BaseCog):
         if not signal_ids:
             return 0
         count = 0
+        alert_system = (
+            self.bot.monitor.alert_system
+            if hasattr(self.bot, 'monitor') and self.bot.monitor else None
+        )
         for sid in signal_ids:
             success = await self.signal_db.manually_set_signal_status(
                 sid, 'cancelled', reason
             )
             if success:
                 count += 1
+                # Update the persistent alert embed
+                if alert_system:
+                    try:
+                        await alert_system.update_embed_for_signal_id(sid, 'cancelled')
+                    except Exception as _ue:
+                        logger.warning(f"Could not update embed after bulk cancel for signal {sid}: {_ue}")
         return count
 
     async def _bulk_cancel_gold(self, ctx, direction_filter, channel_category):
