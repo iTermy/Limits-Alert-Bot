@@ -1,12 +1,12 @@
 """
 Alert System - Handles all alert generation and sending for the price monitor
-Enhanced with message ID tracking for reply-based status management
-ENHANCED: Shows spread value in alerts when spread buffer is enabled
+REDESIGNED: Single persistent message per signal, edited in-place for all events.
+Separate short ping messages are sent for each event so role pings still fire.
 """
 
 import asyncio
 import logging
-from typing import Dict, Optional
+from typing import Dict, Optional, List
 from datetime import datetime, timezone
 from enum import Enum
 import discord
@@ -24,671 +24,711 @@ class AlertType(Enum):
     STOP_LOSS = "stop_loss"
 
 
+# ──────────────────────────────────────────────────────────────────────────────
+# Embed builder helpers
+# ──────────────────────────────────────────────────────────────────────────────
+
+def _fmt(price: float) -> str:
+    """Format price with appropriate decimal places."""
+    if price == 0:
+        return "0"
+    s = f"{price:.5f}".rstrip("0").rstrip(".")
+    if "." not in s:
+        s += ".00"
+    elif len(s.split(".")[1]) < 2:
+        s += "0"
+    return s
+
+
+def _build_signal_embed(
+    signal: Dict,
+    limits: List[Dict],
+    current_price: Optional[float] = None,
+    distance_formatted: Optional[str] = None,
+    spread: Optional[float] = None,
+    spread_buffer_enabled: bool = False,
+    event: str = "approaching",
+    guild_id: Optional[int] = None,
+    bot=None,
+    hit_limit_ids: Optional[set] = None,
+    pnl_display: Optional[str] = None,
+    force_hit_up_to_seq: int = 0,
+    limit_pnl_map: Optional[Dict] = None,
+) -> discord.Embed:
+    """
+    Build (or rebuild) the single persistent embed for a signal.
+    event: "approaching" | "hit" | "stop_loss" | "auto_tp"
+           | "profit" | "breakeven" | "cancelled" | "reactivated"
+
+    hit_limit_ids: optional set of limit_id values that are confirmed hit.
+                   Used when limits come from the hit-limits DB query, which
+                   returns rows without a 'status' key.
+    pnl_display:   formatted profit string (e.g. "+12.3 pips") shown for
+                   auto_tp and profit events only.
+    force_hit_up_to_seq: treat all limits with sequence_number <= this value
+                   as hit, regardless of DB status. Used when the alert fires
+                   before the DB write has committed.
+    limit_pnl_map: sequence_number -> formatted pnl string, shown per-limit
+                   on auto_tp embeds only (e.g. {1: "+3 pips", 2: "+4 pips"}).
+    """
+    instrument = signal["instrument"]
+    direction = signal["direction"].upper()
+    signal_id = signal["signal_id"]
+    total = signal.get("total_limits", len(limits)) or len(limits)
+
+    def _is_hit(lim: Dict) -> bool:
+        if force_hit_up_to_seq and isinstance(lim.get("sequence_number"), int):
+            if lim["sequence_number"] <= force_hit_up_to_seq:
+                return True
+        if hit_limit_ids is not None:
+            lid = lim.get("limit_id") or lim.get("id")
+            if lid is not None and lid in hit_limit_ids:
+                return True
+        return bool(lim.get("hit_alert_sent") or lim.get("status") == "hit")
+
+    hit_count = sum(1 for l in limits if _is_hit(l))
+
+    status_map = {
+        "approaching":  (0xFFA500, "🟡 Approaching"),
+        "hit":          (0x00FF00, "🎯 Limit Hit"),
+        "stop_loss":    (0xFF0000, "🛑 Stop Loss"),
+        "auto_tp":      (0x00FF00, "💰 Auto Take-Profit"),
+        "profit":       (0x00FF00, "💰 Profit"),
+        "breakeven":    (0x808080, "➖ Breakeven"),
+        "cancelled":    (0x808080, "❌ Cancelled"),
+        "reactivated":  (0x3498DB, "♻️ Reactivated"),
+    }
+    color, status_label = status_map.get(event, (0xFFA500, "🟡 Active"))
+
+    embed = discord.Embed(
+        title=f"{status_label} — {instrument} {direction}",
+        color=color,
+        timestamp=datetime.now(timezone.utc),
+    )
+
+    # ── Limits section ───────────────────────────────────────────────────────
+    sorted_limits = sorted(limits, key=lambda l: l.get("sequence_number", 0))
+    limit_lines = []
+    for lim in sorted_limits:
+        seq = lim.get("sequence_number", "?")
+        price = _fmt(lim["price_level"])
+        if _is_hit(lim):
+            per_limit_pnl = limit_pnl_map.get(seq) if limit_pnl_map else None
+            if per_limit_pnl:
+                limit_lines.append(f"~~Limit #{seq}: {price}~~ ✅  +{per_limit_pnl}")
+            else:
+                limit_lines.append(f"~~Limit #{seq}: {price}~~ ✅")
+        else:
+            limit_lines.append(f"Limit #{seq}: {price}")
+
+    embed.add_field(
+        name=f"Limits ({hit_count}/{total} hit)",
+        value="\n".join(limit_lines) if limit_lines else "—",
+        inline=False,
+    )
+
+    # ── Profit display (auto_tp / profit events only) ────────────────────────
+    if pnl_display and event in ("auto_tp", "profit"):
+        embed.add_field(name="Profit", value=f"**+{pnl_display}**", inline=True)
+
+    # ── Stop loss ────────────────────────────────────────────────────────────
+    sl = signal.get("stop_loss")
+    if sl:
+        sl_label = f"~~{_fmt(sl)}~~ 🛑" if event == "stop_loss" else _fmt(sl)
+        embed.add_field(name="Stop Loss", value=sl_label, inline=True)
+
+    # ── Current price ────────────────────────────────────────────────────────
+    if current_price is not None:
+        if spread_buffer_enabled and spread and spread > 0 and event != "stop_loss":
+            display_price = _fmt(current_price + spread)
+        else:
+            display_price = _fmt(current_price)
+        embed.add_field(name="Current Price", value=display_price, inline=True)
+
+    # ── Distance (approaching only) ──────────────────────────────────────────
+    if distance_formatted and event == "approaching":
+        embed.add_field(name="Distance", value=distance_formatted, inline=True)
+
+    # ── Source link ──────────────────────────────────────────────────────────
+    msg_id = signal.get("message_id")
+    ch_id = signal.get("channel_id")
+    if msg_id and ch_id and not str(msg_id).startswith("manual_"):
+        if not guild_id and bot and bot.guilds:
+            guild_id = bot.guilds[0].id
+        if guild_id:
+            url = f"https://discord.com/channels/{guild_id}/{ch_id}/{msg_id}"
+            embed.add_field(name="Source", value=url, inline=False)
+
+    embed.set_footer(text=f"Signal #{signal_id} • Reply to this message to manage")
+    return embed
+
+
+# ──────────────────────────────────────────────────────────────────────────────
+# AlertSystem
+# ──────────────────────────────────────────────────────────────────────────────
+
 class AlertSystem:
     """
-    Handles all alert generation and sending for trading signals
+    Handles all alert generation and sending for trading signals.
 
-    Features:
-    - Uses EmbedFactory for consistent embed creation
-    - Only sends approaching alert for first limit
-    - Handles limit hit and stop loss alerts
-    - Tracks alert statistics
-    - Stores alert message IDs for reply-based management
-    - Shows spread value when spread buffer is enabled
+    NEW BEHAVIOUR
+    ─────────────
+    One persistent Discord message (embed) is created per signal when the first
+    approaching / hit alert fires.  All subsequent events (more limits hit,
+    stop loss, auto-TP, manual overrides) EDIT that same message instead of
+    posting new ones.
+
+    Pinging
+    ───────
+    Because editing a message does NOT ping anyone, a short plain-text ping
+    message is sent as a REPLY to the persistent embed for each event.
+    Previous ping messages are deleted before sending a new one, keeping
+    the channel tidy.
+
+    Manual overrides
+    ────────────────
+    Call update_signal_message(signal, event, ...) from message_handler.py after
+    processing reply commands (profit, sl, cancel, etc.) to update the embed.
     """
 
     def __init__(self, alert_channel: Optional[discord.TextChannel] = None, bot=None):
-        """
-        Initialize the alert system
-
-        Args:
-            alert_channel: Discord channel for sending alerts
-            bot: Discord bot instance for fetching channels
-        """
         self.alert_channel = alert_channel
         self.pa_alert_channel = None
         self.toll_alert_channel = None
         self.general_toll_alert_channel = None
         self._load_pa_channels()
         self._load_toll_channels()
-
         self.bot = bot
 
-        # Alert message tracking - maps alert message ID to signal ID
-        # This allows users to reply to alerts to manage signals
-        self.alert_messages = {}  # {message_id: signal_id}
+        # signal_id → discord.Message  (the one persistent embed per signal)
+        self.signal_messages: Dict[int, discord.Message] = {}
 
-        # Statistics tracking
+        # signal_id → discord.Message  (the most recent ping message per signal)
+        self.signal_ping_messages: Dict[int, discord.Message] = {}
+
+        # BACKWARDS COMPAT: alert message ID (str) → signal_id
+        self.alert_messages: Dict[str, int] = {}
+
         self.stats = {
-            'approaching_sent': 0,
-            'hit_sent': 0,
-            'stop_loss_sent': 0,
-            'auto_tp_sent': 0,
-            'spread_hour_cancelled': 0,
-            'total_alerts': 0,
-            'errors': 0
+            "approaching_sent": 0,
+            "hit_sent": 0,
+            "stop_loss_sent": 0,
+            "auto_tp_sent": 0,
+            "spread_hour_cancelled": 0,
+            "total_alerts": 0,
+            "errors": 0,
         }
 
+    # ── Channel helpers ──────────────────────────────────────────────────────
+
     def set_channel(self, channel: discord.TextChannel):
-        """Update the alert channel"""
         self.alert_channel = channel
         logger.info(f"Alert channel set to #{channel.name} ({channel.id})")
 
+    def set_pa_channel(self, channel: discord.TextChannel):
+        self.pa_alert_channel = channel
+        logger.info(f"PA alert channel set: #{channel.name} ({channel.id})")
+
+    def set_toll_channel(self, channel: discord.TextChannel):
+        self.toll_alert_channel = channel
+        logger.info(f"Toll alert channel set: #{channel.name} ({channel.id})")
+
+    def set_general_toll_channel(self, channel: discord.TextChannel):
+        self.general_toll_alert_channel = channel
+        logger.info(f"General-toll alert channel set: #{channel.name} ({channel.id})")
+
     def _load_pa_channels(self):
-        """Load PA channel IDs from config"""
         try:
             from pathlib import Path
             import json
-
-            config_path = Path(__file__).parent.parent / 'config' / 'channels.json'
-            with open(config_path, 'r') as f:
-                config = json.load(f)
-
-            # Get PA channel IDs
-            monitored = config.get('monitored_channels', {})
-            self.pa_channel_ids = set()
-
-            for channel_name, channel_id in monitored.items():
-                if 'pa' in channel_name.lower() or 'price-action' in channel_name.lower():
-                    self.pa_channel_ids.add(str(channel_id))
-
-            logger.info(f"Loaded {len(self.pa_channel_ids)} PA channel IDs: {self.pa_channel_ids}")
-
+            config_path = Path(__file__).parent.parent / "config" / "channels.json"
+            with open(config_path) as f:
+                cfg = json.load(f)
+            monitored = cfg.get("monitored_channels", {})
+            self.pa_channel_ids = {
+                str(v) for k, v in monitored.items()
+                if "pa" in k.lower() or "price-action" in k.lower()
+            }
+            logger.info(f"Loaded {len(self.pa_channel_ids)} PA channel IDs")
         except Exception as e:
             logger.error(f"Failed to load PA channels: {e}")
             self.pa_channel_ids = set()
 
     def _load_toll_channels(self):
-        """Load toll channel IDs from config"""
         try:
             from pathlib import Path
             import json
-
-            config_path = Path(__file__).parent.parent / 'config' / 'channels.json'
-            with open(config_path, 'r') as f:
-                config = json.load(f)
-
-            # Get toll channel IDs
-            monitored = config.get('monitored_channels', {})
+            config_path = Path(__file__).parent.parent / "config" / "channels.json"
+            with open(config_path) as f:
+                cfg = json.load(f)
+            monitored = cfg.get("monitored_channels", {})
             self.toll_channel_ids = set()
             self.general_toll_channel_ids = set()
-
             for channel_name, channel_id in monitored.items():
                 if not channel_id:
                     continue
-                if channel_name.lower() == 'general-tolls':
+                if channel_name.lower() == "general-tolls":
                     self.general_toll_channel_ids.add(str(channel_id))
-                elif 'toll' in channel_name.lower():
+                elif "toll" in channel_name.lower():
                     self.toll_channel_ids.add(str(channel_id))
-
-            logger.info(f"Loaded {len(self.toll_channel_ids)} toll channel IDs: {self.toll_channel_ids}")
-            logger.info(f"Loaded {len(self.general_toll_channel_ids)} general-toll channel IDs: {self.general_toll_channel_ids}")
-
+            logger.info(f"Loaded {len(self.toll_channel_ids)} toll channel IDs")
+            logger.info(f"Loaded {len(self.general_toll_channel_ids)} general-toll channel IDs")
         except Exception as e:
             logger.error(f"Failed to load toll channels: {e}")
             self.toll_channel_ids = set()
             self.general_toll_channel_ids = set()
 
-    def set_pa_channel(self, channel: discord.TextChannel):
-        """Set the PA alert channel"""
-        self.pa_alert_channel = channel
-        logger.info(f"PA alert channel set: #{channel.name} ({channel.id})")
-
-    def set_toll_channel(self, channel: discord.TextChannel):
-        """Set the toll alert channel"""
-        self.toll_alert_channel = channel
-        logger.info(f"Toll alert channel set: #{channel.name} ({channel.id})")
-
-    def set_general_toll_channel(self, channel: discord.TextChannel):
-        """Set the general-tolls alert channel"""
-        self.general_toll_alert_channel = channel
-        logger.info(f"General-toll alert channel set: #{channel.name} ({channel.id})")
-
     def is_pa_signal(self, signal: Dict) -> bool:
-        """Check if signal originated from a PA channel"""
-        channel_id = str(signal.get('channel_id', ''))
-        is_pa = channel_id in self.pa_channel_ids
-        if is_pa:
-            logger.debug(f"Signal {signal.get('signal_id')} identified as PA signal (channel: {channel_id})")
-        return is_pa
+        return str(signal.get("channel_id", "")) in self.pa_channel_ids
 
     def is_toll_signal(self, signal: Dict) -> bool:
-        """Check if signal originated from a toll channel"""
-        channel_id = str(signal.get('channel_id', ''))
-        is_toll = channel_id in self.toll_channel_ids
-        if is_toll:
-            logger.debug(f"Signal {signal.get('signal_id')} identified as toll signal (channel: {channel_id})")
-        return is_toll
+        return str(signal.get("channel_id", "")) in self.toll_channel_ids
 
     def is_general_toll_signal(self, signal: Dict) -> bool:
-        """Check if signal originated from the general-tolls channel"""
-        channel_id = str(signal.get('channel_id', ''))
-        is_general = channel_id in self.general_toll_channel_ids
-        if is_general:
-            logger.debug(f"Signal {signal.get('signal_id')} identified as general-toll signal (channel: {channel_id})")
-        return is_general
+        return str(signal.get("channel_id", "")) in self.general_toll_channel_ids
 
-    def _get_alert_channel(self, signal: Dict) -> discord.TextChannel:
-        """
-        Determine which alert channel to use based on signal source
-
-        Args:
-            signal: Signal dictionary with channel_id
-
-        Returns:
-            Alert channel to use
-        """
-        # Check general-toll signals (most specific — its own channel)
+    def _get_alert_channel(self, signal: Dict) -> Optional[discord.TextChannel]:
+        # Most-specific routing first
         if self.is_general_toll_signal(signal):
             if self.general_toll_alert_channel:
-                logger.debug(f"Routing to general-toll alert channel for signal {signal.get('signal_id')}")
                 return self.general_toll_alert_channel
-            else:
-                logger.warning("General-toll signal detected but no general-toll alert channel configured, using main channel")
-                return self.alert_channel
-
-        # Check toll signals first (more specific)
+            logger.warning("General-toll signal but no general-toll alert channel; falling back")
         if self.is_toll_signal(signal):
             if self.toll_alert_channel:
-                logger.debug(f"Routing to toll alert channel for signal {signal.get('signal_id')}")
                 return self.toll_alert_channel
-            else:
-                logger.warning(f"Toll signal detected but no toll alert channel configured, using main channel")
-                return self.alert_channel
-
-        # Check PA signals
+            logger.warning("Toll signal but no toll alert channel; falling back")
         if self.is_pa_signal(signal):
             if self.pa_alert_channel:
-                logger.debug(f"Routing to PA alert channel for signal {signal.get('signal_id')}")
                 return self.pa_alert_channel
-            else:
-                logger.warning(f"PA signal detected but no PA alert channel configured, using main channel")
-                return self.alert_channel
-
+            logger.warning("PA signal but no PA alert channel; falling back")
         return self.alert_channel
 
-    def _format_price(self, price: float) -> str:
-        """Format price with appropriate decimal places"""
-        if price == 0:
-            return "0"
-
-        # Convert to string and strip trailing zeros
-        price_str = f"{price:.5f}".rstrip('0').rstrip('.')
-
-        # Ensure at least 2 decimal places for most currencies
-        if '.' not in price_str:
-            price_str += '.00'
-        elif len(price_str.split('.')[1]) < 2:
-            price_str += '0'
-
-        return price_str
+    # ── Backwards-compat tracking ────────────────────────────────────────────
 
     def track_alert_message(self, message_id: int, signal_id: int):
-        """
-        Track an alert message for reply-based management
-
-        Args:
-            message_id: Discord message ID of the alert
-            signal_id: Database signal ID this alert relates to
-        """
+        """Register a message_id → signal_id mapping (used by reply handler)."""
         self.alert_messages[str(message_id)] = signal_id
-        logger.debug(f"Tracked alert message {message_id} for signal {signal_id}")
-
-        # Clean up old entries if we have too many (keep last 1000)
         if len(self.alert_messages) > 1000:
-            # Remove oldest entries
-            to_remove = len(self.alert_messages) - 1000
-            for key in list(self.alert_messages.keys())[:to_remove]:
-                del self.alert_messages[key]
+            for k in list(self.alert_messages)[:len(self.alert_messages) - 1000]:
+                del self.alert_messages[k]
 
     def get_signal_from_alert(self, message_id: str) -> Optional[int]:
-        """
-        Get the signal ID associated with an alert message
-
-        Args:
-            message_id: Discord message ID of the alert
-
-        Returns:
-            Signal ID if found, None otherwise
-        """
         return self.alert_messages.get(str(message_id))
 
-    async def send_approaching_alert(self, signal: Dict, limit: Dict, current_price: float,
-                                    distance_formatted: str, spread: float = None,
-                                    spread_buffer_enabled: bool = False) -> bool:
-        """
-        Send alert for approaching limit
-        ONLY sends for the FIRST limit (sequence_number == 1)
+    # ── Limit fetcher ────────────────────────────────────────────────────────
 
-        Args:
-            signal: Signal dictionary
-            limit: Limit dictionary with sequence_number
-            current_price: Current market price
-            distance_pips: Distance to limit in pips
-            spread: Current spread value (optional)
-            spread_buffer_enabled: Whether spread buffer is enabled
-
-        Returns:
-            True if alert was sent successfully
+    async def _fetch_limits(self, signal: Dict) -> List[Dict]:
         """
+        Get ALL limits for a signal (hit + pending) from the DB.
+        The DB is always the source of truth — the signal dict may only have
+        pending_limits (unhit), which would cause the embed to show wrong data.
+        Falls back to signal dict only if the DB call fails or bot is unavailable.
+        """
+        if self.bot and hasattr(self.bot, "signal_db") and self.bot.signal_db:
+            try:
+                full = await self.bot.signal_db.get_signal_with_limits(signal["signal_id"])
+                if full:
+                    return full.get("limits", [])
+            except Exception as e:
+                logger.warning(f"Could not fetch limits from DB for signal {signal['signal_id']}: {e}")
+        # Fallback: prefer 'limits' (all) over 'pending_limits' (subset)
+        return signal.get("limits") or signal.get("pending_limits") or []
+
+    # ── Core: get/create/edit the persistent message ─────────────────────────
+
+    async def _upsert_signal_message(
+        self,
+        signal: Dict,
+        limits: List[Dict],
+        event: str,
+        current_price: Optional[float] = None,
+        distance_formatted: Optional[str] = None,
+        spread: Optional[float] = None,
+        spread_buffer_enabled: bool = False,
+        ping_text: Optional[str] = None,
+        hit_limit_ids: Optional[set] = None,
+        pnl_display: Optional[str] = None,
+        force_hit_up_to_seq: int = 0,
+        limit_pnl_map: Optional[Dict] = None,
+    ) -> Optional[discord.Message]:
+        """
+        Send a ping then create or edit the persistent embed for this signal.
+
+        The ping message is always a NEW reply (so the role gets notified).
+        The embed is edited if one already exists, created otherwise.
+        """
+        signal_id = signal["signal_id"]
         target_channel = self._get_alert_channel(signal)
-
         if not target_channel:
             logger.error("No alert channel configured")
-            return False
+            return None
 
-        # ONLY send approaching alert for the first limit
-        if limit.get('sequence_number', 0) != 1:
-            logger.debug(f"Skipping approaching alert for limit #{limit['sequence_number']} (not first limit)")
-            return False
+        guild_id = signal.get("guild_id")
+        if not guild_id and self.bot and self.bot.guilds:
+            guild_id = self.bot.guilds[0].id
 
+        embed = _build_signal_embed(
+            signal=signal,
+            limits=limits,
+            current_price=current_price,
+            distance_formatted=distance_formatted,
+            spread=spread,
+            spread_buffer_enabled=spread_buffer_enabled,
+            event=event,
+            guild_id=guild_id,
+            bot=self.bot,
+            hit_limit_ids=hit_limit_ids,
+            pnl_display=pnl_display,
+            force_hit_up_to_seq=force_hit_up_to_seq,
+            limit_pnl_map=limit_pnl_map,
+        )
+
+        # ── Edit or create the persistent embed ───────────────────────────────
+        existing_msg = self.signal_messages.get(signal_id)
+        embed_msg = None
+
+        if existing_msg:
+            try:
+                await existing_msg.edit(embed=embed)
+                logger.info(f"Edited persistent message for signal {signal_id} (event={event})")
+                embed_msg = existing_msg
+            except discord.NotFound:
+                logger.warning(f"Persistent message for signal {signal_id} deleted — recreating")
+                del self.signal_messages[signal_id]
+                existing_msg = None
+            except Exception as e:
+                logger.error(f"Failed to edit persistent message for signal {signal_id}: {e}")
+                return None
+
+        if not existing_msg:
+            try:
+                # On the initial send, include the role mention as content so users
+                # are notified even though there's no separate ping reply yet.
+                role_mention = "<@&1334203997107650662>"
+                embed_msg = await target_channel.send(content=role_mention, embed=embed)
+                self.signal_messages[signal_id] = embed_msg
+                self.track_alert_message(embed_msg.id, signal_id)
+                logger.info(f"Created persistent message for signal {signal_id} (event={event})")
+            except Exception as e:
+                logger.error(f"Failed to send new persistent message for signal {signal_id}: {e}")
+                return None
+
+        # ── Delete old ping, send new one as a reply to the embed ─────────────
+        if ping_text and embed_msg:
+            old_ping = self.signal_ping_messages.get(signal_id)
+            if old_ping:
+                try:
+                    await old_ping.delete()
+                    logger.debug(f"Deleted old ping for signal {signal_id}")
+                except discord.NotFound:
+                    pass
+                except Exception as e:
+                    logger.warning(f"Could not delete old ping for signal {signal_id}: {e}")
+
+            try:
+                role_mention = "<@&1334203997107650662>"
+                new_ping = await embed_msg.reply(f"{role_mention} {ping_text}")
+                self.signal_ping_messages[signal_id] = new_ping
+                logger.debug(f"Sent new ping for signal {signal_id} (event={event})")
+            except Exception as e:
+                logger.error(f"Failed to send ping for signal {signal_id}: {e}")
+
+        return embed_msg
+
+    # ── Public alert API ─────────────────────────────────────────────────────
+
+    async def send_approaching_alert(
+        self,
+        signal: Dict,
+        limit: Dict,
+        current_price: float,
+        distance_formatted: str,
+        spread: float = None,
+        spread_buffer_enabled: bool = False,
+    ) -> bool:
+        if limit.get("sequence_number", 0) != 1:
+            logger.debug(f"Skipping approaching alert for limit #{limit['sequence_number']} (not first)")
+            return False
         try:
-            # Build embed
-            embed = discord.Embed(
-                title="🟡 First Limit Approaching",
-                description=f"**{signal['instrument']}** {signal['direction'].upper()}",
-                color=0xFFA500,  # Orange
-                timestamp=datetime.now(timezone.utc)
+            limits = await self._fetch_limits(signal)
+            if not limits:
+                limits = [limit]
+            # No ping for approaching — the embed itself is the first notification.
+            # Pings are only sent when the embed is *updated* (hit, SL, profit, etc.)
+            msg = await self._upsert_signal_message(
+                signal=signal, limits=limits, event="approaching",
+                current_price=current_price, distance_formatted=distance_formatted,
+                spread=spread, spread_buffer_enabled=spread_buffer_enabled,
+                ping_text=None,
             )
-
-            # Add fields
-            embed.add_field(
-                name="Limit Details:",
-                value=f"Limit #{limit['sequence_number']}: {self._format_price(limit['price_level'])}",
-                inline=False
-            )
-
-            # Current price with optional spread
-            if spread_buffer_enabled and spread and spread > 0:
-                price_display = f"{self._format_price(current_price + spread)}"
-            else:
-                price_display = self._format_price(current_price)
-
-            embed.add_field(
-                name="Current Price",
-                value=price_display,
-                inline=True
-            )
-
-            embed.add_field(
-                name="Distance",
-                value=distance_formatted,
-                inline=True
-            )
-            embed.add_field(
-                name="Progress",
-                value=f"{signal.get('limits_hit', 0)}/{signal.get('total_limits', 0)} hit",
-                inline=True
-            )
-
-            # Add message link if available
-            if signal.get('message_id') and signal.get('channel_id'):
-                if not str(signal['message_id']).startswith('manual_'):
-                    # Get guild ID from the bot's first guild if not provided
-                    guild_id = signal.get('guild_id')
-                    if not guild_id and self.bot.guilds:
-                        guild_id = self.bot.guilds[0].id
-
-                    message_url = f"https://discord.com/channels/{guild_id}/{signal['channel_id']}/{signal['message_id']}"
-                    embed.add_field(
-                        name="Source",
-                        value=f"{message_url}",
-                        inline=False
-                    )
-
-            embed.set_footer(text=f"Signal #{signal['signal_id']} • Reply to manage")
-
-            await target_channel.send("<@&1334203997107650662>")
-            message = await target_channel.send(embed=embed)
-
-            # Track this alert message
-            self.track_alert_message(message.id, signal['signal_id'])
-
-            # Update statistics
-            self.stats['approaching_sent'] += 1
-            self.stats['total_alerts'] += 1
-
-            logger.info(f"Approaching alert sent for signal {signal['signal_id']}, first limit")
-            return True
-
+            if msg:
+                self.stats["approaching_sent"] += 1
+                self.stats["total_alerts"] += 1
+                return True
         except Exception as e:
-            logger.error(f"Failed to send approaching alert: {e}")
-            self.stats['errors'] += 1
-            return False
+            logger.error(f"Failed to send approaching alert: {e}", exc_info=True)
+            self.stats["errors"] += 1
+        return False
 
-    async def send_limit_hit_alert(self, signal: Dict, limit: Dict, current_price: float,
-                                   spread: float = None, spread_buffer_enabled: bool = False) -> bool:
-        """
-        Send alert for limit hit
-
-        Args:
-            signal: Signal dictionary
-            limit: Limit dictionary
-            current_price: Current market price
-            spread: Current spread value (optional)
-            spread_buffer_enabled: Whether spread buffer is enabled
-
-        Returns:
-            True if alert was sent successfully
-        """
-        target_channel = self._get_alert_channel(signal)
-
-        if not target_channel:
-            logger.error("No alert channel configured")
-            return False
-
+    async def send_limit_hit_alert(
+        self,
+        signal: Dict,
+        limit: Dict,
+        current_price: float,
+        spread: float = None,
+        spread_buffer_enabled: bool = False,
+    ) -> bool:
         try:
-            # Determine title based on limit number
-            if limit['sequence_number'] == 1:
-                title = "🎯 First Limit Hit!"
-            elif limit['sequence_number'] == signal.get('total_limits', 0):
-                title = "🎯🎯 Final Limit Hit!"
-            else:
-                title = f"🎯 Limit #{limit['sequence_number']} Hit!"
+            limits = await self._fetch_limits(signal)
+            if not limits:
+                limits = [limit]
+            seq = limit.get("sequence_number", "?")
+            total = signal.get("total_limits", len(limits))
 
-            embed = discord.Embed(
-                title=title,
-                description=f"**{signal['instrument']}** {signal['direction'].upper()}",
-                color=0x00FF00,  # Green
-                timestamp=datetime.now(timezone.utc)
+            # The DB status may not be committed yet at the moment this alert fires,
+            # so we force-mark the current limit as hit by its sequence_number.
+            # Any limits with seq <= current seq are treated as hit for display purposes.
+            force_hit_up_to_seq = seq if isinstance(seq, int) else 0
+            hit_count = sum(
+                1 for l in limits
+                if l.get("status") == "hit"
+                or l.get("hit_alert_sent")
+                or (isinstance(l.get("sequence_number"), int) and l["sequence_number"] <= force_hit_up_to_seq)
             )
 
-            # Add limit price
-            embed.add_field(
-                name="Limit Hit:",
-                value=f"Limit #{limit['sequence_number']}: {self._format_price(limit['price_level'])}",
-                inline=False
+            suffix = "🎯🎯 **FINAL**" if seq == total else "🎯"
+            ping = (
+                f"{suffix} **{signal['instrument']}** {signal['direction'].upper()} — "
+                f"limit #{seq} hit @ {_fmt(limit['price_level'])} "
+                f"({hit_count}/{total} done)"
             )
-
-            # Hit price with optional spread
-            if spread_buffer_enabled and spread and spread > 0:
-                price_display = f"{self._format_price(current_price + spread)}"
-            else:
-                price_display = self._format_price(current_price)
-
-            embed.add_field(
-                name="Hit Price",
-                value=price_display,
-                inline=True
+            msg = await self._upsert_signal_message(
+                signal=signal, limits=limits, event="hit",
+                current_price=current_price,
+                spread=spread, spread_buffer_enabled=spread_buffer_enabled,
+                ping_text=ping,
+                force_hit_up_to_seq=force_hit_up_to_seq,
             )
-
-            # Calculate progress — use sequence_number of the hit limit (always current)
-            # rather than signal['limits_hit'] which may be stale when limits fire rapidly
-            progress = limit['sequence_number']
-            total = signal.get('total_limits', 1)
-
-            embed.add_field(
-                name="Progress",
-                value=f"{progress}/{total} limits hit",
-                inline=True
-            )
-
-            # Add message link if available
-            if signal.get('message_id') and signal.get('channel_id'):
-                if not str(signal['message_id']).startswith('manual_'):
-                    # Get guild ID from the bot's first guild if not provided
-                    guild_id = signal.get('guild_id')
-                    if not guild_id and self.bot.guilds:
-                        guild_id = self.bot.guilds[0].id
-
-                    message_url = f"https://discord.com/channels/{guild_id}/{signal['channel_id']}/{signal['message_id']}"
-                    embed.add_field(
-                        name="Source",
-                        value=f"{message_url}",
-                        inline=False
-                    )
-
-            # Add special message for milestones
-            if progress == 1:
-                embed.add_field(
-                    name="💡 Status",
-                    value="Signal is now in HIT status",
-                    inline=False
-                )
-            elif progress == total:
-                embed.add_field(
-                    name="✅ Complete",
-                    value="All limits have been hit!",
-                    inline=False
-                )
-
-            embed.set_footer(text=f"Signal #{signal['signal_id']} • Reply to manage")
-
-            await target_channel.send("<@&1334203997107650662>")
-            message = await target_channel.send(embed=embed)
-
-            # Track this alert message
-            self.track_alert_message(message.id, signal['signal_id'])
-
-            # Update statistics
-            self.stats['hit_sent'] += 1
-            self.stats['total_alerts'] += 1
-
-            logger.info(f"Limit hit alert sent for signal {signal['signal_id']}, limit {limit['sequence_number']}")
-            return True
-
+            if msg:
+                self.stats["hit_sent"] += 1
+                self.stats["total_alerts"] += 1
+                return True
         except Exception as e:
-            logger.error(f"Failed to send limit hit alert: {e}")
-            self.stats['errors'] += 1
-            return False
+            logger.error(f"Failed to send limit hit alert: {e}", exc_info=True)
+            self.stats["errors"] += 1
+        return False
 
     async def send_stop_loss_alert(self, signal: Dict, current_price: float) -> bool:
+        try:
+            limits = await self._fetch_limits(signal)
+            ping = (
+                f"🛑 **{signal['instrument']}** {signal['direction'].upper()} — "
+                f"stop loss hit @ {_fmt(current_price)} (SL: {_fmt(signal.get('stop_loss', 0))})"
+            )
+            msg = await self._upsert_signal_message(
+                signal=signal, limits=limits, event="stop_loss",
+                current_price=current_price,
+                ping_text=ping,
+            )
+            if msg:
+                self.stats["stop_loss_sent"] += 1
+                self.stats["total_alerts"] += 1
+                return True
+        except Exception as e:
+            logger.error(f"Failed to send stop loss alert: {e}", exc_info=True)
+            self.stats["errors"] += 1
+        return False
+
+    async def send_auto_tp_alert(
+        self, signal: Dict, hit_limits: list, last_pnl: float, tp_config,
+        cumulative_pnl: Optional[float] = None,
+        limit_pnl_map: Optional[Dict] = None,
+    ) -> bool:
+        """Edit the persistent embed to show auto take-profit. Also posts to profit channel.
+
+        cumulative_pnl: total P&L across all hit limits (if provided, shown instead of last_pnl).
+        limit_pnl_map:  sequence_number -> formatted pnl string for per-limit display.
         """
-        Send alert for stop loss hit
-        NOTE: Stop loss alerts NEVER show spread (exact prices only)
+        instrument = signal["instrument"]
+        direction = signal["direction"].upper()
+        # Use cumulative P&L for display if available, otherwise fall back to last limit pnl
+        display_pnl = cumulative_pnl if cumulative_pnl is not None else last_pnl
+        pnl_display = tp_config.format_value(instrument, display_pnl)
+        num_hit = len(hit_limits)
+        total = signal.get("total_limits", num_hit)
 
-        Args:
-            signal: Signal dictionary
-            current_price: Current market price
+        # Build a set of hit limit IDs so the embed can correctly show struck-through limits
+        hit_limit_ids = {lim.get("limit_id") or lim.get("id") for lim in hit_limits}
+        hit_limit_ids.discard(None)
 
-        Returns:
-            True if alert was sent successfully
-        """
-        target_channel = self._get_alert_channel(signal)
+        # Fetch all limits (hit + pending) for the full limits display
+        limits = await self._fetch_limits(signal)
+        if not limits:
+            limits = hit_limits
 
-        if not target_channel:
-            logger.error("No alert channel configured")
-            return False
+        ping = (
+            f"💰 **{instrument}** {direction} — "
+            f"Auto Take-Profit triggered! {num_hit}/{total} limits hit (+{pnl_display})"
+        )
 
         try:
-            embed = discord.Embed(
-                title="🛑 Stop Loss Hit!",
-                description=f"**{signal['instrument']}** {signal['direction'].upper()}",
-                color=0xFF0000,  # Red
-                timestamp=datetime.now(timezone.utc)
+            msg = await self._upsert_signal_message(
+                signal=signal, limits=limits, event="auto_tp", ping_text=ping,
+                hit_limit_ids=hit_limit_ids, pnl_display=pnl_display,
+                limit_pnl_map=limit_pnl_map,
             )
-
-            # Add fields - NO SPREAD for stop loss
-            embed.add_field(
-                name="Stop Loss Level",
-                value=self._format_price(signal['stop_loss']),
-                inline=False
-            )
-            embed.add_field(
-                name="Hit Price",
-                value=self._format_price(current_price),
-                inline=False
-            )
-
-            # Add message link if available
-            if signal.get('message_id') and signal.get('channel_id'):
-                if not str(signal['message_id']).startswith('manual_'):
-                    # Get guild ID from the bot's first guild if not provided
-                    guild_id = signal.get('guild_id')
-                    if not guild_id and self.bot.guilds:
-                        guild_id = self.bot.guilds[0].id
-
-                    message_url = f"https://discord.com/channels/{guild_id}/{signal['channel_id']}/{signal['message_id']}"
-                    embed.add_field(
-                        name="Source",
-                        value=f"{message_url}",
-                        inline=False
-                    )
-
-            # Add warning message
-            embed.add_field(
-                name="⚠️ Action Required",
-                value="Signal has been stopped out. Review position immediately.",
-                inline=False
-            )
-
-            embed.set_footer(text=f"Signal #{signal['signal_id']} • Status changed to STOP_LOSS • Reply to manage")
-
-            await target_channel.send("<@&1334203997107650662>")
-            message = await target_channel.send(embed=embed)
-
-            # Track this alert message
-            self.track_alert_message(message.id, signal['signal_id'])
-
-            # Update statistics
-            self.stats['stop_loss_sent'] += 1
-            self.stats['total_alerts'] += 1
-
-            logger.info(f"Stop loss alert sent for signal {signal['signal_id']}")
-            return True
-
+            if msg:
+                self.stats["auto_tp_sent"] += 1
+                self.stats["total_alerts"] += 1
         except Exception as e:
-            logger.error(f"Failed to send stop loss alert: {e}")
-            self.stats['errors'] += 1
+            logger.error(f"Failed to update embed for auto-TP signal {signal['signal_id']}: {e}")
+            self.stats["errors"] += 1
             return False
+
+        # Also post to profit channel
+        try:
+            profit_channel = await self._get_profit_channel()
+            if profit_channel:
+                message_url = None
+                if signal.get("message_id") and signal.get("channel_id"):
+                    if not str(signal["message_id"]).startswith("manual_"):
+                        guild_id = signal.get("guild_id")
+                        if not guild_id and self.bot and self.bot.guilds:
+                            guild_id = self.bot.guilds[0].id
+                        if guild_id:
+                            message_url = (
+                                f"https://discord.com/channels/{guild_id}"
+                                f"/{signal['channel_id']}/{signal['message_id']}"
+                            )
+
+                profit_embed = discord.Embed(
+                    title="💰 PROFIT Alert",
+                    description=f"Signal #{signal['signal_id']} has been marked as **PROFIT** (Auto TP)",
+                    color=0x00FF00,
+                    timestamp=datetime.now(timezone.utc),
+                )
+                profit_embed.add_field(name="Symbol", value=instrument, inline=True)
+                profit_embed.add_field(name="Position", value=direction, inline=True)
+                profit_embed.add_field(name="Profit", value=f"**+{pnl_display}**", inline=True)
+                if hit_limits:
+                    lines = [
+                        f"Limit #{l.get('sequence_number', '?')}: "
+                        f"{_fmt(l.get('price_level') or l.get('hit_price', 0))} ✅"
+                        for l in hit_limits
+                    ]
+                    profit_embed.add_field(name="Limits", value="\n".join(lines), inline=True)
+                if signal.get("stop_loss"):
+                    profit_embed.add_field(name="Stop Loss", value=_fmt(signal["stop_loss"]), inline=True)
+                if message_url:
+                    profit_embed.add_field(name="Original Signal", value=f"[View Message]({message_url})", inline=False)
+                profit_embed.set_footer(text="Auto Take-Profit")
+                await profit_channel.send(embed=profit_embed)
+        except Exception as e:
+            logger.error(f"Failed to send auto-TP to profit channel: {e}", exc_info=True)
+
+        return True
+
+    async def update_signal_message(
+        self,
+        signal: Dict,
+        event: str,
+        limits: Optional[List[Dict]] = None,
+        current_price: Optional[float] = None,
+        ping_text: Optional[str] = None,
+    ) -> bool:
+        """
+        Update the persistent embed after a manual command (profit, sl, cancel, etc.).
+        If no persistent message exists yet, this is a no-op and returns False.
+        """
+        signal_id = signal["signal_id"]
+        if signal_id not in self.signal_messages:
+            logger.debug(
+                f"update_signal_message: signal {signal_id} has no persistent message yet — skipping"
+            )
+            return False
+        try:
+            if limits is None:
+                limits = await self._fetch_limits(signal)
+            await self._upsert_signal_message(
+                signal=signal, limits=limits, event=event,
+                current_price=current_price, ping_text=ping_text,
+            )
+            return True
+        except Exception as e:
+            logger.error(f"Failed to update signal message for {signal_id}: {e}", exc_info=True)
+            return False
+
+    # ── Spread hour / news cancel (standalone new messages) ──────────────────
 
     async def send_spread_hour_cancel_alert(self, signal: Dict, current_price: float) -> bool:
-        """
-        Send a single informational embed when a signal is hit during spread hour
-        (5–6 PM EST weekdays) and is automatically cancelled.
-
-        A role ping is sent so traders are notified of the cancellation.
-
-        Args:
-            signal: Signal dictionary
-            current_price: The price that triggered the (rejected) hit
-
-        Returns:
-            True if the embed was sent successfully
-        """
         target_channel = self._get_alert_channel(signal)
         if not target_channel:
-            logger.error("No alert channel configured for spread hour cancel alert")
             return False
-
         try:
             embed = discord.Embed(
                 title="🕔 Spread Hour — Signal Auto-Cancelled",
                 description=(
                     f"**{signal['instrument']}** {signal['direction'].upper()} was triggered "
-                    f"during the **5–6 PM EST spread hour** and has been automatically cancelled."
+                    "during the **5–6 PM EST spread hour** and has been automatically cancelled."
                 ),
-                color=0xFFA500,   # Orange — informational, not a real hit or loss
-                timestamp=datetime.now(timezone.utc)
+                color=0xFFA500,
+                timestamp=datetime.now(timezone.utc),
             )
-
-            embed.add_field(
-                name="Trigger Price",
-                value=self._format_price(current_price),
-                inline=True
-            )
-            embed.add_field(
-                name="Stop Loss Level",
-                value=self._format_price(signal['stop_loss']),
-                inline=True
-            )
-
-            # Show remaining pending limits so the trader knows what to re-enter
-            pending = signal.get('pending_limits', [])
+            embed.add_field(name="Trigger Price", value=_fmt(current_price), inline=True)
+            embed.add_field(name="Stop Loss Level", value=_fmt(signal.get("stop_loss", 0)), inline=True)
+            pending = signal.get("pending_limits", [])
             if pending:
-                levels = "  |  ".join(
-                    self._format_price(lim['price_level']) for lim in pending
-                )
-                embed.add_field(
-                    name=f"Pending Limits ({len(pending)})",
-                    value=levels,
-                    inline=False
-                )
-
-            # Source link
-            if signal.get('message_id') and signal.get('channel_id'):
-                if not str(signal['message_id']).startswith('manual_'):
-                    guild_id = signal.get('guild_id')
+                levels = "  |  ".join(_fmt(l["price_level"]) for l in pending)
+                embed.add_field(name=f"Pending Limits ({len(pending)})", value=levels, inline=False)
+            if signal.get("message_id") and signal.get("channel_id"):
+                if not str(signal["message_id"]).startswith("manual_"):
+                    guild_id = signal.get("guild_id")
                     if not guild_id and self.bot and self.bot.guilds:
                         guild_id = self.bot.guilds[0].id
-                    message_url = (
-                        f"https://discord.com/channels/"
-                        f"{guild_id}/{signal['channel_id']}/{signal['message_id']}"
-                    )
-                    embed.add_field(name="Source", value=message_url, inline=False)
-
+                    url = f"https://discord.com/channels/{guild_id}/{signal['channel_id']}/{signal['message_id']}"
+                    embed.add_field(name="Source", value=url, inline=False)
             embed.add_field(
                 name="ℹ️ What happened?",
                 value=(
-                    "Broker spreads widen significantly between 5–6 PM EST each weekday "
-                    "as liquidity providers roll positions.  This hit was likely caused by "
-                    "spread, not a genuine price move.  The signal has been cancelled to "
-                    "protect the trade record."
+                    "Broker spreads widen significantly between 5–6 PM EST each weekday. "
+                    "This hit was likely caused by spread, not a genuine price move. "
+                    "The signal has been cancelled to protect the trade record."
                 ),
-                inline=False
+                inline=False,
             )
-
             embed.set_footer(text=f"Signal #{signal['signal_id']} • Auto-cancelled (spread hour)")
-
             await target_channel.send("<@&1334203997107650662>")
             message = await target_channel.send(embed=embed)
-
-            self.track_alert_message(message.id, signal['signal_id'])
-            self.stats['spread_hour_cancelled'] += 1
-            self.stats['total_alerts'] += 1
-
-            logger.info(
-                f"Spread hour cancel alert sent for signal {signal['signal_id']} "
-                f"({signal['instrument']} @ {self._format_price(current_price)})"
-            )
+            self.track_alert_message(message.id, signal["signal_id"])
+            self.stats["spread_hour_cancelled"] += 1
+            self.stats["total_alerts"] += 1
             return True
-
         except Exception as e:
             logger.error(f"Failed to send spread hour cancel alert: {e}")
-            self.stats['errors'] += 1
+            self.stats["errors"] += 1
             return False
 
-    async def send_news_cancel_alert(
-        self,
-        signal: Dict,
-        current_price: float,
-        news_event,        # NewsEvent — typed loosely to avoid circular import
-    ) -> bool:
-        """
-        Send a compact alert when a signal is auto-cancelled during a news window.
-        Includes a role ping.
-        """
+    async def send_news_cancel_alert(self, signal: Dict, current_price: float, news_event) -> bool:
         target_channel = self._get_alert_channel(signal)
         if not target_channel:
-            logger.error("No alert channel configured for news cancel alert")
             return False
-
         try:
             import pytz
-            EST = pytz.timezone('America/New_York')
+            EST = pytz.timezone("America/New_York")
             news_time_est = news_event.news_time.astimezone(EST)
-
-            # Build a compact summary of the signal's limits
-            all_limits = signal.get('limits', signal.get('pending_limits', []))
+            all_limits = signal.get("limits", signal.get("pending_limits", []))
             if all_limits:
                 limit_prices = "  |  ".join(
-                    self._format_price(
-                        lim['price_level'] if isinstance(lim, dict) else lim
-                    )
-                    for lim in sorted(
-                        all_limits,
-                        key=lambda l: l['sequence_number'] if isinstance(l, dict) else 0
-                    )
+                    _fmt(l["price_level"] if isinstance(l, dict) else l)
+                    for l in sorted(all_limits, key=lambda x: x["sequence_number"] if isinstance(x, dict) else 0)
                 )
             else:
                 limit_prices = "—"
-
             signal_summary = (
                 f"**{signal['instrument']}** {signal['direction'].upper()}\n"
                 f"Limits: {limit_prices}\n"
-                f"SL: {self._format_price(signal['stop_loss'])}"
+                f"SL: {_fmt(signal.get('stop_loss', 0))}"
             )
-
             embed = discord.Embed(
                 title="📰 Signal Cancelled — News",
                 description=(
@@ -700,58 +740,33 @@ class AlertSystem:
                 color=0x5865F2,
                 timestamp=datetime.now(timezone.utc),
             )
-
-            embed.set_footer(
-                text=f"Signal #{signal['signal_id']} • Auto-cancelled (news mode)"
-            )
-
-            # Source link
-            if signal.get('message_id') and signal.get('channel_id'):
-                if not str(signal['message_id']).startswith('manual_'):
-                    guild_id = signal.get('guild_id')
+            embed.set_footer(text=f"Signal #{signal['signal_id']} • Auto-cancelled (news mode)")
+            if signal.get("message_id") and signal.get("channel_id"):
+                if not str(signal["message_id"]).startswith("manual_"):
+                    guild_id = signal.get("guild_id")
                     if not guild_id and self.bot and self.bot.guilds:
                         guild_id = self.bot.guilds[0].id
-                    message_url = (
-                        f"https://discord.com/channels/"
-                        f"{guild_id}/{signal['channel_id']}/{signal['message_id']}"
-                    )
-                    embed.add_field(name="Source", value=message_url, inline=False)
-
-            # Role ping + embed
+                    url = f"https://discord.com/channels/{guild_id}/{signal['channel_id']}/{signal['message_id']}"
+                    embed.add_field(name="Source", value=url, inline=False)
             await target_channel.send("<@&1334203997107650662>")
             message = await target_channel.send(embed=embed)
-
-            self.track_alert_message(message.id, signal['signal_id'])
-            self.stats['news_cancelled'] = self.stats.get('news_cancelled', 0) + 1
-            self.stats['total_alerts'] += 1
-
-            logger.info(
-                f"News cancel alert sent for signal {signal['signal_id']} "
-                f"({signal['instrument']} @ {self._format_price(current_price)})"
-            )
+            self.track_alert_message(message.id, signal["signal_id"])
+            self.stats["news_cancelled"] = self.stats.get("news_cancelled", 0) + 1
+            self.stats["total_alerts"] += 1
             return True
-
         except Exception as e:
             logger.error(f"Failed to send news cancel alert: {e}")
-            self.stats['errors'] += 1
+            self.stats["errors"] += 1
             return False
 
     async def send_news_activated_alert(self, news_event) -> bool:
-        """
-        Send a small informational embed when a news window becomes active.
-        No role ping.
-        """
         if not self.alert_channel:
-            logger.warning("No alert channel configured for news activated alert")
             return False
-
         try:
             import pytz
-            EST = pytz.timezone('America/New_York')
-            news_time_est = news_event.news_time.astimezone(EST)
+            EST = pytz.timezone("America/New_York")
             start_est = news_event.start_time.astimezone(EST)
             end_est = news_event.end_time.astimezone(EST)
-
             embed = discord.Embed(
                 title="📰 News Mode Active",
                 description=(
@@ -762,162 +777,22 @@ class AlertSystem:
                 timestamp=datetime.now(timezone.utc),
             )
             embed.set_footer(text=f"Event #{news_event.event_id} • Signals will be auto-cancelled if hit")
-
             await self.alert_channel.send(embed=embed)
-            self.stats['total_alerts'] += 1
-            logger.info(f"News activated alert sent for event #{news_event.event_id} ({news_event.category.upper()})")
+            self.stats["total_alerts"] += 1
             return True
-
         except Exception as e:
             logger.error(f"Failed to send news activated alert: {e}")
-            self.stats['errors'] += 1
+            self.stats["errors"] += 1
             return False
-    async def send_auto_tp_alert(self, signal: Dict, hit_limits: list,
-                                  last_pnl: float, tp_config) -> bool:
-        """
-        Send auto take-profit alerts to both the alert channel and the profit channel.
-
-        Mirrors what happens on a manual 'profit' reply:
-          - Role ping + profit embed → alert channel (same channel as limit-hit alerts)
-          - Profit embed → profit_channel (from channels.json)
-
-        Args:
-            signal:      Signal dict (needs signal_id, instrument, direction,
-                         message_id, channel_id, total_limits)
-            hit_limits:  Ordered list of hit limit dicts (with hit_price, sequence_number)
-            last_pnl:    P&L of the last hit limit in native units
-            tp_config:   TPConfig instance for formatting
-
-        Returns:
-            True if at least the alert-channel message was sent successfully.
-        """
-        target_channel = self._get_alert_channel(signal)
-        if not target_channel:
-            logger.error("send_auto_tp_alert: no alert channel configured")
-            return False
-
-        instrument = signal['instrument']
-        direction = signal['direction'].upper()
-        pnl_display = tp_config.format_value(instrument, last_pnl)
-        num_hit = len(hit_limits)
-        total = signal.get('total_limits', num_hit)
-
-        # Build source link
-        message_url = None
-        if signal.get('message_id') and signal.get('channel_id'):
-            if not str(signal['message_id']).startswith('manual_'):
-                guild_id = signal.get('guild_id')
-                if not guild_id and self.bot and self.bot.guilds:
-                    guild_id = self.bot.guilds[0].id
-                if guild_id:
-                    message_url = (
-                        f"https://discord.com/channels/{guild_id}"
-                        f"/{signal['channel_id']}/{signal['message_id']}"
-                    )
-
-        # --- Build the embed ---
-        embed = discord.Embed(
-            title="💰 Auto Take-Profit Triggered!",
-            description=f"**{instrument}** {direction}",
-            color=0x00FF00,
-            timestamp=datetime.now(timezone.utc)
-        )
-
-        embed.add_field(name="Profit", value=f"**+{pnl_display}**", inline=True)
-        embed.add_field(name="Direction", value=direction, inline=True)
-        embed.add_field(name="Limits Hit", value=f"{num_hit}/{total}", inline=True)
-
-        # Show each hit limit with its P&L
-        if hit_limits:
-            limits_lines = []
-            for lim in hit_limits:
-                seq = lim.get('sequence_number', '?')
-                price = lim.get('price_level') or lim.get('hit_price', '?')
-                limits_lines.append(f"Limit #{seq}: {self._format_price(price)} ✅")
-            embed.add_field(
-                name="Hit Limits",
-                value="\n".join(limits_lines),
-                inline=False
-            )
-
-        if message_url:
-            embed.add_field(name="Original Signal", value=message_url, inline=False)
-
-        embed.set_footer(text=f"Signal #{signal['signal_id']} • Auto TP • Reply to manage")
-
-        # --- Send to alert channel ---
-        try:
-            await target_channel.send("<@&1334203997107650662>")
-            alert_message = await target_channel.send(embed=embed)
-            self.track_alert_message(alert_message.id, signal['signal_id'])
-            self.stats['auto_tp_sent'] += 1
-            self.stats['total_alerts'] += 1
-            logger.info(f"Auto-TP alert sent for signal {signal['signal_id']} to alert channel")
-        except Exception as e:
-            logger.error(f"Failed to send auto-TP alert to alert channel: {e}", exc_info=True)
-            self.stats['errors'] += 1
-            return False
-
-        # --- Send to profit channel ---
-        try:
-            profit_channel = await self._get_profit_channel()
-            if profit_channel:
-                profit_embed = discord.Embed(
-                    title="💰 PROFIT Alert",
-                    description=f"Signal #{signal['signal_id']} has been marked as **PROFIT** (Auto TP)",
-                    color=0x00FF00,
-                    timestamp=datetime.now(timezone.utc)
-                )
-                profit_embed.add_field(name="Symbol", value=instrument, inline=True)
-                profit_embed.add_field(name="Position", value=direction, inline=True)
-                profit_embed.add_field(name="Profit", value=f"**+{pnl_display}**", inline=True)
-
-                if hit_limits:
-                    limits_lines = []
-                    for lim in hit_limits:
-                        seq = lim.get('sequence_number', '?')
-                        price = lim.get('price_level') or lim.get('hit_price', '?')
-                        limits_lines.append(f"Limit #{seq}: {self._format_price(price)} ✅")
-                    profit_embed.add_field(
-                        name="Limits",
-                        value="\n".join(limits_lines),
-                        inline=True
-                    )
-
-                if signal.get('stop_loss'):
-                    profit_embed.add_field(
-                        name="Stop Loss",
-                        value=self._format_price(signal['stop_loss']),
-                        inline=True
-                    )
-
-                if message_url:
-                    profit_embed.add_field(
-                        name="Original Signal",
-                        value=f"[View Message]({message_url})",
-                        inline=False
-                    )
-
-                profit_embed.set_footer(text="Auto Take-Profit")
-                await profit_channel.send(embed=profit_embed)
-                logger.info(f"Auto-TP profit alert sent for signal {signal['signal_id']} to profit channel")
-            else:
-                logger.warning("send_auto_tp_alert: no profit_channel configured, skipping")
-        except Exception as e:
-            # Don't fail the whole call if only the profit channel send fails
-            logger.error(f"Failed to send auto-TP alert to profit channel: {e}", exc_info=True)
-
-        return True
 
     async def _get_profit_channel(self) -> Optional[discord.TextChannel]:
-        """Load and return the profit channel from channels.json."""
         try:
             from pathlib import Path
             import json
-            config_path = Path(__file__).resolve().parent.parent / 'config' / 'channels.json'
-            with open(config_path, 'r') as f:
-                channels_config = json.load(f)
-            profit_channel_id = channels_config.get('profit_channel')
+            config_path = Path(__file__).resolve().parent.parent / "config" / "channels.json"
+            with open(config_path) as f:
+                cfg = json.load(f)
+            profit_channel_id = cfg.get("profit_channel")
             if not profit_channel_id:
                 return None
             channel = self.bot.get_channel(int(profit_channel_id))
@@ -929,16 +804,17 @@ class AlertSystem:
             return None
 
     def get_stats(self) -> Dict:
-        """Get alert system statistics"""
         return {
-            'alerts': {
-                'approaching': self.stats['approaching_sent'],
-                'hit': self.stats['hit_sent'],
-                'stop_loss': self.stats['stop_loss_sent'],
-                'auto_tp': self.stats['auto_tp_sent'],
-                'total': self.stats['total_alerts']
+            "alerts": {
+                "approaching": self.stats["approaching_sent"],
+                "hit": self.stats["hit_sent"],
+                "stop_loss": self.stats["stop_loss_sent"],
+                "auto_tp": self.stats["auto_tp_sent"],
+                "total": self.stats["total_alerts"],
             },
-            'errors': self.stats['errors'],
-            'channel_configured': self.alert_channel is not None,
-            'tracked_messages': len(self.alert_messages)
+            "errors": self.stats["errors"],
+            "channel_configured": self.alert_channel is not None,
+            "tracked_messages": len(self.alert_messages),
+            "persistent_messages": len(self.signal_messages),
+            "active_pings": len(self.signal_ping_messages),
         }

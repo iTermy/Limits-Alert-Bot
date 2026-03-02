@@ -2,11 +2,20 @@
 News Mode Manager - Tracks active news windows during which signals are auto-cancelled.
 
 Usage:
-    !news USD 12:30pm 15   → cancel all USD pairs hit within 15 min of 12:30pm
-    !news gold 8:30am      → cancel all GOLD signals hit within 15 min of 8:30am (default window)
-    !news all 14:00 30     → cancel ALL signals hit within 30 min of 14:00
+    !news USD 12:30pm 15                  → cancel all USD pairs hit within 15 min of 12:30pm (EST)
+    !news gold 8:30am                     → cancel all GOLD signals hit within 15 min of 8:30am (default window)
+    !news all 14:00 30                    → cancel ALL signals hit within 30 min of 14:00
+    !news USD 14:30 tz:UTC                → specify timezone (EST is default)
+    !news USD 9:30am date:2025-06-15      → schedule for a specific date
+    !news USD 9:30am date:06/15           → date without year (uses current year)
+    !news now [category]                  → activate an immediate open-ended window (until !news off)
+    !news off                             → deactivate all "now" windows
 
-Times are interpreted as Eastern Time (EST/EDT).
+Tags (can be added in any order after the time):
+    tz:<timezone>    e.g. tz:UTC  tz:EST  tz:GMT  tz:CST  tz:PST  tz:London
+    date:<date>      e.g. date:2025-06-15  date:06/15  date:tomorrow
+
+Times are interpreted as Eastern Time (EST/EDT) by default.
 """
 
 from __future__ import annotations
@@ -14,10 +23,11 @@ from __future__ import annotations
 import asyncio
 import json
 import logging
+import re
 from dataclasses import dataclass, field
 from datetime import datetime, timedelta
 from pathlib import Path
-from typing import Dict, List, Optional, Set
+from typing import Dict, List, Optional, Set, Tuple
 import pytz
 
 from utils.logger import get_logger
@@ -25,6 +35,68 @@ from utils.logger import get_logger
 logger = get_logger('news_manager')
 
 EST = pytz.timezone('America/New_York')
+
+# ---------------------------------------------------------------------------
+# Timezone alias map — maps short names to pytz zone names
+# ---------------------------------------------------------------------------
+
+TIMEZONE_ALIASES: Dict[str, str] = {
+    # Eastern
+    'EST': 'America/New_York',
+    'EDT': 'America/New_York',
+    'ET':  'America/New_York',
+    # Central
+    'CST': 'America/Chicago',
+    'CDT': 'America/Chicago',
+    'CT':  'America/Chicago',
+    # Mountain
+    'MST': 'America/Denver',
+    'MDT': 'America/Denver',
+    'MT':  'America/Denver',
+    # Pacific
+    'PST': 'America/Los_Angeles',
+    'PDT': 'America/Los_Angeles',
+    'PT':  'America/Los_Angeles',
+    # UTC / GMT
+    'UTC': 'UTC',
+    'GMT': 'UTC',
+    # European
+    'LONDON': 'Europe/London',
+    'BST':    'Europe/London',
+    'CET':    'Europe/Paris',
+    'CEST':   'Europe/Paris',
+    'PARIS':  'Europe/Paris',
+    'BERLIN': 'Europe/Berlin',
+    # Asian
+    'JST':   'Asia/Tokyo',
+    'TOKYO': 'Asia/Tokyo',
+    'HKT':   'Asia/Hong_Kong',
+    'SGT':   'Asia/Singapore',
+    'IST':   'Asia/Kolkata',
+    # Australian
+    'AEST':   'Australia/Sydney',
+    'AEDT':   'Australia/Sydney',
+    'SYDNEY': 'Australia/Sydney',
+}
+
+
+def resolve_timezone(tz_str: str) -> pytz.BaseTzInfo:
+    """
+    Resolve a timezone string to a pytz timezone.
+    Accepts short aliases (EST, UTC, CET) and full pytz names.
+    Raises ValueError if unrecognised.
+    """
+    upper = tz_str.strip().upper()
+    if upper in TIMEZONE_ALIASES:
+        return pytz.timezone(TIMEZONE_ALIASES[upper])
+    # Try as a direct pytz name (e.g. "America/Toronto")
+    try:
+        return pytz.timezone(tz_str.strip())
+    except pytz.UnknownTimeZoneError:
+        raise ValueError(
+            f"Unknown timezone '{tz_str}'. "
+            f"Use a short code like EST, UTC, GMT, CET, JST, or a full pytz name."
+        )
 
 # ---------------------------------------------------------------------------
 # Currency / category → instrument matching rules
@@ -57,6 +129,10 @@ class NewsEvent:
     created_by: str         # Discord username who set the event
     created_at: datetime = field(default_factory=lambda: datetime.now(pytz.utc))
     event_id: int = field(default=0)
+    # When True the window has no fixed end_time — stays open until manually deactivated
+    is_now_mode: bool = field(default=False)
+    # Original timezone label for display (e.g. "EST", "UTC")
+    display_tz: str = field(default='EST')
 
     @property
     def start_time(self) -> datetime:
@@ -64,6 +140,9 @@ class NewsEvent:
 
     @property
     def end_time(self) -> datetime:
+        if self.is_now_mode:
+            # Far future sentinel — effectively never expires on its own
+            return self.news_time + timedelta(days=365)
         return self.news_time + timedelta(minutes=self.window_minutes)
 
     def is_active(self, at: Optional[datetime] = None) -> bool:
@@ -72,6 +151,8 @@ class NewsEvent:
         return self.start_time <= now <= self.end_time
 
     def is_expired(self, at: Optional[datetime] = None) -> bool:
+        if self.is_now_mode:
+            return False  # Never auto-expires; must be manually removed
         now = at or datetime.now(pytz.utc)
         return now > self.end_time
 
@@ -109,6 +190,11 @@ class NewsEvent:
         return cat in instr
 
     def __str__(self) -> str:
+        if self.is_now_mode:
+            return (
+                f"[#{self.event_id}] {self.category.upper()} news @ "
+                f"NOW (open-ended, manual off required)"
+            )
         news_est = self.news_time.astimezone(EST)
         return (
             f"[#{self.event_id}] {self.category.upper()} news @ "
@@ -168,6 +254,8 @@ class NewsManager:
                     "window_minutes": e.window_minutes,
                     "created_by":     e.created_by,
                     "created_at":     e.created_at.isoformat(),
+                    "is_now_mode":    e.is_now_mode,
+                    "display_tz":     e.display_tz,
                 }
                 for e in self._events
                 if not e.is_expired(now)   # don't bother saving already-expired events
@@ -220,6 +308,8 @@ class NewsManager:
                     created_by=item["created_by"],
                     created_at=created_at,
                     event_id=item["event_id"],
+                    is_now_mode=item.get("is_now_mode", False),
+                    display_tz=item.get("display_tz", "EST"),
                 )
 
                 if not event.is_expired(now):
@@ -244,6 +334,8 @@ class NewsManager:
         news_time: datetime,
         window_minutes: int,
         created_by: str,
+        is_now_mode: bool = False,
+        display_tz: str = 'EST',
     ) -> NewsEvent:
         """Register a new news event, persist to disk, and return it."""
         event = NewsEvent(
@@ -252,12 +344,23 @@ class NewsManager:
             window_minutes=window_minutes,
             created_by=created_by,
             event_id=self._next_id,
+            is_now_mode=is_now_mode,
+            display_tz=display_tz,
         )
         self._next_id += 1
         self._events.append(event)
         self._save()
         logger.info(f"News event added: {event}")
         return event
+
+    def remove_now_events(self) -> int:
+        """Remove all 'now' mode events. Returns count removed."""
+        before = len(self._events)
+        self._events = [e for e in self._events if not e.is_now_mode]
+        removed = before - len(self._events)
+        if removed:
+            self._save()
+        return removed
 
     def is_news_active_for(self, instrument: str) -> Optional[NewsEvent]:
         """
@@ -332,6 +435,10 @@ class NewsManager:
                     active_ids = {e.event_id for e in self._events}
                     alerted_ids &= active_ids
 
+        # Cancel any previously running cleanup task so we don't leak coroutines
+        if self._cleanup_task is not None and not self._cleanup_task.done():
+            self._cleanup_task.cancel()
+
         self._cleanup_task = asyncio.ensure_future(_run())
 
 
@@ -339,24 +446,34 @@ class NewsManager:
 # Parsing helpers
 # ---------------------------------------------------------------------------
 
-def parse_news_command(args_str: str) -> tuple[str, datetime, int]:
+def parse_news_command(args_str: str) -> Tuple[str, datetime, int, str]:
     """
-    Parse the argument string from !news and return (category, news_time_utc, window_minutes).
+    Parse the argument string from !news and return
+    (category, news_time_utc, window_minutes, display_tz_label).
 
-    Expected format:  <category> <time> [window_minutes]
+    Supported format:
+        <category> <time> [window_minutes] [tz:<timezone>] [date:<date>]
+
+    Tags can appear in any order after the time token.
+
     Examples:
         USD 12:30pm 15
         gold 8:30am
         all 14:00 30
-        JPY 9:30AM
+        JPY 9:30AM tz:UTC
+        USD 14:30 tz:London date:2025-06-20
+        EUR 9:00am date:tomorrow tz:CET
+        all 8:30am date:06/15
     """
     tokens = args_str.strip().split()
     if len(tokens) < 2:
-        raise ValueError("Usage: `!news <category> <time> [window_minutes]`")
+        raise ValueError(
+            "Usage: `!news <category> <time> [window] [tz:<timezone>] [date:<date>]`"
+        )
 
     category = tokens[0].upper()
 
-    # Validate category
+    # Validate / warn about category
     is_valid = (
         category == 'ALL'
         or category in FOREX_CURRENCIES
@@ -364,25 +481,116 @@ def parse_news_command(args_str: str) -> tuple[str, datetime, int]:
         or category in {k.upper() for k in NAMED_CATEGORIES}
     )
     if not is_valid:
-        # Still allow it — could be an exact instrument ticker
         logger.warning(f"Unknown news category: {category!r} — treating as exact match")
 
-    time_str = tokens[1]
-    window_minutes = int(tokens[2]) if len(tokens) >= 3 else 10
+    # ---- Extract tags from remaining tokens ----
+    remaining = tokens[1:]
+    tz_label: str = 'EST'
+    tz_zone: pytz.BaseTzInfo = EST
+    date_override: Optional[datetime] = None
+    window_minutes: int = 10
+    time_str: Optional[str] = None
 
-    # Parse time string (supports 12-hour and 24-hour)
-    news_time_est = _parse_time_est(time_str)
-    news_time_utc = news_time_est.astimezone(pytz.utc)
+    non_tag_tokens = []
+    for tok in remaining:
+        lower = tok.lower()
+        if lower.startswith('tz:'):
+            tz_str = tok[3:]
+            tz_zone = resolve_timezone(tz_str)           # raises ValueError if bad
+            tz_label = tz_str.upper()
+        elif lower.startswith('date:'):
+            date_val = tok[5:]
+            date_override = _parse_date(date_val, tz_zone)  # raises ValueError if bad
+        else:
+            non_tag_tokens.append(tok)
 
-    return category, news_time_utc, window_minutes
+    # non_tag_tokens: first is time, optional second is window_minutes
+    if not non_tag_tokens:
+        raise ValueError("Missing time argument.")
+
+    time_str = non_tag_tokens[0]
+    if len(non_tag_tokens) >= 2:
+        try:
+            window_minutes = int(non_tag_tokens[1])
+        except ValueError:
+            raise ValueError(f"Window minutes must be an integer, got '{non_tag_tokens[1]}'")
+
+    # Parse the time, using date_override if provided
+    news_time_local = _parse_time(time_str, tz_zone, date_override)
+    news_time_utc = news_time_local.astimezone(pytz.utc)
+
+    # If no explicit date was given and the window has already fully passed,
+    # auto-advance to the same time tomorrow.  This prevents silently scheduling
+    # an event that is already expired (which would never appear in !newslist).
+    if date_override is None:
+        now_utc = datetime.now(pytz.utc)
+        window_end_utc = news_time_utc + timedelta(minutes=window_minutes)
+        if window_end_utc < now_utc:
+            news_time_local = news_time_local + timedelta(days=1)
+            news_time_utc = news_time_local.astimezone(pytz.utc)
+            logger.info(
+                f"News time {time_str} has already passed today — "
+                f"auto-advanced to tomorrow: {news_time_utc.isoformat()}"
+            )
+
+    return category, news_time_utc, window_minutes, tz_label
 
 
-def _parse_time_est(time_str: str) -> datetime:
+def _parse_date(date_str: str, tz_zone: pytz.BaseTzInfo) -> datetime:
     """
-    Parse a time string into a timezone-aware datetime for today in EST.
-    Accepts: 12:30pm, 12:30PM, 8:30am, 14:00, 9:30, 930am, etc.
+    Parse a date string, returning a timezone-aware datetime at midnight in tz_zone.
+
+    Accepts:
+        YYYY-MM-DD      e.g. 2025-06-15
+        MM/DD           e.g. 06/15  (current year assumed)
+        MM-DD           e.g. 06-15  (current year assumed)
+        tomorrow        next calendar day in the given tz
+        today           today in the given tz
     """
-    now_est = datetime.now(EST)
+    now_local = datetime.now(tz_zone)
+    lower = date_str.lower().strip()
+
+    if lower == 'today':
+        return now_local.replace(hour=0, minute=0, second=0, microsecond=0)
+    if lower == 'tomorrow':
+        return (now_local + timedelta(days=1)).replace(hour=0, minute=0, second=0, microsecond=0)
+
+    # YYYY-MM-DD
+    m = re.fullmatch(r'(\d{4})-(\d{1,2})-(\d{1,2})', date_str)
+    if m:
+        year, month, day = int(m.group(1)), int(m.group(2)), int(m.group(3))
+        naive = datetime(year, month, day, 0, 0, 0)
+        return tz_zone.localize(naive)
+
+    # MM/DD or MM-DD
+    m = re.fullmatch(r'(\d{1,2})[/-](\d{1,2})', date_str)
+    if m:
+        month, day = int(m.group(1)), int(m.group(2))
+        year = now_local.year
+        naive = datetime(year, month, day, 0, 0, 0)
+        return tz_zone.localize(naive)
+
+    raise ValueError(
+        f"Cannot parse date '{date_str}'. "
+        "Use YYYY-MM-DD, MM/DD, 'today', or 'tomorrow'."
+    )
+
+
+def _parse_time(
+    time_str: str,
+    tz_zone: pytz.BaseTzInfo,
+    date_override: Optional[datetime] = None,
+) -> datetime:
+    """
+    Parse a time string into a timezone-aware datetime in tz_zone.
+    If date_override is given, use that date; otherwise use today in tz_zone.
+    Accepts: 12:30pm, 12:30PM, 8:30am, 14:00, 9:30, 930am, 2pm, etc.
+    """
+    if date_override is not None:
+        base = date_override.astimezone(tz_zone)
+    else:
+        base = datetime.now(tz_zone)
+
     time_str = time_str.strip()
 
     formats = [
@@ -407,11 +615,16 @@ def _parse_time_est(time_str: str) -> datetime:
             "Use formats like: 12:30pm, 14:00, 8:30am"
         )
 
-    # Build timezone-aware datetime for today in EST
-    result = now_est.replace(
+    result = base.replace(
         hour=parsed.hour,
         minute=parsed.minute,
         second=0,
         microsecond=0,
     )
     return result
+
+
+# Keep legacy name for any external callers
+def _parse_time_est(time_str: str) -> datetime:
+    """Legacy wrapper — parses time as EST for today."""
+    return _parse_time(time_str, EST)

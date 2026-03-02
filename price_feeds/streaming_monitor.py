@@ -511,6 +511,14 @@ class StreamingPriceMonitor:
             # can trigger false limit hits.  Instead of recording the hit, cancel
             # the entire signal and send a single informational embed.
             if self._is_spread_hour():
+                signal_id = signal['signal_id']
+                # Pre-evict from active tracking BEFORE any awaits so that
+                # concurrent limit checks for other limits on this signal bail early
+                # (mirrors the news-mode guard above).
+                if signal_id not in self.active_signals:
+                    return  # Another limit already triggered the spread-hour cancel
+                self.active_signals.pop(signal_id, None)
+
                 logger.info(
                     f"Spread hour: suppressing limit hit for signal "
                     f"{signal['signal_id']} limit #{limit['sequence_number']} "
@@ -646,6 +654,10 @@ class StreamingPriceMonitor:
         """
         stop_loss = signal['stop_loss']
 
+        # Guard against duplicate SL alerts if price ticks arrive faster than DB writes
+        if signal.get('_sl_alert_sent', False):
+            return
+
         # Check if hit (NO SPREAD BUFFER - exact prices only)
         if direction == 'long':
             is_hit = current_price <= stop_loss
@@ -663,6 +675,9 @@ class StreamingPriceMonitor:
                 await self._react_to_original_signal(signal, "❌")
                 await self._process_spread_hour_cancel(signal)
                 return
+
+            # CRITICAL: Set dedup flag immediately before any awaits
+            signal['_sl_alert_sent'] = True
 
             # Stop loss alerts never show spread
             await self.alert_system.send_stop_loss_alert(signal, current_price)
@@ -756,7 +771,6 @@ class StreamingPriceMonitor:
                 signal_id,
                 'cancelled',
                 reason='spread_hour_auto_cancel',
-                db_manager=self.db,
                 closed_reason='automatic'
             )
             if success:
