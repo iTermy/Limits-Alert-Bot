@@ -90,6 +90,21 @@ class AutoTPMonitor:
         if not hit_limits:
             return False
 
+        # Guard: re-fetch current signal status before doing any TP evaluation.
+        # If the signal was manually closed (profit, cancelled, stop_loss, breakeven)
+        # between ticks, evict it from cache and abort — prevents double-marking.
+        try:
+            current = await self.signal_db.get_signal_with_limits(signal_id)
+            if current and current.get("status") not in ("hit", "active"):
+                logger.info(
+                    f"Signal {signal_id}: status is '{current.get('status')}', "
+                    f"skipping auto-TP and evicting from cache"
+                )
+                self.evict_signal(signal_id)
+                return False
+        except Exception as e:
+            logger.warning(f"Signal {signal_id}: could not verify status before auto-TP: {e}")
+
         num_hit = len(hit_limits)
 
         # Separate last vs earlier limits (ordered by sequence_number)
@@ -131,21 +146,50 @@ class AutoTPMonitor:
             if combined_earlier_pnl < -EPSILON:
                 return False
 
-        success = await self._trigger_auto_profit(signal, hit_limits, last_pnl, num_hit)
+        # Cumulative P&L = last limit P&L + all earlier limits P&L at current price
+        cumulative_pnl = last_pnl
+        if earlier_limits:
+            for lim in earlier_limits:
+                entry = lim.get("hit_price") or lim.get("price_level")
+                if entry is not None:
+                    cumulative_pnl += self.tp_config.calculate_pnl(
+                        instrument, direction, entry, close_price, scalp=scalp
+                    )
+
+        success = await self._trigger_auto_profit(signal, hit_limits, last_pnl, num_hit, cumulative_pnl, close_price)
         return success
 
     async def _trigger_auto_profit(self, signal: Dict, hit_limits: list,
-                                    last_pnl: float, limits_hit: int) -> bool:
+                                    last_pnl: float, limits_hit: int,
+                                    cumulative_pnl: float = None,
+                                    close_price: float = None) -> bool:
         """
         Mark signal as profit, send alerts, and clean up.
+
+        cumulative_pnl: total P&L across all hit limits at the TP price.
+                        Used for display only; DB stores last_pnl as result_pips.
+        close_price:    the market price at TP trigger, used to calculate per-limit pnl.
 
         Returns True if successfully marked as profit, False on any failure.
         """
         signal_id = signal["signal_id"]
         instrument = signal["instrument"]
+        direction = signal["direction"].lower()
+        scalp = signal.get("scalp", False)
 
-        pnl_display = self.tp_config.format_value(instrument, last_pnl)
-        reason = f"Auto TP: {limits_hit} limit(s) hit, last limit +{pnl_display} profit"
+        display_pnl = cumulative_pnl if cumulative_pnl is not None else last_pnl
+        pnl_display = self.tp_config.format_value(instrument, display_pnl)
+        reason = f"Auto TP: {limits_hit} limit(s) hit, +{pnl_display} cumulative profit"
+
+        # Build per-limit pnl map: sequence_number -> formatted pnl string
+        limit_pnl_map = {}
+        if close_price is not None:
+            for lim in hit_limits:
+                seq = lim.get("sequence_number")
+                entry = lim.get("hit_price") or lim.get("price_level")
+                if seq is not None and entry is not None:
+                    pnl = self.tp_config.calculate_pnl(instrument, direction, entry, close_price, scalp=scalp)
+                    limit_pnl_map[seq] = self.tp_config.format_value(instrument, pnl)
 
         logger.info(f"Signal {signal_id} ({instrument}): auto-TP triggered — {reason}")
 
@@ -182,6 +226,8 @@ class AutoTPMonitor:
                     hit_limits,
                     last_pnl,
                     self.tp_config,
+                    cumulative_pnl=cumulative_pnl,
+                    limit_pnl_map=limit_pnl_map,
                 )
             except Exception as e:
                 logger.error(f"Signal {signal_id}: failed to send auto-TP alert: {e}", exc_info=True)

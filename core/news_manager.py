@@ -435,6 +435,10 @@ class NewsManager:
                     active_ids = {e.event_id for e in self._events}
                     alerted_ids &= active_ids
 
+        # Cancel any previously running cleanup task so we don't leak coroutines
+        if self._cleanup_task is not None and not self._cleanup_task.done():
+            self._cleanup_task.cancel()
+
         self._cleanup_task = asyncio.ensure_future(_run())
 
 
@@ -514,6 +518,20 @@ def parse_news_command(args_str: str) -> Tuple[str, datetime, int, str]:
     # Parse the time, using date_override if provided
     news_time_local = _parse_time(time_str, tz_zone, date_override)
     news_time_utc = news_time_local.astimezone(pytz.utc)
+
+    # If no explicit date was given and the window has already fully passed,
+    # auto-advance to the same time tomorrow.  This prevents silently scheduling
+    # an event that is already expired (which would never appear in !newslist).
+    if date_override is None:
+        now_utc = datetime.now(pytz.utc)
+        window_end_utc = news_time_utc + timedelta(minutes=window_minutes)
+        if window_end_utc < now_utc:
+            news_time_local = news_time_local + timedelta(days=1)
+            news_time_utc = news_time_local.astimezone(pytz.utc)
+            logger.info(
+                f"News time {time_str} has already passed today — "
+                f"auto-advanced to tomorrow: {news_time_utc.isoformat()}"
+            )
 
     return category, news_time_utc, window_minutes, tz_label
 

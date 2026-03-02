@@ -1286,6 +1286,12 @@ class TradingCommands(BaseCog):
         start_est = event.start_time.astimezone(EST)
         end_est = event.end_time.astimezone(EST)
 
+        # Detect whether the time was auto-advanced to tomorrow
+        import datetime as _dt
+        today_in_tz = _dt.datetime.now(pytz.utc).astimezone(EST).date()
+        scheduled_date = news_est.date()
+        auto_advanced = scheduled_date > today_in_tz
+
         # Also show in original timezone if not EST
         tz_display = f"{news_est.strftime('%I:%M %p')} EST"
         if tz_label not in ('EST', 'EDT', 'ET'):
@@ -1297,6 +1303,10 @@ class TradingCommands(BaseCog):
                 tz_display = f"{orig_time.strftime('%I:%M %p')} {tz_label} ({news_est.strftime('%I:%M %p')} EST)"
             except Exception:
                 pass
+
+        # Add date to display when auto-advanced (so it's clear it's tomorrow)
+        if auto_advanced:
+            tz_display += f" on {news_est.strftime('%a %b %-d')}"
 
         embed = discord.Embed(
             title="📰 News Mode Scheduled",
@@ -1314,6 +1324,12 @@ class TradingCommands(BaseCog):
             value=f"{start_est.strftime('%I:%M %p')} → {end_est.strftime('%I:%M %p')} EST",
             inline=False,
         )
+        if auto_advanced:
+            embed.add_field(
+                name="ℹ️ Note",
+                value="That time has already passed today — scheduled for **tomorrow** automatically. Use `date:today` to override.",
+                inline=False,
+            )
         embed.set_footer(text=f"Event #{event.event_id} • Set by {ctx.author}")
 
         await ctx.send(embed=embed)

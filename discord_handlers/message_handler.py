@@ -408,6 +408,26 @@ class MessageHandler:
                 # ALSO react to the original signal message
                 await self._react_to_original_signal(signal, action_taken)
 
+                # Update the persistent alert embed to reflect the new status
+                if self.alert_system:
+                    event_map = {
+                        "cancelled": "cancelled",
+                        "marked as PROFIT": "profit",
+                        "marked as HIT": "hit",
+                        "marked as BREAKEVEN": "breakeven",
+                        "marked as STOP LOSS": "stop_loss",
+                        "reactivated": "reactivated",
+                    }
+                    embed_event = event_map.get(action_taken)
+                    if embed_event:
+                        try:
+                            await self.alert_system.update_signal_message(
+                                signal=signal,
+                                event=embed_event,
+                            )
+                        except Exception as _ue:
+                            logger.warning(f"Could not update signal embed after manual command: {_ue}")
+
                 # React to the command message
                 await message.add_reaction("👍")
 
@@ -729,6 +749,30 @@ class MessageHandler:
                         pass
                     await referenced.add_reaction("✅")
                     await referenced.add_reaction("♻️")
+
+                # Update the persistent alert embed to reflect the new status
+                if self.alert_system and signal.get('signal_id') or signal.get('id'):
+                    _sig_id = signal.get('signal_id') or signal.get('id')
+                    # Build a minimal signal dict with signal_id key expected by update_signal_message
+                    _signal_for_update = dict(signal)
+                    _signal_for_update['signal_id'] = _sig_id
+                    event_map = {
+                        "cancelled": "cancelled",
+                        "marked as PROFIT": "profit",
+                        "marked as HIT": "hit",
+                        "marked as BREAKEVEN": "breakeven",
+                        "marked as STOP LOSS": "stop_loss",
+                        "reactivated": "reactivated",
+                    }
+                    embed_event = event_map.get(action_taken)
+                    if embed_event:
+                        try:
+                            await self.alert_system.update_signal_message(
+                                signal=_signal_for_update,
+                                event=embed_event,
+                            )
+                        except Exception as _ue:
+                            logger.warning(f"Could not update signal embed after manual command: {_ue}")
 
                 # React to the command message
                 await message.add_reaction("👍")

@@ -586,11 +586,7 @@ class CorePatternParser:
             if not limits or stop_loss is None:
                 if not _internal_call:
                     logger.debug("Could not determine limits and stop loss")
-                from . import LimitsOrderError
-                raise LimitsOrderError(
-                    f"Could not resolve limits/stop for {instrument} {direction} "
-                    f"with numbers {numbers}"
-                )
+                return None
 
             # Extract expiry
             expiry_type = extract_expiry(cleaned, channel_name, self.channel_config)
@@ -714,11 +710,8 @@ class StockPatternParser:
             # Determine limits and stop loss (pass channel_name for tolls handling)
             limits, stop_loss = determine_limits_and_stop(numbers, direction, channel_name)
             if not limits or stop_loss is None:
-                from . import LimitsOrderError
-                raise LimitsOrderError(
-                    f"Could not resolve limits/stop for {instrument} {direction} "
-                    f"with numbers {numbers}"
-                )
+                logger.debug("Could not determine limits and stop loss")
+                return None
 
             # Extract expiry
             expiry_type = extract_expiry(cleaned, channel_name, self.channel_config)

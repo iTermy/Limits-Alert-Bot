@@ -68,22 +68,51 @@ class CrudOperations:
             from .utils import calculate_expiry
             expiry_time = calculate_expiry(parsed_signal.expiry_type)
 
-            # Insert signal with total limits count
-            signal_id = await self.db.insert_signal(
-                message_id=message_id,
-                channel_id=channel_id,
-                instrument=parsed_signal.instrument,
-                direction=parsed_signal.direction,
-                stop_loss=parsed_signal.stop_loss,
-                expiry_type=parsed_signal.expiry_type,
-                expiry_time=expiry_time,
-                total_limits=len(parsed_signal.limits) if parsed_signal.limits else 0,
-                scalp=getattr(parsed_signal, 'scalp', False)
-            )
+            # Insert signal and its limits atomically in a single transaction
+            # so we never end up with a signal row that has no limit rows.
+            from database.models import SignalStatus, LimitStatus
+            from datetime import datetime
+            import pytz
 
-            # Insert limits with sequence numbers
-            if signal_id and parsed_signal.limits:
-                await self.db.insert_limits(signal_id, parsed_signal.limits)
+            def _parse_dt_local(value):
+                if value is None:
+                    return None
+                if isinstance(value, datetime):
+                    return value if value.tzinfo else pytz.UTC.localize(value)
+                s = str(value).replace('Z', '+00:00')
+                dt = datetime.fromisoformat(s)
+                return dt if dt.tzinfo else pytz.UTC.localize(dt)
+
+            async with self.db.get_connection() as conn:
+                signal_id = await conn.fetchval(
+                    """
+                    INSERT INTO signals (
+                        message_id, channel_id, instrument, direction,
+                        stop_loss, expiry_type, expiry_time, total_limits, status, scalp
+                    )
+                    VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10)
+                    RETURNING id
+                    """,
+                    message_id, channel_id,
+                    parsed_signal.instrument, parsed_signal.direction,
+                    parsed_signal.stop_loss, parsed_signal.expiry_type,
+                    _parse_dt_local(expiry_time),
+                    len(parsed_signal.limits) if parsed_signal.limits else 0,
+                    SignalStatus.ACTIVE,
+                    getattr(parsed_signal, 'scalp', False),
+                )
+
+                if signal_id and parsed_signal.limits:
+                    await conn.executemany(
+                        """
+                        INSERT INTO limits (signal_id, price_level, sequence_number, status)
+                        VALUES ($1, $2, $3, $4)
+                        """,
+                        [
+                            (signal_id, level, idx + 1, LimitStatus.PENDING)
+                            for idx, level in enumerate(parsed_signal.limits)
+                        ],
+                    )
 
             logger.info(f"Saved signal {signal_id}: {parsed_signal.instrument} "
                         f"{parsed_signal.direction} with {len(parsed_signal.limits)} limits")
@@ -162,47 +191,51 @@ class CrudOperations:
                 logger.warning(f"Cannot update signal {signal_id} in final status {existing['status']}")
                 return False
 
-            # Update signal basic info
-            update_query = """
-                UPDATE signals 
-                SET instrument = $1, direction = $2, stop_loss = $3, 
-                    expiry_type = $4, total_limits = $5, scalp = $6, updated_at = CURRENT_TIMESTAMP
-                WHERE id = $7
-            """
-            await self.db.execute(
-                update_query,
-                (parsed_signal.instrument, parsed_signal.direction,
-                 parsed_signal.stop_loss, parsed_signal.expiry_type,
-                 len(parsed_signal.limits), getattr(parsed_signal, 'scalp', False), signal_id)
-            )
+            async with self.db.get_connection() as conn:
+                # Update signal basic info
+                await conn.execute(
+                    """
+                    UPDATE signals
+                    SET instrument = $1, direction = $2, stop_loss = $3,
+                        expiry_type = $4, total_limits = $5, scalp = $6,
+                        updated_at = CURRENT_TIMESTAMP
+                    WHERE id = $7
+                    """,
+                    parsed_signal.instrument, parsed_signal.direction,
+                    parsed_signal.stop_loss, parsed_signal.expiry_type,
+                    len(parsed_signal.limits), getattr(parsed_signal, 'scalp', False),
+                    signal_id,
+                )
 
-            # Get existing limits that were hit
-            hit_limits_query = """
-                SELECT price_level FROM limits 
-                WHERE signal_id = $1 AND status = 'hit'
-                ORDER BY sequence_number
-            """
-            hit_limits = await self.db.fetch_all(hit_limits_query, (signal_id,))
-            hit_prices = [l['price_level'] for l in hit_limits]
+                # Get existing limits that were hit (before deleting)
+                hit_rows = await conn.fetch(
+                    "SELECT price_level FROM limits WHERE signal_id = $1 AND status = 'hit' ORDER BY sequence_number",
+                    signal_id,
+                )
+                hit_prices = [r['price_level'] for r in hit_rows]
 
-            # Delete old limits
-            delete_limits = "DELETE FROM limits WHERE signal_id = $1"
-            await self.db.execute(delete_limits, (signal_id,))
+                # Delete all old limits
+                await conn.execute("DELETE FROM limits WHERE signal_id = $1", signal_id)
 
-            # Insert new limits, preserving hit status for matching prices
-            for idx, level in enumerate(parsed_signal.limits):
-                if level in hit_prices:
-                    # Re-insert as hit
-                    await self.db.execute("""
-                        INSERT INTO limits (signal_id, price_level, sequence_number, status, hit_time)
-                        VALUES ($1, $2, $3, 'hit', CURRENT_TIMESTAMP)
-                    """, (signal_id, level, idx + 1))
-                else:
-                    # Insert as pending
-                    await self.db.execute("""
-                        INSERT INTO limits (signal_id, price_level, sequence_number, status)
-                        VALUES ($1, $2, $3, 'pending')
-                    """, (signal_id, level, idx + 1))
+                # Re-insert limits, preserving hit status for matching prices
+                for idx, level in enumerate(parsed_signal.limits):
+                    if level in hit_prices:
+                        await conn.execute(
+                            """
+                            INSERT INTO limits (signal_id, price_level, sequence_number, status, hit_time)
+                            VALUES ($1, $2, $3, 'hit', CURRENT_TIMESTAMP)
+                            """,
+                            signal_id, level, idx + 1,
+                        )
+                    else:
+                        await conn.execute(
+                            """
+                            INSERT INTO limits (signal_id, price_level, sequence_number, status)
+                            VALUES ($1, $2, $3, 'pending')
+                            """,
+                            signal_id, level, idx + 1,
+                        )
+
             logger.info(f"Updated signal {signal_id} from edited message")
             return True
 
