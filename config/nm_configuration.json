@@ -1,0 +1,47 @@
+{
+  "defaults": {
+    "forex": {
+      "type": "pips",
+      "max_proximity": 7.0,
+      "base_bounce": 4.0,
+      "description": "Standard forex — track within 7 pips; bounce = closest + 4 pips (min 5 @ 1pip, max 11 @ 7pip)"
+    },
+    "forex_jpy": {
+      "type": "pips",
+      "max_proximity": 7.0,
+      "base_bounce": 4.0,
+      "description": "JPY pairs — track within 10 pips; bounce = closest + 6 pips"
+    },
+    "metals": {
+      "type": "dollars",
+      "max_proximity": 5.0,
+      "base_bounce": 4.0,
+      "description": "Gold/Silver — track within $6; bounce = closest + $3 (min $4 @ $1, max $9 @ $6)"
+    },
+    "indices": {
+      "type": "dollars",
+      "max_proximity": 20.0,
+      "base_bounce": 10.0,
+      "description": "Indices — track within $20; bounce = closest + $10"
+    },
+    "stocks": {
+      "type": "dollars",
+      "max_proximity": 1.0,
+      "base_bounce": 0.5,
+      "description": "Stocks — track within $1; bounce = closest + $0.50"
+    },
+    "crypto": {
+      "type": "dollars",
+      "max_proximity": 50.0,
+      "base_bounce": 30.0,
+      "description": "Crypto — track within $50; bounce = closest + $30"
+    },
+    "oil": {
+      "type": "dollars",
+      "max_proximity": 0.2,
+      "base_bounce": 0.1,
+      "description": "Oil — track within $0.20; bounce = closest + $0.10"
+    }
+  },
+  "overrides": {}
+}

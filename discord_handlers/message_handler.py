@@ -274,6 +274,7 @@ class MessageHandler:
                         await self.send_profit_alert(signal, message.author, profit_amount)
                 elif command in ("hit",):
                     logger.debug(f"Processing hit command for signal {signal_id}")
+                    was_cancelled = signal.get('status') == 'cancelled'
                     transitioned = await asyncio.wait_for(
                         self.signal_db.manually_set_signal_to_hit(
                             signal_id, f"Set via alert reply by {message.author.name}"
@@ -287,6 +288,21 @@ class MessageHandler:
                             await monitor.tp_monitor.refresh_hit_limits(signal_id)
                             if signal_id in monitor.active_signals:
                                 monitor.active_signals[signal_id]['status'] = 'hit'
+                            elif was_cancelled:
+                                # Signal was cancelled and not in monitor — re-add it now
+                                # so price tracking and auto-TP resume immediately
+                                reloaded = await self.signal_db.get_signal_with_limits(signal_id)
+                                if reloaded:
+                                    reloaded_for_monitor = dict(reloaded)
+                                    reloaded_for_monitor['signal_id'] = signal_id
+                                    reloaded_for_monitor['status'] = 'hit'
+                                    monitor.active_signals[signal_id] = reloaded_for_monitor
+                                    symbol = signal.get('instrument')
+                                    if symbol:
+                                        monitor.symbol_to_signals.setdefault(symbol, [])
+                                        if signal_id not in monitor.symbol_to_signals[symbol]:
+                                            monitor.symbol_to_signals[symbol].append(signal_id)
+                                        await monitor.stream_manager.bulk_subscribe([symbol])
                         success = True
                         action_taken = "marked as HIT"
                     else:
@@ -340,19 +356,28 @@ class MessageHandler:
                         if signal.get('message_id') and signal.get('channel_id'):
                             try:
                                 original_channel = self.bot.get_channel(int(signal['channel_id']))
-                                if original_channel:
-                                    original_message = await original_channel.fetch_message(int(signal['message_id']))
+                                if original_channel is None:
+                                    original_channel = await self.bot.fetch_channel(int(signal['channel_id']))
+                                original_message = await original_channel.fetch_message(int(signal['message_id']))
 
-                                    from core.parser import parse_signal
-                                    channel_name = self.get_channel_name(int(signal['channel_id']))
-                                    parsed = parse_signal(original_message.content, channel_name)
+                                from core.parser import parse_signal
+                                channel_name = self.get_channel_name(int(signal['channel_id']))
+                                parsed = parse_signal(original_message.content, channel_name)
 
-                                    if parsed:
-                                        success = await asyncio.wait_for(
-                                            self.signal_db.reactivate_cancelled_signal(signal_id, parsed),
-                                            timeout=5.0
-                                        )
+                                if parsed:
+                                    success = await asyncio.wait_for(
+                                        self.signal_db.reactivate_cancelled_signal(signal_id, parsed),
+                                        timeout=5.0
+                                    )
+                                    if success:
                                         action_taken = "reactivated"
+                                        # Mark NM-immune so the monitor can't auto-cancel again
+                                        if (hasattr(self.bot, 'monitor') and self.bot.monitor and
+                                                hasattr(self.bot.monitor, 'nm_monitor')):
+                                            self.bot.monitor.nm_monitor.mark_immune(signal_id)
+                                else:
+                                    await message.reply("❌ Cannot reactivate - failed to parse original signal.")
+                                    return
                             except Exception as e:
                                 logger.error(f"Error getting original message: {e}")
                                 await message.reply("❌ Cannot reactivate - original signal message not found.")
@@ -709,6 +734,40 @@ class MessageHandler:
                         timeout=5.0
                     )
                     action_taken = "marked as STOP LOSS"
+
+                elif command in ("hit",):
+                    self.logger.debug(f"Processing hit command for signal {signal['id']} via signal reply")
+                    was_cancelled = signal.get('status') == 'cancelled'
+                    transitioned = await asyncio.wait_for(
+                        self.signal_db.manually_set_signal_to_hit(
+                            signal['id'], f"Set via signal reply by {message.author.name}"
+                        ),
+                        timeout=5.0
+                    )
+                    if transitioned:
+                        if hasattr(self.bot, 'monitor') and self.bot.monitor:
+                            monitor = self.bot.monitor
+                            await monitor.tp_monitor.refresh_hit_limits(signal['id'])
+                            if signal['id'] in monitor.active_signals:
+                                monitor.active_signals[signal['id']]['status'] = 'hit'
+                            elif was_cancelled:
+                                reloaded = await self.signal_db.get_signal_with_limits(signal['id'])
+                                if reloaded:
+                                    reloaded_for_monitor = dict(reloaded)
+                                    reloaded_for_monitor['signal_id'] = signal['id']
+                                    reloaded_for_monitor['status'] = 'hit'
+                                    monitor.active_signals[signal['id']] = reloaded_for_monitor
+                                    sym = signal.get('instrument')
+                                    if sym:
+                                        monitor.symbol_to_signals.setdefault(sym, [])
+                                        if signal['id'] not in monitor.symbol_to_signals[sym]:
+                                            monitor.symbol_to_signals[sym].append(signal['id'])
+                                        await monitor.stream_manager.bulk_subscribe([sym])
+                        success = True
+                        action_taken = "marked as HIT"
+                    else:
+                        success = False
+                        action_taken = None
 
                 elif command in ("reactivate", "reopen", "active"):
                     # Only allow if signal was cancelled

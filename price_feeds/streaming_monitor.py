@@ -19,6 +19,8 @@ from price_feeds.alert_config import AlertDistanceConfig
 from price_feeds.alert_system import AlertSystem
 from price_feeds.tp_config import TPConfig
 from price_feeds.tp_monitor import AutoTPMonitor
+from price_feeds.nm_config import NMConfig
+from price_feeds.nm_monitor import NearMissMonitor
 from utils.logger import get_logger
 from utils.config_loader import load_settings
 
@@ -52,6 +54,13 @@ class StreamingPriceMonitor:
         self.tp_config = TPConfig()
         self.tp_monitor = AutoTPMonitor(
             tp_config=self.tp_config,
+            signal_db=signal_db,
+            db=db,
+            alert_system=self.alert_system,
+        )
+        self.nm_config = NMConfig()
+        self.nm_monitor = NearMissMonitor(
+            nm_config=self.nm_config,
             signal_db=signal_db,
             db=db,
             alert_system=self.alert_system,
@@ -396,6 +405,22 @@ class StreamingPriceMonitor:
         for limit in signal.get('pending_limits', []):
             await self._check_limit(signal, limit, current_price, direction)
 
+        # Near-miss check: only for active signals (not hit) with approaching alert sent
+        if signal.get('status') in ('active', None):
+            nm_triggered = self.nm_monitor.update(signal, current_price)
+            if nm_triggered:
+                # Evict from all active tracking before awaiting DB write
+                signal_id = signal['signal_id']
+                self.active_signals.pop(signal_id, None)
+                await self._react_to_original_signal(signal, "❌")
+                success = await self.nm_monitor.trigger_near_miss(signal)
+                if success:
+                    self.nm_monitor.evict_signal(signal_id)
+                    self.tp_monitor.evict_signal(signal_id)
+                    await self._maybe_unsubscribe_symbol(signal['instrument'], signal_id)
+                    self.stats['nm_cancels'] = self.stats.get('nm_cancels', 0) + 1
+                return  # Signal is done
+
         # Check stop loss
         if signal.get('stop_loss'):
             await self._check_stop_loss(signal, current_price, direction)
@@ -709,12 +734,16 @@ class StreamingPriceMonitor:
                 await self.tp_monitor.refresh_hit_limits(signal['signal_id'])
                 # Keep signal status as 'hit' so TP checks keep running
                 signal['status'] = 'hit'
+                # Near-miss no longer relevant
+                self.nm_monitor.evict_signal(signal['signal_id'])
                 # Do NOT unsubscribe here — let auto-TP (or manual close/SL) handle that
             else:
                 # Signal is now HIT — refresh TP hit-limit cache so TP checks start immediately
                 await self.tp_monitor.refresh_hit_limits(signal['signal_id'])
                 # Update in-memory status so _check_signal starts running TP checks
                 signal['status'] = 'hit'
+                # Near-miss no longer relevant once a limit is hit
+                self.nm_monitor.evict_signal(signal['signal_id'])
 
         except Exception as e:
             logger.error(f"Failed to process limit hit: {e}")
@@ -824,9 +853,10 @@ class StreamingPriceMonitor:
                 del self.symbol_to_signals[symbol]
                 logger.info(f"Unsubscribed from {symbol} (no active signals)")
 
-        # Remove from active signals and TP cache
+        # Remove from active signals and TP/NM cache
         self.active_signals.pop(completed_signal_id, None)
         self.tp_monitor.evict_signal(completed_signal_id)
+        self.nm_monitor.evict_signal(completed_signal_id)
 
     def get_stats(self) -> Dict:
         """Get monitoring statistics"""
@@ -836,6 +866,7 @@ class StreamingPriceMonitor:
             'active_signals': len(self.active_signals),
             'monitored_symbols': len(self.symbol_to_signals),
             'spread_buffer_enabled': self._spread_buffer_enabled,
+            'nm_tracking_count': self.nm_monitor.get_tracked_count(),
             'stream_manager': self.stream_manager.get_stats(),
             'alert_stats': self.alert_system.get_stats()
         }

@@ -74,7 +74,7 @@ def _build_signal_embed(
     instrument = signal["instrument"]
     direction = signal["direction"].upper()
     signal_id = signal["signal_id"]
-    total = signal.get("total_limits", len(limits)) or len(limits)
+    total = len(limits) or signal.get("total_limits", 0)
 
     def _is_hit(lim: Dict) -> bool:
         if force_hit_up_to_seq and isinstance(lim.get("sequence_number"), int):
@@ -110,15 +110,42 @@ def _build_signal_embed(
     )
 
     # ── Limits section ───────────────────────────────────────────────────────
+    # Load tp_config once for live pnl calculations on hit limits
+    _tp_config = None
+    try:
+        from price_feeds.tp_config import TPConfig
+        _tp_config = TPConfig()
+    except Exception:
+        pass
+
+    direction = signal.get("direction", "long").lower()
+    is_scalp = bool(signal.get("scalp", False))
+
     sorted_limits = sorted(limits, key=lambda l: l.get("sequence_number", 0))
     limit_lines = []
     for lim in sorted_limits:
         seq = lim.get("sequence_number", "?")
         price = _fmt(lim["price_level"])
         if _is_hit(lim):
+            # Priority 1: explicit pnl_map (e.g. auto_tp final values)
             per_limit_pnl = limit_pnl_map.get(seq) if limit_pnl_map else None
             if per_limit_pnl:
                 limit_lines.append(f"~~Limit #{seq}: {price}~~ ✅  +{per_limit_pnl}")
+            elif current_price is not None and _tp_config is not None:
+                # Live pnl: use hit_price if available, otherwise fall back to price_level
+                entry = lim.get("hit_price") or lim.get("price_level")
+                if entry:
+                    try:
+                        pnl_val = _tp_config.calculate_pnl(
+                            instrument, direction, entry, current_price, scalp=is_scalp
+                        )
+                        pnl_str = _tp_config.format_value(instrument, abs(pnl_val))
+                        sign = "+" if pnl_val >= 0 else "-"
+                        limit_lines.append(f"~~Limit #{seq}: {price}~~ ✅  {sign}{pnl_str}")
+                    except Exception:
+                        limit_lines.append(f"~~Limit #{seq}: {price}~~ ✅")
+                else:
+                    limit_lines.append(f"~~Limit #{seq}: {price}~~ ✅")
             else:
                 limit_lines.append(f"~~Limit #{seq}: {price}~~ ✅")
         else:
@@ -358,6 +385,13 @@ class AlertSystem:
                             )
                         else:
                             distance_formatted = f"{distance:.5f}".rstrip("0").rstrip(".")
+
+                # Re-check that the signal is still live before editing — a manual
+                # status change (profit, sl, cancel) may have called _unregister_live_embed
+                # while we were awaiting price data or limits above.
+                if signal_id not in self._live_embeds:
+                    logger.debug(f"Live update: signal {signal_id} was unregistered mid-cycle, skipping")
+                    continue
 
                 # Rebuild and edit the embed (no ping — this is a silent live update)
                 existing_msg = self.signal_messages.get(signal_id)
@@ -674,7 +708,7 @@ class AlertSystem:
             if not limits:
                 limits = [limit]
             seq = limit.get("sequence_number", "?")
-            total = signal.get("total_limits", len(limits))
+            total = len(limits)
 
             # The DB status may not be committed yet at the moment this alert fires,
             # so we force-mark the current limit as hit by its sequence_number.
@@ -772,7 +806,6 @@ class AlertSystem:
         display_pnl = cumulative_pnl if cumulative_pnl is not None else last_pnl
         pnl_display = tp_config.format_value(instrument, display_pnl)
         num_hit = len(hit_limits)
-        total = signal.get("total_limits", num_hit)
 
         # Build a set of hit limit IDs so the embed can correctly show struck-through limits
         hit_limit_ids = {lim.get("limit_id") or lim.get("id") for lim in hit_limits}
@@ -782,6 +815,8 @@ class AlertSystem:
         limits = await self._fetch_limits(signal)
         if not limits:
             limits = hit_limits
+
+        total = len(limits) or num_hit
 
         ping = (
             f"💰 **{instrument}** {direction} — "
@@ -1039,9 +1074,7 @@ class AlertSystem:
         if not target_channel:
             return False
         try:
-            import pytz
-            EST = pytz.timezone("America/New_York")
-            news_time_est = news_event.news_time.astimezone(EST)
+            news_ts = int(news_event.news_time.timestamp())
             all_limits = signal.get("limits", signal.get("pending_limits", []))
             if all_limits:
                 limit_prices = "  |  ".join(
@@ -1060,7 +1093,7 @@ class AlertSystem:
                 description=(
                     f"The following signal was cancelled due to news "
                     f"({news_event.category.upper()} @ "
-                    f"{news_time_est.strftime('%I:%M %p')} EST):\n\n"
+                    f"<t:{news_ts}:t>):\n\n"
                     f"{signal_summary}"
                 ),
                 color=0x5865F2,
@@ -1085,31 +1118,157 @@ class AlertSystem:
             self.stats["errors"] += 1
             return False
 
-    async def send_news_activated_alert(self, news_event) -> bool:
-        if not self.alert_channel:
-            return False
+    async def send_near_miss_cancel_alert(self, signal: Dict, nm_state=None) -> bool:
+        """
+        Update the persistent embed to show near-miss cancellation and send a role ping.
+
+        This mirrors send_auto_tp_alert in structure: edits the existing embed
+        (so the channel history stays clean) and sends a fresh role ping.
+        """
+        signal_id = signal["signal_id"]
+        instrument = signal["instrument"]
+        direction = signal["direction"].upper()
+
+        # Build description of the near-miss
+        closest_str = "N/A"
+        bounce_str = "N/A"
+        if nm_state is not None:
+            try:
+                # Import here to avoid circular imports
+                from price_feeds.nm_config import NMConfig
+                _cfg = NMConfig()
+                closest_str = _cfg.format_value(instrument, nm_state.closest_distance)
+                required_bounce = _cfg.get_required_bounce(instrument, nm_state.closest_distance)
+                bounce_str = _cfg.format_value(instrument, required_bounce)
+            except Exception:
+                pass
+
+        # Unregister from live updates — signal is now in a terminal state
+        self._unregister_live_embed(signal_id)
+
+        ping = (
+            f"❌ **{instrument}** {direction} — "
+            f"Near-Miss detected! Signal auto-cancelled "
+            f"(approached {closest_str} from limit, bounced {bounce_str})"
+        )
+
+        # Fetch all limits for the embed
+        limits = await self._fetch_limits(signal)
+
         try:
-            import pytz
-            EST = pytz.timezone("America/New_York")
-            start_est = news_event.start_time.astimezone(EST)
-            end_est = news_event.end_time.astimezone(EST)
-            embed = discord.Embed(
-                title="📰 News Mode Active",
-                description=(
-                    f"News window activated for **{news_event.category.upper()}**\n"
-                    f"{start_est.strftime('%I:%M %p')} → {end_est.strftime('%I:%M %p')} EST"
-                ),
-                color=0x5865F2,
-                timestamp=datetime.now(timezone.utc),
+            msg = await self._upsert_signal_message(
+                signal=signal,
+                limits=limits,
+                event="cancelled",
+                ping_text=ping,
             )
-            embed.set_footer(text=f"Event #{news_event.event_id} • Signals will be auto-cancelled if hit")
-            await self.alert_channel.send(embed=embed)
+            if msg:
+                self.stats["nm_cancelled"] = self.stats.get("nm_cancelled", 0) + 1
+                self.stats["total_alerts"] += 1
+                logger.info(f"Near-miss cancel alert sent for signal {signal_id} ({instrument})")
+                return True
+        except Exception as e:
+            logger.error(f"Failed to send near-miss cancel alert for signal {signal_id}: {e}")
+            self.stats["errors"] += 1
+
+        return False
+
+    async def send_news_activated_alert(self, news_event) -> bool:
+        """Send news-mode activated embed to ALL alert channels. Returns list of sent messages."""
+        # Collect all distinct alert channels
+        channels = []
+        seen_ids = set()
+        for ch in [
+            self.alert_channel,
+            self.pa_alert_channel,
+            self.toll_alert_channel,
+            self.general_toll_alert_channel,
+        ]:
+            if ch is not None and ch.id not in seen_ids:
+                channels.append(ch)
+                seen_ids.add(ch.id)
+
+        if not channels:
+            return False
+
+        # Build time string using Discord timestamps (auto-localised per viewer)
+        start_ts = int(news_event.start_time.timestamp())
+        if news_event.is_now_mode:
+            if news_event.end_time_override is not None:
+                end_ts = int(news_event.end_time_override.timestamp())
+                time_str = f"**<t:{start_ts}:t> → <t:{end_ts}:t>**"
+            else:
+                time_str = f"**Active from <t:{start_ts}:t>**"
+        else:
+            end_ts = int(news_event.end_time.timestamp())
+            time_str = f"**<t:{start_ts}:t> → <t:{end_ts}:t>**"
+
+        embed = discord.Embed(
+            title="📰 News Mode Active",
+            description=(
+                f"News window activated for **{news_event.category.upper()}**\n"
+                f"{time_str}"
+            ),
+            color=0x5865F2,
+            timestamp=datetime.now(timezone.utc),
+        )
+        embed.set_footer(text=f"Event #{news_event.event_id} • Signals will be auto-cancelled if hit")
+
+        sent_messages = []
+        try:
+            for ch in channels:
+                msg = await ch.send(embed=embed)
+                sent_messages.append(msg)
             self.stats["total_alerts"] += 1
+
+            # Store messages so we can update them when the window ends
+            if not hasattr(self, '_news_activation_messages'):
+                self._news_activation_messages = {}
+            self._news_activation_messages[news_event.event_id] = sent_messages
+
             return True
         except Exception as e:
             logger.error(f"Failed to send news activated alert: {e}")
             self.stats["errors"] += 1
             return False
+
+    async def send_news_ended_alert(self, news_event) -> None:
+        """
+        Edit all activation embeds for this event to show 'News Mode Ended',
+        then schedule deletion after 5 minutes.
+        """
+        messages = []
+        if hasattr(self, '_news_activation_messages'):
+            messages = self._news_activation_messages.pop(news_event.event_id, [])
+
+        end_ts = int(datetime.now(timezone.utc).timestamp())
+        embed = discord.Embed(
+            title="📰 News Mode Ended",
+            description=(
+                f"News window for **{news_event.category.upper()}** has ended.\n"
+                f"**Ended at <t:{end_ts}:t>**"
+            ),
+            color=0x808080,
+            timestamp=datetime.now(timezone.utc),
+        )
+        embed.set_footer(text=f"Event #{news_event.event_id} • This message will be deleted in 5 minutes")
+
+        for msg in messages:
+            try:
+                await msg.edit(embed=embed)
+            except Exception as e:
+                logger.warning(f"Could not edit news activation message {msg.id}: {e}")
+
+        # Auto-delete after 5 minutes
+        if messages:
+            async def _delete_later():
+                await asyncio.sleep(300)
+                for msg in messages:
+                    try:
+                        await msg.delete()
+                    except Exception:
+                        pass
+            asyncio.ensure_future(_delete_later())
 
     async def _get_profit_channel(self) -> Optional[discord.TextChannel]:
         try:
