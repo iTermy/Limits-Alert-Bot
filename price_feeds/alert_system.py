@@ -110,15 +110,42 @@ def _build_signal_embed(
     )
 
     # ── Limits section ───────────────────────────────────────────────────────
+    # Load tp_config once for live pnl calculations on hit limits
+    _tp_config = None
+    try:
+        from price_feeds.tp_config import TPConfig
+        _tp_config = TPConfig()
+    except Exception:
+        pass
+
+    direction = signal.get("direction", "long").lower()
+    is_scalp = bool(signal.get("scalp", False))
+
     sorted_limits = sorted(limits, key=lambda l: l.get("sequence_number", 0))
     limit_lines = []
     for lim in sorted_limits:
         seq = lim.get("sequence_number", "?")
         price = _fmt(lim["price_level"])
         if _is_hit(lim):
+            # Priority 1: explicit pnl_map (e.g. auto_tp final values)
             per_limit_pnl = limit_pnl_map.get(seq) if limit_pnl_map else None
             if per_limit_pnl:
                 limit_lines.append(f"~~Limit #{seq}: {price}~~ ✅  +{per_limit_pnl}")
+            elif current_price is not None and _tp_config is not None:
+                # Live pnl: use hit_price if available, otherwise fall back to price_level
+                entry = lim.get("hit_price") or lim.get("price_level")
+                if entry:
+                    try:
+                        pnl_val = _tp_config.calculate_pnl(
+                            instrument, direction, entry, current_price, scalp=is_scalp
+                        )
+                        pnl_str = _tp_config.format_value(instrument, abs(pnl_val))
+                        sign = "+" if pnl_val >= 0 else "-"
+                        limit_lines.append(f"~~Limit #{seq}: {price}~~ ✅  {sign}{pnl_str}")
+                    except Exception:
+                        limit_lines.append(f"~~Limit #{seq}: {price}~~ ✅")
+                else:
+                    limit_lines.append(f"~~Limit #{seq}: {price}~~ ✅")
             else:
                 limit_lines.append(f"~~Limit #{seq}: {price}~~ ✅")
         else:
@@ -1106,10 +1133,8 @@ class AlertSystem:
                 from price_feeds.nm_config import NMConfig
                 _cfg = NMConfig()
                 closest_str = _cfg.format_value(instrument, nm_state.closest_distance)
-                bounce_str = _cfg.format_value(
-                    instrument,
-                    _cfg.get_bounce_threshold(instrument)
-                )
+                required_bounce = _cfg.get_required_bounce(instrument, nm_state.closest_distance)
+                bounce_str = _cfg.format_value(instrument, required_bounce)
             except Exception:
                 pass
 
@@ -1117,7 +1142,7 @@ class AlertSystem:
         self._unregister_live_embed(signal_id)
 
         ping = (
-            f"⚠️ **{instrument}** {direction} — "
+            f"❌ **{instrument}** {direction} — "
             f"Near-Miss detected! Signal auto-cancelled "
             f"(approached {closest_str} from limit, bounced {bounce_str})"
         )

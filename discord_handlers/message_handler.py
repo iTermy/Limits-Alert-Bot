@@ -340,19 +340,28 @@ class MessageHandler:
                         if signal.get('message_id') and signal.get('channel_id'):
                             try:
                                 original_channel = self.bot.get_channel(int(signal['channel_id']))
-                                if original_channel:
-                                    original_message = await original_channel.fetch_message(int(signal['message_id']))
+                                if original_channel is None:
+                                    original_channel = await self.bot.fetch_channel(int(signal['channel_id']))
+                                original_message = await original_channel.fetch_message(int(signal['message_id']))
 
-                                    from core.parser import parse_signal
-                                    channel_name = self.get_channel_name(int(signal['channel_id']))
-                                    parsed = parse_signal(original_message.content, channel_name)
+                                from core.parser import parse_signal
+                                channel_name = self.get_channel_name(int(signal['channel_id']))
+                                parsed = parse_signal(original_message.content, channel_name)
 
-                                    if parsed:
-                                        success = await asyncio.wait_for(
-                                            self.signal_db.reactivate_cancelled_signal(signal_id, parsed),
-                                            timeout=5.0
-                                        )
+                                if parsed:
+                                    success = await asyncio.wait_for(
+                                        self.signal_db.reactivate_cancelled_signal(signal_id, parsed),
+                                        timeout=5.0
+                                    )
+                                    if success:
                                         action_taken = "reactivated"
+                                        # Mark NM-immune so the monitor can't auto-cancel again
+                                        if (hasattr(self.bot, 'monitor') and self.bot.monitor and
+                                                hasattr(self.bot.monitor, 'nm_monitor')):
+                                            self.bot.monitor.nm_monitor.mark_immune(signal_id)
+                                else:
+                                    await message.reply("❌ Cannot reactivate - failed to parse original signal.")
+                                    return
                             except Exception as e:
                                 logger.error(f"Error getting original message: {e}")
                                 await message.reply("❌ Cannot reactivate - original signal message not found.")

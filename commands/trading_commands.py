@@ -739,27 +739,68 @@ class TradingCommands(BaseCog):
             )
         return [dict(r) for r in rows]
 
-    async def _cancel_signal_ids(self, signal_ids: list, reason: str) -> int:
-        """Cancel a list of signal IDs. Returns number successfully cancelled."""
-        if not signal_ids:
+    async def _cancel_signal_ids(self, signals: list, reason: str) -> int:
+        """
+        Cancel a list of signals. Returns number successfully cancelled.
+
+        `signals` may be a list of full signal dicts (with at least 'id',
+        'message_id', 'channel_id', 'instrument', 'direction') or plain ints.
+        Passing full dicts enables original-message reactions, monitor eviction,
+        and embed pings. Plain ints fall back to embed-only behaviour.
+        """
+        if not signals:
             return 0
+
+        monitor = self.bot.monitor if hasattr(self.bot, 'monitor') and self.bot.monitor else None
+        alert_system = monitor.alert_system if monitor else None
+
         count = 0
-        alert_system = (
-            self.bot.monitor.alert_system
-            if hasattr(self.bot, 'monitor') and self.bot.monitor else None
-        )
-        for sid in signal_ids:
+        for item in signals:
+            # Support both plain IDs and full signal dicts
+            if isinstance(item, dict):
+                sid = item['id']
+                signal_dict = item
+            else:
+                sid = item
+                signal_dict = None
+
             success = await self.signal_db.manually_set_signal_status(
                 sid, 'cancelled', reason
             )
-            if success:
-                count += 1
-                # Update the persistent alert embed
-                if alert_system:
-                    try:
-                        await alert_system.update_embed_for_signal_id(sid, 'cancelled')
-                    except Exception as _ue:
-                        logger.warning(f"Could not update embed after bulk cancel for signal {sid}: {_ue}")
+            if not success:
+                continue
+
+            count += 1
+
+            # 1. Evict from streaming monitor so price-checking stops immediately
+            if monitor:
+                monitor.active_signals.pop(sid, None)
+                if hasattr(monitor, 'nm_monitor'):
+                    monitor.nm_monitor.evict_signal(sid)
+                if hasattr(monitor, 'tp_monitor'):
+                    monitor.tp_monitor.evict_signal(sid)
+
+            # 2. React to the original signal message
+            if signal_dict and monitor:
+                try:
+                    await monitor._react_to_original_signal(signal_dict, "\u274c")
+                except Exception as _re:
+                    logger.warning(f"Could not react to original message for signal {sid}: {_re}")
+
+            # 3. Update the persistent alert embed with a ping so the role is notified
+            if alert_system:
+                try:
+                    ping_text = None
+                    if signal_dict:
+                        instrument = signal_dict.get('instrument', '')
+                        direction = (signal_dict.get('direction') or '').upper()
+                        ping_text = f"\u274c **{instrument}** {direction} \u2014 signal cancelled"
+                    await alert_system.update_embed_for_signal_id(
+                        sid, 'cancelled', ping_text=ping_text
+                    )
+                except Exception as _ue:
+                    logger.warning(f"Could not update embed after bulk cancel for signal {sid}: {_ue}")
+
         return count
 
     async def _bulk_cancel_gold(self, ctx, direction_filter, channel_category):
@@ -776,7 +817,7 @@ class TradingCommands(BaseCog):
         from database import db
         async with db.get_connection() as conn:
             rows = await conn.fetch(
-                """SELECT id, instrument, direction, channel_id
+                """SELECT id, instrument, direction, channel_id, message_id
                    FROM signals
                    WHERE UPPER(instrument) IN ('XAUUSD', 'GOLD')
                      AND status IN ('active', 'hit')"""
@@ -802,9 +843,8 @@ class TradingCommands(BaseCog):
             await loading.edit(content=f"ℹ️ No active Gold {dir_label} {cat_label} signals found.")
             return
 
-        signal_ids = [s['id'] for s in signals]
         cancelled = await self._cancel_signal_ids(
-            signal_ids, f"Bulk cancel by {ctx.author.name}"
+            signals, f"Bulk cancel by {ctx.author.name}"
         )
 
         dir_label = direction_filter.title() + "s" if direction_filter else "Longs & Shorts"
@@ -812,7 +852,7 @@ class TradingCommands(BaseCog):
 
         embed = discord.Embed(
             title="🚫 Bulk Cancel Complete",
-            description=f"Cancelled **{cancelled}/{len(signal_ids)}** Gold {dir_label} ({cat_label}) signals",
+            description=f"Cancelled **{cancelled}/{len(signals)}** Gold {dir_label} ({cat_label}) signals",
             color=0xFFA500
         )
         embed.set_footer(text=f"Actioned by {ctx.author.name}")
@@ -828,7 +868,7 @@ class TradingCommands(BaseCog):
         from database import db
         async with db.get_connection() as conn:
             rows = await conn.fetch(
-                """SELECT id, instrument, direction
+                """SELECT id, instrument, direction, channel_id, message_id
                    FROM signals
                    WHERE UPPER(instrument) LIKE $1
                      AND status IN ('active', 'hit')""",
@@ -840,9 +880,8 @@ class TradingCommands(BaseCog):
             await loading.edit(content=f"ℹ️ No active signals found matching `{target}`.")
             return
 
-        signal_ids = [s['id'] for s in signals]
         cancelled = await self._cancel_signal_ids(
-            signal_ids, f"Bulk cancel by {ctx.author.name}"
+            signals, f"Bulk cancel by {ctx.author.name}"
         )
 
         # Summarise by instrument
@@ -852,7 +891,7 @@ class TradingCommands(BaseCog):
 
         embed = discord.Embed(
             title="🚫 Bulk Cancel Complete",
-            description=f"Cancelled **{cancelled}/{len(signal_ids)}** signals matching `{target}`",
+            description=f"Cancelled **{cancelled}/{len(signals)}** signals matching `{target}`",
             color=0xFFA500
         )
         summary = "\n".join(f"• {instr}: {cnt} signal(s)" for instr, cnt in sorted(instruments.items()))

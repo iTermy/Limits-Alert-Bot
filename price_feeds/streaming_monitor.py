@@ -412,7 +412,7 @@ class StreamingPriceMonitor:
                 # Evict from all active tracking before awaiting DB write
                 signal_id = signal['signal_id']
                 self.active_signals.pop(signal_id, None)
-                await self._react_to_original_signal(signal, "⚠️")
+                await self._react_to_original_signal(signal, "❌")
                 success = await self.nm_monitor.trigger_near_miss(signal)
                 if success:
                     self.nm_monitor.evict_signal(signal_id)
