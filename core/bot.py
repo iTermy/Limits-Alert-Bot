@@ -284,6 +284,12 @@ class TradingBot(commands.Bot):
         # Cancel background tasks
         self.heartbeat.cancel()
 
+        if self.expiry_manager:
+            self.expiry_manager.stop()
+
+        if self.news_manager:
+            self.news_manager.stop_cleanup_task()
+
         if self.monitor:
             await self.monitor.stop()
 

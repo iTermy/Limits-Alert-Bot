@@ -476,6 +476,12 @@ class NewsManager:
 
         self._cleanup_task = asyncio.ensure_future(_run())
 
+    def stop_cleanup_task(self):
+        """Cancel the background cleanup task (called on bot shutdown)."""
+        if self._cleanup_task is not None and not self._cleanup_task.done():
+            self._cleanup_task.cancel()
+            self._cleanup_task = None
+
 
 # ---------------------------------------------------------------------------
 # Parsing helpers
