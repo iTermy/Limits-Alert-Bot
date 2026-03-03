@@ -40,7 +40,11 @@ class ExpiryManager:
                         try:
                             signal = await self.bot.signal_db.get_signal_with_limits(sig_id)
                             if signal and signal.get('status') == 'cancelled' and signal.get('closed_reason') == 'automatic':
-                                await alert_system.update_embed_for_signal_id(sig_id, 'cancelled')
+                                await alert_system.update_embed_for_signal_id(
+                                    sig_id,
+                                    'expired',
+                                    ping_text="Signal expired."
+                                )
                         except Exception as _ue:
                             self.logger.warning(f"Could not update embed after expiry for signal {sig_id}: {_ue}")
 

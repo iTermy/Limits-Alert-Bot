@@ -96,6 +96,8 @@ def _build_signal_embed(
         "profit":       (0x00FF00, "💰 Profit"),
         "breakeven":    (0x808080, "➖ Breakeven"),
         "cancelled":    (0x808080, "❌ Cancelled"),
+        "expired":      (0x808080, "⌛ Expired"),
+        "spread_hour_cancelled": (0xFFA500, "🕔 Spread Hour — Cancelled"),
         "reactivated":  (0x3498DB, "♻️ Reactivated"),
         "edited":       (0x3498DB, "📝 Updated"),
     }
@@ -150,6 +152,25 @@ def _build_signal_embed(
     if distance_formatted and event == "approaching":
         embed.add_field(name="Distance", value=distance_formatted, inline=True)
 
+    # ── Expired notice ───────────────────────────────────────────────────────
+    is_expired = event == "expired" or (
+        event == "cancelled" and signal.get("closed_reason") == "automatic"
+    )
+    if is_expired:
+        embed.add_field(
+            name="⌛ Signal Expired",
+            value="This signal reached its expiry time and was automatically cancelled.",
+            inline=False,
+        )
+
+    # ── Spread hour cancel notice ─────────────────────────────────────────────
+    if event == "spread_hour_cancelled":
+        embed.add_field(
+            name="🕔 Spread Hour — Auto-Cancelled",
+            value="This signal triggered during the **5–6 PM EST spread hour** and was automatically cancelled due to widened spreads.",
+            inline=False,
+        )
+
     # ── Source link ──────────────────────────────────────────────────────────
     msg_id = signal.get("message_id")
     ch_id = signal.get("channel_id")
@@ -160,7 +181,12 @@ def _build_signal_embed(
             url = f"https://discord.com/channels/{guild_id}/{ch_id}/{msg_id}"
             embed.add_field(name="Source", value=url, inline=False)
 
-    embed.set_footer(text=f"Signal #{signal_id} • Reply to this message to manage")
+    if is_expired:
+        embed.set_footer(text=f"Signal #{signal_id} • Auto-expired")
+    elif event == "spread_hour_cancelled":
+        embed.set_footer(text=f"Signal #{signal_id} • Auto-cancelled (spread hour)")
+    else:
+        embed.set_footer(text=f"Signal #{signal_id} • Reply to this message to manage")
     return embed
 
 
@@ -697,36 +723,23 @@ class AlertSystem:
     # ── Spread hour / news cancel (standalone new messages) ──────────────────
 
     async def send_spread_hour_cancel_alert(self, signal: Dict, current_price: float) -> bool:
-        target_channel = self._get_alert_channel(signal)
-        if not target_channel:
-            return False
+        """
+        If an approaching alert embed already exists for this signal, update it to show
+        the spread-hour cancellation and ping members.  If no embed exists yet (no
+        approaching alert was sent), do nothing — the cancel is handled silently in the DB.
+        """
+        signal_id = signal.get("signal_id")
+        if signal_id not in self.signal_messages:
+            # No approaching alert was sent — silent backend cancel, no Discord message needed
+            logger.debug(f"Spread hour cancel for signal {signal_id}: no persistent embed, skipping alert")
+            return True
         try:
-            embed = discord.Embed(
-                title="🕔 Spread Hour — Signal Auto-Cancelled",
-                description=(
-                    f"**{signal['instrument']}** {signal['direction'].upper()} was triggered "
-                    "during the **5–6 PM EST spread hour** and has been automatically cancelled."
-                ),
-                color=0xFFA500,
-                timestamp=datetime.now(timezone.utc),
+            await self.update_signal_message(
+                signal=signal,
+                event="spread_hour_cancelled",
+                current_price=current_price,
+                ping_text="Signal cancelled — spread hour.",
             )
-            embed.add_field(name="Trigger Price", value=_fmt(current_price), inline=True)
-            embed.add_field(name="Stop Loss Level", value=_fmt(signal.get("stop_loss", 0)), inline=True)
-            pending = signal.get("pending_limits", [])
-            if pending:
-                levels = "  |  ".join(_fmt(l["price_level"]) for l in pending)
-                embed.add_field(name=f"Pending Limits ({len(pending)})", value=levels, inline=False)
-            if signal.get("message_id") and signal.get("channel_id"):
-                if not str(signal["message_id"]).startswith("manual_"):
-                    guild_id = signal.get("guild_id")
-                    if not guild_id and self.bot and self.bot.guilds:
-                        guild_id = self.bot.guilds[0].id
-                    url = f"https://discord.com/channels/{guild_id}/{signal['channel_id']}/{signal['message_id']}"
-                    embed.add_field(name="Source", value=url, inline=False)
-            embed.set_footer(text=f"Signal #{signal['signal_id']} • Auto-cancelled (spread hour)")
-            await target_channel.send("<@&1334203997107650662>")
-            message = await target_channel.send(embed=embed)
-            self.track_alert_message(message.id, signal["signal_id"])
             self.stats["spread_hour_cancelled"] += 1
             self.stats["total_alerts"] += 1
             return True
