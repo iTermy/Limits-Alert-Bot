@@ -17,9 +17,33 @@ class ExpiryManager:
     async def check_expiry(self):
         """Check and expire signals past expiry_time."""
         try:
+            # Get the list of signal IDs that are about to be expired so we can update embeds
+            alert_system = (
+                self.bot.monitor.alert_system
+                if hasattr(self.bot, 'monitor') and self.bot.monitor else None
+            )
+
+            # Collect IDs with persistent embeds before expiring
+            ids_to_update = []
+            if alert_system:
+                ids_to_update = [
+                    sid for sid in alert_system.signal_messages.keys()
+                ]
+
             count = await self.bot.signal_db.expire_old_signals()
             if count > 0:
                 self.logger.info(f"Expired {count} signals")
+
+                # Update embeds for any expired signals that had persistent messages
+                if alert_system and ids_to_update:
+                    for sig_id in ids_to_update:
+                        try:
+                            signal = await self.bot.signal_db.get_signal_with_limits(sig_id)
+                            if signal and signal.get('status') == 'cancelled' and signal.get('closed_reason') == 'automatic':
+                                await alert_system.update_embed_for_signal_id(sig_id, 'cancelled')
+                        except Exception as _ue:
+                            self.logger.warning(f"Could not update embed after expiry for signal {sig_id}: {_ue}")
+
         except Exception as e:
             self.logger.error(f"Error in expiry loop: {e}")
 

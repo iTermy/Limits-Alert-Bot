@@ -408,7 +408,13 @@ class MessageHandler:
                 # ALSO react to the original signal message
                 await self._react_to_original_signal(signal, action_taken)
 
-                # Update the persistent alert embed to reflect the new status
+                # Delete the user's reply message to reduce clutter
+                try:
+                    await message.delete()
+                except Exception:
+                    pass
+
+                # Update the persistent alert embed and send a ping saying who manually changed it
                 if self.alert_system:
                     event_map = {
                         "cancelled": "cancelled",
@@ -420,38 +426,32 @@ class MessageHandler:
                     }
                     embed_event = event_map.get(action_taken)
                     if embed_event:
+                        action_emoji_map = {
+                            "profit": "💰",
+                            "hit": "🎯",
+                            "stop_loss": "🛑",
+                            "breakeven": "➖",
+                            "cancelled": "❌",
+                            "reactivated": "♻️",
+                        }
+                        emoji = action_emoji_map.get(embed_event, "✅")
+                        ping_text = (
+                            f"{emoji} **{signal['instrument']}** {signal['direction'].upper()} — "
+                            f"manually {action_taken.lower()} (by {message.author.display_name})"
+                        )
                         try:
+                            # get_signal_with_limits returns 'id', not 'signal_id' —
+                            # normalise so update_signal_message can find the embed
+                            _signal_for_update = dict(signal)
+                            if 'signal_id' not in _signal_for_update:
+                                _signal_for_update['signal_id'] = _signal_for_update.get('id', signal_id)
                             await self.alert_system.update_signal_message(
-                                signal=signal,
+                                signal=_signal_for_update,
                                 event=embed_event,
+                                ping_text=ping_text,
                             )
                         except Exception as _ue:
                             logger.warning(f"Could not update signal embed after manual command: {_ue}")
-
-                # React to the command message
-                await message.add_reaction("👍")
-
-                # Send confirmation
-                embed = discord.Embed(
-                    title="✅ Signal Updated",
-                    description=f"Signal #{signal_id} {action_taken}",
-                    color=0x00FF00,
-                    timestamp=discord.utils.utcnow()
-                )
-                embed.add_field(name="Instrument", value=signal['instrument'], inline=True)
-                embed.add_field(name="Direction", value=signal['direction'].upper(), inline=True)
-                embed.add_field(name="Updated By", value=message.author.mention, inline=True)
-
-                # Add profit amount if specified
-                if action_taken == "marked as PROFIT" and profit_amount:
-                    unit = self.get_pip_unit_name(signal['instrument'])
-                    embed.add_field(name="Profit", value=f"{profit_amount:.1f} {unit}", inline=True)
-
-                embed.set_footer(text=f"Via alert reply")
-
-                # Send role ping before embed (similar to limit hit alerts)
-                await message.channel.send("<@&1334203997107650662>")
-                await message.channel.send(embed=embed)
 
                 logger.info(f"Signal {signal_id} {action_taken} via alert reply by {message.author.name}")
             else:
@@ -750,10 +750,15 @@ class MessageHandler:
                     await referenced.add_reaction("✅")
                     await referenced.add_reaction("♻️")
 
-                # Update the persistent alert embed to reflect the new status
-                if self.alert_system and signal.get('signal_id') or signal.get('id'):
+                # Delete the user's reply message to reduce clutter
+                try:
+                    await message.delete()
+                except Exception:
+                    pass
+
+                # Update the persistent alert embed and send a ping saying who manually changed it
+                if self.alert_system:
                     _sig_id = signal.get('signal_id') or signal.get('id')
-                    # Build a minimal signal dict with signal_id key expected by update_signal_message
                     _signal_for_update = dict(signal)
                     _signal_for_update['signal_id'] = _sig_id
                     event_map = {
@@ -766,16 +771,28 @@ class MessageHandler:
                     }
                     embed_event = event_map.get(action_taken)
                     if embed_event:
+                        action_emoji_map = {
+                            "profit": "💰",
+                            "hit": "🎯",
+                            "stop_loss": "🛑",
+                            "breakeven": "➖",
+                            "cancelled": "❌",
+                            "reactivated": "♻️",
+                        }
+                        emoji = action_emoji_map.get(embed_event, "✅")
+                        ping_text = (
+                            f"{emoji} **{signal['instrument']}** {signal['direction'].upper()} — "
+                            f"manually {action_taken.lower()} (by {message.author.display_name})"
+                        )
                         try:
                             await self.alert_system.update_signal_message(
                                 signal=_signal_for_update,
                                 event=embed_event,
+                                ping_text=ping_text,
                             )
                         except Exception as _ue:
                             logger.warning(f"Could not update signal embed after manual command: {_ue}")
 
-                # React to the command message
-                await message.add_reaction("👍")
                 self.logger.info(f"Signal {signal['id']} {action_taken} by {message.author.name}")
             else:
                 self.logger.warning(f"Failed to process command '{command}' for signal {signal['id']}")
@@ -883,6 +900,26 @@ class MessageHandler:
                 await after.add_reaction("✅")
                 await after.add_reaction("📝")
                 self.logger.info(f"Signal updated after edit: {after.id}")
+
+                # Update the persistent embed and send an alert ping
+                if self.alert_system:
+                    try:
+                        updated_signal = await self.signal_db.get_signal_with_limits(existing['id'])
+                        if updated_signal:
+                            _sig_id = updated_signal.get('signal_id') or updated_signal.get('id')
+                            _signal_for_update = dict(updated_signal)
+                            _signal_for_update['signal_id'] = _sig_id
+                            ping_text = (
+                                f"📝 **{updated_signal['instrument']}** {updated_signal['direction'].upper()} — "
+                                f"signal updated by sender"
+                            )
+                            await self.alert_system.update_signal_message(
+                                signal=_signal_for_update,
+                                event="edited",
+                                ping_text=ping_text,
+                            )
+                    except Exception as _ue:
+                        self.logger.warning(f"Could not update embed after signal edit: {_ue}")
             else:
                 if existing['status'] in ['profit', 'breakeven', 'stop_loss']:
                     await after.add_reaction("🔒")
@@ -902,10 +939,22 @@ class MessageHandler:
             return
 
         self.logger.info(f"Message deleted in monitored channel: {payload.message_id}")
-        success = await self.signal_db.cancel_signal_by_message(str(payload.message_id))
+        result = await self.signal_db.cancel_signal_by_message(str(payload.message_id))
 
-        if success:
+        # cancel_signal_by_message returns True or the signal id depending on implementation
+        if result:
             self.logger.info(f"Signal cancelled due to message deletion: {payload.message_id}")
+            # Update the persistent alert embed
+            if self.alert_system:
+                try:
+                    # Fetch the signal id from the DB so we can update the embed
+                    cancelled_signal = await self.signal_db.get_signal_by_message_id(str(payload.message_id))
+                    if cancelled_signal:
+                        sig_id = cancelled_signal.get('id') or cancelled_signal.get('signal_id')
+                        if sig_id:
+                            await self.alert_system.update_embed_for_signal_id(sig_id, 'cancelled')
+                except Exception as _ue:
+                    self.logger.warning(f"Could not update embed after message delete cancel: {_ue}")
 
     def looks_like_signal(self, text: str) -> bool:
         """Check if text appears to be a trading signal"""

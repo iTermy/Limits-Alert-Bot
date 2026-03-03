@@ -97,6 +97,7 @@ def _build_signal_embed(
         "breakeven":    (0x808080, "➖ Breakeven"),
         "cancelled":    (0x808080, "❌ Cancelled"),
         "reactivated":  (0x3498DB, "♻️ Reactivated"),
+        "edited":       (0x3498DB, "📝 Updated"),
     }
     color, status_label = status_map.get(event, (0xFFA500, "🟡 Active"))
 
@@ -658,6 +659,41 @@ class AlertSystem:
             logger.error(f"Failed to update signal message for {signal_id}: {e}", exc_info=True)
             return False
 
+    async def update_embed_for_signal_id(
+        self,
+        signal_id: int,
+        event: str,
+        ping_text: Optional[str] = None,
+    ) -> bool:
+        """
+        Fetch the signal from the DB by ID and update its persistent embed.
+        Safe to call from anywhere (commands, expiry, message handler, etc.).
+        No-op if the signal has no persistent embed yet.
+        """
+        if signal_id not in self.signal_messages:
+            logger.debug(f"update_embed_for_signal_id: signal {signal_id} has no embed yet — skipping")
+            return False
+        if not (self.bot and hasattr(self.bot, "signal_db") and self.bot.signal_db):
+            logger.warning("update_embed_for_signal_id: bot/signal_db not available")
+            return False
+        try:
+            signal = await self.bot.signal_db.get_signal_with_limits(signal_id)
+            if not signal:
+                logger.warning(f"update_embed_for_signal_id: signal {signal_id} not found in DB")
+                return False
+            # Normalise key: update_signal_message expects signal["signal_id"]
+            if "signal_id" not in signal:
+                signal = dict(signal)
+                signal["signal_id"] = signal.get("id", signal_id)
+            return await self.update_signal_message(
+                signal=signal,
+                event=event,
+                ping_text=ping_text,
+            )
+        except Exception as e:
+            logger.error(f"update_embed_for_signal_id failed for {signal_id}: {e}", exc_info=True)
+            return False
+
     # ── Spread hour / news cancel (standalone new messages) ──────────────────
 
     async def send_spread_hour_cancel_alert(self, signal: Dict, current_price: float) -> bool:
@@ -687,15 +723,6 @@ class AlertSystem:
                         guild_id = self.bot.guilds[0].id
                     url = f"https://discord.com/channels/{guild_id}/{signal['channel_id']}/{signal['message_id']}"
                     embed.add_field(name="Source", value=url, inline=False)
-            embed.add_field(
-                name="ℹ️ What happened?",
-                value=(
-                    "Broker spreads widen significantly between 5–6 PM EST each weekday. "
-                    "This hit was likely caused by spread, not a genuine price move. "
-                    "The signal has been cancelled to protect the trade record."
-                ),
-                inline=False,
-            )
             embed.set_footer(text=f"Signal #{signal['signal_id']} • Auto-cancelled (spread hour)")
             await target_channel.send("<@&1334203997107650662>")
             message = await target_channel.send(embed=embed)
