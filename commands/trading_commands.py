@@ -14,6 +14,7 @@ from typing import Optional, List, Dict
 from datetime import datetime
 from price_feeds.tp_config import TPConfig
 from price_feeds.alert_config import AlertDistanceConfig
+from price_feeds.nm_config import NMConfig
 import pytz
 from core.news_manager import (
     NewsManager,
@@ -168,6 +169,7 @@ class TradingCommands(BaseCog):
         super().__init__(bot)
         self.tp_config = TPConfig()
         self.alert_dist_config = AlertDistanceConfig()
+        self.nm_config = NMConfig()
 
     @commands.command(name="signal")
     async def add_signal(
@@ -562,6 +564,16 @@ class TradingCommands(BaseCog):
                         )
                 except Exception as _ue:
                     logger.warning(f"Could not update embed after setstatus: {_ue}")
+
+            # If reactivating, mark signal as NM-immune so the monitor can't re-fire.
+            # The existing embed is edited in place by reactivate_embed (no duplicate sent).
+            if status == 'active':
+                try:
+                    if hasattr(self.bot, 'monitor') and self.bot.monitor:
+                        if hasattr(self.bot.monitor, 'nm_monitor'):
+                            self.bot.monitor.nm_monitor.mark_immune(signal_id)
+                except Exception as _ne:
+                    logger.warning(f"Could not mark signal {signal_id} NM-immune: {_ne}")
         else:
             await ctx.send("❌ Failed to update signal status")
 
@@ -1900,6 +1912,253 @@ class TradingCommands(BaseCog):
             await ctx.send(f"❌ Error removing alert distance override: {e}")
 
     # ── End Alert Distance commands ────────────────────────────────────────
+
+    # ── Near-Miss (NM) configuration commands ─────────────────────────────
+
+    @commands.command(name="nmconfig", aliases=["nmc", "nm_config"])
+    async def nm_config_command(self, ctx: commands.Context, subcommand: str = None, *args):
+        """
+        Near-miss auto-cancel configuration (linear bounce model).
+
+          !nmconfig show [symbol]                                         — Show NM config
+          !nmconfig set <target> <max_proximity> <base_bounce> [pips|dollars]  — Set (admin)
+          !nmconfig remove <symbol>                                       — Remove override (admin)
+
+        The required bounce scales linearly: required = closest_distance + base_bounce
+        So price that got within 2 pips needs less bounce than one that stayed 6 pips away.
+
+        Examples:
+          !nmconfig show XAUUSD
+          !nmconfig set XAUUSD 6 3 dollars      (within $6; bounce = closest + $3)
+          !nmconfig set forex 7 4 pips          (within 7 pips; bounce = closest + 4 pips)
+          !nmconfig remove XAUUSD
+        """
+        if subcommand is None:
+            await ctx.send(
+                "Usage: `!nmconfig show [symbol]`, `!nmconfig set <target> <proximity> <bounce> [pips|dollars]`, "
+                "`!nmconfig remove <symbol>`"
+            )
+            return
+
+        sub = subcommand.lower()
+
+        if sub == "show":
+            symbol = args[0] if args else None
+            await self._nm_show(ctx, symbol)
+
+        elif sub == "set":
+            if not self.is_admin(ctx.author):
+                await ctx.send("❌ You don't have permission to use this command.")
+                return
+            if len(args) < 2:
+                await ctx.send("❌ Usage: `!nmconfig set <target> <proximity> <bounce> [pips|dollars]`")
+                return
+            target = args[0]
+            proximity_str = args[1]
+            bounce_str = args[2] if len(args) >= 3 else None
+            nm_type = args[3] if len(args) >= 4 else None
+            await self._nm_set(ctx, target, proximity_str, bounce_str, nm_type)
+
+        elif sub == "remove":
+            if not self.is_admin(ctx.author):
+                await ctx.send("❌ You don't have permission to use this command.")
+                return
+            if not args:
+                await ctx.send("❌ Usage: `!nmconfig remove <symbol>`")
+                return
+            await self._nm_remove(ctx, args[0])
+
+        else:
+            await ctx.send(f"❌ Unknown subcommand `{subcommand}`. Use `show`, `set`, or `remove`.")
+
+    async def _nm_show(self, ctx: commands.Context, symbol: str = None):
+        """Show NM config for one symbol or all."""
+        try:
+            if symbol:
+                symbol = symbol.upper()
+                info = self.nm_config.get_params_display(symbol)
+                nm_type = info["type"]
+                unit = "pips" if nm_type == "pips" else "$"
+
+                prox_str = f"{info['max_proximity']} {unit}" if nm_type == "pips" else f"${info['max_proximity']}"
+                base_str = f"{info['base_bounce']} {unit}" if nm_type == "pips" else f"${info['base_bounce']}"
+
+                is_override = symbol in self.nm_config.get_all_overrides()
+
+                embed = discord.Embed(
+                    title=f"NM Config — {symbol}",
+                    color=discord.Color.orange(),
+                    description=(
+                        f"**Formula:** `required_bounce = closest_distance + base_bounce`\n"
+                        f"Price must enter the proximity zone first; any bounce beyond this formula triggers an NM."
+                    ),
+                )
+                embed.add_field(name="Max Proximity", value=prox_str, inline=True)
+                embed.add_field(name="Base Bounce", value=base_str, inline=True)
+                embed.add_field(name="Source", value="Override" if is_override else "Default", inline=True)
+                embed.add_field(
+                    name="Curve Preview",
+                    value=f"```\n{self.nm_config.describe_curve(symbol)}\n```",
+                    inline=False,
+                )
+                if info.get("description"):
+                    embed.add_field(name="Note", value=info["description"], inline=False)
+                embed.set_footer(text="!nmconfig set to adjust | closer approach = less bounce needed")
+                await ctx.send(embed=embed)
+
+            else:
+                defaults = self.nm_config.get_all_defaults()
+                overrides = self.nm_config.get_all_overrides()
+
+                embed = discord.Embed(
+                    title="Near-Miss Auto-Cancel Configuration",
+                    color=discord.Color.orange(),
+                    description=(
+                        "**Linear model:** `required_bounce = closest_distance + base_bounce`\n"
+                        "Price must enter the proximity zone to start tracking."
+                    ),
+                )
+
+                defaults_lines = []
+                for cls, cfg in defaults.items():
+                    t = cfg.get("type", "pips")
+                    p = cfg.get("max_proximity", 0)
+                    b = cfg.get("base_bounce", 0)
+                    if t == "pips":
+                        defaults_lines.append(f"**{cls}**: within {p} pips, base bounce {b} pips")
+                    else:
+                        defaults_lines.append(f"**{cls}**: within ${p}, base bounce ${b}")
+
+                embed.add_field(
+                    name="Defaults",
+                    value="\n".join(defaults_lines) or "None",
+                    inline=False,
+                )
+
+                if overrides:
+                    override_lines = []
+                    for sym, ov in overrides.items():
+                        t = ov.get("type", "pips")
+                        p = ov.get("max_proximity", 0)
+                        b = ov.get("base_bounce", 0)
+                        set_by = ov.get("set_by", "?")
+                        if t == "pips":
+                            override_lines.append(f"**{sym}**: {p} pip / +{b} pip base _(by {set_by})_")
+                        else:
+                            override_lines.append(f"**{sym}**: ${p} / +${b} base _(by {set_by})_")
+                    embed.add_field(
+                        name=f"Per-Symbol Overrides ({len(overrides)})",
+                        value="\n".join(override_lines),
+                        inline=False,
+                    )
+                else:
+                    embed.add_field(name="Per-Symbol Overrides", value="None", inline=False)
+
+                embed.set_footer(text="Use !nmconfig set <target> <max_proximity> <base_bounce> [pips|dollars]")
+                await ctx.send(embed=embed)
+
+        except Exception as e:
+            self.logger.error(f"Error in nmconfig show: {e}", exc_info=True)
+            await ctx.send(f"❌ Error fetching NM config: {e}")
+
+    async def _nm_set(self, ctx, target: str, proximity_str: str, bounce_str: str = None, nm_type: str = None):
+        """Set NM thresholds for an asset class or symbol."""
+        ASSET_CLASSES = {"forex", "forex_jpy", "metals", "indices", "stocks", "crypto", "oil"}
+        VALID_TYPES = {"pips", "dollars"}
+
+        try:
+            try:
+                max_proximity = float(proximity_str)
+            except (ValueError, TypeError):
+                await ctx.send(f"❌ Invalid max_proximity `{proximity_str}` — must be a number.")
+                return
+
+            if bounce_str is None:
+                await ctx.send("❌ Usage: `!nmconfig set <target> <max_proximity> <base_bounce> [pips|dollars]`")
+                return
+
+            try:
+                base_bounce = float(bounce_str)
+            except ValueError:
+                await ctx.send(f"❌ Invalid base_bounce `{bounce_str}` — must be a number.")
+                return
+
+            if max_proximity <= 0 or base_bounce <= 0:
+                await ctx.send("❌ Both values must be positive numbers.")
+                return
+
+            if nm_type is not None:
+                nm_type = nm_type.lower()
+                if nm_type not in VALID_TYPES:
+                    await ctx.send(f"❌ Invalid type `{nm_type}`. Valid: {', '.join(VALID_TYPES)}")
+                    return
+
+            target_lower = target.lower()
+            target_upper = target.upper()
+
+            if target_lower in ASSET_CLASSES:
+                success = self.nm_config.set_default(target_lower, max_proximity, base_bounce, nm_type, set_by=ctx.author.name)
+                label = f"**{target_lower}** (default)"
+            else:
+                success = self.nm_config.set_override(target_upper, max_proximity, base_bounce, nm_type, set_by=ctx.author.name)
+                label = f"**{target_upper}** (override)"
+
+            # Reload live monitor config
+            if hasattr(self.bot, "monitor") and self.bot.monitor:
+                if hasattr(self.bot.monitor, "nm_config"):
+                    self.bot.monitor.nm_config = NMConfig()
+                    self.bot.monitor.nm_monitor.nm_config = self.bot.monitor.nm_config
+
+            unit = nm_type if nm_type else "?"
+            embed = discord.Embed(title="NM Configuration Updated", color=discord.Color.green())
+            embed.add_field(name="Target", value=label, inline=True)
+            embed.add_field(name="Max Proximity", value=f"{max_proximity} {unit}", inline=True)
+            embed.add_field(name="Base Bounce", value=f"{base_bounce} {unit}", inline=True)
+            embed.add_field(
+                name="Curve Preview",
+                value=f"```\n{self.nm_config.describe_curve(target_upper if target_lower not in ASSET_CLASSES else 'EURUSD')}\n```",
+                inline=False,
+            )
+            embed.set_footer(text=f"Set by {ctx.author.name} | required_bounce = closest_distance + base_bounce")
+            await ctx.send(embed=embed)
+
+        except Exception as e:
+            self.logger.error(f"Error in nmconfig set: {e}", exc_info=True)
+            await ctx.send(f"❌ Error setting NM config: {e}")
+
+    async def _nm_remove(self, ctx, symbol: str):
+        """Remove a per-symbol NM override."""
+        try:
+            symbol_upper = symbol.upper()
+            removed = self.nm_config.remove_override(symbol_upper)
+
+            # Reload live monitor config
+            if hasattr(self.bot, "monitor") and self.bot.monitor:
+                if hasattr(self.bot.monitor, "nm_config"):
+                    self.bot.monitor.nm_config = NMConfig()
+                    self.bot.monitor.nm_monitor.nm_config = self.bot.monitor.nm_config
+
+            if removed:
+                info = self.nm_config.get_params_display(symbol_upper)
+                t = info["type"]
+                p, b = info["max_proximity"], info["base_bounce"]
+                fallback_str = f"{p} pip proximity, +{b} pip base" if t == "pips" else f"${p} proximity, +${b} base"
+                asset_class = self.nm_config._get_asset_class(symbol_upper)
+
+                embed = discord.Embed(title="NM Override Removed", color=discord.Color.green())
+                embed.add_field(name="Symbol", value=symbol_upper, inline=True)
+                embed.add_field(name="Now Using", value=f"{asset_class} default: {fallback_str}", inline=True)
+                await ctx.send(embed=embed)
+            else:
+                await ctx.send(
+                    f"No NM override found for `{symbol_upper}`. It was already using the asset-class default."
+                )
+
+        except Exception as e:
+            self.logger.error(f"Error in nmconfig remove: {e}", exc_info=True)
+            await ctx.send(f"❌ Error removing NM override: {e}")
+
+    # ── End Near-Miss commands ─────────────────────────────────────────────
 
 
 async def setup(bot):

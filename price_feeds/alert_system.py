@@ -1085,6 +1085,63 @@ class AlertSystem:
             self.stats["errors"] += 1
             return False
 
+    async def send_near_miss_cancel_alert(self, signal: Dict, nm_state=None) -> bool:
+        """
+        Update the persistent embed to show near-miss cancellation and send a role ping.
+
+        This mirrors send_auto_tp_alert in structure: edits the existing embed
+        (so the channel history stays clean) and sends a fresh role ping.
+        """
+        signal_id = signal["signal_id"]
+        instrument = signal["instrument"]
+        direction = signal["direction"].upper()
+
+        # Build description of the near-miss
+        closest_str = "N/A"
+        bounce_str = "N/A"
+        if nm_state is not None:
+            try:
+                # Import here to avoid circular imports
+                from price_feeds.nm_config import NMConfig
+                _cfg = NMConfig()
+                closest_str = _cfg.format_value(instrument, nm_state.closest_distance)
+                bounce_str = _cfg.format_value(
+                    instrument,
+                    _cfg.get_bounce_threshold(instrument)
+                )
+            except Exception:
+                pass
+
+        # Unregister from live updates — signal is now in a terminal state
+        self._unregister_live_embed(signal_id)
+
+        ping = (
+            f"⚠️ **{instrument}** {direction} — "
+            f"Near-Miss detected! Signal auto-cancelled "
+            f"(approached {closest_str} from limit, bounced {bounce_str})"
+        )
+
+        # Fetch all limits for the embed
+        limits = await self._fetch_limits(signal)
+
+        try:
+            msg = await self._upsert_signal_message(
+                signal=signal,
+                limits=limits,
+                event="cancelled",
+                ping_text=ping,
+            )
+            if msg:
+                self.stats["nm_cancelled"] = self.stats.get("nm_cancelled", 0) + 1
+                self.stats["total_alerts"] += 1
+                logger.info(f"Near-miss cancel alert sent for signal {signal_id} ({instrument})")
+                return True
+        except Exception as e:
+            logger.error(f"Failed to send near-miss cancel alert for signal {signal_id}: {e}")
+            self.stats["errors"] += 1
+
+        return False
+
     async def send_news_activated_alert(self, news_event) -> bool:
         if not self.alert_channel:
             return False

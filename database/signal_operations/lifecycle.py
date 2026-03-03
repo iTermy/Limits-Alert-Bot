@@ -153,10 +153,12 @@ class LifecycleManager:
                         INSERT INTO status_changes (signal_id, old_status, new_status, change_type, reason)
                         VALUES ($1, $2, $3, $4, $5)
                     """, signal_id, SignalStatus.CANCELLED, new_status, 'manual', 'Signal reactivated')
-                    # Reactivate cancelled limits as pending
+                    # Reactivate cancelled limits as pending.
+                    # approaching_alert_sent is intentionally left as-is (TRUE) so the
+                    # existing approaching embed is reused rather than sending a duplicate.
                     await conn.execute("""
                         UPDATE limits 
-                        SET status = 'pending' 
+                        SET status = 'pending'
                         WHERE signal_id = $1 AND status = 'cancelled'
                     """, signal_id,)
                 logger.info(f"Successfully reactivated signal {signal_id} to status {new_status}")
