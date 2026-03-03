@@ -530,10 +530,35 @@ class StreamingPriceMonitor:
                 return  # All subsequent limit/SL checks for this signal are moot
 
             # ENHANCED: Pass spread and buffer status to alert system
+            # Calculate distance to next pending limit for the hit embed
+            next_limit_distance_formatted = None
+            current_seq = limit.get('sequence_number', 0)
+            pending_limits = signal.get('pending_limits', [])
+            # Find the next pending limit (lowest sequence_number > current)
+            next_limits = [
+                l for l in pending_limits
+                if isinstance(l.get('sequence_number'), int)
+                and l['sequence_number'] > current_seq
+                and not l.get('hit_alert_sent')
+            ]
+            if next_limits:
+                next_limit = min(next_limits, key=lambda l: l['sequence_number'])
+                next_seq = next_limit['sequence_number']
+                next_price = next_limit['price_level']
+                next_distance = abs(current_price - next_price)
+                try:
+                    next_limit_distance_formatted = (
+                        f"Limit #{next_seq} distance: "
+                        f"{self.alert_config.format_distance_for_display(symbol, next_distance, current_price)}"
+                    )
+                except Exception as e:
+                    logger.warning(f"Could not format next limit distance: {e}")
+
             await self.alert_system.send_limit_hit_alert(
                 signal, limit, current_price,
                 spread=spread,
-                spread_buffer_enabled=spread_buffer_enabled
+                spread_buffer_enabled=spread_buffer_enabled,
+                next_limit_distance_formatted=next_limit_distance_formatted,
             )
             # Add reaction to original signal message for limit hit
             await self._react_to_original_signal(signal, "🎯")

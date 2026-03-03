@@ -445,11 +445,18 @@ class MessageHandler:
                             _signal_for_update = dict(signal)
                             if 'signal_id' not in _signal_for_update:
                                 _signal_for_update['signal_id'] = _signal_for_update.get('id', signal_id)
-                            await self.alert_system.update_signal_message(
-                                signal=_signal_for_update,
-                                event=embed_event,
-                                ping_text=ping_text,
-                            )
+                            if embed_event == "reactivated":
+                                # Rebuild embed with correct live state (approaching/hit) + current price
+                                await self.alert_system.reactivate_embed(
+                                    signal=_signal_for_update,
+                                    ping_text=ping_text,
+                                )
+                            else:
+                                await self.alert_system.update_signal_message(
+                                    signal=_signal_for_update,
+                                    event=embed_event,
+                                    ping_text=ping_text,
+                                )
                         except Exception as _ue:
                             logger.warning(f"Could not update signal embed after manual command: {_ue}")
 
@@ -785,11 +792,18 @@ class MessageHandler:
                             f"manually {action_taken.lower()} (by {message.author.display_name})"
                         )
                         try:
-                            await self.alert_system.update_signal_message(
-                                signal=_signal_for_update,
-                                event=embed_event,
-                                ping_text=ping_text,
-                            )
+                            if embed_event == "reactivated":
+                                # Rebuild embed with correct live state (approaching/hit) + current price
+                                await self.alert_system.reactivate_embed(
+                                    signal=_signal_for_update,
+                                    ping_text=ping_text,
+                                )
+                            else:
+                                await self.alert_system.update_signal_message(
+                                    signal=_signal_for_update,
+                                    event=embed_event,
+                                    ping_text=ping_text,
+                                )
                         except Exception as _ue:
                             logger.warning(f"Could not update signal embed after manual command: {_ue}")
 

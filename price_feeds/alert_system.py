@@ -54,6 +54,7 @@ def _build_signal_embed(
     pnl_display: Optional[str] = None,
     force_hit_up_to_seq: int = 0,
     limit_pnl_map: Optional[Dict] = None,
+    next_limit_distance_formatted: Optional[str] = None,
 ) -> discord.Embed:
     """
     Build (or rebuild) the single persistent embed for a signal.
@@ -151,6 +152,10 @@ def _build_signal_embed(
     # ── Distance (approaching only) ──────────────────────────────────────────
     if distance_formatted and event == "approaching":
         embed.add_field(name="Distance", value=distance_formatted, inline=True)
+
+    # ── Next limit distance (hit events only) ────────────────────────────────
+    if next_limit_distance_formatted and event == "hit":
+        embed.add_field(name="Next Limit Distance", value=next_limit_distance_formatted, inline=True)
 
     # ── Expired notice ───────────────────────────────────────────────────────
     is_expired = event == "expired" or (
@@ -377,6 +382,7 @@ class AlertSystem:
         pnl_display: Optional[str] = None,
         force_hit_up_to_seq: int = 0,
         limit_pnl_map: Optional[Dict] = None,
+        next_limit_distance_formatted: Optional[str] = None,
     ) -> Optional[discord.Message]:
         """
         Send a ping then create or edit the persistent embed for this signal.
@@ -408,6 +414,7 @@ class AlertSystem:
             pnl_display=pnl_display,
             force_hit_up_to_seq=force_hit_up_to_seq,
             limit_pnl_map=limit_pnl_map,
+            next_limit_distance_formatted=next_limit_distance_formatted,
         )
 
         # ── Edit or create the persistent embed ───────────────────────────────
@@ -504,6 +511,7 @@ class AlertSystem:
         current_price: float,
         spread: float = None,
         spread_buffer_enabled: bool = False,
+        next_limit_distance_formatted: Optional[str] = None,
     ) -> bool:
         try:
             limits = await self._fetch_limits(signal)
@@ -535,6 +543,7 @@ class AlertSystem:
                 spread=spread, spread_buffer_enabled=spread_buffer_enabled,
                 ping_text=ping,
                 force_hit_up_to_seq=force_hit_up_to_seq,
+                next_limit_distance_formatted=next_limit_distance_formatted,
             )
             if msg:
                 self.stats["hit_sent"] += 1

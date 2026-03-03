@@ -135,6 +135,12 @@ class TradingBot(commands.Bot):
             self.message_handler.alert_system = self.monitor.alert_system
             self.logger.info("Re-connected alert system in on_ready")
 
+        # Start live embed price update loop
+        if self.monitor and self.monitor.alert_system:
+            self.monitor.alert_system.bot = self
+            self.monitor.alert_system.start_live_updates()
+            self.logger.info("Live embed update loop started")
+
         # Set bot status
         await self.change_presence(
             activity=discord.Activity(
