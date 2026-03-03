@@ -315,7 +315,38 @@ class LifecycleManager:
             if signal_row['status'] == SignalStatus.HIT:
                 logger.info(f"Signal {signal_id} is already HIT — no-op for manual hit")
                 return False  # Caller uses False to skip TP re-init (already running)
-            if signal_row['status'] != SignalStatus.ACTIVE:
+
+            # If the signal was auto-cancelled (e.g. auto-nm by mistake), reactivate it first
+            if signal_row['status'] == SignalStatus.CANCELLED:
+                logger.info(
+                    f"Signal {signal_id} is CANCELLED — reactivating before manual HIT"
+                )
+                async with self.db.get_connection() as conn:
+                    now = datetime.now(pytz.UTC)
+                    await conn.execute("""
+                        UPDATE signals
+                        SET status = $1, updated_at = $2,
+                            closed_at = NULL, closed_reason = NULL, result_pips = NULL
+                        WHERE id = $3
+                    """, SignalStatus.ACTIVE, now, signal_id)
+                    # Restore cancelled limits to pending so the hit can proceed
+                    await conn.execute("""
+                        UPDATE limits
+                        SET status = 'pending'
+                        WHERE signal_id = $1 AND status = 'cancelled'
+                    """, signal_id)
+                    await conn.execute("""
+                        INSERT INTO status_changes (signal_id, old_status, new_status, change_type, reason)
+                        VALUES ($1, $2, $3, 'manual', $4)
+                    """, signal_id, SignalStatus.CANCELLED, SignalStatus.ACTIVE,
+                        f"Reactivated as part of manual hit — {reason}")
+                # Refresh limits list after reactivation
+                limits = await self.db.fetch_all(
+                    "SELECT * FROM limits WHERE signal_id = $1 ORDER BY sequence_number",
+                    (signal_id,)
+                )
+
+            elif signal_row['status'] != SignalStatus.ACTIVE:
                 logger.warning(f"Signal {signal_id} is not ACTIVE (status: {signal_row['status']}), cannot manually mark as HIT")
                 return False
 

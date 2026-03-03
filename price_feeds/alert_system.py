@@ -386,6 +386,13 @@ class AlertSystem:
                         else:
                             distance_formatted = f"{distance:.5f}".rstrip("0").rstrip(".")
 
+                # Re-check that the signal is still live before editing — a manual
+                # status change (profit, sl, cancel) may have called _unregister_live_embed
+                # while we were awaiting price data or limits above.
+                if signal_id not in self._live_embeds:
+                    logger.debug(f"Live update: signal {signal_id} was unregistered mid-cycle, skipping")
+                    continue
+
                 # Rebuild and edit the embed (no ping — this is a silent live update)
                 existing_msg = self.signal_messages.get(signal_id)
                 if not existing_msg:
