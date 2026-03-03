@@ -54,7 +54,6 @@ def _build_signal_embed(
     pnl_display: Optional[str] = None,
     force_hit_up_to_seq: int = 0,
     limit_pnl_map: Optional[Dict] = None,
-    next_limit_distance_formatted: Optional[str] = None,
 ) -> discord.Embed:
     """
     Build (or rebuild) the single persistent embed for a signal.
@@ -153,10 +152,6 @@ def _build_signal_embed(
     if distance_formatted and event == "approaching":
         embed.add_field(name="Distance", value=distance_formatted, inline=True)
 
-    # ── Next limit distance (hit events only) ────────────────────────────────
-    if next_limit_distance_formatted and event == "hit":
-        embed.add_field(name="Next Limit Distance", value=next_limit_distance_formatted, inline=True)
-
     # ── Expired notice ───────────────────────────────────────────────────────
     is_expired = event == "expired" or (
         event == "cancelled" and signal.get("closed_reason") == "automatic"
@@ -221,7 +216,18 @@ class AlertSystem:
     ────────────────
     Call update_signal_message(signal, event, ...) from message_handler.py after
     processing reply commands (profit, sl, cancel, etc.) to update the embed.
+
+    Live Price Updates
+    ──────────────────
+    Active approaching/hit embeds are refreshed every LIVE_UPDATE_INTERVAL seconds
+    with the latest price and distance. Only embeds in "live" states (approaching,
+    hit) are updated; terminal states (profit, cancelled, etc.) are left static.
+    Updates are staggered 1 second apart to stay well within Discord's 5 edits /
+    5 seconds per-channel rate limit.
     """
+
+    # How often (seconds) to refresh live embeds with the latest price/distance
+    LIVE_UPDATE_INTERVAL = 15
 
     def __init__(self, alert_channel: Optional[discord.TextChannel] = None, bot=None):
         self.alert_channel = alert_channel
@@ -241,6 +247,13 @@ class AlertSystem:
         # BACKWARDS COMPAT: alert message ID (str) → signal_id
         self.alert_messages: Dict[str, int] = {}
 
+        # signal_id → {"signal": dict, "event": str, "spread_buffer_enabled": bool}
+        # Tracks which signals have "live" embeds that should be refreshed with prices
+        self._live_embeds: Dict[int, Dict] = {}
+
+        # Background task handle
+        self._live_update_task: Optional[asyncio.Task] = None
+
         self.stats = {
             "approaching_sent": 0,
             "hit_sent": 0,
@@ -250,6 +263,148 @@ class AlertSystem:
             "total_alerts": 0,
             "errors": 0,
         }
+
+    # ── Live update loop ─────────────────────────────────────────────────────
+
+    def start_live_updates(self):
+        """Start the background task that refreshes live embeds. Call after bot is ready."""
+        if self._live_update_task and not self._live_update_task.done():
+            return
+        self._live_update_task = asyncio.create_task(self._live_update_loop())
+        logger.info("Live embed update loop started")
+
+    def stop_live_updates(self):
+        """Cancel the live update loop."""
+        if self._live_update_task and not self._live_update_task.done():
+            self._live_update_task.cancel()
+            logger.info("Live embed update loop stopped")
+
+    async def _live_update_loop(self):
+        """
+        Periodically refreshes all active approaching/hit embeds with the latest
+        price and distance. Staggered 1 second per embed to respect Discord rate limits.
+        """
+        await asyncio.sleep(5)  # Brief startup delay
+        while True:
+            try:
+                await asyncio.sleep(self.LIVE_UPDATE_INTERVAL)
+                await self._refresh_live_embeds()
+            except asyncio.CancelledError:
+                break
+            except Exception as e:
+                logger.error(f"Live update loop error: {e}", exc_info=True)
+
+    async def _refresh_live_embeds(self):
+        """Refresh each live embed with the latest price, staggered 1s apart."""
+        if not self._live_embeds:
+            return
+        if not (self.bot and hasattr(self.bot, "monitor") and self.bot.monitor):
+            return
+
+        monitor = self.bot.monitor
+        stream_manager = getattr(monitor, "stream_manager", None)
+        if not stream_manager:
+            return
+
+        signal_ids = list(self._live_embeds.keys())
+        logger.debug(f"Refreshing {len(signal_ids)} live embed(s)")
+
+        for i, signal_id in enumerate(signal_ids):
+            # Stagger updates: 1 second apart to stay well under rate limits
+            if i > 0:
+                await asyncio.sleep(1)
+
+            entry = self._live_embeds.get(signal_id)
+            if not entry:
+                continue
+
+            signal = entry["signal"]
+            event = entry["event"]
+            spread_buffer_enabled = entry.get("spread_buffer_enabled", False)
+
+            try:
+                # Get latest price from the stream manager
+                instrument = signal["instrument"]
+                price_data = await stream_manager.get_latest_price(instrument)
+                if not price_data:
+                    continue
+
+                direction = signal.get("direction", "long").lower()
+                current_price = price_data["ask"] if direction == "long" else price_data["bid"]
+                spread = price_data.get("spread", 0.0)
+
+                # Fetch fresh limits from DB
+                limits = await self._fetch_limits(signal)
+
+                # Calculate distance for approaching embeds (to nearest pending limit)
+                distance_formatted = None
+                if event == "approaching":
+                    pending_limits = [
+                        l for l in limits
+                        if l.get("status") != "hit" and not l.get("hit_alert_sent")
+                    ]
+                    if pending_limits:
+                        nearest = min(
+                            pending_limits,
+                            key=lambda l: abs(current_price - l["price_level"])
+                        )
+                        distance = abs(current_price - nearest["price_level"])
+                        if hasattr(monitor, "alert_config") and monitor.alert_config:
+                            distance_formatted = monitor.alert_config.format_distance_for_display(
+                                instrument, distance, current_price
+                            )
+                        else:
+                            distance_formatted = f"{distance:.5f}".rstrip("0").rstrip(".")
+
+                # Rebuild and edit the embed (no ping — this is a silent live update)
+                existing_msg = self.signal_messages.get(signal_id)
+                if not existing_msg:
+                    continue
+
+                guild_id = signal.get("guild_id")
+                if not guild_id and self.bot and self.bot.guilds:
+                    guild_id = self.bot.guilds[0].id
+
+                embed = _build_signal_embed(
+                    signal=signal,
+                    limits=limits,
+                    current_price=current_price,
+                    distance_formatted=distance_formatted,
+                    spread=spread,
+                    spread_buffer_enabled=spread_buffer_enabled,
+                    event=event,
+                    guild_id=guild_id,
+                    bot=self.bot,
+                )
+
+                try:
+                    await existing_msg.edit(embed=embed)
+                    logger.debug(f"Live-updated embed for signal {signal_id} @ {current_price}")
+                except discord.NotFound:
+                    logger.warning(f"Live update: embed for signal {signal_id} not found, removing")
+                    self._live_embeds.pop(signal_id, None)
+                    self.signal_messages.pop(signal_id, None)
+                except discord.HTTPException as e:
+                    if e.status == 429:
+                        logger.warning(f"Live update rate-limited for signal {signal_id}, skipping this cycle")
+                    else:
+                        logger.warning(f"Live update HTTP error for signal {signal_id}: {e}")
+
+            except Exception as e:
+                logger.error(f"Live update failed for signal {signal_id}: {e}", exc_info=True)
+
+    def _register_live_embed(self, signal: Dict, event: str, spread_buffer_enabled: bool = False):
+        """Register or update a signal embed as 'live' so it gets periodic price updates."""
+        signal_id = signal["signal_id"]
+        self._live_embeds[signal_id] = {
+            "signal": signal,
+            "event": event,
+            "spread_buffer_enabled": spread_buffer_enabled,
+        }
+
+    def _unregister_live_embed(self, signal_id: int):
+        """Remove a signal from live tracking (called when it reaches a terminal state)."""
+        self._live_embeds.pop(signal_id, None)
 
     # ── Channel helpers ──────────────────────────────────────────────────────
 
@@ -382,7 +537,6 @@ class AlertSystem:
         pnl_display: Optional[str] = None,
         force_hit_up_to_seq: int = 0,
         limit_pnl_map: Optional[Dict] = None,
-        next_limit_distance_formatted: Optional[str] = None,
     ) -> Optional[discord.Message]:
         """
         Send a ping then create or edit the persistent embed for this signal.
@@ -414,7 +568,6 @@ class AlertSystem:
             pnl_display=pnl_display,
             force_hit_up_to_seq=force_hit_up_to_seq,
             limit_pnl_map=limit_pnl_map,
-            next_limit_distance_formatted=next_limit_distance_formatted,
         )
 
         # ── Edit or create the persistent embed ───────────────────────────────
@@ -496,6 +649,7 @@ class AlertSystem:
                 ping_text=None,
             )
             if msg:
+                self._register_live_embed(signal, "approaching", spread_buffer_enabled)
                 self.stats["approaching_sent"] += 1
                 self.stats["total_alerts"] += 1
                 return True
@@ -511,7 +665,6 @@ class AlertSystem:
         current_price: float,
         spread: float = None,
         spread_buffer_enabled: bool = False,
-        next_limit_distance_formatted: Optional[str] = None,
     ) -> bool:
         try:
             limits = await self._fetch_limits(signal)
@@ -543,9 +696,9 @@ class AlertSystem:
                 spread=spread, spread_buffer_enabled=spread_buffer_enabled,
                 ping_text=ping,
                 force_hit_up_to_seq=force_hit_up_to_seq,
-                next_limit_distance_formatted=next_limit_distance_formatted,
             )
             if msg:
+                self._register_live_embed(signal, "hit", spread_buffer_enabled)
                 self.stats["hit_sent"] += 1
                 self.stats["total_alerts"] += 1
                 return True
@@ -556,6 +709,7 @@ class AlertSystem:
 
     async def send_stop_loss_alert(self, signal: Dict, current_price: float) -> bool:
         try:
+            self._unregister_live_embed(signal["signal_id"])
             limits = await self._fetch_limits(signal)
             ping = (
                 f"🛑 **{signal['instrument']}** {signal['direction'].upper()} — "
@@ -587,6 +741,8 @@ class AlertSystem:
         """
         instrument = signal["instrument"]
         direction = signal["direction"].upper()
+        # Unregister from live updates — signal is now in a terminal state
+        self._unregister_live_embed(signal["signal_id"])
         # Use cumulative P&L for display if available, otherwise fall back to last limit pnl
         display_pnl = cumulative_pnl if cumulative_pnl is not None else last_pnl
         pnl_display = tp_config.format_value(instrument, display_pnl)
@@ -664,6 +820,92 @@ class AlertSystem:
 
         return True
 
+    async def reactivate_embed(
+        self,
+        signal: Dict,
+        ping_text: Optional[str] = None,
+    ) -> bool:
+        """
+        After a signal is reactivated from cancelled state, rebuild its embed to reflect
+        the correct live state (approaching or hit) with current price and distance.
+        Re-registers the embed for live price updates.
+        """
+        signal_id = signal.get("signal_id") or signal.get("id")
+        if signal_id is None:
+            return False
+
+        # Normalise signal dict so it always has signal_id
+        signal = dict(signal)
+        signal["signal_id"] = signal_id
+
+        # Fetch fresh limits from DB
+        limits = await self._fetch_limits(signal)
+
+        # Determine event based on whether any limits were already hit
+        hit_count = sum(1 for l in limits if l.get("status") == "hit" or l.get("hit_alert_sent"))
+        event = "hit" if hit_count > 0 else "approaching"
+
+        # Try to get current live price
+        current_price = None
+        distance_formatted = None
+        spread = 0.0
+        spread_buffer_enabled = False
+
+        monitor = getattr(self.bot, "monitor", None) if self.bot else None
+        stream_manager = getattr(monitor, "stream_manager", None) if monitor else None
+
+        if stream_manager:
+            try:
+                price_data = await stream_manager.get_latest_price(signal["instrument"])
+                if price_data:
+                    direction = signal.get("direction", "long").lower()
+                    current_price = price_data["ask"] if direction == "long" else price_data["bid"]
+                    spread = price_data.get("spread", 0.0)
+
+                    # Reload spread buffer setting
+                    if hasattr(monitor, "_reload_spread_buffer_setting"):
+                        monitor._reload_spread_buffer_setting()
+                    spread_buffer_enabled = getattr(monitor, "spread_buffer_enabled", False)
+
+                    # Calculate distance to nearest pending limit (for approaching state)
+                    if event == "approaching" and limits:
+                        pending = [
+                            l for l in limits
+                            if l.get("status") != "hit" and not l.get("hit_alert_sent")
+                        ]
+                        if pending:
+                            nearest = min(pending, key=lambda l: abs(current_price - l["price_level"]))
+                            distance = abs(current_price - nearest["price_level"])
+                            alert_config = getattr(monitor, "alert_config", None)
+                            if alert_config:
+                                distance_formatted = alert_config.format_distance_for_display(
+                                    signal["instrument"], distance, current_price
+                                )
+                            else:
+                                distance_formatted = f"{distance:.5f}".rstrip("0").rstrip(".")
+            except Exception as e:
+                logger.warning(f"reactivate_embed: could not fetch live price for signal {signal_id}: {e}")
+
+        try:
+            msg = await self._upsert_signal_message(
+                signal=signal,
+                limits=limits,
+                event=event,
+                current_price=current_price,
+                distance_formatted=distance_formatted,
+                spread=spread,
+                spread_buffer_enabled=spread_buffer_enabled,
+                ping_text=ping_text,
+            )
+            if msg:
+                # Re-register for live updates since the signal is active again
+                self._register_live_embed(signal, event, spread_buffer_enabled)
+                logger.info(f"Reactivated embed for signal {signal_id} as event='{event}'")
+                return True
+        except Exception as e:
+            logger.error(f"reactivate_embed failed for signal {signal_id}: {e}", exc_info=True)
+        return False
+
     async def update_signal_message(
         self,
         signal: Dict,
@@ -682,6 +924,13 @@ class AlertSystem:
                 f"update_signal_message: signal {signal_id} has no persistent message yet — skipping"
             )
             return False
+
+        # Terminal events: stop live price updates
+        _TERMINAL_EVENTS = {"stop_loss", "auto_tp", "profit", "breakeven", "cancelled", "expired",
+                            "spread_hour_cancelled"}
+        if event in _TERMINAL_EVENTS:
+            self._unregister_live_embed(signal_id)
+
         try:
             if limits is None:
                 limits = await self._fetch_limits(signal)
@@ -720,6 +969,9 @@ class AlertSystem:
             if "signal_id" not in signal:
                 signal = dict(signal)
                 signal["signal_id"] = signal.get("id", signal_id)
+            # Reactivation needs special handling to show live state + current price
+            if event == "reactivated":
+                return await self.reactivate_embed(signal=signal, ping_text=ping_text)
             return await self.update_signal_message(
                 signal=signal,
                 event=event,
@@ -866,4 +1118,5 @@ class AlertSystem:
             "tracked_messages": len(self.alert_messages),
             "persistent_messages": len(self.signal_messages),
             "active_pings": len(self.signal_ping_messages),
+            "live_embeds": len(self._live_embeds),
         }
