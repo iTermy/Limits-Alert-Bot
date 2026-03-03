@@ -133,6 +133,8 @@ class NewsEvent:
     is_now_mode: bool = field(default=False)
     # Original timezone label for display (e.g. "EST", "UTC")
     display_tz: str = field(default='EST')
+    # Optional explicit end time for timed "now" events (e.g. !news now gold 5 minutes)
+    end_time_override: Optional[datetime] = field(default=None)
 
     @property
     def start_time(self) -> datetime:
@@ -140,6 +142,8 @@ class NewsEvent:
 
     @property
     def end_time(self) -> datetime:
+        if self.end_time_override is not None:
+            return self.end_time_override
         if self.is_now_mode:
             # Far future sentinel — effectively never expires on its own
             return self.news_time + timedelta(days=365)
@@ -151,7 +155,8 @@ class NewsEvent:
         return self.start_time <= now <= self.end_time
 
     def is_expired(self, at: Optional[datetime] = None) -> bool:
-        if self.is_now_mode:
+        # Now-mode with a timed end CAN expire when end_time_override passes
+        if self.is_now_mode and self.end_time_override is None:
             return False  # Never auto-expires; must be manually removed
         now = at or datetime.now(pytz.utc)
         return now > self.end_time
@@ -213,6 +218,19 @@ def _is_crypto(symbol: str) -> bool:
     )
 
 
+def _load_optional_dt(value) -> Optional[datetime]:
+    """Parse an optional ISO datetime string from JSON, returning None if absent."""
+    if not value:
+        return None
+    try:
+        dt = datetime.fromisoformat(value)
+        if dt.tzinfo is None:
+            dt = pytz.utc.localize(dt)
+        return dt
+    except Exception:
+        return None
+
+
 # ---------------------------------------------------------------------------
 # Manager
 # ---------------------------------------------------------------------------
@@ -248,14 +266,15 @@ class NewsManager:
             "next_id": self._next_id,
             "events": [
                 {
-                    "event_id":       e.event_id,
-                    "category":       e.category,
-                    "news_time":      e.news_time.isoformat(),
-                    "window_minutes": e.window_minutes,
-                    "created_by":     e.created_by,
-                    "created_at":     e.created_at.isoformat(),
-                    "is_now_mode":    e.is_now_mode,
-                    "display_tz":     e.display_tz,
+                    "event_id":          e.event_id,
+                    "category":          e.category,
+                    "news_time":         e.news_time.isoformat(),
+                    "window_minutes":    e.window_minutes,
+                    "created_by":        e.created_by,
+                    "created_at":        e.created_at.isoformat(),
+                    "is_now_mode":       e.is_now_mode,
+                    "display_tz":        e.display_tz,
+                    "end_time_override": e.end_time_override.isoformat() if e.end_time_override else None,
                 }
                 for e in self._events
                 if not e.is_expired(now)   # don't bother saving already-expired events
@@ -310,6 +329,7 @@ class NewsManager:
                     event_id=item["event_id"],
                     is_now_mode=item.get("is_now_mode", False),
                     display_tz=item.get("display_tz", "EST"),
+                    end_time_override=_load_optional_dt(item.get("end_time_override")),
                 )
 
                 if not event.is_expired(now):
@@ -336,6 +356,7 @@ class NewsManager:
         created_by: str,
         is_now_mode: bool = False,
         display_tz: str = 'EST',
+        end_time_override: Optional[datetime] = None,
     ) -> NewsEvent:
         """Register a new news event, persist to disk, and return it."""
         event = NewsEvent(
@@ -346,6 +367,7 @@ class NewsManager:
             event_id=self._next_id,
             is_now_mode=is_now_mode,
             display_tz=display_tz,
+            end_time_override=end_time_override,
         )
         self._next_id += 1
         self._events.append(event)
@@ -353,12 +375,11 @@ class NewsManager:
         logger.info(f"News event added: {event}")
         return event
 
-    def remove_now_events(self) -> int:
-        """Remove all 'now' mode events. Returns count removed."""
-        before = len(self._events)
-        self._events = [e for e in self._events if not e.is_now_mode]
-        removed = before - len(self._events)
+    def remove_now_events(self) -> List[NewsEvent]:
+        """Remove all 'now' mode events. Returns list of removed events."""
+        removed = [e for e in self._events if e.is_now_mode]
         if removed:
+            self._events = [e for e in self._events if not e.is_now_mode]
             self._save()
         return removed
 
@@ -378,14 +399,13 @@ class NewsManager:
         now = datetime.now(pytz.utc)
         return [e for e in self._events if not e.is_expired(now)]
 
-    def remove_event(self, event_id: int) -> bool:
-        """Manually remove an event by ID, persist to disk. Returns True if found."""
-        before = len(self._events)
-        self._events = [e for e in self._events if e.event_id != event_id]
-        found = len(self._events) < before
-        if found:
+    def remove_event(self, event_id: int) -> Optional[NewsEvent]:
+        """Manually remove an event by ID, persist to disk. Returns the removed event if found."""
+        target = next((e for e in self._events if e.event_id == event_id), None)
+        if target:
+            self._events = [e for e in self._events if e.event_id != event_id]
             self._save()
-        return found
+        return target
 
     def purge_expired(self):
         """Remove events that have fully passed and persist the updated list."""
@@ -401,19 +421,21 @@ class NewsManager:
         """
         Start a background task that:
         - Every 30 s: fires a 'news activated' alert for any window that just opened
+        - Every 30 s: fires a 'news ended' alert + schedules deletion for expired windows
         - Every 5 min: purges expired events from memory and disk
         """
         async def _run():
-            # Track which events have already had their activation alert sent
+            # Track which events have already had their activation / ended alert sent
             alerted_ids: set = set()
+            ended_ids: set = set()
 
             while True:
                 await asyncio.sleep(30)
                 now = datetime.now(pytz.utc)
 
-                # Fire activation alerts for windows that are now open
                 if alert_system is not None:
-                    for event in self._events:
+                    for event in list(self._events):
+                        # Fire activation alerts for windows that are now open
                         if (
                             event.event_id not in alerted_ids
                             and event.is_active(now)
@@ -424,6 +446,18 @@ class NewsManager:
                             except Exception as e:
                                 logger.error(f"Failed to send news activated alert: {e}")
 
+                        # Fire ended alert for windows that just expired
+                        if (
+                            event.event_id not in ended_ids
+                            and event.event_id in alerted_ids  # only if activation was sent
+                            and event.is_expired(now)
+                        ):
+                            ended_ids.add(event.event_id)
+                            try:
+                                await alert_system.send_news_ended_alert(event)
+                            except Exception as e:
+                                logger.error(f"Failed to send news ended alert: {e}")
+
                 # Purge expired events (every ~5 min: 10 × 30 s)
                 if not hasattr(_run, '_purge_counter'):
                     _run._purge_counter = 0
@@ -431,9 +465,10 @@ class NewsManager:
                 if _run._purge_counter >= 10:
                     _run._purge_counter = 0
                     self.purge_expired()
-                    # Also clean up alerted IDs for events that no longer exist
+                    # Also clean up tracking sets for events that no longer exist
                     active_ids = {e.event_id for e in self._events}
                     alerted_ids &= active_ids
+                    ended_ids &= active_ids
 
         # Cancel any previously running cleanup task so we don't leak coroutines
         if self._cleanup_task is not None and not self._cleanup_task.done():

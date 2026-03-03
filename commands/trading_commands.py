@@ -1322,40 +1322,95 @@ class TradingCommands(BaseCog):
         # ── !news off ──────────────────────────────────────────────────────
         if subcommand == 'off':
             news_manager: NewsManager = self.bot.news_manager
-            removed = news_manager.remove_now_events()
-            if removed:
-                await ctx.send(f"✅ Deactivated {removed} open-ended news window(s).")
+            removed_events = news_manager.remove_now_events()
+            if removed_events:
+                await ctx.send(f"✅ Deactivated {len(removed_events)} open-ended news window(s).")
+                alert_system = getattr(self.bot.monitor, 'alert_system', None)
+                if alert_system:
+                    for event in removed_events:
+                        try:
+                            await alert_system.send_news_ended_alert(event)
+                        except Exception as e:
+                            logger.warning(f"Failed to send news ended alert for event #{event.event_id}: {e}")
             else:
                 await ctx.send("ℹ️ No open-ended news windows were active.")
             return
 
-        # ── !news now [category] ───────────────────────────────────────────
+        # ── !news now [category] [N minutes] ──────────────────────────────
         if subcommand == 'now':
-            category = tokens[1].upper() if len(tokens) >= 2 else 'ALL'
-            now_utc = __import__('datetime').datetime.now(pytz.utc)
+            import datetime as _dt
+            import re as _re
+            rest_tokens = tokens[1:]
+            category = 'ALL'
+            duration_minutes = None
+
+            if rest_tokens:
+                # Strip optional trailing duration: "5 minutes", "5m", "5 min", bare "5"
+                if len(rest_tokens) >= 2:
+                    last = rest_tokens[-1].lower()
+                    if last in ('minutes', 'mins', 'min', 'm', 'minute'):
+                        try:
+                            duration_minutes = int(rest_tokens[-2])
+                            rest_tokens = rest_tokens[:-2]
+                        except ValueError:
+                            pass
+                if duration_minutes is None and rest_tokens:
+                    last = rest_tokens[-1].lower()
+                    m2 = _re.match(r'^(\d+)(m|min|mins|minute|minutes)$', last)
+                    if m2:
+                        duration_minutes = int(m2.group(1))
+                        rest_tokens = rest_tokens[:-1]
+                    elif _re.match(r'^\d+$', last) and len(rest_tokens) == 1:
+                        # Bare number only, no category token — treat as duration
+                        duration_minutes = int(last)
+                        rest_tokens = rest_tokens[:-1]
+                if rest_tokens:
+                    category = rest_tokens[0].upper()
+
+            now_utc = _dt.datetime.now(pytz.utc)
+            from datetime import timedelta as _td
+            end_time_override = (now_utc + _td(minutes=duration_minutes)) if duration_minutes else None
             news_manager: NewsManager = self.bot.news_manager
             event = news_manager.add_event(
                 category=category,
                 news_time=now_utc,
-                window_minutes=0,       # start_time == news_time; end_time is far future
+                window_minutes=0,
                 created_by=str(ctx.author),
                 is_now_mode=True,
                 display_tz='EST',
+                end_time_override=end_time_override,
             )
-            embed = discord.Embed(
-                title="📰 News Mode — ACTIVE NOW",
-                description=(
+
+            activated_ts = int(now_utc.timestamp())
+
+            if end_time_override:
+                end_ts = int(end_time_override.timestamp())
+                ends_val = f"<t:{end_ts}:t> (auto)"
+                desc = (
+                    f"Signals matching **{category}** will be automatically cancelled "
+                    f"for the next **{duration_minutes} minute(s)**."
+                )
+            else:
+                ends_val = "Manual (`!news off`)"
+                desc = (
                     f"Signals matching **{category}** will be automatically cancelled "
                     f"until you run `!news off`."
-                ),
+                )
+
+            embed = discord.Embed(
+                title="📰 News Mode — ACTIVE NOW",
+                description=desc,
                 color=0xFF4444,
             )
             embed.add_field(name="Category", value=category, inline=True)
-            embed.add_field(name="Activated", value="Immediately", inline=True)
-            embed.add_field(name="Ends", value="Manual (`!news off`)", inline=True)
+            embed.add_field(name="Activated", value=f"<t:{activated_ts}:t>", inline=True)
+            embed.add_field(name="Ends", value=ends_val, inline=True)
             embed.set_footer(text=f"Event #{event.event_id} • Set by {ctx.author}")
             await ctx.send(embed=embed)
-            logger.info(f"News NOW event #{event.event_id} activated by {ctx.author} for {category}")
+            logger.info(
+                f"News NOW event #{event.event_id} activated by {ctx.author} for {category}"
+                + (f" for {duration_minutes} min" if duration_minutes else "")
+            )
             return
 
         # ── Normal scheduled news ──────────────────────────────────────────
@@ -1385,20 +1440,18 @@ class TradingCommands(BaseCog):
         auto_advanced = scheduled_date > today_in_tz
 
         # Also show in original timezone if not EST
-        tz_display = f"{news_est.strftime('%I:%M %p')} EST"
+        # Use Discord timestamps so each viewer sees their local time
+        news_ts = int(news_time_utc.timestamp())
+        start_ts = int(event.start_time.timestamp())
+        end_ts = int(event.end_time.timestamp())
+        tz_display = f"<t:{news_ts}:t>"
         if tz_label not in ('EST', 'EDT', 'ET'):
-            import pytz as _pytz
-            from core.news_manager import resolve_timezone
-            try:
-                orig_tz = resolve_timezone(tz_label)
-                orig_time = news_time_utc.astimezone(orig_tz)
-                tz_display = f"{orig_time.strftime('%I:%M %p')} {tz_label} ({news_est.strftime('%I:%M %p')} EST)"
-            except Exception:
-                pass
+            tz_display += f" ({tz_label})"
 
-        # Add date to display when auto-advanced (so it's clear it's tomorrow)
+        # Add date hint when auto-advanced (Discord timestamps show the date but an
+        # explicit note makes it clear this slipped to tomorrow)
         if auto_advanced:
-            tz_display += f" on {news_est.strftime('%a %b %-d')}"
+            tz_display += f" — <t:{news_ts}:D>"
 
         embed = discord.Embed(
             title="📰 News Mode Scheduled",
@@ -1413,7 +1466,7 @@ class TradingCommands(BaseCog):
         embed.add_field(name="Window", value=f"±{window_minutes} min", inline=True)
         embed.add_field(
             name="Active From → To",
-            value=f"{start_est.strftime('%I:%M %p')} → {end_est.strftime('%I:%M %p')} EST",
+            value=f"<t:{start_ts}:t> → <t:{end_ts}:t>",
             inline=False,
         )
         if auto_advanced:
@@ -1448,8 +1501,13 @@ class TradingCommands(BaseCog):
 
         for event in events:
             if event.is_now_mode:
-                status = "🔴 **ACTIVE NOW** (open-ended)"
-                window_str = "Until `!news off`"
+                activated_ts = int(event.news_time.timestamp())
+                status = "🔴 **ACTIVE NOW**"
+                if event.end_time_override is not None:
+                    end_ts2 = int(event.end_time_override.timestamp())
+                    window_str = f"<t:{activated_ts}:t> → <t:{end_ts2}:t> (auto-end)"
+                else:
+                    window_str = f"From <t:{activated_ts}:t> — Until `!news off`"
                 embed.add_field(
                     name=f"#{event.event_id}  {event.category.upper()}",
                     value=(
@@ -1460,15 +1518,15 @@ class TradingCommands(BaseCog):
                     inline=False,
                 )
             else:
-                start_est = event.start_time.astimezone(EST)
-                end_est = event.end_time.astimezone(EST)
+                s_ts = int(event.start_time.timestamp())
+                e_ts = int(event.end_time.timestamp())
                 status = "🟢 **ACTIVE NOW**" if event.is_active(now) else "🕐 Upcoming"
                 tz_note = f" ({event.display_tz})" if event.display_tz not in ('EST', 'EDT', 'ET') else ""
                 embed.add_field(
                     name=f"#{event.event_id}  {event.category.upper()}{tz_note}",
                     value=(
                         f"{status}\n"
-                        f"Window: {start_est.strftime('%I:%M %p')} → {end_est.strftime('%I:%M %p')} EST\n"
+                        f"Window: <t:{s_ts}:t> → <t:{e_ts}:t>\n"
                         f"Set by: {event.created_by}"
                     ),
                     inline=False,
@@ -1490,18 +1548,29 @@ class TradingCommands(BaseCog):
             !newsclear        → remove all events
         """
         news_manager: NewsManager = self.bot.news_manager
+        alert_system = getattr(self.bot.monitor, 'alert_system', None)
 
         if event_id is None:
             events = news_manager.get_all_events()
             count = len(events)
             for ev in events:
                 news_manager.remove_event(ev.event_id)
+                if alert_system and ev.event_id in getattr(alert_system, '_news_activation_messages', {}):
+                    try:
+                        await alert_system.send_news_ended_alert(ev)
+                    except Exception as e:
+                        logger.warning(f"Failed to send news ended alert for event #{ev.event_id}: {e}")
             await ctx.send(f"🗑️ Removed all {count} scheduled news event(s).")
             return
 
-        removed = news_manager.remove_event(event_id)
-        if removed:
+        removed_event = news_manager.remove_event(event_id)
+        if removed_event:
             await ctx.send(f"✅ News event #{event_id} removed.")
+            if alert_system and event_id in getattr(alert_system, '_news_activation_messages', {}):
+                try:
+                    await alert_system.send_news_ended_alert(removed_event)
+                except Exception as e:
+                    logger.warning(f"Failed to send news ended alert for event #{event_id}: {e}")
         else:
             await ctx.send(f"❌ No news event with ID #{event_id} found.")
 

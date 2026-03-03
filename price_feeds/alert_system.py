@@ -1074,9 +1074,7 @@ class AlertSystem:
         if not target_channel:
             return False
         try:
-            import pytz
-            EST = pytz.timezone("America/New_York")
-            news_time_est = news_event.news_time.astimezone(EST)
+            news_ts = int(news_event.news_time.timestamp())
             all_limits = signal.get("limits", signal.get("pending_limits", []))
             if all_limits:
                 limit_prices = "  |  ".join(
@@ -1095,7 +1093,7 @@ class AlertSystem:
                 description=(
                     f"The following signal was cancelled due to news "
                     f"({news_event.category.upper()} @ "
-                    f"{news_time_est.strftime('%I:%M %p')} EST):\n\n"
+                    f"<t:{news_ts}:t>):\n\n"
                     f"{signal_summary}"
                 ),
                 color=0x5865F2,
@@ -1176,30 +1174,101 @@ class AlertSystem:
         return False
 
     async def send_news_activated_alert(self, news_event) -> bool:
-        if not self.alert_channel:
+        """Send news-mode activated embed to ALL alert channels. Returns list of sent messages."""
+        # Collect all distinct alert channels
+        channels = []
+        seen_ids = set()
+        for ch in [
+            self.alert_channel,
+            self.pa_alert_channel,
+            self.toll_alert_channel,
+            self.general_toll_alert_channel,
+        ]:
+            if ch is not None and ch.id not in seen_ids:
+                channels.append(ch)
+                seen_ids.add(ch.id)
+
+        if not channels:
             return False
+
+        # Build time string using Discord timestamps (auto-localised per viewer)
+        start_ts = int(news_event.start_time.timestamp())
+        if news_event.is_now_mode:
+            if news_event.end_time_override is not None:
+                end_ts = int(news_event.end_time_override.timestamp())
+                time_str = f"**<t:{start_ts}:t> → <t:{end_ts}:t>**"
+            else:
+                time_str = f"**Active from <t:{start_ts}:t>**"
+        else:
+            end_ts = int(news_event.end_time.timestamp())
+            time_str = f"**<t:{start_ts}:t> → <t:{end_ts}:t>**"
+
+        embed = discord.Embed(
+            title="📰 News Mode Active",
+            description=(
+                f"News window activated for **{news_event.category.upper()}**\n"
+                f"{time_str}"
+            ),
+            color=0x5865F2,
+            timestamp=datetime.now(timezone.utc),
+        )
+        embed.set_footer(text=f"Event #{news_event.event_id} • Signals will be auto-cancelled if hit")
+
+        sent_messages = []
         try:
-            import pytz
-            EST = pytz.timezone("America/New_York")
-            start_est = news_event.start_time.astimezone(EST)
-            end_est = news_event.end_time.astimezone(EST)
-            embed = discord.Embed(
-                title="📰 News Mode Active",
-                description=(
-                    f"News window activated for **{news_event.category.upper()}**\n"
-                    f"{start_est.strftime('%I:%M %p')} → {end_est.strftime('%I:%M %p')} EST"
-                ),
-                color=0x5865F2,
-                timestamp=datetime.now(timezone.utc),
-            )
-            embed.set_footer(text=f"Event #{news_event.event_id} • Signals will be auto-cancelled if hit")
-            await self.alert_channel.send(embed=embed)
+            for ch in channels:
+                msg = await ch.send(embed=embed)
+                sent_messages.append(msg)
             self.stats["total_alerts"] += 1
+
+            # Store messages so we can update them when the window ends
+            if not hasattr(self, '_news_activation_messages'):
+                self._news_activation_messages = {}
+            self._news_activation_messages[news_event.event_id] = sent_messages
+
             return True
         except Exception as e:
             logger.error(f"Failed to send news activated alert: {e}")
             self.stats["errors"] += 1
             return False
+
+    async def send_news_ended_alert(self, news_event) -> None:
+        """
+        Edit all activation embeds for this event to show 'News Mode Ended',
+        then schedule deletion after 5 minutes.
+        """
+        messages = []
+        if hasattr(self, '_news_activation_messages'):
+            messages = self._news_activation_messages.pop(news_event.event_id, [])
+
+        end_ts = int(datetime.now(timezone.utc).timestamp())
+        embed = discord.Embed(
+            title="📰 News Mode Ended",
+            description=(
+                f"News window for **{news_event.category.upper()}** has ended.\n"
+                f"**Ended at <t:{end_ts}:t>**"
+            ),
+            color=0x808080,
+            timestamp=datetime.now(timezone.utc),
+        )
+        embed.set_footer(text=f"Event #{news_event.event_id} • This message will be deleted in 5 minutes")
+
+        for msg in messages:
+            try:
+                await msg.edit(embed=embed)
+            except Exception as e:
+                logger.warning(f"Could not edit news activation message {msg.id}: {e}")
+
+        # Auto-delete after 5 minutes
+        if messages:
+            async def _delete_later():
+                await asyncio.sleep(300)
+                for msg in messages:
+                    try:
+                        await msg.delete()
+                    except Exception:
+                        pass
+            asyncio.ensure_future(_delete_later())
 
     async def _get_profit_channel(self) -> Optional[discord.TextChannel]:
         try:
