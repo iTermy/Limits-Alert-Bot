@@ -148,9 +148,11 @@ def _build_signal_embed(
             display_price = _fmt(current_price)
         embed.add_field(name="Current Price", value=display_price, inline=True)
 
-    # ── Distance (approaching only) ──────────────────────────────────────────
+    # ── Distance ─────────────────────────────────────────────────────────────
     if distance_formatted and event == "approaching":
         embed.add_field(name="Distance", value=distance_formatted, inline=True)
+    elif distance_formatted and event == "hit":
+        embed.add_field(name="Next Limit Distance", value=distance_formatted, inline=True)
 
     # ── Expired notice ───────────────────────────────────────────────────────
     is_expired = event == "expired" or (
@@ -337,8 +339,9 @@ class AlertSystem:
                 limits = await self._fetch_limits(signal)
 
                 # Calculate distance for approaching embeds (to nearest pending limit)
+                # and for hit embeds (to the next pending limit)
                 distance_formatted = None
-                if event == "approaching":
+                if event in ("approaching", "hit"):
                     pending_limits = [
                         l for l in limits
                         if l.get("status") != "hit" and not l.get("hit_alert_sent")
@@ -690,9 +693,31 @@ class AlertSystem:
                 f"limit #{seq} hit @ {_fmt(limit['price_level'])} "
                 f"({hit_count}/{total} done)"
             )
+
+            # Calculate distance to next pending limit for the embed
+            distance_formatted = None
+            pending_limits = [
+                l for l in limits
+                if l.get("status") != "hit"
+                and not l.get("hit_alert_sent")
+                and (not isinstance(l.get("sequence_number"), int) or l["sequence_number"] > force_hit_up_to_seq)
+            ]
+            if pending_limits and current_price is not None:
+                nearest = min(pending_limits, key=lambda l: abs(current_price - l["price_level"]))
+                distance = abs(current_price - nearest["price_level"])
+                monitor = getattr(self.bot, "monitor", None) if self.bot else None
+                alert_config = getattr(monitor, "alert_config", None) if monitor else None
+                if alert_config:
+                    distance_formatted = alert_config.format_distance_for_display(
+                        signal["instrument"], distance, current_price
+                    )
+                else:
+                    distance_formatted = f"{distance:.5f}".rstrip("0").rstrip(".")
+
             msg = await self._upsert_signal_message(
                 signal=signal, limits=limits, event="hit",
                 current_price=current_price,
+                distance_formatted=distance_formatted,
                 spread=spread, spread_buffer_enabled=spread_buffer_enabled,
                 ping_text=ping,
                 force_hit_up_to_seq=force_hit_up_to_seq,
