@@ -74,7 +74,7 @@ def _build_signal_embed(
     instrument = signal["instrument"]
     direction = signal["direction"].upper()
     signal_id = signal["signal_id"]
-    total = signal.get("total_limits", len(limits)) or len(limits)
+    total = len(limits) or signal.get("total_limits", 0)
 
     def _is_hit(lim: Dict) -> bool:
         if force_hit_up_to_seq and isinstance(lim.get("sequence_number"), int):
@@ -674,7 +674,7 @@ class AlertSystem:
             if not limits:
                 limits = [limit]
             seq = limit.get("sequence_number", "?")
-            total = signal.get("total_limits", len(limits))
+            total = len(limits)
 
             # The DB status may not be committed yet at the moment this alert fires,
             # so we force-mark the current limit as hit by its sequence_number.
@@ -772,7 +772,6 @@ class AlertSystem:
         display_pnl = cumulative_pnl if cumulative_pnl is not None else last_pnl
         pnl_display = tp_config.format_value(instrument, display_pnl)
         num_hit = len(hit_limits)
-        total = signal.get("total_limits", num_hit)
 
         # Build a set of hit limit IDs so the embed can correctly show struck-through limits
         hit_limit_ids = {lim.get("limit_id") or lim.get("id") for lim in hit_limits}
@@ -782,6 +781,8 @@ class AlertSystem:
         limits = await self._fetch_limits(signal)
         if not limits:
             limits = hit_limits
+
+        total = len(limits) or num_hit
 
         ping = (
             f"💰 **{instrument}** {direction} — "
