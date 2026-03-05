@@ -178,6 +178,10 @@ class TradingBot(commands.Bot):
                     allowed_channels.add(int(self.channels_config['toll-alert-channel']))
                 if 'general-tolls-alert' in self.channels_config and self.channels_config['general-tolls-alert']:
                     allowed_channels.add(int(self.channels_config['general-tolls-alert']))
+                if 'finished_signals' in self.channels_config and self.channels_config['finished_signals']:
+                    allowed_channels.add(int(self.channels_config['finished_signals']))
+                if 'profit_channel' in self.channels_config and self.channels_config['profit_channel']:
+                    allowed_channels.add(int(self.channels_config['profit_channel']))
 
             # Only process messages in allowed channels
             if message.channel.id not in allowed_channels:

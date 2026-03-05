@@ -54,6 +54,10 @@ class MessageHandler:
                     self._allowed_channels.add(int(self.bot.channels_config['toll-alert-channel']))
                 if 'general-tolls-alert' in self.bot.channels_config and self.bot.channels_config['general-tolls-alert']:
                     self._allowed_channels.add(int(self.bot.channels_config['general-tolls-alert']))
+                if 'finished_signals' in self.bot.channels_config and self.bot.channels_config['finished_signals']:
+                    self._allowed_channels.add(int(self.bot.channels_config['finished_signals']))
+                if 'profit_channel' in self.bot.channels_config and self.bot.channels_config['profit_channel']:
+                    self._allowed_channels.add(int(self.bot.channels_config['profit_channel']))
 
         return self._allowed_channels
 

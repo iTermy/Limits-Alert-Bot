@@ -54,6 +54,7 @@ def _build_signal_embed(
     pnl_display: Optional[str] = None,
     force_hit_up_to_seq: int = 0,
     limit_pnl_map: Optional[Dict] = None,
+    delete_after_minutes: Optional[int] = None,
 ) -> discord.Embed:
     """
     Build (or rebuild) the single persistent embed for a signal.
@@ -219,12 +220,16 @@ def _build_signal_embed(
             url = f"https://discord.com/channels/{guild_id}/{ch_id}/{msg_id}"
             embed.add_field(name="Source", value=url, inline=False)
 
+    _deletion_suffix = f" • ⏳ Moving to archive in {delete_after_minutes} min" if delete_after_minutes else ""
+
     if is_expired:
-        embed.set_footer(text=f"Signal #{signal_id} • Auto-expired")
+        embed.set_footer(text=f"Signal #{signal_id} • Auto-expired{_deletion_suffix}")
     elif event == "spread_hour_cancelled":
-        embed.set_footer(text=f"Signal #{signal_id} • Auto-cancelled (spread hour)")
+        embed.set_footer(text=f"Signal #{signal_id} • Auto-cancelled (spread hour){_deletion_suffix}")
     elif event == "near_miss_cancelled":
-        embed.set_footer(text=f"Signal #{signal_id} • Auto-cancelled (near-miss)")
+        embed.set_footer(text=f"Signal #{signal_id} • Auto-cancelled (near-miss){_deletion_suffix}")
+    elif _deletion_suffix:
+        embed.set_footer(text=f"Signal #{signal_id}{_deletion_suffix}")
     else:
         embed.set_footer(text=f"Signal #{signal_id} • Reply to this message to manage")
     return embed
@@ -284,6 +289,9 @@ class AlertSystem:
         # signal_id → discord.Message  (the most recent ping message per signal)
         self.signal_ping_messages: Dict[int, discord.Message] = {}
 
+        # signal_id → discord.Message  (embed in finished-signals channel after move)
+        self.signal_finished_messages: Dict[int, discord.Message] = {}
+
         # BACKWARDS COMPAT: alert message ID (str) → signal_id
         self.alert_messages: Dict[str, int] = {}
 
@@ -293,6 +301,9 @@ class AlertSystem:
 
         # Background task handle
         self._live_update_task: Optional[asyncio.Task] = None
+
+        # signal_id → asyncio.Task  (pending auto-delete tasks for end-state embeds)
+        self._deletion_tasks: Dict[int, asyncio.Task] = {}
 
         self.stats = {
             "approaching_sent": 0,
@@ -314,10 +325,15 @@ class AlertSystem:
         logger.info("Live embed update loop started")
 
     def stop_live_updates(self):
-        """Cancel the live update loop."""
+        """Cancel the live update loop and any pending archive-move tasks."""
         if self._live_update_task and not self._live_update_task.done():
             self._live_update_task.cancel()
             logger.info("Live embed update loop stopped")
+        for signal_id, task in list(self._deletion_tasks.items()):
+            if not task.done():
+                task.cancel()
+        self._deletion_tasks.clear()
+        logger.info(f"Cancelled all pending end-state archive-move tasks")
 
     async def _live_update_loop(self):
         """
@@ -454,6 +470,225 @@ class AlertSystem:
         """Remove a signal from live tracking (called when it reaches a terminal state)."""
         self._live_embeds.pop(signal_id, None)
 
+    # ── End-state auto-deletion ──────────────────────────────────────────────
+
+    # End states that trigger the 15-minute deletion countdown.
+    # Every state where the signal will not be re-traded belongs here.
+    _END_STATES = {
+        "profit", "auto_tp",           # take-profit outcomes
+        "stop_loss",                    # stop loss hit
+        "cancelled", "near_miss_cancelled",  # manual or auto cancel
+        "spread_hour_cancelled",        # auto-cancel during spread hour
+        "expired",                      # auto-expired by expiry manager
+        "breakeven",                    # closed at breakeven
+    }
+    # How long (minutes) to wait before deleting end-state embeds
+    END_STATE_DELETE_MINUTES = 15
+
+    def _cancel_deletion_task(self, signal_id: int):
+        """Cancel any pending move-to-finished task for a signal (e.g. on reactivation)."""
+        task = self._deletion_tasks.pop(signal_id, None)
+        if task and not task.done():
+            task.cancel()
+            logger.debug(f"Cancelled pending move-to-finished task for signal {signal_id}")
+
+    def _get_finished_channel(self) -> Optional[discord.TextChannel]:
+        """
+        Return the finished-signals Discord channel, or None if not configured.
+        Reads `finished_signals` from channels.json each time so hot-reloads work.
+        """
+        try:
+            from pathlib import Path
+            import json
+            config_path = Path(__file__).resolve().parent.parent / "config" / "channels.json"
+            with open(config_path) as f:
+                cfg = json.load(f)
+            finished_id = cfg.get("finished_signals")
+            if not finished_id:
+                return None
+            channel = self.bot.get_channel(int(finished_id)) if self.bot else None
+            return channel
+        except Exception as e:
+            logger.warning(f"Could not load finished_signals channel: {e}")
+            return None
+
+    def _get_profit_channel_sync(self) -> Optional[discord.TextChannel]:
+        """
+        Return the profit Discord channel from channels.json synchronously,
+        or None if not configured. Used inside the archive-move task.
+        """
+        try:
+            from pathlib import Path
+            import json
+            config_path = Path(__file__).resolve().parent.parent / "config" / "channels.json"
+            with open(config_path) as f:
+                cfg = json.load(f)
+            profit_id = cfg.get("profit_channel")
+            if not profit_id:
+                return None
+            channel = self.bot.get_channel(int(profit_id)) if self.bot else None
+            return channel
+        except Exception as e:
+            logger.warning(f"Could not load profit_channel: {e}")
+            return None
+
+    # Profit events — moved to profit_channel instead of finished_signals channel
+    _PROFIT_EVENTS = {"profit", "auto_tp"}
+
+    def _schedule_end_state_deletion(self, signal_id: int, event: str = ""):
+        """
+        Schedule the persistent embed to be moved out of the alert channel after
+        END_STATE_DELETE_MINUTES minutes.
+
+        Routing:
+          • profit / auto_tp  → profit_channel  (so wins land in the profit log)
+          • everything else   → finished_signals channel  (so members can see why
+                                a signal was cancelled / stopped out)
+
+        If the target channel is not configured, the embed is simply deleted.
+
+        Steps after the delay:
+          1. Delete the ping reply.
+          2. Re-send the embed (updated footer) to the target channel.
+          3. Track the new message so reply commands still work.
+          4. Delete the original embed from the alert channel.
+        """
+        self._cancel_deletion_task(signal_id)
+        is_profit = event in self._PROFIT_EVENTS
+
+        async def _move_after_delay():
+            try:
+                await asyncio.sleep(self.END_STATE_DELETE_MINUTES * 60)
+            except asyncio.CancelledError:
+                return
+
+            # ── 1. Delete the ping reply ──────────────────────────────────────
+            ping_msg = self.signal_ping_messages.pop(signal_id, None)
+            if ping_msg:
+                try:
+                    await ping_msg.delete()
+                    logger.debug(f"Deleted ping for signal {signal_id} before archive move")
+                except Exception:
+                    pass
+
+            # ── 2. Grab the original embed message ───────────────────────────
+            embed_msg = self.signal_messages.get(signal_id)
+            if not embed_msg:
+                self._deletion_tasks.pop(signal_id, None)
+                return
+
+            # ── 3. Pick the destination channel ──────────────────────────────
+            if is_profit:
+                dest_channel = self._get_profit_channel_sync()
+                archive_label = "📁 Profit Archived"
+                dest_name = "profit channel"
+            else:
+                dest_channel = self._get_finished_channel()
+                archive_label = "📁 Archived"
+                dest_name = "finished-signals channel"
+
+            if dest_channel:
+                try:
+                    existing_embed = embed_msg.embeds[0] if embed_msg.embeds else None
+                    if existing_embed:
+                        new_embed = existing_embed.copy()
+                        old_footer = existing_embed.footer.text or ""
+                        clean_footer = old_footer.split(" • ⏳")[0].split(" • 🗑️")[0]
+                        new_embed.set_footer(text=f"{clean_footer} • {archive_label}")
+                    else:
+                        new_embed = discord.Embed(
+                            description="Signal reached a final state.",
+                            color=0x808080,
+                        )
+
+                    finished_msg = await dest_channel.send(embed=new_embed)
+                    self.signal_finished_messages[signal_id] = finished_msg
+                    self.track_alert_message(finished_msg.id, signal_id)
+                    logger.info(
+                        f"Moved signal {signal_id} embed to {dest_name} (msg {finished_msg.id})"
+                    )
+                except Exception as e:
+                    logger.error(
+                        f"Failed to send embed to {dest_name} for signal {signal_id}: {e}"
+                    )
+
+                # ── 4. Delete the original from the alert channel ─────────────
+                try:
+                    await embed_msg.delete()
+                    logger.info(
+                        f"Deleted alert-channel embed for signal {signal_id} after move to {dest_name}"
+                    )
+                except discord.NotFound:
+                    pass
+                except Exception as e:
+                    logger.warning(
+                        f"Failed to delete alert embed for signal {signal_id}: {e}"
+                    )
+            else:
+                # Target channel not configured — fall back to plain delete
+                try:
+                    await embed_msg.delete()
+                    logger.info(
+                        f"Deleted end-state embed for signal {signal_id} "
+                        f"(no {dest_name} configured)"
+                    )
+                except discord.NotFound:
+                    pass
+                except Exception as e:
+                    logger.warning(f"Failed to delete embed for signal {signal_id}: {e}")
+
+            # ── 5. Clean up in-memory tracking ───────────────────────────────
+            self.signal_messages.pop(signal_id, None)
+            if embed_msg:
+                self.alert_messages.pop(str(embed_msg.id), None)
+            self._deletion_tasks.pop(signal_id, None)
+
+            # ── 6. Gold-tolls only: delete the original signal message ────────
+            # For signals originating in the gold-tolls-map channel, also remove
+            # the sender's original message so the channel stays clean.
+            try:
+                if self.bot and hasattr(self.bot, "signal_db") and self.bot.signal_db:
+                    sig_data = await self.bot.signal_db.get_signal_with_limits(signal_id)
+                    if sig_data:
+                        src_channel_id = str(sig_data.get("channel_id", ""))
+                        src_message_id = str(sig_data.get("message_id", ""))
+                        if (
+                            src_channel_id in self.toll_channel_ids
+                            and src_message_id
+                            and not src_message_id.startswith("manual_")
+                        ):
+                            src_channel = self.bot.get_channel(int(src_channel_id))
+                            if src_channel:
+                                try:
+                                    src_msg = await src_channel.fetch_message(int(src_message_id))
+                                    await src_msg.delete()
+                                    logger.info(
+                                        f"Deleted gold-tolls original message {src_message_id} "
+                                        f"for signal {signal_id}"
+                                    )
+                                except discord.NotFound:
+                                    pass  # Already deleted by someone else
+                                except discord.Forbidden:
+                                    logger.warning(
+                                        f"No permission to delete gold-tolls message "
+                                        f"{src_message_id} for signal {signal_id}"
+                                    )
+                                except Exception as e:
+                                    logger.warning(
+                                        f"Could not delete gold-tolls original message "
+                                        f"{src_message_id}: {e}"
+                                    )
+            except Exception as e:
+                logger.warning(f"Gold-tolls original message cleanup failed for signal {signal_id}: {e}")
+
+        task = asyncio.ensure_future(_move_after_delay())
+        self._deletion_tasks[signal_id] = task
+        logger.info(
+            f"Scheduled archive move for signal {signal_id} (event='{event}') "
+            f"in {self.END_STATE_DELETE_MINUTES} minutes → "
+            f"{'profit channel' if is_profit else 'finished-signals channel'}"
+        )
+
     # ── Channel helpers ──────────────────────────────────────────────────────
 
     def set_channel(self, channel: discord.TextChannel):
@@ -585,6 +820,7 @@ class AlertSystem:
         pnl_display: Optional[str] = None,
         force_hit_up_to_seq: int = 0,
         limit_pnl_map: Optional[Dict] = None,
+        delete_after_minutes: Optional[int] = None,
     ) -> Optional[discord.Message]:
         """
         Send a ping then create or edit the persistent embed for this signal.
@@ -616,6 +852,7 @@ class AlertSystem:
             pnl_display=pnl_display,
             force_hit_up_to_seq=force_hit_up_to_seq,
             limit_pnl_map=limit_pnl_map,
+            delete_after_minutes=delete_after_minutes,
         )
 
         # ── Edit or create the persistent embed ───────────────────────────────
@@ -779,7 +1016,8 @@ class AlertSystem:
 
     async def send_stop_loss_alert(self, signal: Dict, current_price: float) -> bool:
         try:
-            self._unregister_live_embed(signal["signal_id"])
+            signal_id = signal["signal_id"]
+            self._unregister_live_embed(signal_id)
             limits = await self._fetch_limits(signal)
             ping = (
                 f"🛑 **{signal['instrument']}** {signal['direction'].upper()} — "
@@ -789,8 +1027,10 @@ class AlertSystem:
                 signal=signal, limits=limits, event="stop_loss",
                 current_price=current_price,
                 ping_text=ping,
+                delete_after_minutes=self.END_STATE_DELETE_MINUTES,
             )
             if msg:
+                self._schedule_end_state_deletion(signal_id, event="stop_loss")
                 self.stats["stop_loss_sent"] += 1
                 self.stats["total_alerts"] += 1
                 return True
@@ -839,8 +1079,10 @@ class AlertSystem:
                 signal=signal, limits=limits, event="auto_tp", ping_text=ping,
                 hit_limit_ids=hit_limit_ids, pnl_display=pnl_display,
                 limit_pnl_map=limit_pnl_map,
+                delete_after_minutes=self.END_STATE_DELETE_MINUTES,
             )
             if msg:
+                self._schedule_end_state_deletion(signal["signal_id"], event="auto_tp")
                 self.stats["auto_tp_sent"] += 1
                 self.stats["total_alerts"] += 1
         except Exception as e:
@@ -900,10 +1142,30 @@ class AlertSystem:
         After a signal is reactivated from cancelled state, rebuild its embed to reflect
         the correct live state (approaching or hit) with current price and distance.
         Re-registers the embed for live price updates.
+
+        If the persistent embed was previously auto-deleted (end-state deletion), a new
+        message is sent to the alert channel — the signal is effectively re-announced.
         """
         signal_id = signal.get("signal_id") or signal.get("id")
         if signal_id is None:
             return False
+
+        # If there's a pending move-to-finished task for this signal, cancel it
+        self._cancel_deletion_task(signal_id)
+
+        # If the embed was already moved to the finished channel, remove it from there
+        # so the signal re-appears only in the live alert channel.
+        finished_msg = self.signal_finished_messages.pop(signal_id, None)
+        if finished_msg:
+            # Untrack it so reply commands no longer hit the finished-channel message
+            self.alert_messages.pop(str(finished_msg.id), None)
+            try:
+                await finished_msg.delete()
+                logger.info(f"Deleted finished-channel embed for signal {signal_id} on reactivation")
+            except discord.NotFound:
+                pass
+            except Exception as e:
+                logger.warning(f"Could not delete finished-channel embed for signal {signal_id}: {e}")
 
         # Normalise signal dict so it always has signal_id
         signal = dict(signal)
@@ -957,6 +1219,15 @@ class AlertSystem:
             except Exception as e:
                 logger.warning(f"reactivate_embed: could not fetch live price for signal {signal_id}: {e}")
 
+        # If the embed was previously auto-deleted, we need to drop the stale reference
+        # so _upsert_signal_message will create a fresh one in the channel.
+        if signal_id not in self.signal_messages:
+            logger.info(
+                f"reactivate_embed: no existing embed for signal {signal_id} "
+                f"(likely auto-deleted) — will send fresh embed to channel"
+            )
+            # Fall through to _upsert_signal_message which will create a new message
+
         try:
             msg = await self._upsert_signal_message(
                 signal=signal,
@@ -987,9 +1258,16 @@ class AlertSystem:
     ) -> bool:
         """
         Update the persistent embed after a manual command (profit, sl, cancel, etc.).
-        If no persistent message exists yet, this is a no-op and returns False.
+        If no persistent message exists yet, this is a no-op for most events.
+        Exception: 'reactivated' always calls reactivate_embed (which creates a fresh
+        embed if the old one was auto-deleted).
         """
         signal_id = signal["signal_id"]
+
+        # Reactivation: always delegate to reactivate_embed regardless of embed state
+        if event == "reactivated":
+            return await self.reactivate_embed(signal=signal, ping_text=ping_text)
+
         if signal_id not in self.signal_messages:
             logger.debug(
                 f"update_signal_message: signal {signal_id} has no persistent message yet — skipping"
@@ -1002,13 +1280,19 @@ class AlertSystem:
         if event in _TERMINAL_EVENTS:
             self._unregister_live_embed(signal_id)
 
+        # End states: schedule auto-deletion after 15 minutes
+        is_end_state = event in self._END_STATES
+
         try:
             if limits is None:
                 limits = await self._fetch_limits(signal)
             await self._upsert_signal_message(
                 signal=signal, limits=limits, event=event,
                 current_price=current_price, ping_text=ping_text,
+                delete_after_minutes=self.END_STATE_DELETE_MINUTES if is_end_state else None,
             )
+            if is_end_state:
+                self._schedule_end_state_deletion(signal_id, event=event)
             return True
         except Exception as e:
             logger.error(f"Failed to update signal message for {signal_id}: {e}", exc_info=True)
@@ -1023,9 +1307,13 @@ class AlertSystem:
         """
         Fetch the signal from the DB by ID and update its persistent embed.
         Safe to call from anywhere (commands, expiry, message handler, etc.).
-        No-op if the signal has no persistent embed yet.
+
+        For 'reactivated' events this always runs (even if the embed was deleted),
+        so a fresh embed is sent to the channel.  For all other events this is a
+        no-op when no persistent embed exists yet.
         """
-        if signal_id not in self.signal_messages:
+        # Always proceed for reactivation — the embed may have been auto-deleted
+        if event != "reactivated" and signal_id not in self.signal_messages:
             logger.debug(f"update_embed_for_signal_id: signal {signal_id} has no embed yet — skipping")
             return False
         if not (self.bot and hasattr(self.bot, "signal_db") and self.bot.signal_db):
@@ -1081,9 +1369,38 @@ class AlertSystem:
             return False
 
     async def send_news_cancel_alert(self, signal: Dict, current_price: float, news_event) -> bool:
+        """
+        If an approaching/hit embed already exists for this signal, update it to show
+        the news cancellation.  If no embed exists, send a standalone message.
+        Either way, schedule auto-deletion after END_STATE_DELETE_MINUTES minutes.
+        """
+        signal_id = signal.get("signal_id")
         target_channel = self._get_alert_channel(signal)
         if not target_channel:
             return False
+
+        instrument = signal.get("instrument", "?")
+        direction = signal.get("direction", "").upper()
+
+        # If there's a persistent embed, edit it (keeps the channel clean)
+        if signal_id in self.signal_messages:
+            try:
+                await self.update_signal_message(
+                    signal=signal,
+                    event="cancelled",
+                    current_price=current_price,
+                    ping_text=f"📰 **{instrument}** {direction} — cancelled (news: {news_event.category.upper()})",
+                )
+                self.stats["news_cancelled"] = self.stats.get("news_cancelled", 0) + 1
+                self.stats["total_alerts"] += 1
+                # Deletion is scheduled inside update_signal_message for _END_STATES
+                return True
+            except Exception as e:
+                logger.error(f"Failed to update embed for news cancel (signal {signal_id}): {e}")
+                self.stats["errors"] += 1
+                return False
+
+        # No persistent embed — send a standalone message and schedule its deletion
         try:
             news_ts = int(news_event.news_time.timestamp())
             all_limits = signal.get("limits", signal.get("pending_limits", []))
@@ -1095,7 +1412,7 @@ class AlertSystem:
             else:
                 limit_prices = "—"
             signal_summary = (
-                f"**{signal['instrument']}** {signal['direction'].upper()}\n"
+                f"**{instrument}** {direction}\n"
                 f"Limits: {limit_prices}\n"
                 f"SL: {_fmt(signal.get('stop_loss', 0))}"
             )
@@ -1110,7 +1427,12 @@ class AlertSystem:
                 color=0x5865F2,
                 timestamp=datetime.now(timezone.utc),
             )
-            embed.set_footer(text=f"Signal #{signal['signal_id']} • Auto-cancelled (news mode)")
+            embed.set_footer(
+                text=(
+                    f"Signal #{signal_id} • Auto-cancelled (news mode) "
+                    f"• 🗑️ Deletes in {self.END_STATE_DELETE_MINUTES} min"
+                )
+            )
             if signal.get("message_id") and signal.get("channel_id"):
                 if not str(signal["message_id"]).startswith("manual_"):
                     guild_id = signal.get("guild_id")
@@ -1120,9 +1442,19 @@ class AlertSystem:
                     embed.add_field(name="Source", value=url, inline=False)
             await target_channel.send("<@&1334203997107650662>")
             message = await target_channel.send(embed=embed)
-            self.track_alert_message(message.id, signal["signal_id"])
+            self.track_alert_message(message.id, signal_id)
             self.stats["news_cancelled"] = self.stats.get("news_cancelled", 0) + 1
             self.stats["total_alerts"] += 1
+
+            # Schedule deletion of this standalone message
+            async def _delete_standalone():
+                await asyncio.sleep(self.END_STATE_DELETE_MINUTES * 60)
+                try:
+                    await message.delete()
+                    logger.info(f"Auto-deleted standalone news-cancel message for signal {signal_id}")
+                except Exception:
+                    pass
+            asyncio.ensure_future(_delete_standalone())
             return True
         except Exception as e:
             logger.error(f"Failed to send news cancel alert: {e}")
@@ -1172,8 +1504,10 @@ class AlertSystem:
                 limits=limits,
                 event="near_miss_cancelled",
                 ping_text=ping,
+                delete_after_minutes=self.END_STATE_DELETE_MINUTES,
             )
             if msg:
+                self._schedule_end_state_deletion(signal_id, event="near_miss_cancelled")
                 self.stats["nm_cancelled"] = self.stats.get("nm_cancelled", 0) + 1
                 self.stats["total_alerts"] += 1
                 logger.info(f"Near-miss cancel alert sent for signal {signal_id} ({instrument})")
@@ -1314,4 +1648,6 @@ class AlertSystem:
             "persistent_messages": len(self.signal_messages),
             "active_pings": len(self.signal_ping_messages),
             "live_embeds": len(self._live_embeds),
+            "pending_archive_moves": len(self._deletion_tasks),
+            "finished_channel_messages": len(self.signal_finished_messages),
         }
