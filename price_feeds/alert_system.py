@@ -98,6 +98,7 @@ def _build_signal_embed(
         "cancelled":    (0x808080, "❌ Cancelled"),
         "expired":      (0x808080, "⌛ Expired"),
         "spread_hour_cancelled": (0xFFA500, "🕔 Spread Hour — Cancelled"),
+        "near_miss_cancelled":   (0x808080, "❌ Near-Miss — Cancelled"),
         "reactivated":  (0x3498DB, "♻️ Reactivated"),
         "edited":       (0x3498DB, "📝 Updated"),
     }
@@ -200,6 +201,14 @@ def _build_signal_embed(
             inline=False,
         )
 
+    # ── Near-miss cancel notice ───────────────────────────────────────────────
+    if event == "near_miss_cancelled":
+        embed.add_field(
+            name="❌ Near-Miss — Auto-Cancelled",
+            value="Price approached but did not hit this limit. The signal was automatically cancelled after a near-miss was detected.",
+            inline=False,
+        )
+
     # ── Source link ──────────────────────────────────────────────────────────
     msg_id = signal.get("message_id")
     ch_id = signal.get("channel_id")
@@ -214,6 +223,8 @@ def _build_signal_embed(
         embed.set_footer(text=f"Signal #{signal_id} • Auto-expired")
     elif event == "spread_hour_cancelled":
         embed.set_footer(text=f"Signal #{signal_id} • Auto-cancelled (spread hour)")
+    elif event == "near_miss_cancelled":
+        embed.set_footer(text=f"Signal #{signal_id} • Auto-cancelled (near-miss)")
     else:
         embed.set_footer(text=f"Signal #{signal_id} • Reply to this message to manage")
     return embed
@@ -987,7 +998,7 @@ class AlertSystem:
 
         # Terminal events: stop live price updates
         _TERMINAL_EVENTS = {"stop_loss", "auto_tp", "profit", "breakeven", "cancelled", "expired",
-                            "spread_hour_cancelled"}
+                            "spread_hour_cancelled", "near_miss_cancelled"}
         if event in _TERMINAL_EVENTS:
             self._unregister_live_embed(signal_id)
 
@@ -1159,7 +1170,7 @@ class AlertSystem:
             msg = await self._upsert_signal_message(
                 signal=signal,
                 limits=limits,
-                event="cancelled",
+                event="near_miss_cancelled",
                 ping_text=ping,
             )
             if msg:

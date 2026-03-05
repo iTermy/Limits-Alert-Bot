@@ -70,11 +70,11 @@
       "default_expiry": "month_end"
     },
     "gold-tolls-map": {
-      "default_expiry": "day_end",
+      "default_expiry": "week_end",
       "default_instrument": "XAUUSD"
     },
     "general-tolls": {
-      "default_expiry": "day_end"
+      "default_expiry": "week_end"
     }
   }
 }

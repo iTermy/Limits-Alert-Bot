@@ -21,6 +21,7 @@ from price_feeds.tp_config import TPConfig
 from price_feeds.tp_monitor import AutoTPMonitor
 from price_feeds.nm_config import NMConfig
 from price_feeds.nm_monitor import NearMissMonitor
+from price_feeds.live_price_writer import LivePriceWriter
 from utils.logger import get_logger
 from utils.config_loader import load_settings
 
@@ -64,6 +65,13 @@ class StreamingPriceMonitor:
             signal_db=signal_db,
             db=db,
             alert_system=self.alert_system,
+        )
+
+        # Live price writer: persists OANDA/Binance prices to DB every 5s
+        # so the execution bot can calculate feed-vs-MT5 distance
+        self.live_price_writer = LivePriceWriter(
+            db_manager=db,
+            stream_manager=self.stream_manager,
         )
 
         # Connect alert system to message handler
@@ -246,6 +254,9 @@ class StreamingPriceMonitor:
         # Start periodic signal refresh task (every 30 seconds)
         asyncio.create_task(self._periodic_signal_refresh())
 
+        # Start writing OANDA/Binance prices to live_prices table
+        self.live_price_writer.start()
+
         logger.info("Streaming price monitor started")
 
     async def stop(self):
@@ -254,6 +265,9 @@ class StreamingPriceMonitor:
 
         # Shutdown stream manager
         await self.stream_manager.shutdown()
+
+        # Stop live price writer (does a final flush)
+        await self.live_price_writer.stop()
 
         if self.health_monitor:
             await self.health_monitor.stop_monitoring()
