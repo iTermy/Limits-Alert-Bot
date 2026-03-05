@@ -966,6 +966,51 @@ class MessageHandler:
             return
 
         if parsed:
+            # If the signal was cancelled, reactivate it with the updated content
+            if existing['status'] == 'cancelled':
+                from database.signal_operations.lifecycle import LifecycleManager
+                lifecycle = LifecycleManager(self.signal_db.db)
+                reactivated = await lifecycle.reactivate_cancelled_signal(
+                    existing['id'], parsed, self.signal_db.db
+                )
+                if reactivated:
+                    # Also update the signal fields with the newly parsed content
+                    await self.signal_db.update_signal_from_edit(str(after.id), parsed)
+
+                    # Mark NM-immune so the near-miss monitor won't auto-cancel it again
+                    if hasattr(self.bot, 'monitor') and self.bot.monitor:
+                        nm = getattr(self.bot.monitor, 'nm_monitor', None)
+                        if nm:
+                            nm.mark_immune(existing['id'])
+
+                    await after.clear_reactions()
+                    await after.add_reaction("✅")
+                    await after.add_reaction("♻️")
+                    self.logger.info(f"Cancelled signal reactivated after edit: {after.id}")
+
+                    if self.alert_system:
+                        try:
+                            updated_signal = await self.signal_db.get_signal_with_limits(existing['id'])
+                            if updated_signal:
+                                _sig_id = updated_signal.get('signal_id') or updated_signal.get('id')
+                                _signal_for_update = dict(updated_signal)
+                                _signal_for_update['signal_id'] = _sig_id
+                                ping_text = (
+                                    f"♻️ **{updated_signal['instrument']}** {updated_signal['direction'].upper()} — "
+                                    f"signal reactivated by sender (edited)"
+                                )
+                                await self.alert_system.update_signal_message(
+                                    signal=_signal_for_update,
+                                    event="reactivated",
+                                    ping_text=ping_text,
+                                )
+                        except Exception as _ue:
+                            self.logger.warning(f"Could not update embed after reactivation via edit: {_ue}")
+                else:
+                    await after.add_reaction("❌")
+                    self.logger.warning(f"Failed to reactivate cancelled signal on edit: {after.id}")
+                return
+
             success = await self.signal_db.update_signal_from_edit(str(after.id), parsed)
 
             if success:

@@ -36,6 +36,7 @@ class ExpiryManager:
 
                 # Update embeds for any expired signals that had persistent messages
                 if alert_system and ids_to_update:
+                    monitor = self.bot.monitor if hasattr(self.bot, 'monitor') and self.bot.monitor else None
                     for sig_id in ids_to_update:
                         try:
                             signal = await self.bot.signal_db.get_signal_with_limits(sig_id)
@@ -45,6 +46,12 @@ class ExpiryManager:
                                     'expired',
                                     ping_text="Signal expired."
                                 )
+                                # React to the original signal message with ❌
+                                if monitor:
+                                    try:
+                                        await monitor._react_to_original_signal(signal, "❌")
+                                    except Exception as _re:
+                                        self.logger.warning(f"Could not react to original message for expired signal {sig_id}: {_re}")
                         except Exception as _ue:
                             self.logger.warning(f"Could not update embed after expiry for signal {sig_id}: {_ue}")
 

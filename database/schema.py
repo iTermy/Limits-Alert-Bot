@@ -101,6 +101,17 @@ async def initialize_database(db_manager):
             )
         """)
 
+        # Create live_prices table (written by LivePriceWriter, read by execution bot)
+        await conn.execute("""
+            CREATE TABLE IF NOT EXISTS live_prices (
+                symbol     TEXT PRIMARY KEY,
+                bid        DOUBLE PRECISION NOT NULL,
+                ask        DOUBLE PRECISION NOT NULL,
+                feed       TEXT NOT NULL,
+                updated_at TIMESTAMPTZ NOT NULL DEFAULT NOW()
+            )
+        """)
+
         await _create_indexes(conn)
 
         # Run migrations for any new columns added to existing tables
@@ -126,6 +137,7 @@ async def _create_indexes(conn):
         "CREATE INDEX IF NOT EXISTS idx_limits_status ON limits(status)",
         "CREATE INDEX IF NOT EXISTS idx_status_changes_signal ON status_changes(signal_id)",
         "CREATE INDEX IF NOT EXISTS idx_performance_date ON performance_metrics(date)",
+        "CREATE INDEX IF NOT EXISTS idx_live_prices_updated ON live_prices(updated_at)",
     ]
 
     for index_query in indexes:

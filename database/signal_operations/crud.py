@@ -186,8 +186,11 @@ class CrudOperations:
 
             signal_id = existing['id']
 
-            # Only allow updates if signal is not in final status
-            if SignalStatus.is_final(existing['status']):
+            # Only block truly terminal statuses. 'cancelled' is allowed through here
+            # because handle_message_edit reactivates first, then calls this to sync
+            # the newly-parsed content into the DB.
+            truly_final = [s for s in SignalStatus.FINAL_STATUSES if s != SignalStatus.CANCELLED]
+            if existing['status'] in truly_final:
                 logger.warning(f"Cannot update signal {signal_id} in final status {existing['status']}")
                 return False
 
