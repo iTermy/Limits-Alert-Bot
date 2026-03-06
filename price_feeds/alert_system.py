@@ -183,32 +183,28 @@ def _build_signal_embed(
     elif distance_formatted and event == "hit":
         embed.add_field(name="Next Limit Distance", value=distance_formatted, inline=True)
 
-    # ── Expired notice ───────────────────────────────────────────────────────
-    is_expired = event == "expired" or (
-        event == "cancelled" and signal.get("closed_reason") == "automatic"
-    )
-    if is_expired:
-        embed.add_field(
-            name="⌛ Signal Expired",
-            value="This signal reached its expiry time and was automatically cancelled.",
-            inline=False,
-        )
+    # ── Cancelled/expired reason notice ─────────────────────────────────────
+    cancel_type = signal.get("cancel_type") or signal.get("closed_reason") or ""
+    is_expired = event == "expired" or cancel_type == "expiry"
 
-    # ── Spread hour cancel notice ─────────────────────────────────────────────
-    if event == "spread_hour_cancelled":
-        embed.add_field(
-            name="🕔 Spread Hour — Auto-Cancelled",
-            value="This signal triggered during the **5–6 PM EST spread hour** and was automatically cancelled due to widened spreads.",
-            inline=False,
-        )
+    if event in ("cancelled", "expired", "near_miss_cancelled", "spread_hour_cancelled"):
+        if event == "near_miss_cancelled" or cancel_type == "near_miss":
+            reason_text = "Auto near-miss"
+        elif event == "spread_hour_cancelled" or cancel_type == "spread_hour":
+            reason_text = "Auto spread hour"
+        elif is_expired:
+            reason_text = "Auto expiry"
+        elif cancel_type.startswith("news"):
+            currency = cancel_type.split(":")[-1] if ":" in cancel_type else ""
+            reason_text = f"Auto news" + (f" ({currency})" if currency else "")
+        elif cancel_type == "manual":
+            reason_text = "Manual"
+        elif cancel_type == "automatic":
+            reason_text = "Auto expiry"
+        else:
+            reason_text = "Cancelled"
 
-    # ── Near-miss cancel notice ───────────────────────────────────────────────
-    if event == "near_miss_cancelled":
-        embed.add_field(
-            name="❌ Near-Miss — Auto-Cancelled",
-            value="Price approached but did not hit this limit. The signal was automatically cancelled after a near-miss was detected.",
-            inline=False,
-        )
+        embed.add_field(name="Reason", value=reason_text, inline=True)
 
     # ── Source link ──────────────────────────────────────────────────────────
     msg_id = signal.get("message_id")
@@ -222,16 +218,100 @@ def _build_signal_embed(
 
     _deletion_suffix = f" • ⏳ Moving to archive in {delete_after_minutes} min" if delete_after_minutes else ""
 
-    if is_expired:
+    if event == "expired" or (event == "cancelled" and cancel_type == "expiry"):
         embed.set_footer(text=f"Signal #{signal_id} • Auto-expired{_deletion_suffix}")
-    elif event == "spread_hour_cancelled":
+    elif event == "spread_hour_cancelled" or cancel_type == "spread_hour":
         embed.set_footer(text=f"Signal #{signal_id} • Auto-cancelled (spread hour){_deletion_suffix}")
-    elif event == "near_miss_cancelled":
+    elif event == "near_miss_cancelled" or cancel_type == "near_miss":
         embed.set_footer(text=f"Signal #{signal_id} • Auto-cancelled (near-miss){_deletion_suffix}")
+    elif event == "cancelled" and cancel_type.startswith("news"):
+        embed.set_footer(text=f"Signal #{signal_id} • Auto-cancelled (news){_deletion_suffix}")
+    elif event == "cancelled" and cancel_type == "automatic":
+        embed.set_footer(text=f"Signal #{signal_id} • Auto-expired{_deletion_suffix}")
     elif _deletion_suffix:
         embed.set_footer(text=f"Signal #{signal_id}{_deletion_suffix}")
     else:
         embed.set_footer(text=f"Signal #{signal_id} • Reply to this message to manage")
+    return embed
+
+
+def _build_profit_archive_embed(sig_data: Optional[Dict], signal_id: int, bot=None) -> discord.Embed:
+    """
+    Build the dedicated profit embed posted to the profit channel when a signal
+    is archived (after the END_STATE_DELETE_MINUTES window).
+
+    Shows: instrument, direction, hit limits, stop loss, P&L (if available),
+    source link, and whether it was auto-TP or manual profit.
+    """
+    if not sig_data:
+        return discord.Embed(
+            title="💰 PROFIT",
+            description=f"Signal #{signal_id} closed as profit.",
+            color=0x00FF00,
+            timestamp=datetime.now(timezone.utc),
+        )
+
+    instrument = sig_data.get("instrument", "?")
+    direction = (sig_data.get("direction") or "").upper()
+    sid = sig_data.get("signal_id") or sig_data.get("id", signal_id)
+    db_status = sig_data.get("status", "")
+    closed_reason = sig_data.get("closed_reason") or ""
+    is_auto_tp = closed_reason == "automatic"
+    result_pips = sig_data.get("result_pips")
+
+    all_limits = sorted(sig_data.get("limits", []), key=lambda l: l.get("sequence_number", 0))
+    hit_limits = [l for l in all_limits if l.get("status") == "hit" or l.get("hit_alert_sent")]
+    total = len(all_limits) or len(hit_limits)
+    num_hit = len(hit_limits)
+
+    method = "Auto Take-Profit" if is_auto_tp else "Manual Profit"
+
+    embed = discord.Embed(
+        title=f"💰 PROFIT — {instrument} {direction}",
+        color=0x00FF00,
+        timestamp=datetime.now(timezone.utc),
+    )
+
+    embed.add_field(name="Symbol", value=instrument, inline=True)
+    embed.add_field(name="Position", value=direction, inline=True)
+    embed.add_field(name="Method", value=method, inline=True)
+
+    if hit_limits:
+        lines = [
+            f"Limit #{l.get('sequence_number', '?')}: {_fmt(l.get('price_level', 0))} ✅"
+            for l in hit_limits
+        ]
+        embed.add_field(
+            name=f"Limits Hit ({num_hit}/{total})",
+            value="\n".join(lines),
+            inline=False,
+        )
+
+    if sig_data.get("stop_loss"):
+        embed.add_field(name="Stop Loss", value=_fmt(sig_data["stop_loss"]), inline=True)
+
+    if result_pips is not None:
+        try:
+            from price_feeds.tp_config import TPConfig
+            _tp = TPConfig()
+            pnl_str = _tp.format_value(instrument, abs(float(result_pips)))
+            sign = "+" if float(result_pips) >= 0 else "-"
+            embed.add_field(name="P&L", value=f"**{sign}{pnl_str}**", inline=True)
+        except Exception:
+            embed.add_field(name="P&L", value=f"**+{result_pips:.1f}**", inline=True)
+
+    # Source link
+    msg_id = sig_data.get("message_id")
+    ch_id = sig_data.get("channel_id")
+    if msg_id and ch_id and not str(msg_id).startswith("manual_"):
+        guild_id = sig_data.get("guild_id")
+        if not guild_id and bot and bot.guilds:
+            guild_id = bot.guilds[0].id
+        if guild_id:
+            url = f"https://discord.com/channels/{guild_id}/{ch_id}/{msg_id}"
+            embed.add_field(name="Source", value=url, inline=False)
+
+    embed.set_footer(text=f"Signal #{sid} • 📁 Profit Archived")
     return embed
 
 
@@ -589,17 +669,72 @@ class AlertSystem:
 
             if dest_channel:
                 try:
-                    existing_embed = embed_msg.embeds[0] if embed_msg.embeds else None
-                    if existing_embed:
-                        new_embed = existing_embed.copy()
-                        old_footer = existing_embed.footer.text or ""
-                        clean_footer = old_footer.split(" • ⏳")[0].split(" • 🗑️")[0]
-                        new_embed.set_footer(text=f"{clean_footer} • {archive_label}")
+                    # Fetch fresh signal data from DB once — used for both paths
+                    sig_data = None
+                    if self.bot and hasattr(self.bot, "signal_db") and self.bot.signal_db:
+                        try:
+                            sig_data = await self.bot.signal_db.get_signal_with_limits(signal_id)
+                            if sig_data and "signal_id" not in sig_data:
+                                sig_data = dict(sig_data)
+                                sig_data["signal_id"] = sig_data.get("id", signal_id)
+                        except Exception as _fetch_err:
+                            logger.warning(f"Could not fetch signal {signal_id} from DB for archive: {_fetch_err}")
+
+                    if is_profit:
+                        # ── Profit channel: send a dedicated profit summary embed ────
+                        new_embed = _build_profit_archive_embed(sig_data, signal_id, self.bot)
                     else:
-                        new_embed = discord.Embed(
-                            description="Signal reached a final state.",
-                            color=0x808080,
-                        )
+                        # ── Finished channel: rebuild the signal embed with correct event ──
+                        new_embed = None
+                        if sig_data:
+                            try:
+                                db_status = sig_data.get("status", "")
+                                cancel_type_db = sig_data.get("closed_reason") or ""
+                                _status_to_event = {
+                                    "profit": "profit",
+                                    "auto_tp": "auto_tp",
+                                    "stop_loss": "stop_loss",
+                                    "cancelled": "cancelled",
+                                    "expired": "expired",
+                                    "breakeven": "breakeven",
+                                }
+                                rebuild_event = _status_to_event.get(db_status, event)
+                                if rebuild_event == "cancelled":
+                                    if cancel_type_db == "near_miss":
+                                        rebuild_event = "near_miss_cancelled"
+                                    elif cancel_type_db == "spread_hour":
+                                        rebuild_event = "spread_hour_cancelled"
+
+                                guild_id_val = sig_data.get("guild_id")
+                                if not guild_id_val and self.bot and self.bot.guilds:
+                                    guild_id_val = self.bot.guilds[0].id
+
+                                new_embed = _build_signal_embed(
+                                    signal=sig_data,
+                                    limits=sig_data.get("limits", []),
+                                    event=rebuild_event,
+                                    guild_id=guild_id_val,
+                                    bot=self.bot,
+                                )
+                                old_footer = new_embed.footer.text or ""
+                                clean_footer = old_footer.split(" • ⏳")[0].split(" • 🗑️")[0]
+                                new_embed.set_footer(text=f"{clean_footer} • 📁 Archived")
+                            except Exception as _rebuild_err:
+                                logger.warning(f"Could not rebuild embed for signal {signal_id} from DB: {_rebuild_err}")
+
+                        # Fallback: copy the existing embed if DB rebuild failed
+                        if new_embed is None:
+                            existing_embed = embed_msg.embeds[0] if embed_msg.embeds else None
+                            if existing_embed:
+                                new_embed = existing_embed.copy()
+                                old_footer = existing_embed.footer.text or ""
+                                clean_footer = old_footer.split(" • ⏳")[0].split(" • 🗑️")[0]
+                                new_embed.set_footer(text=f"{clean_footer} • 📁 Archived")
+                            else:
+                                new_embed = discord.Embed(
+                                    description="Signal reached a final state.",
+                                    color=0x808080,
+                                )
 
                     finished_msg = await dest_channel.send(embed=new_embed)
                     self.signal_finished_messages[signal_id] = finished_msg
@@ -1089,47 +1224,6 @@ class AlertSystem:
             logger.error(f"Failed to update embed for auto-TP signal {signal['signal_id']}: {e}")
             self.stats["errors"] += 1
             return False
-
-        # Also post to profit channel
-        try:
-            profit_channel = await self._get_profit_channel()
-            if profit_channel:
-                message_url = None
-                if signal.get("message_id") and signal.get("channel_id"):
-                    if not str(signal["message_id"]).startswith("manual_"):
-                        guild_id = signal.get("guild_id")
-                        if not guild_id and self.bot and self.bot.guilds:
-                            guild_id = self.bot.guilds[0].id
-                        if guild_id:
-                            message_url = (
-                                f"https://discord.com/channels/{guild_id}"
-                                f"/{signal['channel_id']}/{signal['message_id']}"
-                            )
-
-                profit_embed = discord.Embed(
-                    title="💰 PROFIT Alert",
-                    description=f"Signal #{signal['signal_id']} has been marked as **PROFIT** (Auto TP)",
-                    color=0x00FF00,
-                    timestamp=datetime.now(timezone.utc),
-                )
-                profit_embed.add_field(name="Symbol", value=instrument, inline=True)
-                profit_embed.add_field(name="Position", value=direction, inline=True)
-                profit_embed.add_field(name="Profit", value=f"**+{pnl_display}**", inline=True)
-                if hit_limits:
-                    lines = [
-                        f"Limit #{l.get('sequence_number', '?')}: "
-                        f"{_fmt(l.get('price_level') or l.get('hit_price', 0))} ✅"
-                        for l in hit_limits
-                    ]
-                    profit_embed.add_field(name="Limits", value="\n".join(lines), inline=True)
-                if signal.get("stop_loss"):
-                    profit_embed.add_field(name="Stop Loss", value=_fmt(signal["stop_loss"]), inline=True)
-                if message_url:
-                    profit_embed.add_field(name="Original Signal", value=f"[View Message]({message_url})", inline=False)
-                profit_embed.set_footer(text="Auto Take-Profit")
-                await profit_channel.send(embed=profit_embed)
-        except Exception as e:
-            logger.error(f"Failed to send auto-TP to profit channel: {e}", exc_info=True)
 
         return True
 

@@ -814,7 +814,7 @@ class StreamingPriceMonitor:
                 signal_id,
                 'cancelled',
                 reason='spread_hour_auto_cancel',
-                closed_reason='automatic'
+                closed_reason='spread_hour'
             )
             if success:
                 logger.info(f"Signal {signal_id} cancelled due to spread hour hit")
@@ -839,7 +839,7 @@ class StreamingPriceMonitor:
                 signal_id,
                 'cancelled',
                 reason=f'news_auto_cancel:{news_event.category.upper()}',
-                closed_reason='automatic'
+                closed_reason=f'news:{news_event.category.upper()}'
             )
             if success:
                 logger.info(

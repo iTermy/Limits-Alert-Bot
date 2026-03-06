@@ -601,7 +601,7 @@ class LifecycleManager:
                         UPDATE signals
                         SET status = $1, updated_at = CURRENT_TIMESTAMP, closed_at = CURRENT_TIMESTAMP, closed_reason = $2
                         WHERE id = $3
-                    """, SignalStatus.CANCELLED, 'automatic', signal_id)
+                    """, SignalStatus.CANCELLED, 'expiry', signal_id)
                     # Record status change
                     await conn.execute("""
                         INSERT INTO status_changes (signal_id, old_status, new_status, change_type, reason)

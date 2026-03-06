@@ -263,6 +263,20 @@ class MessageHandler:
 
                 elif command in ("profit", "win", "tp"):
                     logger.debug(f"Processing profit command for signal {signal_id}")
+                    # If signal has no limits hit yet (approaching→profit), mark limit 1 as hit first
+                    if not signal.get('hit_limits'):
+                        pending = sorted(
+                            signal.get('pending_limits') or [],
+                            key=lambda l: l.get('sequence_number', 999)
+                        )
+                        if pending:
+                            try:
+                                from database import db as _db
+                                await _db.mark_limit_hit(pending[0]['id'], pending[0]['price_level'])
+                                # Refresh signal so result_pips calc and embed see the hit limit
+                                signal = await self.signal_db.get_signal_with_limits(signal_id) or signal
+                            except Exception as _he:
+                                logger.warning(f"Could not auto-hit limit for signal {signal_id} on profit reply: {_he}")
                     # Use TP threshold from config as the recorded result
                     profit_result_pips = self.tp_config.get_tp_value(signal['instrument'], scalp=signal.get('scalp', False))
                     success = await asyncio.wait_for(
@@ -273,9 +287,6 @@ class MessageHandler:
                         timeout=5.0
                     )
                     action_taken = "marked as PROFIT"
-                    # Send profit alert to profit channel if successful
-                    if success:
-                        await self.send_profit_alert(signal, message.author, profit_amount)
                 elif command in ("hit",):
                     logger.debug(f"Processing hit command for signal {signal_id}")
                     was_cancelled = signal.get('status') == 'cancelled'
@@ -804,6 +815,23 @@ class MessageHandler:
                     except:
                         pass  # Reaction might not exist
                     await referenced.add_reaction("❌")
+
+                    # If no alert embed has been sent for this signal yet, delete the
+                    # original signal message immediately (nothing else will clean it up).
+                    _sig_id_for_check = signal.get('signal_id') or signal.get('id')
+                    has_alert_embed = (
+                        self.alert_system and
+                        _sig_id_for_check in self.alert_system.signal_messages
+                    )
+                    if not has_alert_embed:
+                        try:
+                            await referenced.delete()
+                            logger.info(
+                                f"Deleted original signal message {referenced.id} "
+                                f"(signal {_sig_id_for_check} cancelled with no alert embed)"
+                            )
+                        except Exception as _de:
+                            logger.warning(f"Could not delete original signal message {referenced.id}: {_de}")
                 elif action_taken == "marked as HIT":
                     await referenced.add_reaction("🎯")
                 elif action_taken == "marked as PROFIT":

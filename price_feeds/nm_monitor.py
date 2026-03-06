@@ -233,7 +233,7 @@ class NearMissMonitor:
                     signal_id,
                     "cancelled",
                     reason=f"near_miss_auto_cancel:closest={closest_str}",
-                    closed_reason="automatic",
+                    closed_reason="near_miss",
                 ),
                 timeout=5.0,
             )
