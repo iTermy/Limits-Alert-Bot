@@ -504,6 +504,27 @@ class TradingCommands(BaseCog):
         # Calculate result_pips for profit and stop_loss
         result_pips = None
         if status == 'profit':
+            # If signal is approaching (no limits hit yet), mirror !hit behaviour:
+            # mark the first pending limit as hit before setting status to profit.
+            current_hit_count = len(signal.get('hit_limits') or [])
+            if current_hit_count == 0:
+                pending_limits = signal.get('pending_limits') or []
+                if pending_limits:
+                    # Sort by sequence_number and hit the first one
+                    sorted_pending = sorted(pending_limits, key=lambda l: l.get('sequence_number', 999))
+                    first_limit = sorted_pending[0]
+                    try:
+                        from database import db as _db
+                        await _db.mark_limit_hit(first_limit['id'], first_limit['price_level'])
+                        logger.info(
+                            f"Auto-hit limit #{first_limit.get('sequence_number')} "
+                            f"for signal {signal_id} as part of manual profit (approaching→profit)"
+                        )
+                        # Refresh signal so hit_limits count is correct for result_pips calc
+                        signal = await self.signal_db.get_signal_with_limits(signal_id) or signal
+                    except Exception as _hit_err:
+                        logger.warning(f"Could not auto-hit limit for signal {signal_id} on profit: {_hit_err}")
+
             # Use the TP threshold from config as the recorded result
             result_pips = self.tp_config.get_tp_value(signal['instrument'], scalp=signal.get('scalp', False))
         elif status == 'stop_loss':
