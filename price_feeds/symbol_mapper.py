@@ -205,9 +205,11 @@ class SymbolMapper:
         if symbol_upper in specific:
             return specific[symbol_upper]
 
-        # Stocks keep their format
+        # Stocks: append -24 suffix for 24-hour market price tracking.
+        # The DB stores the clean symbol (e.g. AMD.NAS), but the ICMarkets
+        # feed requires AMD.NAS-24 to get prices outside US market hours.
         if '.NAS' in symbol_upper or '.NYSE' in symbol_upper:
-            return symbol_upper
+            return symbol_upper + '-24'
 
         # Forex pairs stay as-is
         if self.determine_asset_class(symbol) == 'forex':
@@ -336,7 +338,12 @@ class SymbolMapper:
                 return 'XAUUSD'
             elif feed_symbol == 'SILVER':
                 return 'XAGUSD'
-            return feed_symbol.upper()
+            # Strip the -24 suffix added for 24-hour stock price tracking
+            # so the symbol matches the DB format (e.g. AMD.NAS-24 -> AMD.NAS)
+            symbol_up = feed_symbol.upper()
+            if symbol_up.endswith('-24'):
+                return symbol_up[:-3]
+            return symbol_up
 
         elif feed == 'oanda':
             # CRITICAL FIX: Convert EUR_USD back to EURUSD (remove underscores)

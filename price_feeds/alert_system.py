@@ -785,34 +785,7 @@ class AlertSystem:
                 if self.bot and hasattr(self.bot, "signal_db") and self.bot.signal_db:
                     sig_data = await self.bot.signal_db.get_signal_with_limits(signal_id)
                     if sig_data:
-                        src_channel_id = str(sig_data.get("channel_id", ""))
-                        src_message_id = str(sig_data.get("message_id", ""))
-                        if (
-                            src_channel_id in self.toll_channel_ids
-                            and src_message_id
-                            and not src_message_id.startswith("manual_")
-                        ):
-                            src_channel = self.bot.get_channel(int(src_channel_id))
-                            if src_channel:
-                                try:
-                                    src_msg = await src_channel.fetch_message(int(src_message_id))
-                                    await src_msg.delete()
-                                    logger.info(
-                                        f"Deleted gold-tolls original message {src_message_id} "
-                                        f"for signal {signal_id}"
-                                    )
-                                except discord.NotFound:
-                                    pass  # Already deleted by someone else
-                                except discord.Forbidden:
-                                    logger.warning(
-                                        f"No permission to delete gold-tolls message "
-                                        f"{src_message_id} for signal {signal_id}"
-                                    )
-                                except Exception as e:
-                                    logger.warning(
-                                        f"Could not delete gold-tolls original message "
-                                        f"{src_message_id}: {e}"
-                                    )
+                        await self._maybe_delete_toll_original(sig_data, signal_id)
             except Exception as e:
                 logger.warning(f"Gold-tolls original message cleanup failed for signal {signal_id}: {e}")
 
@@ -891,6 +864,40 @@ class AlertSystem:
 
     def is_general_toll_signal(self, signal: Dict) -> bool:
         return str(signal.get("channel_id", "")) in self.general_toll_channel_ids
+
+    async def _maybe_delete_toll_original(self, signal: Dict, signal_id: int) -> None:
+        """
+        Delete the original signal message for gold-toll signals (channel is in toll_channel_ids).
+        Safe to call on any signal — silently skips non-toll and manual signals.
+        """
+        src_channel_id = str(signal.get("channel_id", ""))
+        src_message_id = str(signal.get("message_id", ""))
+        if (
+            src_channel_id not in self.toll_channel_ids
+            or not src_message_id
+            or src_message_id.startswith("manual_")
+        ):
+            return
+        try:
+            src_channel = self.bot.get_channel(int(src_channel_id)) if self.bot else None
+            if not src_channel:
+                return
+            try:
+                src_msg = await src_channel.fetch_message(int(src_message_id))
+                await src_msg.delete()
+                logger.info(
+                    f"Deleted gold-tolls original message {src_message_id} for signal {signal_id}"
+                )
+            except discord.NotFound:
+                pass  # Already deleted
+            except discord.Forbidden:
+                logger.warning(
+                    f"No permission to delete gold-tolls message {src_message_id} for signal {signal_id}"
+                )
+            except Exception as e:
+                logger.warning(f"Could not delete gold-tolls message {src_message_id}: {e}")
+        except Exception as e:
+            logger.warning(f"Gold-toll original message cleanup failed for signal {signal_id}: {e}")
 
     def _get_alert_channel(self, signal: Dict) -> Optional[discord.TextChannel]:
         # Most-specific routing first
@@ -1444,8 +1451,10 @@ class AlertSystem:
         """
         signal_id = signal.get("signal_id")
         if signal_id not in self.signal_messages:
-            # No approaching alert was sent — silent backend cancel, no Discord message needed
+            # No approaching alert was sent — silent backend cancel, no Discord message needed.
+            # Still clean up gold-toll original message if applicable.
             logger.debug(f"Spread hour cancel for signal {signal_id}: no persistent embed, skipping alert")
+            await self._maybe_delete_toll_original(signal, signal_id)
             return True
         try:
             await self.update_signal_message(
@@ -1540,15 +1549,39 @@ class AlertSystem:
             self.stats["news_cancelled"] = self.stats.get("news_cancelled", 0) + 1
             self.stats["total_alerts"] += 1
 
-            # Schedule deletion of this standalone message
-            async def _delete_standalone():
-                await asyncio.sleep(self.END_STATE_DELETE_MINUTES * 60)
+            # Schedule move to finished-signals channel (and gold-toll source cleanup)
+            # after END_STATE_DELETE_MINUTES minutes, mirroring the embed path.
+            async def _move_standalone_after_delay():
+                try:
+                    await asyncio.sleep(self.END_STATE_DELETE_MINUTES * 60)
+                except asyncio.CancelledError:
+                    return
+
+                # Move to finished-signals channel
+                finished_channel = self._get_finished_channel()
+                if finished_channel:
+                    try:
+                        # Rebuild embed with archive footer
+                        archived_embed = embed.copy()
+                        old_footer = embed.footer.text or ""
+                        clean_footer = old_footer.split(" • ⏳")[0].split(" • 🗑️")[0]
+                        archived_embed.set_footer(text=f"{clean_footer} • 📁 Archived")
+                        await finished_channel.send(embed=archived_embed)
+                        logger.info(f"Moved standalone news-cancel embed for signal {signal_id} to finished-signals")
+                    except Exception as _mv:
+                        logger.warning(f"Could not move standalone news-cancel embed for signal {signal_id}: {_mv}")
+
+                # Delete the original alert channel message
                 try:
                     await message.delete()
-                    logger.info(f"Auto-deleted standalone news-cancel message for signal {signal_id}")
+                    logger.info(f"Deleted standalone news-cancel message for signal {signal_id}")
                 except Exception:
                     pass
-            asyncio.ensure_future(_delete_standalone())
+
+                # Gold-toll: delete the original signal source message
+                await self._maybe_delete_toll_original(signal, signal_id)
+
+            asyncio.ensure_future(_move_standalone_after_delay())
             return True
         except Exception as e:
             logger.error(f"Failed to send news cancel alert: {e}")
