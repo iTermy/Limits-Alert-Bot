@@ -164,6 +164,36 @@ async def _run_migrations(conn):
             END IF;
         END $$;
         """,
+
+        # License system — per-user key allowance table
+        """
+        CREATE TABLE IF NOT EXISTS license_allowances (
+            discord_id  TEXT PRIMARY KEY,
+            max_keys    INTEGER NOT NULL DEFAULT 1
+        );
+        """,
+
+        # License system — one row per issued license key
+        # mt5_account is globally unique: one license per MT5 account
+        """
+        CREATE TABLE IF NOT EXISTS licenses (
+            id           BIGINT GENERATED ALWAYS AS IDENTITY PRIMARY KEY,
+            discord_id   TEXT NOT NULL,
+            mt5_account  TEXT NOT NULL,
+            license_key  TEXT NOT NULL,
+            status       TEXT DEFAULT 'active',
+            created_at   TIMESTAMPTZ DEFAULT NOW(),
+            revoked_at   TIMESTAMPTZ,
+            CONSTRAINT licenses_mt5_unique    UNIQUE (mt5_account),
+            CONSTRAINT licenses_key_unique    UNIQUE (license_key),
+            CONSTRAINT licenses_status_check  CHECK (status IN ('active', 'revoked'))
+        );
+        """,
+
+        # Index for fast per-user license lookups
+        """
+        CREATE INDEX IF NOT EXISTS idx_licenses_discord_id ON licenses(discord_id);
+        """,
     ]
 
     for migration in migrations:
