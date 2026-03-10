@@ -3,12 +3,51 @@ pattern_parsers.py
 Channel-specific pattern-based parsers for trading signals
 """
 import re
+import time
 from typing import Optional, List, Set, Dict
 from utils.logger import get_logger
 from . import ParsedSignal, INSTRUMENT_MAPPINGS
 from .validators import validate_signal
 
 logger = get_logger("parser.pattern_parsers")
+
+# ---------------------------------------------------------------------------
+# Gold Tolls SL offset — configurable via !goldtollssl, stored in settings.json
+# ---------------------------------------------------------------------------
+
+_GOLD_TOLLS_SL_OFFSET_DEFAULT = 5.0
+_gold_tolls_sl_cache: float = _GOLD_TOLLS_SL_OFFSET_DEFAULT
+_gold_tolls_sl_cache_ts: float = 0.0
+_GOLD_TOLLS_SL_CACHE_TTL: float = 30.0   # seconds
+
+
+def get_gold_tolls_sl_offset() -> float:
+    """
+    Return the current gold-tolls SL offset (dollars from the last limit).
+
+    Value is read from settings.json → ``gold_tolls_sl_offset`` and cached
+    for 30 s so we're not hitting disk on every parse.  The command handler
+    calls ``invalidate_gold_tolls_sl_cache()`` after writing a new value so
+    the change takes effect immediately.
+    """
+    global _gold_tolls_sl_cache, _gold_tolls_sl_cache_ts
+    if time.monotonic() - _gold_tolls_sl_cache_ts > _GOLD_TOLLS_SL_CACHE_TTL:
+        try:
+            from utils.config_loader import load_settings
+            settings = load_settings()
+            _gold_tolls_sl_cache = float(
+                settings.get("gold_tolls_sl_offset", _GOLD_TOLLS_SL_OFFSET_DEFAULT)
+            )
+        except Exception as e:
+            logger.warning(f"Could not load gold_tolls_sl_offset from settings: {e}. Using {_gold_tolls_sl_cache}.")
+        _gold_tolls_sl_cache_ts = time.monotonic()
+    return _gold_tolls_sl_cache
+
+
+def invalidate_gold_tolls_sl_cache() -> None:
+    """Force the next call to get_gold_tolls_sl_offset() to re-read from disk."""
+    global _gold_tolls_sl_cache_ts
+    _gold_tolls_sl_cache_ts = 0.0
 
 # Optional import for stock parsing
 try:
@@ -447,12 +486,13 @@ def determine_limits_and_stop(numbers: List[float], direction: str,
             return None, None
 
         limits = numbers
+        sl_offset = get_gold_tolls_sl_offset()
         if direction == 'long':
             lowest_limit = min(limits)
-            stop_loss = lowest_limit - 5.0
+            stop_loss = lowest_limit - sl_offset
         else:  # short
             highest_limit = max(limits)
-            stop_loss = highest_limit + 5.0
+            stop_loss = highest_limit + sl_offset
 
         # Validate order — tolls signals are subject to the same typo checks
         if len(limits) > 1 and not validate_limits_order(limits, direction):
@@ -462,7 +502,7 @@ def determine_limits_and_stop(numbers: List[float], direction: str,
             )
 
         logger.debug(f"Tolls channel: Using all {len(limits)} number(s) as limits, "
-                     f"auto-setting stop to {stop_loss} ({direction})")
+                     f"auto-setting stop to {stop_loss} (offset={sl_offset}, {direction})")
         return limits, stop_loss
 
     # Normal channel logic (requires at least 2 numbers)

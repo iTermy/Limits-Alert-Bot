@@ -254,6 +254,11 @@ class NewsManager:
         self._events: List[NewsEvent] = []
         self._next_id: int = 1
         self._cleanup_task: Optional[asyncio.Task] = None
+        self._db = None  # Set by bot after DB initialisation via set_db()
+
+    def set_db(self, db) -> None:
+        """Attach the DatabaseManager so mode-status flags can be persisted."""
+        self._db = db
 
     # ------------------------------------------------------------------
     # Persistence
@@ -446,6 +451,13 @@ class NewsManager:
                             except Exception as e:
                                 logger.error(f"Failed to send news activated alert: {e}")
 
+                            # Update DB: news mode is now active
+                            if self._db is not None:
+                                try:
+                                    await self._db.set_news_mode(True)
+                                except Exception as e:
+                                    logger.error(f"Failed to set news_mode=True in DB: {e}")
+
                         # Fire ended alert for windows that just expired
                         if (
                             event.event_id not in ended_ids
@@ -457,6 +469,17 @@ class NewsManager:
                                 await alert_system.send_news_ended_alert(event)
                             except Exception as e:
                                 logger.error(f"Failed to send news ended alert: {e}")
+
+                            # Update DB: check if any other events are still active
+                            if self._db is not None:
+                                try:
+                                    still_active = any(
+                                        e.is_active(now) for e in self._events
+                                        if e.event_id != event.event_id
+                                    )
+                                    await self._db.set_news_mode(still_active)
+                                except Exception as e:
+                                    logger.error(f"Failed to set news_mode in DB: {e}")
 
                 # Purge expired events (every ~5 min: 10 × 30 s)
                 if not hasattr(_run, '_purge_counter'):

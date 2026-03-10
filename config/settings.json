@@ -14,5 +14,6 @@
     "fallback_spread": 0.0,
     "log_buffer_usage": true
   },
-  "license_role_name": "Signal Subscriber"
+  "license_role_name": "Signal Subscriber",
+  "gold_tolls_sl_offset": 5.0
 }

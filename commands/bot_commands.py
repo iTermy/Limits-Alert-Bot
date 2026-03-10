@@ -245,7 +245,8 @@ class BotCommands(BaseCog):
             admin_cmds = (
                 "`!clear` - Clear all signals\n"
                 "`!reload` - Reload configuration\n"
-                "`!shutdown` - Shutdown bot"
+                "`!shutdown` - Shutdown bot\n"
+                "`!goldtollssl [value]` - Get/set gold tolls SL offset ($)"
             )
             embed.add_field(name="Admin Commands", value=admin_cmds, inline=False)
 
@@ -477,6 +478,11 @@ class BotCommands(BaseCog):
                     self.bot.monitor.tp_config.reload_config()
                     self.bot.monitor.tp_monitor.tp_config = self.bot.monitor.tp_config
 
+            # Bust the gold-tolls SL offset cache so the parser picks up any
+            # manual edits to settings.json
+            from core.parser.pattern_parsers import invalidate_gold_tolls_sl_cache
+            invalidate_gold_tolls_sl_cache()
+
             await ctx.send("✅ Configuration reloaded")
             self.logger.info(f"Config reloaded by {ctx.author.name}")
         except Exception as e:
@@ -490,6 +496,69 @@ class BotCommands(BaseCog):
         await ctx.send("👋 Shutting down...")
         self.logger.info(f"Bot shutdown initiated by {ctx.author.name}")
         await self.bot.close()
+
+    @commands.command(name='goldtollssl', aliases=['gtsl', 'goldtollsl'])
+    @commands.check(lambda ctx: ctx.cog.is_admin(ctx.author))
+    async def gold_tolls_sl(self, ctx: commands.Context, value: float = None):
+        """
+        Get or set the gold-tolls stop-loss offset (dollars from the nearest limit).
+        Usage:  !goldtollssl          → show current value
+                !goldtollssl 10       → set offset to $10
+                !goldtollssl 5        → reset to default $5
+        """
+        from utils.config_loader import load_settings, save_settings
+        from core.parser.pattern_parsers import get_gold_tolls_sl_offset, invalidate_gold_tolls_sl_cache
+
+        if value is None:
+            # Show current setting
+            current = get_gold_tolls_sl_offset()
+            embed = discord.Embed(
+                title="🛑 Gold Tolls SL Offset",
+                description=(
+                    f"**Current offset:** `${current:.2f}` from the nearest limit\n\n"
+                    "Gold-tolls stop losses are automatically placed this many dollars "
+                    "beyond the nearest limit.\n\n"
+                    f"**Long signals:** SL = lowest limit − `${current:.2f}`\n"
+                    f"**Short signals:** SL = highest limit + `${current:.2f}`\n\n"
+                    "_Use `!goldtollssl <value>` to change it._"
+                ),
+                color=discord.Color.blue(),
+            )
+            await ctx.send(embed=embed)
+            return
+
+        if value <= 0:
+            await ctx.send("❌ Offset must be a positive number.")
+            return
+
+        # Save to settings.json
+        try:
+            settings = load_settings()
+            old_value = settings.get("gold_tolls_sl_offset", 5.0)
+            settings["gold_tolls_sl_offset"] = value
+            save_settings(settings)
+            invalidate_gold_tolls_sl_cache()
+        except Exception as e:
+            await ctx.send(f"❌ Failed to save setting: {e}")
+            self.logger.error(f"Failed to save gold_tolls_sl_offset: {e}", exc_info=True)
+            return
+
+        self.logger.info(
+            f"gold_tolls_sl_offset changed {old_value} → {value} by {ctx.author}"
+        )
+        embed = discord.Embed(
+            title="✅ Gold Tolls SL Offset Updated",
+            description=(
+                f"**Old offset:** `${old_value:.2f}`\n"
+                f"**New offset:** `${value:.2f}`\n\n"
+                f"**Long signals:** SL = lowest limit − `${value:.2f}`\n"
+                f"**Short signals:** SL = highest limit + `${value:.2f}`\n\n"
+                "⚠️ This affects **new signals** parsed from now on. "
+                "Existing signals in the DB are unaffected."
+            ),
+            color=discord.Color.green(),
+        )
+        await ctx.send(embed=embed)
 
     # ==================== LICENSE COMMANDS ====================
 
@@ -508,40 +577,46 @@ class BotCommands(BaseCog):
     @commands.command(name="activate")
     async def activate(self, ctx: commands.Context):
         """Get an Auto-Limits-Adder license key (requires Signal Subscriber role)"""
-        if not self.is_command_channel(ctx.channel):
-            await ctx.send("❌ Please use this command in the commands channel.", delete_after=10)
-            return
-
-        member = ctx.author
-        role_names = [r.name for r in getattr(member, "roles", [])]
-        if not any(self.LICENSE_ROLE_NAME in r for r in role_names):
-            await ctx.send(
-                f"❌ You need the **{self.LICENSE_ROLE_NAME}** role to activate a license.",
-                delete_after=15,
-            )
-            return
-
+        # Delete the public command message so the channel stays clean
         try:
-            await ctx.message.add_reaction("✅")
-        except discord.HTTPException:
+            await ctx.message.delete()
+        except (discord.HTTPException, discord.Forbidden):
             pass
 
-        try:
-            await member.send(
-                "Hi! To activate your **Auto-Limits-Adder** license, "
-                "please reply here with your **MT5 account number** (the login number shown in MT5)."
-            )
-        except discord.Forbidden:
-            await ctx.send(
-                f"❌ {member.mention} I can't DM you. Please enable DMs from server members and try again.",
-                delete_after=20,
-            )
+        member = ctx.author
+
+        # Role check
+        role_names = [r.name for r in getattr(member, "roles", [])]
+        if not any(self.LICENSE_ROLE_NAME in r for r in role_names):
+            try:
+                await member.send(
+                    f"❌ You need the **{self.LICENSE_ROLE_NAME}** role to activate a license.\n"
+                    "If you are a subscriber, please contact an admin."
+                )
+            except discord.Forbidden:
+                pass
             return
 
-        await ctx.send(
-            f"{member.mention} Check your DMs to complete activation.",
-            delete_after=20,
-        )
+        # Open DM channel
+        try:
+            await member.send(
+                "👋 **Auto-Limits-Adder License Activation**\n\n"
+                "To activate your license, please reply here with your **MT5 account number** "
+                "(the login number shown in MetaTrader 5).\n\n"
+                "_Type `cancel` at any time to abort._"
+            )
+        except discord.Forbidden:
+            try:
+                notice = await ctx.send(
+                    f"❌ {member.mention} I can't DM you. "
+                    "Please **enable DMs from server members** in your Privacy Settings, "
+                    "then run `!activate` again."
+                )
+                await asyncio.sleep(20)
+                await notice.delete()
+            except discord.HTTPException:
+                pass
+            return
 
         def dm_check(m: discord.Message) -> bool:
             return m.author.id == member.id and isinstance(m.channel, discord.DMChannel)
@@ -550,8 +625,13 @@ class BotCommands(BaseCog):
             reply = await self.bot.wait_for("message", check=dm_check, timeout=self.LICENSE_DM_TIMEOUT)
         except asyncio.TimeoutError:
             await member.send(
-                f"Activation timed out ({self.LICENSE_DM_TIMEOUT}s). Run `!activate` again when ready."
+                f"⏰ Activation timed out after {self.LICENSE_DM_TIMEOUT}s. "
+                "Run `!activate` in the server again when you're ready."
             )
+            return
+
+        if reply.content.strip().lower() == "cancel":
+            await member.send("❌ Activation cancelled.")
             return
 
         mt5_account = reply.content.strip()
@@ -560,30 +640,30 @@ class BotCommands(BaseCog):
             return
 
         async with self.bot.signal_db.db.get_connection() as conn:
-            existing = await conn.fetchrow(
-                "SELECT discord_id FROM licenses WHERE mt5_account = $1 AND status = 'active'",
-                mt5_account,
+            # User already has one or more active keys
+            existing_keys = await conn.fetch(
+                "SELECT mt5_account, license_key FROM licenses WHERE discord_id = $1 AND status = 'active'",
+                str(member.id),
             )
-            if existing:
+            if existing_keys:
+                accounts = ", ".join(f"`{r['mt5_account']}`" for r in existing_keys)
                 await member.send(
-                    f"❌ MT5 account `{mt5_account}` is already registered. "
-                    "Contact an admin if you believe this is an error."
+                    f"ℹ️ You already have an active license for MT5 account(s): {accounts}.\n\n"
+                    "If you need to register a **different** MT5 account, contact an admin "
+                    "to revoke your existing key first.\n"
+                    "If you've **lost your key**, ask an admin to re-issue it with `!grantkey`."
                 )
                 return
 
-            active_count = await conn.fetchval(
-                "SELECT COUNT(*) FROM licenses WHERE discord_id = $1 AND status = 'active'",
-                str(member.id),
+            # MT5 account already registered to someone else
+            existing_owner = await conn.fetchrow(
+                "SELECT discord_id FROM licenses WHERE mt5_account = $1 AND status = 'active'",
+                mt5_account,
             )
-            max_keys = await conn.fetchval(
-                "SELECT max_keys FROM license_allowances WHERE discord_id = $1",
-                str(member.id),
-            ) or 1
-
-            if active_count >= max_keys:
+            if existing_owner:
                 await member.send(
-                    f"❌ You already have {active_count}/{max_keys} active license(s). "
-                    "Contact an admin if you need additional slots."
+                    f"❌ MT5 account `{mt5_account}` is already registered to another user.\n"
+                    "If you believe this is an error, please contact an admin."
                 )
                 return
 
@@ -602,7 +682,7 @@ class BotCommands(BaseCog):
             f"**Your license key:**\n```\n{license_key}\n```\n\n"
             f"**Setup:**\n"
             f"1. Open `config.json` in your Auto-Limits-Adder folder.\n"
-            f"2. Add your key to the `\"license\"` section:\n"
+            f"2. Add your key to the \"license\" section:\n"
             f"```json\n\"license\": {{\n    \"key\": \"{license_key}\"\n}}\n```\n"
             f"3. Save and start the bot — it validates on startup.\n\n"
             f"⚠️ Keep this key private. It is locked to MT5 account `{mt5_account}`."
@@ -816,6 +896,139 @@ class BotCommands(BaseCog):
                         break
 
                 await ctx.send(embed=embed)
+
+    # ==================== LICENSE AUTO-MANAGEMENT ====================
+
+    @commands.Cog.listener()
+    async def on_member_update(self, before: discord.Member, after: discord.Member):
+        """
+        Auto-revoke licenses when Signal Subscriber role is removed.
+        Auto-reactivate licenses (if previously revoked by this system) when role is re-added.
+        """
+        before_roles = {r.name for r in before.roles}
+        after_roles = {r.name for r in after.roles}
+
+        had_role = self.LICENSE_ROLE_NAME in before_roles
+        has_role = self.LICENSE_ROLE_NAME in after_roles
+
+        if had_role == has_role:
+            return  # No change in the relevant role
+
+        if had_role and not has_role:
+            # Role was REMOVED — revoke all active licenses
+            await self._auto_revoke_licenses(after, reason="role_removed")
+
+        elif not had_role and has_role:
+            # Role was ADDED (or re-added) — reactivate any role-revoked licenses
+            await self._auto_reactivate_licenses(after)
+
+    @commands.Cog.listener()
+    async def on_member_remove(self, member: discord.Member):
+        """Auto-revoke licenses when a member leaves the server."""
+        await self._auto_revoke_licenses(member, reason="left_server")
+
+    async def _auto_revoke_licenses(self, member: discord.Member, reason: str) -> None:
+        """Revoke all active licenses for *member* and notify them by DM."""
+        try:
+            async with self.bot.signal_db.db.get_connection() as conn:
+                rows = await conn.fetch(
+                    "SELECT id, mt5_account FROM licenses WHERE discord_id = $1 AND status = 'active'",
+                    str(member.id),
+                )
+                if not rows:
+                    return
+
+                for row in rows:
+                    await conn.execute(
+                        """
+                        UPDATE licenses
+                        SET status = 'revoked', revoked_at = NOW(),
+                            revoked_reason = $1
+                        WHERE id = $2
+                        """,
+                        reason, row["id"],
+                    )
+
+            self.logger.info(
+                f"Auto-revoked {len(rows)} license(s) for {member} ({member.id}) — reason={reason}"
+            )
+
+            # Notify the user by DM (best-effort)
+            if reason == "role_removed":
+                msg = (
+                    "⚠️ **Your Auto-Limits-Adder license has been revoked.**\n\n"
+                    f"Your **{self.LICENSE_ROLE_NAME}** role was removed, so your license key "
+                    "has been automatically deactivated.\n\n"
+                    "If you regain subscriber access your license will be reactivated automatically. "
+                    "Contact an admin if you believe this is a mistake."
+                )
+            else:
+                msg = (
+                    "⚠️ **Your Auto-Limits-Adder license has been revoked.**\n\n"
+                    "Your license was deactivated because you left the server. "
+                    "If you rejoin and regain subscriber access, contact an admin to restore your license."
+                )
+
+            try:
+                await member.send(msg)
+            except discord.Forbidden:
+                pass  # User has DMs disabled — log only
+
+        except Exception as e:
+            self.logger.error(f"Failed to auto-revoke licenses for {member} ({member.id}): {e}", exc_info=True)
+
+    async def _auto_reactivate_licenses(self, member: discord.Member) -> None:
+        """
+        Reactivate licenses previously revoked by the auto-revoke system
+        (i.e. revoked_reason = 'role_removed') when the subscriber role is restored.
+        """
+        try:
+            async with self.bot.signal_db.db.get_connection() as conn:
+                rows = await conn.fetch(
+                    """
+                    SELECT id, mt5_account, license_key
+                    FROM licenses
+                    WHERE discord_id = $1
+                      AND status = 'revoked'
+                      AND revoked_reason = 'role_removed'
+                    ORDER BY revoked_at DESC
+                    """,
+                    str(member.id),
+                )
+                if not rows:
+                    return
+
+                for row in rows:
+                    await conn.execute(
+                        """
+                        UPDATE licenses
+                        SET status = 'active', revoked_at = NULL, revoked_reason = NULL
+                        WHERE id = $1
+                        """,
+                        row["id"],
+                    )
+
+            self.logger.info(
+                f"Auto-reactivated {len(rows)} license(s) for {member} ({member.id})"
+            )
+
+            # Notify the user by DM
+            keys_info = "\n".join(
+                f"• MT5 `{r['mt5_account']}` → key `{r['license_key'][:8]}…`"
+                for r in rows
+            )
+            try:
+                await member.send(
+                    f"✅ **Your Auto-Limits-Adder license has been reactivated!**\n\n"
+                    f"Your **{self.LICENSE_ROLE_NAME}** role was restored, so your license key(s) "
+                    f"are active again:\n{keys_info}\n\n"
+                    "No changes needed in your config — just (re)start the Auto-Limits-Adder bot."
+                )
+            except discord.Forbidden:
+                pass
+
+        except Exception as e:
+            self.logger.error(f"Failed to auto-reactivate licenses for {member} ({member.id}): {e}", exc_info=True)
 
 
 async def setup(bot):

@@ -190,9 +190,41 @@ async def _run_migrations(conn):
         );
         """,
 
-        # Index for fast per-user license lookups
+        # Bot mode status — single-row table tracking whether news mode / spread hour is active.
+        # Updated in real-time as modes activate/deactivate.
         """
-        CREATE INDEX IF NOT EXISTS idx_licenses_discord_id ON licenses(discord_id);
+        CREATE TABLE IF NOT EXISTS bot_mode_status (
+            id           INT PRIMARY KEY DEFAULT 1,
+            news_mode    BOOLEAN NOT NULL DEFAULT FALSE,
+            spread_hour  BOOLEAN NOT NULL DEFAULT FALSE,
+            updated_at   TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+            CONSTRAINT bot_mode_status_singleton CHECK (id = 1)
+        );
+        """,
+
+        # Seed the single status row if it does not exist yet
+        """
+        INSERT INTO bot_mode_status (id, news_mode, spread_hour)
+        VALUES (1, FALSE, FALSE)
+        ON CONFLICT (id) DO NOTHING;
+        """,
+
+        # Add revoked_reason to licenses table (stage18 — auto-revoke tracking)
+        """
+        DO $$
+        BEGIN
+            IF NOT EXISTS (
+                SELECT 1 FROM information_schema.columns
+                WHERE table_name = 'licenses' AND column_name = 'revoked_reason'
+            ) THEN
+                ALTER TABLE licenses ADD COLUMN revoked_reason TEXT;
+            END IF;
+        END $$;
+        """,
+
+        # Index for fast lookups (optional — single row, mostly a hint)
+        """
+        CREATE INDEX IF NOT EXISTS idx_bot_mode_status_updated ON bot_mode_status(updated_at);
         """,
     ]
 

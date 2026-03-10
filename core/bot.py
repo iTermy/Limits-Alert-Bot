@@ -25,6 +25,7 @@ class TradingBot(commands.Bot):
         intents.messages = True
         intents.guilds = True
         intents.reactions = True
+        intents.members = True  # Required for on_member_update / on_member_remove (license auto-management)
 
         super().__init__(
             command_prefix=settings.get("bot_prefix", "!"),
@@ -60,6 +61,9 @@ class TradingBot(commands.Bot):
         # Initialize database FIRST
         await db.initialize()
         self.signal_db = initialize_signal_db(db)
+
+        # Give NewsManager a reference to the DB so it can persist mode status
+        self.news_manager.set_db(db)
 
         # Load channel configuration SECOND
         await self.load_config()
