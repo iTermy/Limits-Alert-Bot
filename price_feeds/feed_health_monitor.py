@@ -309,8 +309,12 @@ class FeedHealthMonitor:
         """Handle feed recovery"""
         logger.info(f"{feed_name} feed recovered")
 
-        # Send recovery notification
-        await self._send_feed_recovery_alert(feed_name)
+        # Only send recovery DM if we previously sent a failure alert for this feed.
+        # This prevents spurious "everything is healthy" messages when feeds transition
+        # back to healthy after spread hour (or any other normal market-hours gap)
+        # without having fired a failure alert in the first place.
+        if feed_name in self.last_alert_time:
+            await self._send_feed_recovery_alert(feed_name)
 
         # Reset reconnection attempts
         self.reconnect_attempts[feed_name] = 0

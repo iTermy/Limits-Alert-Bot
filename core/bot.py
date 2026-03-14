@@ -44,6 +44,7 @@ class TradingBot(commands.Bot):
         self.message_handler = None
         self.expiry_manager = None
         self.monitor = None  # Changed from price_monitor to monitor for consistency
+        self.channel_cleaner = None
 
         # News mode manager — tracks active news windows
         from core.news_manager import NewsManager
@@ -84,6 +85,9 @@ class TradingBot(commands.Bot):
         # Start expiry manager
         from core.expiry_manager import ExpiryManager
         self.expiry_manager = ExpiryManager(self)
+
+        from core.channel_cleaner import ChannelCleaner
+        self.channel_cleaner = ChannelCleaner(self)
 
         await self.load_extensions()
 
@@ -294,6 +298,9 @@ class TradingBot(commands.Bot):
 
         if self.expiry_manager:
             self.expiry_manager.stop()
+
+        if self.channel_cleaner:
+            self.channel_cleaner.stop()
 
         if self.news_manager:
             self.news_manager.stop_cleanup_task()

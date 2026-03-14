@@ -546,6 +546,128 @@ class BotCommands(BaseCog):
         self.logger.info(
             f"gold_tolls_sl_offset changed {old_value} → {value} by {ctx.author}"
         )
+
+        # ── Retroactively update all active gold toll signals ─────────────────
+        loading_msg = await ctx.send("🔄 Updating active gold toll signals…")
+
+        updated_count = 0
+        skipped_count = 0
+        error_count = 0
+
+        try:
+            monitor = getattr(self.bot, "monitor", None)
+            alert_system = monitor.alert_system if monitor else None
+
+            # Identify gold-toll channel IDs from the alert system
+            toll_channel_ids: set = set()
+            if alert_system and hasattr(alert_system, "toll_channel_ids"):
+                toll_channel_ids = alert_system.toll_channel_ids  # already str
+
+            if not toll_channel_ids:
+                # Fallback: derive directly from channels config
+                from utils.config_loader import load_channels_config
+                channels_cfg = load_channels_config()
+                monitored = channels_cfg.get("monitored_channels", {})
+                for ch_name, ch_id in monitored.items():
+                    if ch_id and "toll" in ch_name.lower() and ch_name.lower() != "general-tolls":
+                        toll_channel_ids.add(str(ch_id))
+
+            if not toll_channel_ids:
+                await loading_msg.edit(content="⚠️ No gold-toll channels found — offset saved but no signals updated.")
+            else:
+                from database import db
+
+                # Fetch all active/hit gold-toll signals with their pending limits
+                toll_ch_list = list(toll_channel_ids)
+                placeholders = ", ".join(f"${i+1}" for i in range(len(toll_ch_list)))
+                query = f"""
+                    SELECT
+                        s.id,
+                        s.direction,
+                        s.stop_loss,
+                        s.channel_id,
+                        ARRAY_AGG(l.price_level ORDER BY l.sequence_number) FILTER (WHERE l.id IS NOT NULL) AS all_price_levels
+                    FROM signals s
+                    LEFT JOIN limits l ON l.signal_id = s.id
+                    WHERE s.status IN ('active', 'hit')
+                      AND CAST(s.channel_id AS TEXT) IN ({placeholders})
+                    GROUP BY s.id, s.direction, s.stop_loss, s.channel_id
+                """
+                async with db.get_connection() as conn:
+                    rows = await conn.fetch(query, *toll_ch_list)
+
+                for row in rows:
+                    sig_id = row["id"]
+                    direction = row["direction"]
+                    price_levels = row["all_price_levels"] or []
+
+                    if not price_levels:
+                        skipped_count += 1
+                        continue
+
+                    # Recompute SL with new offset
+                    if direction == "long":
+                        new_sl = min(price_levels) - value
+                    else:
+                        new_sl = max(price_levels) + value
+
+                    # Skip if SL hasn't changed (avoid unnecessary DB writes / embed edits)
+                    old_sl = row["stop_loss"]
+                    if old_sl is not None and abs(float(old_sl) - new_sl) < 0.001:
+                        skipped_count += 1
+                        continue
+
+                    try:
+                        # 1. Persist new SL to DB
+                        async with db.get_connection() as conn:
+                            await conn.execute(
+                                "UPDATE signals SET stop_loss = $1 WHERE id = $2",
+                                new_sl, sig_id
+                            )
+
+                        # 2. Update streaming monitor in-memory state so price
+                        #    checks use the new SL immediately
+                        if monitor and hasattr(monitor, "active_signals"):
+                            mem_sig = monitor.active_signals.get(sig_id)
+                            if mem_sig:
+                                mem_sig["stop_loss"] = new_sl
+
+                        # 3. Update the persistent embed (only if one exists)
+                        if alert_system:
+                            await alert_system.update_embed_for_signal_id(
+                                sig_id, "edited"
+                            )
+
+                        updated_count += 1
+                        self.logger.info(
+                            f"Retroactively updated SL for gold-toll signal {sig_id}: "
+                            f"{old_sl} → {new_sl} (offset={value}, dir={direction})"
+                        )
+
+                    except Exception as sig_err:
+                        error_count += 1
+                        self.logger.error(
+                            f"Failed to update SL for gold-toll signal {sig_id}: {sig_err}",
+                            exc_info=True,
+                        )
+
+                await loading_msg.delete()
+
+        except Exception as bulk_err:
+            self.logger.error(f"Retroactive gold-toll SL update failed: {bulk_err}", exc_info=True)
+            await loading_msg.edit(content=f"⚠️ Retroactive update encountered an error: {bulk_err}")
+
+        # ── Final confirmation embed ──────────────────────────────────────────
+        retro_lines = []
+        if updated_count:
+            retro_lines.append(f"✅ **{updated_count}** active signal(s) SL updated retroactively")
+        if skipped_count:
+            retro_lines.append(f"⏭️ **{skipped_count}** signal(s) skipped (no change / no limits)")
+        if error_count:
+            retro_lines.append(f"⚠️ **{error_count}** signal(s) failed to update (see logs)")
+        if not retro_lines:
+            retro_lines.append("ℹ️ No active gold-toll signals found to update")
+
         embed = discord.Embed(
             title="✅ Gold Tolls SL Offset Updated",
             description=(
@@ -553,8 +675,7 @@ class BotCommands(BaseCog):
                 f"**New offset:** `${value:.2f}`\n\n"
                 f"**Long signals:** SL = lowest limit − `${value:.2f}`\n"
                 f"**Short signals:** SL = highest limit + `${value:.2f}`\n\n"
-                "⚠️ This affects **new signals** parsed from now on. "
-                "Existing signals in the DB are unaffected."
+                + "\n".join(retro_lines)
             ),
             color=discord.Color.green(),
         )

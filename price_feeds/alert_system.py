@@ -736,6 +736,15 @@ class AlertSystem:
                                     color=0x808080,
                                 )
 
+                    # Ping the role before the embed so members are notified.
+                    # Only ping for finished_signals (non-profit) to avoid spamming
+                    # the profit channel, which already gets a dedicated summary embed.
+                    if not is_profit:
+                        try:
+                            await dest_channel.send("<@&1334203997107650662>")
+                        except Exception as _ping_err:
+                            logger.warning(f"Could not send role ping to {dest_name} for signal {signal_id}: {_ping_err}")
+
                     finished_msg = await dest_channel.send(embed=new_embed)
                     self.signal_finished_messages[signal_id] = finished_msg
                     self.track_alert_message(finished_msg.id, signal_id)
