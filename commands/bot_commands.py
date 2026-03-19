@@ -244,6 +244,7 @@ class BotCommands(BaseCog):
         if self.is_admin(ctx.author):
             admin_cmds = (
                 "`!clear` - Clear all signals\n"
+                "`!cleanalerts` - Purge past 7 days from alert channels\n"
                 "`!reload` - Reload configuration\n"
                 "`!shutdown` - Shutdown bot\n"
                 "`!goldtollssl [value]` - Get/set gold tolls SL offset ($)"
@@ -463,6 +464,54 @@ class BotCommands(BaseCog):
 
         except asyncio.TimeoutError:
             await confirm_msg.edit(content="⏱️ Clear timed out")
+            await confirm_msg.clear_reactions()
+
+    @commands.command(name='cleanalerts', aliases=['clearalerts', 'purgealerts'])
+    @commands.check(lambda ctx: ctx.cog.is_admin(ctx.author))
+    async def clean_alert_channels(self, ctx: commands.Context):
+        """Delete messages from the past 7 days in all alert channels (Admin only)"""
+        if not hasattr(self.bot, 'channel_cleaner') or not self.bot.channel_cleaner:
+            await ctx.send("❌ Channel cleaner not available")
+            return
+
+        confirm_msg = await ctx.send(
+            "⚠️ **WARNING**: Delete all messages from the past **7 days** in all alert channels?\n"
+            "Channels: `alert`, `pa-alert`, `toll-alert`, `general-tolls-alert`\n"
+            "React with ✅ to confirm or ❌ to cancel (30s timeout)"
+        )
+
+        await confirm_msg.add_reaction("✅")
+        await confirm_msg.add_reaction("❌")
+
+        def check(reaction, user):
+            return (
+                user == ctx.author
+                and str(reaction.emoji) in ["✅", "❌"]
+                and reaction.message.id == confirm_msg.id
+            )
+
+        try:
+            reaction, _ = await self.bot.wait_for('reaction_add', timeout=30.0, check=check)
+
+            if str(reaction.emoji) == "✅":
+                await confirm_msg.edit(content="🧹 Purging alert channels… this may take a moment.")
+                await confirm_msg.clear_reactions()
+
+                try:
+                    await self.bot.channel_cleaner._purge_alert_channels()
+                    await confirm_msg.edit(
+                        content=f"✅ Alert channels purged (past 7 days) — triggered by {ctx.author.name}"
+                    )
+                    self.logger.info(f"Alert channels manually purged by {ctx.author.name}")
+                except Exception as e:
+                    await confirm_msg.edit(content=f"❌ Purge failed: {str(e)}")
+                    self.logger.error(f"Manual alert purge error: {e}", exc_info=True)
+            else:
+                await confirm_msg.edit(content="❌ Purge cancelled")
+                await confirm_msg.clear_reactions()
+
+        except asyncio.TimeoutError:
+            await confirm_msg.edit(content="⏱️ Purge timed out")
             await confirm_msg.clear_reactions()
 
     @commands.command(name='reload')
