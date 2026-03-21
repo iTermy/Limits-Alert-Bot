@@ -848,9 +848,23 @@ class MessageHandler:
                                     if not guild_id_val and self.bot and self.bot.guilds:
                                         guild_id_val = self.bot.guilds[0].id
 
+                                    # Fetch limits fresh from DB — signal dict from
+                                    # get_signal_by_message_id does not join limits,
+                                    # so using it directly would show "—" in the embed.
+                                    _embed_limits = signal.get('limits') or signal.get('pending_limits') or []
+                                    try:
+                                        if self.signal_db:
+                                            _full = await self.signal_db.get_signal_with_limits(_sig_id_for_check)
+                                            if _full:
+                                                _embed_limits = _full.get('limits') or _embed_limits
+                                    except Exception as _lfe:
+                                        self.logger.warning(
+                                            f"Could not fetch limits for cancelled embed (signal {_sig_id_for_check}): {_lfe}"
+                                        )
+
                                     cancel_embed = _build_signal_embed(
                                         signal=_sig_for_embed,
-                                        limits=signal.get('limits') or signal.get('pending_limits') or [],
+                                        limits=_embed_limits,
                                         event='cancelled',
                                         guild_id=guild_id_val,
                                         bot=self.bot,

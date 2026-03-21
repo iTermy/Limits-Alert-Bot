@@ -80,7 +80,7 @@ LONG_KEYWORDS = ['long', 'buy']
 SHORT_KEYWORDS = ['short', 'sell']
 
 # Channels that are always treated as scalps regardless of message content
-SCALP_CHANNELS = {'scalps', 'gold-pa-signals', 'gold-tolls-map', 'general-tolls'}
+SCALP_CHANNELS = {'scalps', 'gold-pa-signals', 'gold-tolls-map', 'general-tolls', 'oil-tolls'}
 
 # Expiry patterns
 EXPIRY_PATTERNS = {

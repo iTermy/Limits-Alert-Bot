@@ -15,7 +15,8 @@
     "price-action-trades": "1402972075446239303",
     "gold-pa-signals": "1402972221953019986",
     "gold-tolls-map": "1472685381315989730",
-    "general-tolls": "1477339674166169911"
+    "general-tolls": "1477339674166169911",
+    "oil-tolls": "1484316173515489392"
   },
   "alert_channel": "1402971805890773005",
   "pa-alert-channel": "1442668785990631435",
@@ -76,6 +77,10 @@
     },
     "general-tolls": {
       "default_expiry": "week_end"
+    },
+    "oil-tolls": {
+      "default_expiry": "week_end",
+      "default_instrument": "XTIUSD"
     }
   }
 }
