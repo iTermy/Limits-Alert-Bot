@@ -33,9 +33,9 @@
       "examples": ["AAPL.NAS", "MSFT.NAS", "JPM.NYSE", "TSLA.NAS"]
     },
     "oil": {
-      "keywords": ["oil", "wti", "brent", "usoil", "ukoil"],
-      "patterns": ["OIL", "WTI", "BRENT"],
-      "examples": ["USOILSPOT", "UKOILSPOT", "WTIUSD"]
+      "keywords": ["oil", "wti", "brent", "usoil", "ukoil", "xti", "xtiusd"],
+      "patterns": ["OIL", "WTI", "BRENT", "XTI"],
+      "examples": ["USOILSPOT", "UKOILSPOT", "WTIUSD", "XTIUSD"]
     }
   },
 
@@ -49,7 +49,8 @@
       },
       "specific_mappings": {
         "GOLD": "XAUUSD",
-        "SILVER": "XAGUSD"
+        "SILVER": "XAGUSD",
+        "XTIUSD": "XTIUSD"
       }
     },
 

@@ -89,6 +89,10 @@ class StreamingPriceMonitor:
         self._last_settings_load = None
         self._settings_cache_duration = 30  # Reload settings every 30 seconds
 
+        # Track spread hour transitions so we can update bot_mode_status exactly once
+        # per transition (not on every price tick).
+        self._spread_hour_active: bool = False
+
         # Performance tracking
         self.stats = {
             'price_updates': 0,
@@ -374,6 +378,19 @@ class StreamingPriceMonitor:
             price_data: Price dictionary with bid, ask, timestamp, spread
         """
         self.stats['price_updates'] += 1
+
+        # ── Spread-hour transition tracking ─────────────────────────────────
+        # Update bot_mode_status.spread_hour in the DB exactly once per
+        # start/end transition (not on every tick).
+        now_in_spread = self._is_spread_hour()
+        if now_in_spread != self._spread_hour_active:
+            self._spread_hour_active = now_in_spread
+            try:
+                await self.db.set_spread_hour(now_in_spread)
+                logger.info(f"Spread hour {'started' if now_in_spread else 'ended'} — DB updated")
+            except Exception as _sh_err:
+                logger.error(f"Failed to update spread_hour in DB: {_sh_err}")
+        # ─────────────────────────────────────────────────────────────────────
 
         # Check if we have any signals for this symbol
         signal_ids = self.symbol_to_signals.get(symbol, [])

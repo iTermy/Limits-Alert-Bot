@@ -204,6 +204,14 @@ class FeedHealthMonitor:
             logger.debug("Within startup grace period, skipping health checks")
             return
 
+        # Skip stale-feed alerts entirely on weekends (Saturday & Sunday).
+        # Forex, metals, and indices are closed from Friday 5 PM EST to Sunday 6 PM EST,
+        # so stale data is completely expected — no need to alert.
+        now_est = datetime.now(self.est)
+        if now_est.weekday() >= 5:  # 5 = Saturday, 6 = Sunday
+            logger.debug("Weekend — skipping feed health alerts (markets closed)")
+            return
+
         stale_threshold = timedelta(seconds=self.config.get('stale_threshold_seconds', 300))
 
         # Check each feed
@@ -301,8 +309,12 @@ class FeedHealthMonitor:
         """Handle feed recovery"""
         logger.info(f"{feed_name} feed recovered")
 
-        # Send recovery notification
-        await self._send_feed_recovery_alert(feed_name)
+        # Only send recovery DM if we previously sent a failure alert for this feed.
+        # This prevents spurious "everything is healthy" messages when feeds transition
+        # back to healthy after spread hour (or any other normal market-hours gap)
+        # without having fired a failure alert in the first place.
+        if feed_name in self.last_alert_time:
+            await self._send_feed_recovery_alert(feed_name)
 
         # Reset reconnection attempts
         self.reconnect_attempts[feed_name] = 0

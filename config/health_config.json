@@ -31,14 +31,14 @@
         2,
         3,
         4,
-        5
+        6
       ],
       "open_time": "18:00",
       "close_time": "17:00",
       "timezone": "America/New_York",
       "spread_hour_start": "17:00",
       "spread_hour_end": "18:00",
-      "description": "Forex market hours (Sunday 6 PM EST - Friday 5 PM EST)"
+      "description": "Forex market hours (Sunday 6 PM EST - Friday 5 PM EST). Day 6 = Sunday (open from 18:00), days 0-4 = Mon-Fri. Saturday (5) excluded — always closed."
     },
     "metals": {
       "days": [
@@ -47,14 +47,14 @@
         2,
         3,
         4,
-        5
+        6
       ],
       "open_time": "18:00",
       "close_time": "17:00",
       "timezone": "America/New_York",
       "spread_hour_start": "17:00",
       "spread_hour_end": "18:00",
-      "description": "Metals follow forex hours"
+      "description": "Metals follow forex hours. Saturday (5) excluded — always closed."
     },
     "indices": {
       "days": [
@@ -63,14 +63,14 @@
         2,
         3,
         4,
-        5
+        6
       ],
       "open_time": "18:00",
       "close_time": "17:00",
       "timezone": "America/New_York",
       "spread_hour_start": "17:00",
       "spread_hour_end": "18:00",
-      "description": "Indices follow forex hours"
+      "description": "Indices follow forex hours. Saturday (5) excluded — always closed."
     }
   },
   "us_market_holidays_2025": [

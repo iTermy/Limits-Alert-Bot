@@ -87,7 +87,7 @@ class SymbolMapper:
             return 'metals'
 
         # Check oil
-        if any(oil in symbol_upper for oil in ['WTI', 'BRENT', 'OIL', 'USOIL', 'USOILSPOT']):
+        if any(oil in symbol_upper for oil in ['WTI', 'BRENT', 'OIL', 'USOIL', 'USOILSPOT', 'XTIUSD', 'XTI']):
             return 'oil'
 
         # Check stocks (common patterns)
@@ -133,8 +133,11 @@ class SymbolMapper:
         """
         asset_class = self.determine_asset_class(symbol)
 
-        # Oil is not supported currently
+        # Oil: XTIUSD is on ICMarkets; legacy USOILSPOT/UKOILSPOT are unsupported
         if asset_class == 'oil':
+            symbol_upper = symbol.upper()
+            if 'XTI' in symbol_upper or symbol_upper == 'XTIUSD':
+                return 'icmarkets'
             logger.warning(f"Oil symbol {symbol} is not currently supported")
             return 'icmarkets'  # Default fallback
 

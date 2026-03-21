@@ -816,14 +816,15 @@ class MessageHandler:
                         pass  # Reaction might not exist
                     await referenced.add_reaction("❌")
 
-                    # If no alert embed has been sent for this signal yet, delete the
-                    # original signal message immediately (nothing else will clean it up).
                     _sig_id_for_check = signal.get('signal_id') or signal.get('id')
                     has_alert_embed = (
                         self.alert_system and
                         _sig_id_for_check in self.alert_system.signal_messages
                     )
                     if not has_alert_embed:
+                        # No approaching embed was ever sent — delete the original signal
+                        # message immediately and send a cancellation embed straight to
+                        # the finished-signals channel so there's still a record.
                         try:
                             await referenced.delete()
                             logger.info(
@@ -832,6 +833,63 @@ class MessageHandler:
                             )
                         except Exception as _de:
                             logger.warning(f"Could not delete original signal message {referenced.id}: {_de}")
+
+                        # Send cancellation embed directly to finished-signals channel.
+                        if self.alert_system:
+                            try:
+                                finished_channel = self.alert_system._get_finished_channel()
+                                if finished_channel:
+                                    from price_feeds.alert_system import _build_signal_embed
+                                    _sig_for_embed = dict(signal)
+                                    if 'signal_id' not in _sig_for_embed:
+                                        _sig_for_embed['signal_id'] = _sig_id_for_check
+
+                                    guild_id_val = signal.get('guild_id')
+                                    if not guild_id_val and self.bot and self.bot.guilds:
+                                        guild_id_val = self.bot.guilds[0].id
+
+                                    # Fetch limits fresh from DB — signal dict from
+                                    # get_signal_by_message_id does not join limits,
+                                    # so using it directly would show "—" in the embed.
+                                    _embed_limits = signal.get('limits') or signal.get('pending_limits') or []
+                                    try:
+                                        if self.signal_db:
+                                            _full = await self.signal_db.get_signal_with_limits(_sig_id_for_check)
+                                            if _full:
+                                                _embed_limits = _full.get('limits') or _embed_limits
+                                    except Exception as _lfe:
+                                        self.logger.warning(
+                                            f"Could not fetch limits for cancelled embed (signal {_sig_id_for_check}): {_lfe}"
+                                        )
+
+                                    cancel_embed = _build_signal_embed(
+                                        signal=_sig_for_embed,
+                                        limits=_embed_limits,
+                                        event='cancelled',
+                                        guild_id=guild_id_val,
+                                        bot=self.bot,
+                                    )
+                                    old_footer = cancel_embed.footer.text or ""
+                                    clean_footer = old_footer.split(" • ⏳")[0].split(" • 🗑️")[0]
+                                    cancel_embed.set_footer(text=f"{clean_footer} • 📁 Archived")
+
+                                    role_mention = "<@&1334203997107650662>"
+                                    ping_line = (
+                                        f"{role_mention} ❌ **{signal['instrument']}** "
+                                        f"{signal['direction'].upper()} — cancelled by sender "
+                                        f"(by {message.author.display_name})"
+                                    )
+                                    await finished_channel.send(ping_line)
+                                    await finished_channel.send(embed=cancel_embed)
+                                    logger.info(
+                                        f"Sent direct cancellation embed to finished-signals "
+                                        f"for signal {_sig_id_for_check} (no prior alert embed)"
+                                    )
+                            except Exception as _fe:
+                                logger.warning(
+                                    f"Could not send cancellation embed to finished-signals "
+                                    f"for signal {_sig_id_for_check}: {_fe}"
+                                )
                 elif action_taken == "marked as HIT":
                     await referenced.add_reaction("🎯")
                 elif action_taken == "marked as PROFIT":

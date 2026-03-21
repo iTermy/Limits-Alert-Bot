@@ -150,6 +150,9 @@ def _build_signal_embed(
                     limit_lines.append(f"~~Limit #{seq}: {price}~~ ✅")
             else:
                 limit_lines.append(f"~~Limit #{seq}: {price}~~ ✅")
+        elif lim.get("status") == "cancelled":
+            # Cancelled limits: show price clearly so traders can see what was set
+            limit_lines.append(f"Limit #{seq}: {price} ❌")
         else:
             limit_lines.append(f"Limit #{seq}: {price}")
 
@@ -736,6 +739,15 @@ class AlertSystem:
                                     color=0x808080,
                                 )
 
+                    # Ping the role before the embed so members are notified.
+                    # Only ping for finished_signals (non-profit) to avoid spamming
+                    # the profit channel, which already gets a dedicated summary embed.
+                    if not is_profit:
+                        try:
+                            await dest_channel.send("<@&1334203997107650662>")
+                        except Exception as _ping_err:
+                            logger.warning(f"Could not send role ping to {dest_name} for signal {signal_id}: {_ping_err}")
+
                     finished_msg = await dest_channel.send(embed=new_embed)
                     self.signal_finished_messages[signal_id] = finished_msg
                     self.track_alert_message(finished_msg.id, signal_id)
@@ -842,19 +854,28 @@ class AlertSystem:
             monitored = cfg.get("monitored_channels", {})
             self.toll_channel_ids = set()
             self.general_toll_channel_ids = set()
+            self.oil_toll_channel_ids = set()
             for channel_name, channel_id in monitored.items():
                 if not channel_id:
                     continue
-                if channel_name.lower() == "general-tolls":
+                name_lower = channel_name.lower()
+                if name_lower == "general-tolls":
                     self.general_toll_channel_ids.add(str(channel_id))
-                elif "toll" in channel_name.lower():
+                elif name_lower == "oil-tolls":
+                    # Oil-tolls: toll-style auto-SL + source cleanup, but alerts
+                    # go to the general-tolls-alert channel (same as general-tolls).
+                    self.oil_toll_channel_ids.add(str(channel_id))
                     self.toll_channel_ids.add(str(channel_id))
-            logger.info(f"Loaded {len(self.toll_channel_ids)} toll channel IDs")
+                elif "toll" in name_lower:
+                    self.toll_channel_ids.add(str(channel_id))
+            logger.info(f"Loaded {len(self.toll_channel_ids)} toll channel IDs "
+                        f"(incl. {len(self.oil_toll_channel_ids)} oil-toll)")
             logger.info(f"Loaded {len(self.general_toll_channel_ids)} general-toll channel IDs")
         except Exception as e:
             logger.error(f"Failed to load toll channels: {e}")
             self.toll_channel_ids = set()
             self.general_toll_channel_ids = set()
+            self.oil_toll_channel_ids = set()
 
     def is_pa_signal(self, signal: Dict) -> bool:
         return str(signal.get("channel_id", "")) in self.pa_channel_ids
@@ -864,6 +885,10 @@ class AlertSystem:
 
     def is_general_toll_signal(self, signal: Dict) -> bool:
         return str(signal.get("channel_id", "")) in self.general_toll_channel_ids
+
+    def is_oil_toll_signal(self, signal: Dict) -> bool:
+        """Return True for signals from the oil-tolls channel."""
+        return str(signal.get("channel_id", "")) in self.oil_toll_channel_ids
 
     async def _maybe_delete_toll_original(self, signal: Dict, signal_id: int) -> None:
         """
@@ -901,10 +926,11 @@ class AlertSystem:
 
     def _get_alert_channel(self, signal: Dict) -> Optional[discord.TextChannel]:
         # Most-specific routing first
-        if self.is_general_toll_signal(signal):
+        # Oil-tolls alerts go to the same channel as general-tolls alerts
+        if self.is_general_toll_signal(signal) or self.is_oil_toll_signal(signal):
             if self.general_toll_alert_channel:
                 return self.general_toll_alert_channel
-            logger.warning("General-toll signal but no general-toll alert channel; falling back")
+            logger.warning("General/oil-toll signal but no general-toll alert channel; falling back")
         if self.is_toll_signal(signal):
             if self.toll_alert_channel:
                 return self.toll_alert_channel

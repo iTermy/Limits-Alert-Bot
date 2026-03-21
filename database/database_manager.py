@@ -267,3 +267,65 @@ class DatabaseManager(BaseConnectionManager):
             Whether transition is valid
         """
         return StatusTransitions.is_valid_transition(old_status, new_status)
+    # ─────────────────────────────────────────────────────────────
+    # Bot mode status helpers
+    # ─────────────────────────────────────────────────────────────
+
+    async def set_news_mode(self, active: bool) -> None:
+        """
+        Update the news_mode flag in bot_mode_status.
+
+        Args:
+            active: True when any news window is now active, False when all clear.
+        """
+        try:
+            await self.execute(
+                """
+                UPDATE bot_mode_status
+                SET news_mode = $1, updated_at = NOW()
+                WHERE id = 1
+                """,
+                (active,)
+            )
+            logger.debug(f"bot_mode_status.news_mode → {active}")
+        except Exception as e:
+            logger.error(f"Failed to update news_mode status: {e}", exc_info=True)
+
+    async def set_spread_hour(self, active: bool) -> None:
+        """
+        Update the spread_hour flag in bot_mode_status.
+
+        Args:
+            active: True when spread hour begins, False when it ends.
+        """
+        try:
+            await self.execute(
+                """
+                UPDATE bot_mode_status
+                SET spread_hour = $1, updated_at = NOW()
+                WHERE id = 1
+                """,
+                (active,)
+            )
+            logger.debug(f"bot_mode_status.spread_hour → {active}")
+        except Exception as e:
+            logger.error(f"Failed to update spread_hour status: {e}", exc_info=True)
+
+    async def get_bot_mode_status(self) -> dict:
+        """
+        Retrieve the current bot mode flags.
+
+        Returns:
+            Dict with keys 'news_mode', 'spread_hour', 'updated_at'.
+        """
+        try:
+            row = await self.fetch_one(
+                "SELECT news_mode, spread_hour, updated_at FROM bot_mode_status WHERE id = 1",
+                ()
+            )
+            if row:
+                return dict(row)
+            return {"news_mode": False, "spread_hour": False, "updated_at": None}
+        except Exception as e:
+            logger.error(f"Failed to fetch bot_mode_status: {e}", exc_info=True)
+            return {"news_mode": False, "spread_hour": False, "updated_at": None}

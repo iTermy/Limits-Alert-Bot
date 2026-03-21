@@ -164,6 +164,68 @@ async def _run_migrations(conn):
             END IF;
         END $$;
         """,
+
+        # License system — per-user key allowance table
+        """
+        CREATE TABLE IF NOT EXISTS license_allowances (
+            discord_id  TEXT PRIMARY KEY,
+            max_keys    INTEGER NOT NULL DEFAULT 1
+        );
+        """,
+
+        # License system — one row per issued license key
+        # mt5_account is globally unique: one license per MT5 account
+        """
+        CREATE TABLE IF NOT EXISTS licenses (
+            id           BIGINT GENERATED ALWAYS AS IDENTITY PRIMARY KEY,
+            discord_id   TEXT NOT NULL,
+            mt5_account  TEXT NOT NULL,
+            license_key  TEXT NOT NULL,
+            status       TEXT DEFAULT 'active',
+            created_at   TIMESTAMPTZ DEFAULT NOW(),
+            revoked_at   TIMESTAMPTZ,
+            CONSTRAINT licenses_mt5_unique    UNIQUE (mt5_account),
+            CONSTRAINT licenses_key_unique    UNIQUE (license_key),
+            CONSTRAINT licenses_status_check  CHECK (status IN ('active', 'revoked'))
+        );
+        """,
+
+        # Bot mode status — single-row table tracking whether news mode / spread hour is active.
+        # Updated in real-time as modes activate/deactivate.
+        """
+        CREATE TABLE IF NOT EXISTS bot_mode_status (
+            id           INT PRIMARY KEY DEFAULT 1,
+            news_mode    BOOLEAN NOT NULL DEFAULT FALSE,
+            spread_hour  BOOLEAN NOT NULL DEFAULT FALSE,
+            updated_at   TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+            CONSTRAINT bot_mode_status_singleton CHECK (id = 1)
+        );
+        """,
+
+        # Seed the single status row if it does not exist yet
+        """
+        INSERT INTO bot_mode_status (id, news_mode, spread_hour)
+        VALUES (1, FALSE, FALSE)
+        ON CONFLICT (id) DO NOTHING;
+        """,
+
+        # Add revoked_reason to licenses table (stage18 — auto-revoke tracking)
+        """
+        DO $$
+        BEGIN
+            IF NOT EXISTS (
+                SELECT 1 FROM information_schema.columns
+                WHERE table_name = 'licenses' AND column_name = 'revoked_reason'
+            ) THEN
+                ALTER TABLE licenses ADD COLUMN revoked_reason TEXT;
+            END IF;
+        END $$;
+        """,
+
+        # Index for fast lookups (optional — single row, mostly a hint)
+        """
+        CREATE INDEX IF NOT EXISTS idx_bot_mode_status_updated ON bot_mode_status(updated_at);
+        """,
     ]
 
     for migration in migrations:
