@@ -159,7 +159,7 @@ class OANDAStream:
             raise Exception("Not connected to OANDA")
 
         if not self.subscribed_symbols:
-            logger.warning("No symbols subscribed, waiting...")
+            logger.debug("No symbols subscribed, waiting...")
             await asyncio.sleep(5)
             return
 
@@ -174,7 +174,7 @@ class OANDAStream:
                 # Open streaming connection
                 async with self.session.get(self.stream_url, params=params) as response:
                     if response.status != 200:
-                        logger.error(f"OANDA stream failed: {response.status}")
+                        logger.debug(f"OANDA stream failed: {response.status}")
                         await asyncio.sleep(5)
                         continue
 

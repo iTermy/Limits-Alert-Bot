@@ -424,7 +424,9 @@ def validate_limits_order(limits: List[float], direction: str) -> bool:
 
 
 def determine_limits_and_stop(numbers: List[float], direction: str,
-                             channel_name: str = None) -> tuple:
+                             channel_name: str = None,
+                             raw_text: str = None,
+                             instrument: str = None) -> tuple:
     """
     Determine which numbers are limits and which is stop loss.
 
@@ -443,43 +445,94 @@ def determine_limits_and_stop(numbers: List[float], direction: str,
       * Long: min(limits) - 5 (5 below the lowest limit)
       * Short: max(limits) + 5 (5 above the highest limit)
     - Single-number messages are valid (one limit, no stop loss required)
+
+    Special handling for general-tolls channel:
+    - If raw_text contains an explicit SL keyword (sl / stop / stops), the last
+      number is treated as the stop loss (standard convention), requiring at
+      least 2 numbers.
+    - If no SL keyword is found, all numbers are treated as limits and the SL
+      is auto-calculated per instrument:
+        * SPX500USD → ±$10
+        * NAS100USD → ±$30
+        * anything else → ±$10 (safe default)
+      Single-number messages are valid in this auto-SL mode.
     """
+    # Auto-SL offsets for general-tolls when no explicit SL keyword is found
+    _GENERAL_TOLLS_AUTO_SL = {
+        'SPX500USD': 10.0,
+        'NAS100USD': 30.0,
+    }
+    _GENERAL_TOLLS_AUTO_SL_DEFAULT = 10.0
+
+    # Regex for explicit SL keyword (whole-word match, case-insensitive)
+    _SL_KEYWORD_RE = re.compile(r'\b(sl|stop|stops)\b', re.IGNORECASE)
+
     # Check if this is the gold tolls channel (auto-infers SL)
     is_tolls_channel = channel_name and 'toll' in channel_name.lower() and channel_name.lower() != 'general-tolls'
 
-    # Check if this is the general-tolls channel (SL is provided, standard parsing)
+    # Check if this is the general-tolls channel
     is_general_tolls = channel_name and channel_name.lower() == 'general-tolls'
 
     if is_general_tolls:
-        # General tolls: SL is explicit (standard last/first number convention).
-        # Requires at least 2 numbers (at least one limit + SL).
-        if len(numbers) < 2:
-            return None, None
+        # Decide whether the message contains an explicit SL keyword
+        has_sl_keyword = bool(raw_text and _SL_KEYWORD_RE.search(raw_text))
 
-        # Last number is the stop loss (primary convention)
-        stop_loss = numbers[-1]
-        limits = numbers[:-1]
-
-        if not validate_limits_and_stop(limits, stop_loss, direction):
-            # Try first number as stop loss (alternative convention)
-            stop_loss = numbers[0]
-            limits = numbers[1:]
-            if not validate_limits_and_stop(limits, stop_loss, direction):
-                logger.debug(
-                    f"General tolls stop loss validation failed for {direction} with numbers {numbers}"
-                )
+        if has_sl_keyword:
+            # Explicit SL: last number is the stop loss — requires at least 2 numbers.
+            if len(numbers) < 2:
                 return None, None
 
-        if not validate_limits_order(limits, direction):
-            from . import LimitsOrderError
-            raise LimitsOrderError(
-                f"{direction} general-tolls limits not {'ascending' if direction == 'short' else 'descending'}: {limits}"
-            )
+            # Last number is the stop loss (primary convention)
+            stop_loss = numbers[-1]
+            limits = numbers[:-1]
 
-        logger.debug(
-            f"General tolls: {len(limits)} limit(s), stop={stop_loss} ({direction})"
-        )
-        return limits, stop_loss
+            if not validate_limits_and_stop(limits, stop_loss, direction):
+                # Try first number as stop loss (alternative convention)
+                stop_loss = numbers[0]
+                limits = numbers[1:]
+                if not validate_limits_and_stop(limits, stop_loss, direction):
+                    logger.debug(
+                        f"General tolls stop loss validation failed for {direction} with numbers {numbers}"
+                    )
+                    return None, None
+
+            if not validate_limits_order(limits, direction):
+                from . import LimitsOrderError
+                raise LimitsOrderError(
+                    f"{direction} general-tolls limits not {'ascending' if direction == 'short' else 'descending'}: {limits}"
+                )
+
+            logger.debug(
+                f"General tolls (explicit SL): {len(limits)} limit(s), stop={stop_loss} ({direction})"
+            )
+            return limits, stop_loss
+
+        else:
+            # No SL keyword — treat all numbers as limits and auto-calculate SL.
+            # Single-number messages are valid in this mode.
+            if len(numbers) < 1:
+                return None, None
+
+            limits = numbers
+            instr_upper = (instrument or '').upper()
+            sl_offset = _GENERAL_TOLLS_AUTO_SL.get(instr_upper, _GENERAL_TOLLS_AUTO_SL_DEFAULT)
+
+            if direction == 'long':
+                stop_loss = min(limits) - sl_offset
+            else:  # short
+                stop_loss = max(limits) + sl_offset
+
+            if len(limits) > 1 and not validate_limits_order(limits, direction):
+                from . import LimitsOrderError
+                raise LimitsOrderError(
+                    f"{direction} general-tolls limits not {'ascending' if direction == 'short' else 'descending'}: {limits}"
+                )
+
+            logger.debug(
+                f"General tolls (auto SL, offset={sl_offset}): {len(limits)} limit(s), "
+                f"stop={stop_loss} ({direction}, instrument={instr_upper})"
+            )
+            return limits, stop_loss
 
     if is_tolls_channel:
         if len(numbers) < 1:
@@ -591,9 +644,14 @@ class CorePatternParser:
                 and channel_name.lower() != 'general-tolls'
             )
 
-            # For gold tolls channel, allow single number (just a limit, no stop)
-            # General tolls and regular channels require at least 2 numbers (limits + stop)
-            min_numbers = 1 if is_gold_tolls_channel else 2
+            # General-tolls with no explicit SL keyword also allows single numbers
+            is_general_tolls_channel = channel_name and channel_name.lower() == 'general-tolls'
+            _sl_kw_re = re.compile(r'\b(sl|stop|stops)\b', re.IGNORECASE)
+            general_tolls_auto_sl = is_general_tolls_channel and not _sl_kw_re.search(cleaned)
+
+            # For gold tolls channel (or general-tolls in auto-SL mode), allow single number
+            # General tolls (explicit SL) and regular channels require at least 2 numbers
+            min_numbers = 1 if (is_gold_tolls_channel or general_tolls_auto_sl) else 2
 
             if len(numbers) < min_numbers:
                 if not _internal_call:
@@ -622,7 +680,10 @@ class CorePatternParser:
                 return None
 
             # Determine limits and stop loss (pass channel_name for tolls handling)
-            limits, stop_loss = determine_limits_and_stop(numbers, direction, channel_name)
+            limits, stop_loss = determine_limits_and_stop(
+                numbers, direction, channel_name,
+                raw_text=cleaned, instrument=instrument,
+            )
             if not limits or stop_loss is None:
                 if not _internal_call:
                     logger.debug("Could not determine limits and stop loss")
@@ -731,7 +792,12 @@ class StockPatternParser:
 
             # Extract numbers
             numbers = extract_numbers(cleaned)
-            if len(numbers) < 2:
+
+            # General-tolls without an explicit SL keyword allows single-number messages
+            _sl_kw_re_stock = re.compile(r'\b(sl|stop|stops)\b', re.IGNORECASE)
+            _is_general_tolls_stock = channel_name and channel_name.lower() == 'general-tolls'
+            _general_tolls_auto_sl_stock = _is_general_tolls_stock and not _sl_kw_re_stock.search(cleaned)
+            if len(numbers) < (1 if _general_tolls_auto_sl_stock else 2):
                 return None
 
             # Extract stock symbol from ORIGINAL message (preserves case)
@@ -748,7 +814,10 @@ class StockPatternParser:
                 return None
 
             # Determine limits and stop loss (pass channel_name for tolls handling)
-            limits, stop_loss = determine_limits_and_stop(numbers, direction, channel_name)
+            limits, stop_loss = determine_limits_and_stop(
+                numbers, direction, channel_name,
+                raw_text=cleaned, instrument=instrument,
+            )
             if not limits or stop_loss is None:
                 logger.debug("Could not determine limits and stop loss")
                 return None

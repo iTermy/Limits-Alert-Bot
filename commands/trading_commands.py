@@ -688,19 +688,24 @@ class TradingCommands(BaseCog):
         # --- !cancel gold ... ---
         if args_lower.startswith("gold"):
             tokens = args_lower.split()
-            # tokens[0] = "gold", tokens[1] = direction, tokens[2] = type
+            # tokens[0] = "gold"; remaining tokens may be in any order
             if len(tokens) < 3:
                 await ctx.send("❌ Usage: `!cancel gold <longs|shorts|both> <setups|pa|tolls|everything>`\nSee `!help cancel` for details.")
                 return
 
-            direction_token = tokens[1]
-            type_token = tokens[2]
+            remaining = tokens[1:]  # everything after "gold"
 
-            if direction_token not in ("longs", "shorts", "both"):
+            _direction_tokens = {"longs", "shorts", "both"}
+            _type_tokens = {"setups", "pa", "priceaction", "price_action", "tolls", "everything"}
+
+            direction_token = next((t for t in remaining if t in _direction_tokens), None)
+            type_token = next((t for t in remaining if t in _type_tokens), None)
+
+            if direction_token is None:
                 await ctx.send("❌ Direction must be `longs`, `shorts`, or `both`.")
                 return
 
-            if type_token not in ("setups", "pa", "priceaction", "price_action", "tolls", "everything"):
+            if type_token is None:
                 await ctx.send("❌ Type must be `setups`, `pa`, `tolls`, or `everything`.")
                 return
 
@@ -768,6 +773,12 @@ class TradingCommands(BaseCog):
         'message_id', 'channel_id', 'instrument', 'direction') or plain ints.
         Passing full dicts enables original-message reactions, monitor eviction,
         and embed pings. Plain ints fall back to embed-only behaviour.
+
+        For toll signals:
+          - If a persistent alert embed exists, update_embed_for_signal_id handles
+            the embed update, archive-move, and original-message deletion.
+          - If NO persistent alert embed exists, we delete the original signal
+            message immediately (since there's nothing to archive).
         """
         if not signals:
             return 0
@@ -808,7 +819,10 @@ class TradingCommands(BaseCog):
                 except Exception as _re:
                     logger.warning(f"Could not react to original message for signal {sid}: {_re}")
 
-            # 3. Update the persistent alert embed with a ping so the role is notified
+            # 3. Update the persistent alert embed with a ping so the role is notified.
+            #    For toll signals WITH an embed: update_embed_for_signal_id will schedule
+            #    the archive-move task, which also deletes the original signal message.
+            #    For toll signals WITHOUT an embed: we delete the original message now.
             if alert_system:
                 try:
                     ping_text = None
@@ -816,9 +830,16 @@ class TradingCommands(BaseCog):
                         instrument = signal_dict.get('instrument', '')
                         direction = (signal_dict.get('direction') or '').upper()
                         ping_text = f"\u274c **{instrument}** {direction} \u2014 signal cancelled"
-                    await alert_system.update_embed_for_signal_id(
+                    embed_existed = await alert_system.update_embed_for_signal_id(
                         sid, 'cancelled', ping_text=ping_text
                     )
+                    # For toll signals with no persistent embed, delete the original
+                    # signal message immediately (nothing to archive).
+                    if not embed_existed and signal_dict:
+                        try:
+                            await alert_system._maybe_delete_toll_original(signal_dict, sid)
+                        except Exception as _td:
+                            logger.warning(f"Could not delete toll original for signal {sid} (no embed): {_td}")
                 except Exception as _ue:
                     logger.warning(f"Could not update embed after bulk cancel for signal {sid}: {_ue}")
 
@@ -879,6 +900,31 @@ class TradingCommands(BaseCog):
         embed.set_footer(text=f"Actioned by {ctx.author.name}")
         await loading.edit(content=None, embed=embed)
 
+        # Notify finished-signals channel that all of this type were cancelled
+        if cancelled > 0:
+            monitor = self.bot.monitor if hasattr(self.bot, 'monitor') and self.bot.monitor else None
+            alert_system = monitor.alert_system if monitor else None
+            if alert_system:
+                finished_channel = alert_system._get_finished_channel()
+                if finished_channel:
+                    try:
+                        summary_embed = discord.Embed(
+                            title="🚫 Mass Cancellation",
+                            description=(
+                                f"All **Gold {dir_label} ({cat_label})** signals have been cancelled.\n"
+                                f"**{cancelled}** signal(s) cancelled by {ctx.author.name}."
+                            ),
+                            color=0xFF4500,
+                        )
+                        summary_embed.set_footer(text="Mass cancellation complete")
+                        await finished_channel.send(embed=summary_embed)
+                        logger.info(
+                            f"Sent mass-cancel summary to finished-signals channel: "
+                            f"Gold {dir_label} ({cat_label}), {cancelled} signals"
+                        )
+                    except Exception as _fe:
+                        logger.warning(f"Could not send mass-cancel summary to finished-signals: {_fe}")
+
     async def _bulk_cancel_by_target(self, ctx, target: str):
         """
         Cancel all active signals whose instrument contains `target`.
@@ -919,6 +965,33 @@ class TradingCommands(BaseCog):
         embed.add_field(name="Instruments", value=summary or "—", inline=False)
         embed.set_footer(text=f"Actioned by {ctx.author.name}")
         await loading.edit(content=None, embed=embed)
+
+        # Notify finished-signals channel that all of this type were cancelled
+        if cancelled > 0:
+            monitor = self.bot.monitor if hasattr(self.bot, 'monitor') and self.bot.monitor else None
+            alert_system = monitor.alert_system if monitor else None
+            if alert_system:
+                finished_channel = alert_system._get_finished_channel()
+                if finished_channel:
+                    try:
+                        instr_list = ", ".join(sorted(instruments.keys()))
+                        summary_embed = discord.Embed(
+                            title="🚫 Mass Cancellation",
+                            description=(
+                                f"All **{target}** signals have been cancelled.\n"
+                                f"**{cancelled}** signal(s) cancelled by {ctx.author.name}.\n"
+                                f"Instruments: {instr_list}"
+                            ),
+                            color=0xFF4500,
+                        )
+                        summary_embed.set_footer(text="Mass cancellation complete")
+                        await finished_channel.send(embed=summary_embed)
+                        logger.info(
+                            f"Sent mass-cancel summary to finished-signals channel: "
+                            f"{target}, {cancelled} signals"
+                        )
+                    except Exception as _fe:
+                        logger.warning(f"Could not send mass-cancel summary to finished-signals: {_fe}")
 
     # ── End bulk cancel helpers ────────────────────────────────────────────
 
