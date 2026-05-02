@@ -183,7 +183,7 @@ class BinanceStream:
             raise Exception("Not connected to Binance WebSocket")
 
         if not self.subscribed_symbols:
-            logger.warning("No symbols subscribed, waiting...")
+            logger.debug("No symbols subscribed, waiting...")
             await asyncio.sleep(5)
             return
 
