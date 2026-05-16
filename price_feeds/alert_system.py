@@ -362,6 +362,7 @@ class AlertSystem:
         self.pa_alert_channel = None
         self.toll_alert_channel = None
         self.general_toll_alert_channel = None
+        self.legends_alert_channel = None
         self._load_pa_channels()
         self._load_toll_channels()
         self.bot = bot
@@ -827,6 +828,10 @@ class AlertSystem:
         self.general_toll_alert_channel = channel
         logger.info(f"General-toll alert channel set: #{channel.name} ({channel.id})")
 
+    def set_legends_channel(self, channel: discord.TextChannel):
+        self.legends_alert_channel = channel
+        logger.info(f"Legends alert channel set: #{channel.name} ({channel.id})")
+
     def _load_pa_channels(self):
         try:
             from pathlib import Path
@@ -855,6 +860,7 @@ class AlertSystem:
             self.toll_channel_ids = set()
             self.general_toll_channel_ids = set()
             self.oil_toll_channel_ids = set()
+            self.legends_channel_ids = set()
             for channel_name, channel_id in monitored.items():
                 if not channel_id:
                     continue
@@ -866,11 +872,14 @@ class AlertSystem:
                     # go to the general-tolls-alert channel (same as general-tolls).
                     self.oil_toll_channel_ids.add(str(channel_id))
                     self.toll_channel_ids.add(str(channel_id))
+                elif name_lower == "legends-trades":
+                    self.legends_channel_ids.add(str(channel_id))
                 elif "toll" in name_lower:
                     self.toll_channel_ids.add(str(channel_id))
             logger.info(f"Loaded {len(self.toll_channel_ids)} toll channel IDs "
                         f"(incl. {len(self.oil_toll_channel_ids)} oil-toll)")
             logger.info(f"Loaded {len(self.general_toll_channel_ids)} general-toll channel IDs")
+            logger.info(f"Loaded {len(self.legends_channel_ids)} legends channel IDs")
         except Exception as e:
             logger.error(f"Failed to load toll channels: {e}")
             self.toll_channel_ids = set()
@@ -889,6 +898,10 @@ class AlertSystem:
     def is_oil_toll_signal(self, signal: Dict) -> bool:
         """Return True for signals from the oil-tolls channel."""
         return str(signal.get("channel_id", "")) in self.oil_toll_channel_ids
+
+    def is_legends_signal(self, signal: Dict) -> bool:
+        """Return True for signals from the legends-trades channel."""
+        return str(signal.get("channel_id", "")) in self.legends_channel_ids
 
     async def _maybe_delete_toll_original(self, signal: Dict, signal_id: int) -> None:
         """
@@ -939,6 +952,10 @@ class AlertSystem:
             if self.pa_alert_channel:
                 return self.pa_alert_channel
             logger.warning("PA signal but no PA alert channel; falling back")
+        if self.is_legends_signal(signal):
+            if self.legends_alert_channel:
+                return self.legends_alert_channel
+            logger.warning("Legends signal but no legends alert channel; falling back")
         return self.alert_channel
 
     # ── Backwards-compat tracking ────────────────────────────────────────────
@@ -1681,6 +1698,7 @@ class AlertSystem:
             self.pa_alert_channel,
             self.toll_alert_channel,
             self.general_toll_alert_channel,
+            self.legends_alert_channel,
         ]:
             if ch is not None and ch.id not in seen_ids:
                 channels.append(ch)

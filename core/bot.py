@@ -186,6 +186,8 @@ class TradingBot(commands.Bot):
                     allowed_channels.add(int(self.channels_config['toll-alert-channel']))
                 if 'general-tolls-alert' in self.channels_config and self.channels_config['general-tolls-alert']:
                     allowed_channels.add(int(self.channels_config['general-tolls-alert']))
+                if 'legends-trade-alert' in self.channels_config and self.channels_config['legends-trade-alert']:
+                    allowed_channels.add(int(self.channels_config['legends-trade-alert']))
                 if 'finished_signals' in self.channels_config and self.channels_config['finished_signals']:
                     allowed_channels.add(int(self.channels_config['finished_signals']))
                 if 'profit_channel' in self.channels_config and self.channels_config['profit_channel']:
