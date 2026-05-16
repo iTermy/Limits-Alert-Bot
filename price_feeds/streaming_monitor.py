@@ -160,6 +160,17 @@ class StreamingPriceMonitor:
                             logger.error(f"Failed to set general-toll alert channel: {e}")
                     else:
                         logger.warning("No general-tolls-alert channel configured in channels.json")
+                    # Setup legends alert channel
+                    legends_alert_id = config.get('legends-trade-alert')
+                    if legends_alert_id:
+                        try:
+                            legends_channel = await self.bot.fetch_channel(int(legends_alert_id))
+                            self.alert_system.set_legends_channel(legends_channel)
+                            logger.info(f"Legends alert channel set: #{legends_channel.name}")
+                        except Exception as e:
+                            logger.error(f"Failed to set legends alert channel: {e}")
+                    else:
+                        logger.warning("No legends-trade-alert channel configured in channels.json")
             except Exception as e:
                 logger.error(f"Error setting up alert channel: {e}")
 

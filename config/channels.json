@@ -16,12 +16,14 @@
     "gold-pa-signals": "1402972221953019986",
     "gold-tolls-map": "1472685381315989730",
     "general-tolls": "1477339674166169911",
-    "oil-tolls": "1484316173515489392"
+    "oil-tolls": "1484316173515489392",
+    "legends-trades": "1500246110491639818"
   },
   "alert_channel": "1402971805890773005",
   "pa-alert-channel": "1442668785990631435",
   "toll-alert-channel": "1472685910549332113",
   "general-tolls-alert": "1477339631900168284",
+  "legends-trade-alert": "1500246110491639818",
   "command_channel": "1402971848731398174",
   "profit_channel": "1414288228206514279",
   "finished_signals": "1479245676377407610",
@@ -81,6 +83,9 @@
     "oil-tolls": {
       "default_expiry": "week_end",
       "default_instrument": "XTIUSD"
+    },
+    "legends-trades": {
+      "default_expiry": "week_end"
     }
   }
 }
