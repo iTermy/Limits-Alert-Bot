@@ -1,5 +1,5 @@
 """
-Enhanced DatabaseManager that integrates all modules and maintains backward compatibility
+DatabaseManager — integrates all database modules into a single interface
 """
 
 from typing import Any, Dict, List
@@ -32,8 +32,7 @@ logger = get_logger("database")
 
 class DatabaseManager(BaseConnectionManager):
     """
-    Enhanced database manager with all operations integrated
-    Maintains backward compatibility with the original interface
+    Database manager with all operations integrated.
     """
 
     def __init__(self, db_url: str = None):

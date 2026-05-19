@@ -14,71 +14,39 @@ Total scope is meaningful but bounded — most proposals are local cleanups, not
 
 ## Area 1: Hot path — `on_message` → channel gate
 
-### 1.1 Consolidate allowed-channels into a single bot attribute
-- **Location**: `core/bot.py:160-198` (`on_message`), `discord_handlers/message_handler.py:28-68` (`_get_allowed_channels`, `is_allowed_channel`)
-- **Current state**: `bot.on_message` rebuilds an `allowed_channels` set on **every message** (including non-bot messages), checks membership, then calls `message_handler.handle_new_message` which calls `is_allowed_channel` and **rebuilds the set again** (cached after first call). Both code blocks list the same 10 channel keys.
-- **Proposed change**: Compute `bot.allowed_channel_ids: set[int]` once in `load_config()` (alongside the existing `monitored_channels` set). Have `bot.on_message` and `MessageHandler.is_allowed_channel` both read it directly. Delete `_get_allowed_channels` and the duplicated branches in `on_message`.
-- **Rationale**: Goal 1 (simpler hot path) + Goal 2 (delete ~50 lines of duplicate per-message work).
-- **Risk**: Low — pure data caching. The set is already mutable in spirit (config reload exists), and `load_config()` is the right place to refresh it.
-- **Behavior-preserving?**: Yes.
+### ✅ 1.1 Consolidate allowed-channels into a single bot attribute
+- **Location**: `core/bot.py` (`on_message`, `load_config`, `__init__`), `discord_handlers/message_handler.py` (`_get_allowed_channels`, `is_allowed_channel`)
+- **Done**: Added `bot.allowed_channel_ids: set[int]` built once at the end of `load_config()`. `on_message` now does a single set-membership check. `MessageHandler._get_allowed_channels` deleted; `is_allowed_channel` reads `bot.allowed_channel_ids` directly.
+- **Adjacent fix applied**: Removed the redundant `is_allowed_channel` guard inside `handle_new_message` (caller already gates).
 
-### 1.2 Remove the early-return defensive duplication in `on_message`
-- **Location**: `core/bot.py:160-221`
-- **Current state**: `on_message` has three nested try/excepts: (a) outer "critical error", (b) wrapping `message_handler.handle_new_message`, (c) wrapping `process_commands`. The outer one is essentially dead — `discord.py` already swallows exceptions in event handlers.
-- **Proposed change**: Drop the outer catch-all. Keep the inner two (they log and swallow specific failures).
-- **Rationale**: Goal 4 — defensive try/except for impossible cases.
-- **Risk**: Low.
-- **Behavior-preserving?**: Yes (discord.py's event dispatcher logs and continues anyway).
+### ✅ 1.2 Remove the early-return defensive duplication in `on_message`
+- **Location**: `core/bot.py` (`on_message`)
+- **Done**: Removed outer `try/except` catch-all. Body dedented one level. Two inner try/except blocks kept unchanged.
+- **Adjacent fix applied**: Removed the `if self.message_handler:` guard (always set after `setup_hook`).
 
 ---
 
 ## Area 2: Parser package (`core/parser/`)
 
-### 2.1 Drop dead exports / dead helpers
+### ✅ 2.1 Drop dead exports / dead helpers
 - **Location**: `core/parser/__init__.py` and `core/parser/validators.py`
-- **Current state**:
-  - `initialize_parser()` — never called externally (only `get_parser()` / `parse_signal()` are used).
-  - `cleanup_parser()` — never called anywhere.
-  - `EnhancedSignalParser` — only used inside `__init__.py`.
-  - `validators._separate_limits_and_stop` — never called.
-  - `validators._extract_direction_quick` — never called.
-  - `validators.is_stock_channel` / `is_crypto_channel` — never called (only `detect_channel_type` is used).
-- **Proposed change**: Delete all six. Trim the `__all__` list accordingly.
-- **Rationale**: Goal 2 (bloat).
-- **Risk**: Low — confirmed via grep that no caller references them.
-- **Behavior-preserving?**: Yes.
+- **Done**: Deleted `initialize_parser()`, `cleanup_parser()`, `validators._separate_limits_and_stop`, `validators._extract_direction_quick`, `validators.is_stock_channel`, `validators.is_crypto_channel`. Trimmed `__all__` accordingly. Removed `Tuple` from typing imports in validators.py.
 
-### 2.2 Collapse `_load_channel_config` redundancy
-- **Location**: `core/parser/__init__.py:150-171`
-- **Current state**: `_load_channel_config(config_loader)` has two near-identical branches: one for the case where `config_loader` is passed, one for the case where it falls back to the global `from utils.config_loader import config`. Both branches reach the same code path; the only difference is `import`.
-- **Proposed change**: Default `config_loader` to the module-level `config` when `None`, then have one branch only.
-- **Rationale**: Goal 3 (verbosity).
-- **Risk**: Low.
-- **Behavior-preserving?**: Yes.
+### ✅ 2.2 Collapse `_load_channel_config` redundancy
+- **Location**: `core/parser/__init__.py`
+- **Done**: Replaced 2-branch if/else with single flow — acquire module-level config singleton when no `config_loader` passed, then one shared try/except for the load call.
 
-### 2.3 De-duplicate the "is general-tolls auto-SL" detection
-- **Location**: `core/parser/pattern_parsers.py:647-654` (CorePatternParser.parse), `796-800` (StockPatternParser.parse), and `467-478` (determine_limits_and_stop)
-- **Current state**: The same regex `r'\b(sl|stop|stops)\b'` and the same "is general-tolls" detection logic is repeated three times. Two of them are even using their own local compiled regex variables (`_sl_kw_re`, `_sl_kw_re_stock`).
-- **Proposed change**: Pull `_SL_KEYWORD_RE` to module-level and add a small helper `_general_tolls_auto_sl(channel_name, cleaned_text) -> bool`. Use it in all three places. Also pull the `min_numbers` decision into the helper.
-- **Rationale**: Goal 3 (consistency) + Goal 4 (the `_sl_kw_re_stock` variable is the kind of suffix that signals copy-paste).
-- **Risk**: Low — pure refactor of detection logic.
-- **Behavior-preserving?**: Yes.
+### ✅ 2.3 De-duplicate the "is general-tolls auto-SL" detection
+- **Location**: `core/parser/pattern_parsers.py`
+- **Done**: Added module-level `_SL_KEYWORD_RE` and `_general_tolls_auto_sl(channel_name, text) -> bool` helper. All three call sites (CorePatternParser.parse, StockPatternParser.parse, determine_limits_and_stop) now use the helper instead of local compiled regex copies.
 
-### 2.4 Simplify `CryptoPatternParser`
-- **Location**: `core/parser/pattern_parsers.py:992-1023`
-- **Current state**: `CryptoPatternParser` inherits from `CorePatternParser` and overrides `parse` only to call super, then patch `parse_method = 'crypto'` and log. The `_internal_call` flag exists in the parent solely to suppress duplicate logging for this subclass.
-- **Proposed change**: Delete `CryptoPatternParser` entirely. In `EnhancedSignalParser._parse_with_crypto_parser` use the core parser directly and set `result.parse_method = 'crypto'` there. Then remove the `_internal_call` parameter from `CorePatternParser.parse`.
-- **Rationale**: Goal 2 (abstraction wrapping one caller) + Goal 4 (`_internal_call` is a code smell of a leaky inheritance hierarchy).
-- **Risk**: Low.
-- **Behavior-preserving?**: Yes — the parse_method label is preserved.
+### ✅ 2.4 Delete `CryptoPatternParser`
+- **Location**: `core/parser/pattern_parsers.py`
+- **Done**: Deleted `CryptoPatternParser` (34 lines). Removed `_internal_call` parameter and all 6 guards from `CorePatternParser.parse`. `SignalParser._parse_with_crypto_parser` now uses `self._core_parser` directly and sets `result.parse_method = "crypto"` after a successful parse.
 
-### 2.5 Remove the duplicate `_remove_index_symbols` blacklist
-- **Location**: `core/parser/validators.py:165-177` and `core/parser/pattern_parsers.py:131-139`
-- **Current state**: The same 18-element blacklist of index symbols appears in both files, inline. They are kept in sync by convention.
-- **Proposed change**: Define `INDEX_SYMBOL_BLACKLIST` once in `validators.py` and import it into `pattern_parsers.py`.
-- **Rationale**: Goal 4 (inconsistent-by-drift risk).
-- **Risk**: Low.
-- **Behavior-preserving?**: Yes.
+### ✅ 2.5 Remove the duplicate `_remove_index_symbols` blacklist
+- **Location**: `core/parser/validators.py`, `core/parser/pattern_parsers.py`
+- **Done**: `INDEX_SYMBOL_BLACKLIST` defined once in `validators.py` as a module-level constant. `pattern_parsers.py` imports and uses it; inline duplicate removed.
 
 ---
 
@@ -350,20 +318,16 @@ Total scope is meaningful but bounded — most proposals are local cleanups, not
 ## Area 8: Misc / cross-cutting
 
 ### 8.1 Top-of-file docstring noise (`Stage 2 Enhanced`, `REDESIGNED`, `ENHANCED`, `FIXED`)
-- **Location**: `main.py:3`, `price_feeds/streaming_monitor.py:1-7`, `price_feeds/price_stream_manager.py:1-6`, `price_feeds/alert_system.py:1-5`, `core/parser/__init__.py:122-130` (the `EnhancedSignalParser` docstring), and others
+- **Location**: `main.py:3`, `price_feeds/streaming_monitor.py:1-7`, `price_feeds/price_stream_manager.py:1-6`, `price_feeds/alert_system.py:1-5`, and others
 - **Current state**: Many file/class docstrings carry refactor-history metadata ("Stage 2", "REDESIGNED:", "ENHANCED:", "FIXED: Added OANDA practice account support"). This is git-log content, not docs.
 - **Proposed change**: Strip the historical preamble lines. Keep the descriptive paragraph.
 - **Rationale**: Goal 3/4 (these are AI-generated-code-smell tags).
 - **Risk**: Low.
 - **Behavior-preserving?**: Yes.
 
-### 8.2 `enhanced_X` / `improved_X` / `EnhancedSignalParser` / `Enhanced DatabaseManager`
-- **Location**: `core/parser/__init__.py:121`, `database/database_manager.py:28`
-- **Current state**: Two classes named "Enhanced...". One is the only parser class in the package; the other is the only DB manager.
-- **Proposed change**: Rename `EnhancedSignalParser` → `SignalParser`. The `DatabaseManager` class is already named `DatabaseManager` — only the docstring says "Enhanced". Drop that adjective.
-- **Rationale**: Goal 4.
-- **Risk**: Low (rename via grep).
-- **Behavior-preserving?**: Yes.
+### ✅ 8.2 `enhanced_X` / `improved_X` / `EnhancedSignalParser` / `Enhanced DatabaseManager`
+- **Location**: `core/parser/__init__.py`, `database/database_manager.py`
+- **Done**: Renamed `EnhancedSignalParser` → `SignalParser` (class, type annotations, log message). Stripped "Enhanced" from both `DatabaseManager` docstrings.
 
 ### 8.3 Inline `import json` / `from pathlib import Path` inside methods
 - **Location**: `price_feeds/alert_system.py:585-589, 605-608, 838-841, 855-858, 1792-1795`; `price_feeds/streaming_monitor.py:117-118, 181-186`; `discord_handlers/message_handler.py:525-528, 614-616`

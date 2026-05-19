@@ -183,7 +183,7 @@ INSTRUMENT_MAPPINGS = {
 # ============================================================================
 
 
-class EnhancedSignalParser:
+class SignalParser:
     """
     Main parser that orchestrates channel-aware parsing
 
@@ -195,46 +195,33 @@ class EnhancedSignalParser:
     """
 
     def __init__(self, config_loader=None):
-        """
-        Initialize the parser with configuration
-
-        Args:
-            config_loader: Configuration loader instance
-        """
-        # Load channel configuration
         self.channel_config = self._load_channel_config(config_loader)
 
         # Lazy-load parsers (imported when needed)
         self._core_parser = None
         self._stock_parser = None
-        self._crypto_parser = None
         self._ai_parser = None
 
-        logger.info("Initialized EnhancedSignalParser")
+        logger.info("Initialized SignalParser")
 
     def _load_channel_config(self, config_loader) -> dict:
         """Load channel configuration from JSON"""
-        channel_config = {}
-
-        if config_loader:
-            try:
-                channels_data = config_loader.load("channels.json")
-                channel_config = channels_data.get("channel_settings", {})
-                logger.info(f"Loaded channel config for {len(channel_config)} channels")
-            except Exception as e:
-                logger.warning(f"Could not load channel configuration: {e}")
-        else:
-            # Try to load directly
+        if not config_loader:
             try:
                 from utils.config_loader import config
 
-                channels_data = config.load("channels.json")
-                channel_config = channels_data.get("channel_settings", {})
-                logger.info(f"Loaded channel config for {len(channel_config)} channels")
+                config_loader = config
             except Exception as e:
                 logger.warning(f"Could not load channel configuration: {e}")
-
-        return channel_config
+                return {}
+        try:
+            channels_data = config_loader.load("channels.json")
+            channel_config = channels_data.get("channel_settings", {})
+            logger.info(f"Loaded channel config for {len(channel_config)} channels")
+            return channel_config
+        except Exception as e:
+            logger.warning(f"Could not load channel configuration: {e}")
+            return {}
 
     def parse(self, message: str, channel_name: str = None) -> Optional[ParsedSignal]:
         """
@@ -279,7 +266,7 @@ class EnhancedSignalParser:
                 logger.debug("→ Routing to StockPatternParser")
                 result = self._parse_with_stock_parser(message, channel_name)
             elif channel_type == "crypto":
-                logger.debug("→ Routing to CryptoPatternParser")
+                logger.debug("→ Routing to crypto parser (CorePatternParser)")
                 result = self._parse_with_crypto_parser(message, channel_name)
             else:  # core
                 logger.debug("→ Routing to CorePatternParser")
@@ -321,13 +308,16 @@ class EnhancedSignalParser:
         return self._stock_parser.parse(message, channel_name)
 
     def _parse_with_crypto_parser(self, message: str, channel_name: str) -> Optional[ParsedSignal]:
-        """Parse using crypto-specific parser"""
-        if self._crypto_parser is None:
-            from .pattern_parsers import CryptoPatternParser
+        """Parse crypto signals using the core parser with crypto parse_method label"""
+        if self._core_parser is None:
+            from .pattern_parsers import CorePatternParser
 
-            self._crypto_parser = CryptoPatternParser(self.channel_config)
+            self._core_parser = CorePatternParser(self.channel_config)
 
-        return self._crypto_parser.parse(message, channel_name)
+        result = self._core_parser.parse(message, channel_name)
+        if result:
+            result.parse_method = "crypto"
+        return result
 
     def _parse_with_ai(self, message: str, channel_name: str) -> Optional[ParsedSignal]:
         """Parse using AI fallback"""
@@ -351,47 +341,20 @@ class EnhancedSignalParser:
 # GLOBAL PARSER INSTANCE
 # ============================================================================
 
-_parser_instance: Optional[EnhancedSignalParser] = None
+_parser_instance: Optional[SignalParser] = None
 
 
-def get_parser() -> EnhancedSignalParser:
+def get_parser() -> SignalParser:
     """Get or create the global parser instance"""
     global _parser_instance
     if _parser_instance is None:
-        _parser_instance = initialize_parser()
-    return _parser_instance
-
-
-def initialize_parser(config_loader=None) -> EnhancedSignalParser:
-    """
-    Initialize the parser with configuration
-
-    Args:
-        config_loader: Optional configuration loader
-
-    Returns:
-        Initialized parser instance
-    """
-    global _parser_instance
-
-    if config_loader:
-        _parser_instance = EnhancedSignalParser(config_loader)
-    else:
-        try:
-            from utils.config_loader import config
-
-            _parser_instance = EnhancedSignalParser(config)
-        except:
-            _parser_instance = EnhancedSignalParser()
-
+        _parser_instance = SignalParser()
     return _parser_instance
 
 
 def parse_signal(message: str, channel_name: str = None) -> Optional[ParsedSignal]:
     """
-    Parse a trading signal with channel awareness
-
-    This is the main entry point for signal parsing.
+    Main entry point for signal parsing.
 
     Args:
         message: Raw message text
@@ -400,26 +363,14 @@ def parse_signal(message: str, channel_name: str = None) -> Optional[ParsedSigna
     Returns:
         ParsedSignal object or None
     """
-    parser = get_parser()
-    return parser.parse(message, channel_name)
-
-
-def cleanup_parser():
-    """Cleanup parser resources"""
-    global _parser_instance
-    if _parser_instance:
-        _parser_instance.cleanup()
-        _parser_instance = None
+    return get_parser().parse(message, channel_name)
 
 
 # Export main components
 __all__ = [
-    "EnhancedSignalParser",
     "LimitsOrderError",
     "ParsedSignal",
     "RejectedSignal",
-    "cleanup_parser",
     "get_parser",
-    "initialize_parser",
     "parse_signal",
 ]

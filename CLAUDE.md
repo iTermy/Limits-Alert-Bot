@@ -405,3 +405,39 @@ LOG_LEVEL=INFO                  # optional
 ```
 
 `database/__init__.py` calls `load_dotenv()` with an absolute path derived from `__file__` before instantiating `DatabaseManager`, so `.env` is found regardless of working directory. `main.py` does the same.
+
+---
+
+## Coding Standards
+
+The codebase aims to read like a clean production application: minimal, direct, professional. These rules exist because they tend to break when an LLM edits without guidance — they're guardrails, not aesthetics.
+
+### Naming
+Names describe what something *is* or *does* in the present tense, not its history or how it came to exist. `SignalParser`, not `EnhancedSignalParser` or `SignalParserV2`. If you find a name with `enhanced_`, `improved_`, `_v2`, `new_`, or `_fixed`, that's a smell from an earlier edit — drop the adjective unless removing it creates a real collision.
+
+### Functions
+One function, one job. If you need "and" to describe what it does ("parses the message and updates the DB and sends the alert"), it should be split. Keep functions short enough to fit on a screen; if early returns get you there, prefer them over deep nesting. Don't introduce parameters that only one caller passes — inline the value or split the function.
+
+### Error handling
+Catch what you can actually recover from. A bare `except: pass` is hiding a bug, not preventing one. A try/except around code that can't fail (e.g. guarding a method call on an attribute the constructor always sets) is noise — delete it. When you do catch, log enough to debug from.
+
+### Imports
+At the top of the file, grouped (stdlib / third-party / local), no inline imports unless there's a real circular-import reason — and if there is one, that's usually a sign the module split is wrong. Drop unused imports.
+
+### Comments and docstrings
+Comments explain *why*, not *what*. `# Loop through signals` above `for signal in signals` is noise. Docstrings describe the contract (what it does, what it returns, what raises) — they don't restate the signature. Strip refactor-history preambles from docstrings (`"REDESIGNED:"`, `"Stage 2 Enhanced:"`, `"FIXED:"`) — that belongs in git, not the file.
+
+### Constants and magic numbers
+Numbers and strings that mean something — timeouts, thresholds, role IDs, channel keys — go in named constants at module top or in a config file. Inline `1000`, `"approaching"`, `<@&123456>` scattered through code is harder to change safely.
+
+### Defensive programming
+`hasattr` guards, `if x is not None` checks, and try/excepts have a real cost — they obscure the happy path and tell future readers "this might fail" when it can't. Use them at genuine boundaries (external I/O, user input, optional config) and not for attributes the constructor always sets. When in doubt: would a sensible caller ever hit this case? If no, delete the guard.
+
+### Logging
+Log at the level that matches the severity (debug for tracing, info for normal events, warning for recoverable problems, error for failures). Don't sprinkle emojis or status indicators into log messages — `logger.info("Signal saved")` not `logger.info("✅ Signal saved successfully!")`. Logging is for operators, not for users.
+
+### Classes vs functions
+Prefer functions unless you actually need state. A class with only a constructor and one method is a function in disguise. A class that holds three sub-managers and forwards every method to them is plumbing — flatten it or delete it.
+
+### Formatting
+Mechanical formatting (line length, quote style, import sort, trailing commas) is handled by `ruff` — see `pyproject.toml`. This will be done manually by the user. No need to run these commands yourself.

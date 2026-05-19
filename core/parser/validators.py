@@ -4,11 +4,39 @@ Signal validation and channel detection for the trading signal parser
 """
 
 import re
-from typing import List, Optional, Tuple
+from typing import List
 
 from utils.logger import get_logger
 
 logger = get_logger("parser.validators")
+
+# ============================================================================
+# CONSTANTS
+# ============================================================================
+
+INDEX_SYMBOL_BLACKLIST = [
+    "spx500usd",
+    "nas100usd",
+    "us30usd",
+    "us2000usd",
+    "jp225",
+    "nas100",
+    "us30",
+    "spx500",
+    "sp500",
+    "us2000",
+    "de30",
+    "dax30",
+    "ger30",
+    "china50",
+    "russel2000",
+    "aus200",
+    "f40",
+    "cac40",
+    "ftse100",
+    "hk50",
+    "asx200",
+]
 
 # ============================================================================
 # MAIN VALIDATION FUNCTIONS (for __init__.py)
@@ -155,45 +183,10 @@ def detect_channel_type(channel_name: str) -> str:
     return "core"
 
 
-def is_stock_channel(channel_name: str) -> bool:
-    """Check if channel is for stocks"""
-    return detect_channel_type(channel_name) == "stock"
-
-
-def is_crypto_channel(channel_name: str) -> bool:
-    """Check if channel is for crypto"""
-    return detect_channel_type(channel_name) == "crypto"
-
-
 def _remove_index_symbols(text: str) -> str:
     """Remove index symbols to prevent number extraction from them"""
-    blacklist = [
-        "spx500usd",
-        "nas100usd",
-        "us30usd",
-        "us2000usd",
-        "jp225",
-        "nas100",
-        "us30",
-        "spx500",
-        "sp500",
-        "us2000",
-        "de30",
-        "dax30",
-        "ger30",
-        "china50",
-        "russel2000",
-        "aus200",
-        "f40",
-        "cac40",
-        "ftse100",
-        "hk50",
-        "asx200",
-    ]
-
-    for symbol in blacklist:
+    for symbol in INDEX_SYMBOL_BLACKLIST:
         text = re.sub(re.escape(symbol), "", text, flags=re.IGNORECASE)
-
     return text
 
 
@@ -204,37 +197,3 @@ def _extract_numbers(text: str) -> List[float]:
         return [float(n) for n in numbers_str]
     except ValueError:
         return []
-
-
-def _extract_direction_quick(text_lower: str) -> Optional[str]:
-    """Quick direction extraction for validation"""
-    if re.search(r"\b(long|buy)\b", text_lower):
-        return "long"
-    if re.search(r"\b(short|sell)\b", text_lower):
-        return "short"
-    return None
-
-
-def _separate_limits_and_stop(
-    numbers: List[float], direction: str
-) -> Tuple[List[float], Optional[float]]:
-    """
-    Separate limit prices from stop loss
-
-    For long: stop is lowest number (limits > stop)
-    For short: stop is highest number (limits < stop)
-
-    Args:
-        numbers: All extracted numbers
-        direction: Trade direction
-
-    Returns:
-        Tuple of (limits, stop_loss)
-    """
-    if not numbers or len(numbers) < 2:
-        return numbers, None
-
-    stop_loss = numbers[-1]
-    limits = numbers[:-1]
-
-    return limits, stop_loss

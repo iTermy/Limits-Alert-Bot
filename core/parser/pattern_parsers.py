@@ -10,7 +10,7 @@ from typing import Dict, List, Optional, Set
 from utils.logger import get_logger
 
 from . import INSTRUMENT_MAPPINGS, ParsedSignal
-from .validators import validate_signal
+from .validators import INDEX_SYMBOL_BLACKLIST, validate_signal
 
 logger = get_logger("parser.pattern_parsers")
 
@@ -151,6 +151,16 @@ EXPIRY_PATTERNS = {
 
 SPECIAL_KEYWORDS = ["hot", "semi-swing", "swing", "scalp", "swing-trade", "intraday", "position"]
 
+_SL_KEYWORD_RE = re.compile(r"\b(sl|stop|stops)\b", re.IGNORECASE)
+
+
+def _general_tolls_auto_sl(channel_name: str, text: str) -> bool:
+    """Returns True when this is a general-tolls channel with no explicit SL keyword (auto-SL mode)."""
+    return bool(
+        channel_name and channel_name.lower() == "general-tolls" and not _SL_KEYWORD_RE.search(text)
+    )
+
+
 STOCK_SKIP_WORDS = {
     "LONG",
     "SHORT",
@@ -192,35 +202,8 @@ def clean_message(message: str) -> str:
 
 def extract_numbers(text: str) -> List[float]:
     """Extract all numbers from text, excluding numbers inside blacklisted terms"""
-    # Remove blacklisted terms
-    blacklist = [
-        "spx500usd",
-        "nas100usd",
-        "us30usd",
-        "us2000usd",
-        "jp225",
-        "nas100",
-        "us30",
-        "spx500",
-        "sp500",
-        "us2000",
-        "de30",
-        "dax30",
-        "ger30",
-        "china50",
-        "russel2000",
-        "aus200",
-        "f40",
-        "cac40",
-        "ftse100",
-        "hk50",
-        "asx200",
-    ]
-
-    for word in blacklist:
+    for word in INDEX_SYMBOL_BLACKLIST:
         text = re.sub(re.escape(word), "", text, flags=re.IGNORECASE)
-
-    # Extract numbers
     numbers = re.findall(r"\d+\.?\d*", text)
     try:
         return [float(n) for n in numbers]
@@ -570,9 +553,6 @@ def determine_limits_and_stop(
     }
     _GENERAL_TOLLS_AUTO_SL_DEFAULT = 10.0
 
-    # Regex for explicit SL keyword (whole-word match, case-insensitive)
-    _SL_KEYWORD_RE = re.compile(r"\b(sl|stop|stops)\b", re.IGNORECASE)
-
     # Check if this is the gold tolls channel (auto-infers SL)
     is_tolls_channel = (
         channel_name and "toll" in channel_name.lower() and channel_name.lower() != "general-tolls"
@@ -730,72 +710,40 @@ class CorePatternParser:
         self.channel_config = channel_config or {}
         logger.info("Initialized CorePatternParser")
 
-    def parse(
-        self, message: str, channel_name: str = None, _internal_call: bool = False
-    ) -> Optional[ParsedSignal]:
-        """
-        Parse using pattern matching for core instruments
-
-        Args:
-            message: The message to parse
-            channel_name: Channel name for context
-            _internal_call: Internal flag to suppress logging when called by subclass
-
-        Returns:
-            ParsedSignal or None
-        """
+    def parse(self, message: str, channel_name: str = None) -> Optional[ParsedSignal]:
+        """Parse using pattern matching for core instruments"""
         try:
-            # Clean the message
             cleaned = clean_message(message)
-
-            # Extract numbers
             numbers = extract_numbers(cleaned)
 
-            # Check if this is the gold tolls channel (single-number messages allowed)
             is_gold_tolls_channel = (
                 channel_name
                 and "toll" in channel_name.lower()
                 and channel_name.lower() != "general-tolls"
             )
-
-            # General-tolls with no explicit SL keyword also allows single numbers
-            is_general_tolls_channel = channel_name and channel_name.lower() == "general-tolls"
-            _sl_kw_re = re.compile(r"\b(sl|stop|stops)\b", re.IGNORECASE)
-            general_tolls_auto_sl = is_general_tolls_channel and not _sl_kw_re.search(cleaned)
-
-            # For gold tolls channel (or general-tolls in auto-SL mode), allow single number
-            # General tolls (explicit SL) and regular channels require at least 2 numbers
-            min_numbers = 1 if (is_gold_tolls_channel or general_tolls_auto_sl) else 2
+            min_numbers = (
+                1 if (is_gold_tolls_channel or _general_tolls_auto_sl(channel_name, cleaned)) else 2
+            )
 
             if len(numbers) < min_numbers:
-                if not _internal_call:
-                    logger.debug(
-                        f"Not enough numbers found (need {min_numbers}, got {len(numbers)})"
-                    )
+                logger.debug(f"Not enough numbers found (need {min_numbers}, got {len(numbers)})")
                 return None
 
-            # Extract instrument
             instrument = extract_instrument(cleaned, channel_name, self.channel_config)
             if not instrument:
-                if not _internal_call:
-                    logger.debug(f"No instrument found for channel {channel_name}")
+                logger.debug(f"No instrument found for channel {channel_name}")
                 return None
 
-            # Scale numbers if needed for forex
             numbers = scale_forex_numbers(numbers, instrument)
             if not numbers:
-                if not _internal_call:
-                    logger.warning("No numbers after scaling")
+                logger.warning("No numbers after scaling")
                 return None
 
-            # Extract direction
             direction = extract_direction(cleaned)
             if not direction:
-                if not _internal_call:
-                    logger.debug("No direction found")
+                logger.debug("No direction found")
                 return None
 
-            # Determine limits and stop loss (pass channel_name for tolls handling)
             limits, stop_loss = determine_limits_and_stop(
                 numbers,
                 direction,
@@ -804,20 +752,13 @@ class CorePatternParser:
                 instrument=instrument,
             )
             if not limits or stop_loss is None:
-                if not _internal_call:
-                    logger.debug("Could not determine limits and stop loss")
+                logger.debug("Could not determine limits and stop loss")
                 return None
 
-            # Extract expiry
             expiry_type = extract_expiry(cleaned, channel_name, self.channel_config)
-
-            # Extract keywords
             keywords = extract_keywords(cleaned)
-
-            # Determine if this is a scalp
             scalp = is_scalp(message, channel_name)
 
-            # Create signal
             signal = ParsedSignal(
                 instrument=instrument,
                 direction=direction,
@@ -831,14 +772,11 @@ class CorePatternParser:
                 scalp=scalp,
             )
 
-            # Validate before returning
             if validate_signal(signal):
-                if not _internal_call:
-                    logger.info(f"Core parse success: {signal.instrument} {signal.direction}")
+                logger.info(f"Core parse success: {signal.instrument} {signal.direction}")
                 return signal
 
-            if not _internal_call:
-                logger.debug("Signal validation failed")
+            logger.debug("Signal validation failed")
             return None
 
         except Exception as e:
@@ -846,8 +784,7 @@ class CorePatternParser:
 
             if isinstance(e, LimitsOrderError):
                 raise
-            if not _internal_call:
-                logger.error(f"Core parsing error: {e}")
+            logger.error(f"Core parsing error: {e}")
             return None
 
 
@@ -911,16 +848,8 @@ class StockPatternParser:
             # Clean message for everything except stock extraction
             cleaned = clean_message(message)
 
-            # Extract numbers
             numbers = extract_numbers(cleaned)
-
-            # General-tolls without an explicit SL keyword allows single-number messages
-            _sl_kw_re_stock = re.compile(r"\b(sl|stop|stops)\b", re.IGNORECASE)
-            _is_general_tolls_stock = channel_name and channel_name.lower() == "general-tolls"
-            _general_tolls_auto_sl_stock = _is_general_tolls_stock and not _sl_kw_re_stock.search(
-                cleaned
-            )
-            if len(numbers) < (1 if _general_tolls_auto_sl_stock else 2):
+            if len(numbers) < (1 if _general_tolls_auto_sl(channel_name, cleaned) else 2):
                 return None
 
             # Extract stock symbol from ORIGINAL message (preserves case)
@@ -1112,42 +1041,3 @@ class StockPatternParser:
         if self.mt5_initialized:
             mt5.shutdown()
             logger.info("MT5 connection closed")
-
-
-# ============================================================================
-# CRYPTO PATTERN PARSER
-# ============================================================================
-
-
-class CryptoPatternParser(CorePatternParser):
-    """
-    Crypto-specific parser (inherits from CorePatternParser)
-
-    Crypto parsing is essentially the same as core parsing, but with
-    crypto-specific defaults and handling.
-    """
-
-    def __init__(self, channel_config: dict = None):
-        super().__init__(channel_config)
-        logger.info("Initialized CryptoPatternParser")
-
-    def parse(self, message: str, channel_name: str = None) -> Optional[ParsedSignal]:
-        """
-        Parse using crypto-specific logic
-
-        Args:
-            message: The message to parse
-            channel_name: Channel name for context
-
-        Returns:
-            ParsedSignal or None
-        """
-        # Use parent's parse method with _internal_call flag to suppress duplicate logs
-        result = super().parse(message, channel_name, _internal_call=True)
-
-        # If successful, update parse method to 'crypto'
-        if result:
-            result.parse_method = "crypto"
-            logger.info(f"Crypto parse success: {result.instrument} {result.direction}")
-
-        return result

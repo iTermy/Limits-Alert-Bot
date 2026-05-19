@@ -42,6 +42,7 @@ class TradingBot(commands.Bot):
         self.settings = settings
         self.channels_config = None
         self.monitored_channels: Set[int] = set()
+        self.allowed_channel_ids: Set[int] = set()
         self.alert_channel_id: Optional[int] = None
         self.command_channel_id: Optional[int] = None
         self.signal_db = None
@@ -127,6 +128,22 @@ class TradingBot(commands.Bot):
             self.command_channel_id = int(command_id)
             self.logger.info(f"Command channel set: {command_id}")
 
+        # Build allowed_channel_ids once — read by on_message and MessageHandler
+        self.allowed_channel_ids = set(self.monitored_channels)
+        for key in (
+            "alert_channel",
+            "command_channel",
+            "pa-alert-channel",
+            "toll-alert-channel",
+            "general-tolls-alert",
+            "legends-trade-alert",
+            "finished_signals",
+            "profit_channel",
+        ):
+            val = self.channels_config.get(key)
+            if val:
+                self.allowed_channel_ids.add(int(val))
+
     async def load_extensions(self):
         """Load all command cogs"""
         extensions = [
@@ -165,71 +182,29 @@ class TradingBot(commands.Bot):
         )
 
     async def on_message(self, message: discord.Message):
-        """Handle new messages with error resilience"""
+        """Handle new messages"""
+        # Only process messages in allowed channels
+        if message.channel.id not in self.allowed_channel_ids:
+            return
+
+        # Let message handler process it first
         try:
-            # Check if message is in an allowed channel
-            allowed_channels = set()
-
-            # Add monitored channels
-            allowed_channels.update(self.monitored_channels)
-
-            # Add alert channel
-            if hasattr(self, "alert_channel_id") and self.alert_channel_id:
-                allowed_channels.add(self.alert_channel_id)
-
-            # Add command channel
-            if hasattr(self, "command_channel_id") and self.command_channel_id:
-                allowed_channels.add(self.command_channel_id)
-
-            # Try to get from channels_config if not set
-            if hasattr(self, "channels_config"):
-                if "alert_channel" in self.channels_config:
-                    allowed_channels.add(int(self.channels_config["alert_channel"]))
-                if "command_channel" in self.channels_config:
-                    allowed_channels.add(int(self.channels_config["command_channel"]))
-                if "pa-alert-channel" in self.channels_config:
-                    allowed_channels.add(int(self.channels_config["pa-alert-channel"]))
-                if "toll-alert-channel" in self.channels_config:
-                    allowed_channels.add(int(self.channels_config["toll-alert-channel"]))
-                if self.channels_config.get("general-tolls-alert"):
-                    allowed_channels.add(int(self.channels_config["general-tolls-alert"]))
-                if self.channels_config.get("legends-trade-alert"):
-                    allowed_channels.add(int(self.channels_config["legends-trade-alert"]))
-                if self.channels_config.get("finished_signals"):
-                    allowed_channels.add(int(self.channels_config["finished_signals"]))
-                if self.channels_config.get("profit_channel"):
-                    allowed_channels.add(int(self.channels_config["profit_channel"]))
-
-            # Only process messages in allowed channels
-            if message.channel.id not in allowed_channels:
-                return  # Silently ignore messages in non-trading channels
-
-            # Let message handler process it first
-            if self.message_handler:
-                try:
-                    await self.message_handler.handle_new_message(message)
-                except discord.NotFound:
-                    # Message was deleted while processing
-                    self.logger.debug(f"Message {message.id} was deleted during processing")
-                except Exception as e:
-                    # Log error but don't crash - allow bot to continue
-                    self.logger.error(
-                        f"Error in message handler for message {message.id}: {str(e)!r}",
-                        exc_info=True,
-                    )
-
-            # Then process commands (only in allowed channels)
-            try:
-                await self.process_commands(message)
-            except Exception as e:
-                # Log error but don't crash
-                self.logger.error(
-                    f"Error processing commands for message {message.id}: {str(e)!r}", exc_info=True
-                )
-
+            await self.message_handler.handle_new_message(message)
+        except discord.NotFound:
+            self.logger.debug(f"Message {message.id} was deleted during processing")
         except Exception as e:
-            # Final catch-all to prevent any crashes
-            self.logger.error(f"Critical error in on_message: {str(e)!r}", exc_info=True)
+            self.logger.error(
+                f"Error in message handler for message {message.id}: {str(e)!r}",
+                exc_info=True,
+            )
+
+        # Then process commands (only in allowed channels)
+        try:
+            await self.process_commands(message)
+        except Exception as e:
+            self.logger.error(
+                f"Error processing commands for message {message.id}: {str(e)!r}", exc_info=True
+            )
 
     async def on_message_edit(self, before: discord.Message, after: discord.Message):
         """Handle message edits"""

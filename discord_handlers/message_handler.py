@@ -25,50 +25,9 @@ class MessageHandler:
         self.alert_system = None  # Will be set by monitor when initialized
         logger.info("MessageHandler initialized, alert_system is None initially")
 
-        # Cache allowed channels for quick lookup
-        self._allowed_channels = None
-
-    def _get_allowed_channels(self):
-        """Get set of allowed channel IDs (monitored + alert + command channels)"""
-        if self._allowed_channels is None:
-            self._allowed_channels = set()
-
-            # Add monitored channels
-            for channel_id in self.bot.monitored_channels:
-                self._allowed_channels.add(channel_id)
-
-            # Add alert channel
-            if hasattr(self.bot, "alert_channel_id") and self.bot.alert_channel_id:
-                self._allowed_channels.add(self.bot.alert_channel_id)
-
-            # Add command channel
-            if hasattr(self.bot, "command_channel_id") and self.bot.command_channel_id:
-                self._allowed_channels.add(self.bot.command_channel_id)
-
-            # Try to get from channels_config if not set
-            if hasattr(self.bot, "channels_config"):
-                if "alert_channel" in self.bot.channels_config:
-                    self._allowed_channels.add(int(self.bot.channels_config["alert_channel"]))
-                if "command_channel" in self.bot.channels_config:
-                    self._allowed_channels.add(int(self.bot.channels_config["command_channel"]))
-                if "pa-alert-channel" in self.bot.channels_config:
-                    self._allowed_channels.add(int(self.bot.channels_config["pa-alert-channel"]))
-                if "toll-alert-channel" in self.bot.channels_config:
-                    self._allowed_channels.add(int(self.bot.channels_config["toll-alert-channel"]))
-                if self.bot.channels_config.get("general-tolls-alert"):
-                    self._allowed_channels.add(int(self.bot.channels_config["general-tolls-alert"]))
-                if self.bot.channels_config.get("legends-trade-alert"):
-                    self._allowed_channels.add(int(self.bot.channels_config["legends-trade-alert"]))
-                if self.bot.channels_config.get("finished_signals"):
-                    self._allowed_channels.add(int(self.bot.channels_config["finished_signals"]))
-                if self.bot.channels_config.get("profit_channel"):
-                    self._allowed_channels.add(int(self.bot.channels_config["profit_channel"]))
-
-        return self._allowed_channels
-
     def is_allowed_channel(self, channel_id: int) -> bool:
         """Check if bot should process messages in this channel"""
-        return channel_id in self._get_allowed_channels()
+        return channel_id in self.bot.allowed_channel_ids
 
     async def handle_new_message(self, message: discord.Message):
         """
@@ -79,10 +38,6 @@ class MessageHandler:
         """
         # Ignore bot's own messages
         if message.author.bot:
-            return
-
-        if not self.is_allowed_channel(message.channel.id):
-            # Silently ignore messages in non-trading channels
             return
 
         # Check if message is in monitored channel
