@@ -5,8 +5,10 @@ Uses continuous tick polling with asyncio for real-time price updates
 
 import asyncio
 import logging
-from typing import Dict, Set, AsyncIterator, Tuple
+from collections.abc import AsyncIterator
 from datetime import datetime
+from typing import Dict, Set, Tuple
+
 import MetaTrader5 as mt5
 
 logger = logging.getLogger(__name__)
@@ -48,10 +50,9 @@ class ICMarketsStream:
                     logger.info(f"Connected to MT5 - {terminal_info.name}")
 
                 return True
-            else:
-                error = mt5.last_error()
-                logger.error(f"MT5 initialization failed: {error}")
-                return False
+            error = mt5.last_error()
+            logger.error(f"MT5 initialization failed: {error}")
+            return False
 
         except Exception as e:
             logger.error(f"Error connecting to MT5: {e}")
@@ -148,11 +149,11 @@ class ICMarketsStream:
 
                     # Build price data
                     current_price = {
-                        'bid': tick.bid,
-                        'ask': tick.ask,
-                        'timestamp': datetime.fromtimestamp(tick.time),
-                        'last': tick.last,
-                        'volume': tick.volume
+                        "bid": tick.bid,
+                        "ask": tick.ask,
+                        "timestamp": datetime.fromtimestamp(tick.time),
+                        "last": tick.last,
+                        "volume": tick.volume,
                     }
 
                     # Check if price changed
@@ -163,7 +164,10 @@ class ICMarketsStream:
                     else:
                         # Check if bid or ask changed
                         last = self.last_prices[symbol]
-                        if last['bid'] != current_price['bid'] or last['ask'] != current_price['ask']:
+                        if (
+                            last["bid"] != current_price["bid"]
+                            or last["ask"] != current_price["ask"]
+                        ):
                             self.last_prices[symbol] = current_price
                             yield symbol, current_price
 

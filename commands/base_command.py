@@ -1,9 +1,11 @@
 """
 Base Command Cog - Foundation for all command groups
 """
-from discord.ext import commands
-import discord
+
 from typing import Optional
+
+import discord
+from discord.ext import commands
 
 
 class BaseCog(commands.Cog):
@@ -15,7 +17,7 @@ class BaseCog(commands.Cog):
         self.signal_db = bot.signal_db
 
     def is_admin(self, user: discord.User) -> bool:
-        if hasattr(user, 'guild_permissions'):
+        if hasattr(user, "guild_permissions"):
             return user.id in self.bot.admin_ids or user.guild_permissions.administrator
         return user.id in self.bot.admin_ids
 
@@ -46,7 +48,7 @@ class BaseCog(commands.Cog):
 
         # Log unexpected errors
         self.logger.error(f"Command error in {ctx.command}: {error}")
-        await ctx.send(f"❌ An error occurred: {str(error)}")
+        await ctx.send(f"❌ An error occurred: {error!s}")
 
     def get_channel_name(self, channel_id: int) -> Optional[str]:
         """Get channel name from configuration"""

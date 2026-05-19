@@ -40,9 +40,9 @@ Supported types:
 
 import json
 import logging
+from datetime import datetime, timezone
 from pathlib import Path
 from typing import Dict, Literal
-from datetime import datetime, timezone
 
 logger = logging.getLogger(__name__)
 
@@ -61,24 +61,24 @@ class NMConfig:
     """
 
     ASSET_CLASS_TYPES: Dict[str, NMType] = {
-        "forex":     "pips",
+        "forex": "pips",
         "forex_jpy": "pips",
-        "metals":    "dollars",
-        "indices":   "dollars",
-        "stocks":    "dollars",
-        "crypto":    "dollars",
-        "oil":       "dollars",
+        "metals": "dollars",
+        "indices": "dollars",
+        "stocks": "dollars",
+        "crypto": "dollars",
+        "oil": "dollars",
     }
 
     # Pip sizes for pips <-> price conversion
     PIP_SIZES: Dict[str, float] = {
-        "forex":     0.0001,
+        "forex": 0.0001,
         "forex_jpy": 0.01,
-        "metals":    1.0,
-        "indices":   1.0,
-        "stocks":    1.0,
-        "crypto":    1.0,
-        "oil":       1.0,
+        "metals": 1.0,
+        "indices": 1.0,
+        "stocks": 1.0,
+        "crypto": 1.0,
+        "oil": 1.0,
     }
 
     def __init__(self, config_path: str = None):
@@ -93,6 +93,7 @@ class NMConfig:
 
         try:
             from price_feeds.symbol_mapper import SymbolMapper
+
             mapper_config = self.config_path.parent / "symbol_mappings.json"
             self.mapper = SymbolMapper(str(mapper_config))
         except Exception as e:
@@ -107,7 +108,7 @@ class NMConfig:
 
     def _load_config(self) -> Dict:
         try:
-            with open(self.config_path, "r") as f:
+            with open(self.config_path) as f:
                 raw = json.load(f)
             return self._migrate_if_needed(raw)
         except FileNotFoundError:
@@ -153,15 +154,50 @@ class NMConfig:
     def _create_default_config(self) -> Dict:
         return {
             "defaults": {
-                "forex":     {"type": "pips",    "max_proximity": 7.0,  "base_bounce": 4.0,  "description": "Track within 7 pips; bounce = closest + 4 pips"},
-                "forex_jpy": {"type": "pips",    "max_proximity": 10.0, "base_bounce": 6.0,  "description": "Track within 10 pips; bounce = closest + 6 pips"},
-                "metals":    {"type": "dollars", "max_proximity": 6.0,  "base_bounce": 3.0,  "description": "Track within $6; bounce = closest + $3"},
-                "indices":   {"type": "dollars", "max_proximity": 20.0, "base_bounce": 10.0, "description": "Track within $20; bounce = closest + $10"},
-                "stocks":    {"type": "dollars", "max_proximity": 1.0,  "base_bounce": 0.5,  "description": "Track within $1; bounce = closest + $0.50"},
-                "crypto":    {"type": "dollars", "max_proximity": 50.0, "base_bounce": 30.0, "description": "Track within $50; bounce = closest + $30"},
-                "oil":       {"type": "dollars", "max_proximity": 0.2,  "base_bounce": 0.1,  "description": "Track within $0.20; bounce = closest + $0.10"},
+                "forex": {
+                    "type": "pips",
+                    "max_proximity": 7.0,
+                    "base_bounce": 4.0,
+                    "description": "Track within 7 pips; bounce = closest + 4 pips",
+                },
+                "forex_jpy": {
+                    "type": "pips",
+                    "max_proximity": 10.0,
+                    "base_bounce": 6.0,
+                    "description": "Track within 10 pips; bounce = closest + 6 pips",
+                },
+                "metals": {
+                    "type": "dollars",
+                    "max_proximity": 6.0,
+                    "base_bounce": 3.0,
+                    "description": "Track within $6; bounce = closest + $3",
+                },
+                "indices": {
+                    "type": "dollars",
+                    "max_proximity": 20.0,
+                    "base_bounce": 10.0,
+                    "description": "Track within $20; bounce = closest + $10",
+                },
+                "stocks": {
+                    "type": "dollars",
+                    "max_proximity": 1.0,
+                    "base_bounce": 0.5,
+                    "description": "Track within $1; bounce = closest + $0.50",
+                },
+                "crypto": {
+                    "type": "dollars",
+                    "max_proximity": 50.0,
+                    "base_bounce": 30.0,
+                    "description": "Track within $50; bounce = closest + $30",
+                },
+                "oil": {
+                    "type": "dollars",
+                    "max_proximity": 0.2,
+                    "base_bounce": 0.1,
+                    "description": "Track within $0.20; bounce = closest + $0.10",
+                },
             },
-            "overrides": {}
+            "overrides": {},
         }
 
     # ------------------------------------------------------------------
@@ -282,8 +318,14 @@ class NMConfig:
     # Override / default management
     # ------------------------------------------------------------------
 
-    def set_override(self, symbol: str, max_proximity: float, base_bounce: float,
-                     nm_type: str = None, set_by: str = "system") -> bool:
+    def set_override(
+        self,
+        symbol: str,
+        max_proximity: float,
+        base_bounce: float,
+        nm_type: str = None,
+        set_by: str = "system",
+    ) -> bool:
         symbol = symbol.upper()
         if nm_type is None:
             asset_class = self._get_asset_class(symbol)
@@ -296,11 +338,19 @@ class NMConfig:
             "set_at": datetime.now(timezone.utc).isoformat(),
         }
         self._save_config()
-        logger.info(f"NM override set for {symbol}: max_proximity={max_proximity}, base_bounce={base_bounce} ({nm_type})")
+        logger.info(
+            f"NM override set for {symbol}: max_proximity={max_proximity}, base_bounce={base_bounce} ({nm_type})"
+        )
         return True
 
-    def set_default(self, asset_class: str, max_proximity: float, base_bounce: float,
-                    nm_type: str = None, set_by: str = "system") -> bool:
+    def set_default(
+        self,
+        asset_class: str,
+        max_proximity: float,
+        base_bounce: float,
+        nm_type: str = None,
+        set_by: str = "system",
+    ) -> bool:
         if nm_type is None:
             nm_type = self.ASSET_CLASS_TYPES.get(asset_class, "pips")
         self.config.setdefault("defaults", {})[asset_class] = {
@@ -310,7 +360,9 @@ class NMConfig:
             "description": f"Set by {set_by}",
         }
         self._save_config()
-        logger.info(f"NM default updated for {asset_class}: max_proximity={max_proximity}, base_bounce={base_bounce}")
+        logger.info(
+            f"NM default updated for {asset_class}: max_proximity={max_proximity}, base_bounce={base_bounce}"
+        )
         return True
 
     def remove_override(self, symbol: str) -> bool:

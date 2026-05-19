@@ -1,11 +1,14 @@
 """
 CRUD operations for signals
 """
-from typing import Optional, List, Dict, Any, Tuple
+
 from datetime import datetime
+from typing import Any, Dict, List, Optional, Tuple
+
 import pytz
-from database.models import SignalStatus
+
 from core.parser import ParsedSignal
+from database.models import SignalStatus
 from utils.logger import get_logger
 
 
@@ -13,7 +16,7 @@ def _to_dt(value) -> datetime:
     """Return a timezone-aware datetime from either a datetime object or an ISO string."""
     if isinstance(value, datetime):
         return value if value.tzinfo else pytz.UTC.localize(value)
-    s = str(value).replace('Z', '+00:00')
+    s = str(value).replace("Z", "+00:00")
     dt = datetime.fromisoformat(s)
     if dt.tzinfo is None:
         return pytz.UTC.localize(dt)
@@ -35,8 +38,9 @@ class CrudOperations:
         """
         self.db = db_manager
 
-    async def save_signal(self, parsed_signal: ParsedSignal, message_id: str,
-                          channel_id: str) -> Tuple[bool, Optional[int]]:
+    async def save_signal(
+        self, parsed_signal: ParsedSignal, message_id: str, channel_id: str
+    ) -> Tuple[bool, Optional[int]]:
         """
         Save a parsed signal to the database
 
@@ -53,33 +57,38 @@ class CrudOperations:
             existing = await self.get_signal_by_message_id(message_id)
             if existing:
                 # Check if it was cancelled and can be reactivated
-                if existing['status'] == SignalStatus.CANCELLED:
+                if existing["status"] == SignalStatus.CANCELLED:
                     logger.info(f"Reactivating cancelled signal for message {message_id}")
                     # Import here to avoid circular dependency
                     from .lifecycle import LifecycleManager
+
                     lifecycle = LifecycleManager(self.db)
-                    await lifecycle.reactivate_cancelled_signal(existing['id'], parsed_signal, self.db)
-                    return True, existing['id']
-                else:
-                    logger.warning(f"Signal already exists for message {message_id}")
-                    return False, existing['id']
+                    await lifecycle.reactivate_cancelled_signal(
+                        existing["id"], parsed_signal, self.db
+                    )
+                    return True, existing["id"]
+                logger.warning(f"Signal already exists for message {message_id}")
+                return False, existing["id"]
 
             # Calculate expiry time
             from .utils import calculate_expiry
+
             expiry_time = calculate_expiry(parsed_signal.expiry_type)
 
             # Insert signal and its limits atomically in a single transaction
             # so we never end up with a signal row that has no limit rows.
-            from database.models import SignalStatus, LimitStatus
             from datetime import datetime
+
             import pytz
+
+            from database.models import LimitStatus, SignalStatus
 
             def _parse_dt_local(value):
                 if value is None:
                     return None
                 if isinstance(value, datetime):
                     return value if value.tzinfo else pytz.UTC.localize(value)
-                s = str(value).replace('Z', '+00:00')
+                s = str(value).replace("Z", "+00:00")
                 dt = datetime.fromisoformat(s)
                 return dt if dt.tzinfo else pytz.UTC.localize(dt)
 
@@ -93,13 +102,16 @@ class CrudOperations:
                     VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10)
                     RETURNING id
                     """,
-                    message_id, channel_id,
-                    parsed_signal.instrument, parsed_signal.direction,
-                    parsed_signal.stop_loss, parsed_signal.expiry_type,
+                    message_id,
+                    channel_id,
+                    parsed_signal.instrument,
+                    parsed_signal.direction,
+                    parsed_signal.stop_loss,
+                    parsed_signal.expiry_type,
                     _parse_dt_local(expiry_time),
                     len(parsed_signal.limits) if parsed_signal.limits else 0,
                     SignalStatus.ACTIVE,
-                    getattr(parsed_signal, 'scalp', False),
+                    getattr(parsed_signal, "scalp", False),
                 )
 
                 if signal_id and parsed_signal.limits:
@@ -114,8 +126,10 @@ class CrudOperations:
                         ],
                     )
 
-            logger.info(f"Saved signal {signal_id}: {parsed_signal.instrument} "
-                        f"{parsed_signal.direction} with {len(parsed_signal.limits)} limits")
+            logger.info(
+                f"Saved signal {signal_id}: {parsed_signal.instrument} "
+                f"{parsed_signal.direction} with {len(parsed_signal.limits)} limits"
+            )
             return True, signal_id
 
         except Exception as e:
@@ -160,9 +174,9 @@ class CrudOperations:
         """
         limits = await self.db.fetch_all(limits_query, (signal_id,))
 
-        signal['limits'] = limits
-        signal['pending_limits'] = [l for l in limits if l['status'] == 'pending']
-        signal['hit_limits'] = [l for l in limits if l['status'] == 'hit']
+        signal["limits"] = limits
+        signal["pending_limits"] = [l for l in limits if l["status"] == "pending"]
+        signal["hit_limits"] = [l for l in limits if l["status"] == "hit"]
 
         return signal
 
@@ -184,14 +198,16 @@ class CrudOperations:
                 logger.warning(f"No signal found for message {message_id}")
                 return False
 
-            signal_id = existing['id']
+            signal_id = existing["id"]
 
             # Only block truly terminal statuses. 'cancelled' is allowed through here
             # because handle_message_edit reactivates first, then calls this to sync
             # the newly-parsed content into the DB.
             truly_final = [s for s in SignalStatus.FINAL_STATUSES if s != SignalStatus.CANCELLED]
-            if existing['status'] in truly_final:
-                logger.warning(f"Cannot update signal {signal_id} in final status {existing['status']}")
+            if existing["status"] in truly_final:
+                logger.warning(
+                    f"Cannot update signal {signal_id} in final status {existing['status']}"
+                )
                 return False
 
             async with self.db.get_connection() as conn:
@@ -204,9 +220,12 @@ class CrudOperations:
                         updated_at = CURRENT_TIMESTAMP
                     WHERE id = $7
                     """,
-                    parsed_signal.instrument, parsed_signal.direction,
-                    parsed_signal.stop_loss, parsed_signal.expiry_type,
-                    len(parsed_signal.limits), getattr(parsed_signal, 'scalp', False),
+                    parsed_signal.instrument,
+                    parsed_signal.direction,
+                    parsed_signal.stop_loss,
+                    parsed_signal.expiry_type,
+                    len(parsed_signal.limits),
+                    getattr(parsed_signal, "scalp", False),
                     signal_id,
                 )
 
@@ -215,7 +234,7 @@ class CrudOperations:
                     "SELECT price_level FROM limits WHERE signal_id = $1 AND status = 'hit' ORDER BY sequence_number",
                     signal_id,
                 )
-                hit_prices = [r['price_level'] for r in hit_rows]
+                hit_prices = [r["price_level"] for r in hit_rows]
 
                 # Delete all old limits
                 await conn.execute("DELETE FROM limits WHERE signal_id = $1", signal_id)
@@ -228,7 +247,9 @@ class CrudOperations:
                             INSERT INTO limits (signal_id, price_level, sequence_number, status, hit_time)
                             VALUES ($1, $2, $3, 'hit', CURRENT_TIMESTAMP)
                             """,
-                            signal_id, level, idx + 1,
+                            signal_id,
+                            level,
+                            idx + 1,
                         )
                     else:
                         await conn.execute(
@@ -236,7 +257,9 @@ class CrudOperations:
                             INSERT INTO limits (signal_id, price_level, sequence_number, status)
                             VALUES ($1, $2, $3, 'pending')
                             """,
-                            signal_id, level, idx + 1,
+                            signal_id,
+                            level,
+                            idx + 1,
                         )
 
             logger.info(f"Updated signal {signal_id} from edited message")
@@ -284,22 +307,24 @@ class CrudOperations:
         # Enhance with additional data
         for signal in signals:
             # Parse limit strings into lists
-            signal['pending_limits'] = []
-            signal['hit_limits'] = []
+            signal["pending_limits"] = []
+            signal["hit_limits"] = []
 
-            if signal.get('pending_limits_str'):
-                signal['pending_limits'] = [float(p) for p in signal['pending_limits_str'].split(',')]
+            if signal.get("pending_limits_str"):
+                signal["pending_limits"] = [
+                    float(p) for p in signal["pending_limits_str"].split(",")
+                ]
 
-            if signal.get('hit_limits_str'):
-                signal['hit_limits'] = [float(p) for p in signal['hit_limits_str'].split(',')]
+            if signal.get("hit_limits_str"):
+                signal["hit_limits"] = [float(p) for p in signal["hit_limits_str"].split(",")]
 
             # Remove temporary string fields
-            signal.pop('pending_limits_str', None)
-            signal.pop('hit_limits_str', None)
+            signal.pop("pending_limits_str", None)
+            signal.pop("hit_limits_str", None)
 
             # Add time remaining for expiry
-            if signal.get('expiry_time'):
-                expiry = _to_dt(signal['expiry_time'])
+            if signal.get("expiry_time"):
+                expiry = _to_dt(signal["expiry_time"])
                 now = datetime.now(pytz.UTC)
                 if expiry.tzinfo is None:
                     expiry = pytz.UTC.localize(expiry)
@@ -308,22 +333,25 @@ class CrudOperations:
                 if remaining.total_seconds() > 0:
                     hours = int(remaining.total_seconds() // 3600)
                     minutes = int((remaining.total_seconds() % 3600) // 60)
-                    signal['time_remaining'] = f"{hours}h {minutes}m"
+                    signal["time_remaining"] = f"{hours}h {minutes}m"
                 else:
-                    signal['time_remaining'] = "Expired"
+                    signal["time_remaining"] = "Expired"
             else:
-                signal['time_remaining'] = "No expiry"
+                signal["time_remaining"] = "No expiry"
 
             # Add status display info
             from .utils import get_status_emoji
-            signal['status_emoji'] = get_status_emoji(signal['status'])
-            signal['progress'] = f"{signal['hit_limit_count']}/{signal['total_limit_count']} limits hit"
+
+            signal["status_emoji"] = get_status_emoji(signal["status"])
+            signal["progress"] = (
+                f"{signal['hit_limit_count']}/{signal['total_limit_count']} limits hit"
+            )
 
         return signals
 
-    async def get_active_signals_detailed_sorted(self, instrument: str = None,
-                                                 sort_by: str = 'recent',
-                                                 limit: int = None) -> List[Dict[str, Any]]:
+    async def get_active_signals_detailed_sorted(
+        self, instrument: str = None, sort_by: str = "recent", limit: int = None
+    ) -> List[Dict[str, Any]]:
         """
         Get detailed active signals with sorting options
 
@@ -360,11 +388,11 @@ class CrudOperations:
         base_query += " GROUP BY s.id"
 
         # Add sorting
-        if sort_by == 'recent':
+        if sort_by == "recent":
             base_query += " ORDER BY s.created_at DESC"
-        elif sort_by == 'oldest':
+        elif sort_by == "oldest":
             base_query += " ORDER BY s.created_at ASC"
-        elif sort_by == 'progress':
+        elif sort_by == "progress":
             base_query += " ORDER BY hit_limit_count DESC, s.created_at DESC"
         else:
             base_query += " ORDER BY s.created_at DESC"
@@ -377,21 +405,23 @@ class CrudOperations:
 
         # Enhance with additional data
         for signal in signals:
-            signal['pending_limits'] = []
-            signal['hit_limits'] = []
+            signal["pending_limits"] = []
+            signal["hit_limits"] = []
 
-            if signal.get('pending_limits_str'):
-                signal['pending_limits'] = [float(p) for p in signal['pending_limits_str'].split(',')]
+            if signal.get("pending_limits_str"):
+                signal["pending_limits"] = [
+                    float(p) for p in signal["pending_limits_str"].split(",")
+                ]
 
-            if signal.get('hit_limits_str'):
-                signal['hit_limits'] = [float(p) for p in signal['hit_limits_str'].split(',')]
+            if signal.get("hit_limits_str"):
+                signal["hit_limits"] = [float(p) for p in signal["hit_limits_str"].split(",")]
 
-            signal.pop('pending_limits_str', None)
-            signal.pop('hit_limits_str', None)
-            signal.pop('first_pending_limit', None)
+            signal.pop("pending_limits_str", None)
+            signal.pop("hit_limits_str", None)
+            signal.pop("first_pending_limit", None)
 
-            if signal.get('expiry_time'):
-                expiry = _to_dt(signal['expiry_time'])
+            if signal.get("expiry_time"):
+                expiry = _to_dt(signal["expiry_time"])
                 now = datetime.now(pytz.UTC)
                 if expiry.tzinfo is None:
                     expiry = pytz.UTC.localize(expiry)
@@ -400,14 +430,17 @@ class CrudOperations:
                 if remaining.total_seconds() > 0:
                     hours = int(remaining.total_seconds() // 3600)
                     minutes = int((remaining.total_seconds() % 3600) // 60)
-                    signal['time_remaining'] = f"{hours}h {minutes}m"
+                    signal["time_remaining"] = f"{hours}h {minutes}m"
                 else:
-                    signal['time_remaining'] = "Expired"
+                    signal["time_remaining"] = "Expired"
             else:
-                signal['time_remaining'] = "No expiry"
+                signal["time_remaining"] = "No expiry"
 
             from .utils import get_status_emoji
-            signal['status_emoji'] = get_status_emoji(signal['status'])
-            signal['progress'] = f"{signal['hit_limit_count']}/{signal['total_limit_count']} limits hit"
+
+            signal["status_emoji"] = get_status_emoji(signal["status"])
+            signal["progress"] = (
+                f"{signal['hit_limit_count']}/{signal['total_limit_count']} limits hit"
+            )
 
         return signals

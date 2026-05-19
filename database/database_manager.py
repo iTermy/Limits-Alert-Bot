@@ -1,26 +1,31 @@
 """
 Enhanced DatabaseManager that integrates all modules and maintains backward compatibility
 """
-from typing import Optional, List, Dict, Any
-from .connection import DatabaseManager as BaseConnectionManager
-from .base_operations import BaseOperations
-from .schema import initialize_database
-from .models import SignalStatus, LimitStatus, StatusTransitions
+
+from typing import Any, Dict, List
+
 from utils.logger import get_logger
+
+from .base_operations import BaseOperations
+from .connection import DatabaseManager as BaseConnectionManager
+from .models import LimitStatus, SignalStatus, StatusTransitions
+from .schema import initialize_database
 
 
 def _parse_dt(value):
     """Convert ISO string or datetime to timezone-aware datetime, or None."""
     if value is None:
         return None
-    if hasattr(value, 'tzinfo'):
-        return value if value.tzinfo else __import__('pytz').UTC.localize(value)
+    if hasattr(value, "tzinfo"):
+        return value if value.tzinfo else __import__("pytz").UTC.localize(value)
     from datetime import datetime
-    s = str(value).replace('Z', '+00:00')
+
+    s = str(value).replace("Z", "+00:00")
     dt = datetime.fromisoformat(s)
     if dt.tzinfo is None:
-        return __import__('pytz').UTC.localize(dt)
+        return __import__("pytz").UTC.localize(dt)
     return dt
+
 
 logger = get_logger("database")
 
@@ -63,10 +68,18 @@ class DatabaseManager(BaseConnectionManager):
         logger.info("Database manager initialized successfully")
 
     # Delegate all operations to the operations handler
-    async def insert_signal(self, message_id: str, channel_id: str, instrument: str,
-                           direction: str, stop_loss: float, expiry_type: str = None,
-                           expiry_time: str = None, total_limits: int = 0,
-                           scalp: bool = False) -> int:
+    async def insert_signal(
+        self,
+        message_id: str,
+        channel_id: str,
+        instrument: str,
+        direction: str,
+        stop_loss: float,
+        expiry_type: str = None,
+        expiry_time: str = None,
+        total_limits: int = 0,
+        scalp: bool = False,
+    ) -> int:
         """
         Insert a new signal with enhanced tracking
 
@@ -85,8 +98,15 @@ class DatabaseManager(BaseConnectionManager):
             Signal ID
         """
         return await self._ops.insert_signal(
-            message_id, channel_id, instrument, direction,
-            stop_loss, expiry_type, expiry_time, total_limits, scalp
+            message_id,
+            channel_id,
+            instrument,
+            direction,
+            stop_loss,
+            expiry_type,
+            expiry_time,
+            total_limits,
+            scalp,
         )
 
     async def insert_limits(self, signal_id: int, price_levels: List[float]):
@@ -99,8 +119,9 @@ class DatabaseManager(BaseConnectionManager):
         """
         return await self._ops.insert_limits(signal_id, price_levels)
 
-    async def update_signal_status(self, signal_id: int, new_status: str,
-                                  change_type: str = 'automatic', reason: str = None) -> bool:
+    async def update_signal_status(
+        self, signal_id: int, new_status: str, change_type: str = "automatic", reason: str = None
+    ) -> bool:
         """
         Update signal status with proper lifecycle management
 
@@ -113,9 +134,7 @@ class DatabaseManager(BaseConnectionManager):
         Returns:
             Success status
         """
-        return await self._ops.update_signal_status(
-            signal_id, new_status, change_type, reason
-        )
+        return await self._ops.update_signal_status(signal_id, new_status, change_type, reason)
 
     async def mark_limit_hit(self, limit_id: int, hit_price: float = None) -> Dict[str, Any]:
         """
@@ -180,8 +199,9 @@ class DatabaseManager(BaseConnectionManager):
         """Return all hit limits for a signal with hit_price for P&L calculations."""
         return await self._ops.get_hit_limits_for_signal(signal_id)
 
-    async def get_performance_stats(self, start_date: str = None, end_date: str = None,
-                                   instrument: str = None) -> Dict[str, Any]:
+    async def get_performance_stats(
+        self, start_date: str = None, end_date: str = None, instrument: str = None
+    ) -> Dict[str, Any]:
         """
         Get performance statistics for closed signals
 
@@ -207,33 +227,34 @@ class DatabaseManager(BaseConnectionManager):
             Success status
         """
         # Validate expiry type
-        valid_types = ['day_end', 'week_end', 'month_end', 'no_expiry']
+        valid_types = ["day_end", "week_end", "month_end", "no_expiry"]
         if expiry_type not in valid_types:
             logger.error(f"Invalid expiry type: {expiry_type}")
             return False
 
         # Get current signal
-        signal = await self.fetch_one(
-            "SELECT * FROM signals WHERE id = $1",
-            (signal_id,)
-        )
+        signal = await self.fetch_one("SELECT * FROM signals WHERE id = $1", (signal_id,))
 
         if not signal:
             logger.error(f"Signal {signal_id} not found")
             return False
 
         # Check if signal is in final status
-        if SignalStatus.is_final(signal['status']):
-            logger.warning(f"Cannot modify expiry for signal {signal_id} in final status {signal['status']}")
+        if SignalStatus.is_final(signal["status"]):
+            logger.warning(
+                f"Cannot modify expiry for signal {signal_id} in final status {signal['status']}"
+            )
             return False
 
         # Calculate new expiry time
         from database.signal_operations.utils import calculate_expiry
+
         new_expiry_time = calculate_expiry(expiry_type)
 
         # Update signal
         try:
             from datetime import datetime
+
             import pytz
 
             now = datetime.now(pytz.UTC)
@@ -244,7 +265,9 @@ class DatabaseManager(BaseConnectionManager):
                 WHERE id = $4
             """
 
-            rows = await self.execute(query, (expiry_type, _parse_dt(new_expiry_time), now, signal_id))
+            rows = await self.execute(
+                query, (expiry_type, _parse_dt(new_expiry_time), now, signal_id)
+            )
 
             if rows > 0:
                 logger.info(f"Updated expiry for signal {signal_id} to {expiry_type}")
@@ -267,6 +290,7 @@ class DatabaseManager(BaseConnectionManager):
             Whether transition is valid
         """
         return StatusTransitions.is_valid_transition(old_status, new_status)
+
     # ─────────────────────────────────────────────────────────────
     # Bot mode status helpers
     # ─────────────────────────────────────────────────────────────
@@ -285,7 +309,7 @@ class DatabaseManager(BaseConnectionManager):
                 SET news_mode = $1, updated_at = NOW()
                 WHERE id = 1
                 """,
-                (active,)
+                (active,),
             )
             logger.debug(f"bot_mode_status.news_mode → {active}")
         except Exception as e:
@@ -305,7 +329,7 @@ class DatabaseManager(BaseConnectionManager):
                 SET spread_hour = $1, updated_at = NOW()
                 WHERE id = 1
                 """,
-                (active,)
+                (active,),
             )
             logger.debug(f"bot_mode_status.spread_hour → {active}")
         except Exception as e:
@@ -320,8 +344,7 @@ class DatabaseManager(BaseConnectionManager):
         """
         try:
             row = await self.fetch_one(
-                "SELECT news_mode, spread_hour, updated_at FROM bot_mode_status WHERE id = 1",
-                ()
+                "SELECT news_mode, spread_hour, updated_at FROM bot_mode_status WHERE id = 1", ()
             )
             if row:
                 return dict(row)

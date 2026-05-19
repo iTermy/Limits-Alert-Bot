@@ -17,7 +17,7 @@ from typing import Dict, Optional
 logger = logging.getLogger(__name__)
 
 # Feeds whose prices we want to persist
-TRACKED_FEEDS = {'oanda', 'binance'}
+TRACKED_FEEDS = {"oanda", "binance"}
 
 # How often to flush the buffer to the DB (seconds)
 WRITE_INTERVAL = 5
@@ -61,8 +61,9 @@ class LivePriceWriter:
         # Register as a subscriber to receive every price tick
         self._stream.add_subscriber(self._on_price_update)
         self._task = asyncio.create_task(self._flush_loop(), name="live_price_writer")
-        logger.info("LivePriceWriter started (flush every %ds, feeds: %s)",
-                    WRITE_INTERVAL, TRACKED_FEEDS)
+        logger.info(
+            "LivePriceWriter started (flush every %ds, feeds: %s)", WRITE_INTERVAL, TRACKED_FEEDS
+        )
 
     async def stop(self):
         """Graceful shutdown: do a final flush then cancel the loop."""
@@ -88,21 +89,21 @@ class LivePriceWriter:
         Called on every tick for every subscribed symbol.
         We only buffer ticks coming from tracked feeds.
         """
-        feed = price_data.get('feed') or self._stream.symbol_to_feed.get(symbol)
+        feed = price_data.get("feed") or self._stream.symbol_to_feed.get(symbol)
         if feed not in TRACKED_FEEDS:
             return
 
-        bid = price_data.get('bid')
-        ask = price_data.get('ask')
+        bid = price_data.get("bid")
+        ask = price_data.get("ask")
         if bid is None or ask is None:
             return
 
         async with self._buffer_lock:
             self._buffer[symbol] = {
-                'bid': float(bid),
-                'ask': float(ask),
-                'feed': feed,
-                'updated_at': datetime.now(timezone.utc),
+                "bid": float(bid),
+                "ask": float(ask),
+                "feed": feed,
+                "updated_at": datetime.now(timezone.utc),
             }
 
     async def _flush_loop(self):
@@ -123,7 +124,7 @@ class LivePriceWriter:
             self._buffer.clear()
 
         rows = [
-            (symbol, data['bid'], data['ask'], data['feed'], data['updated_at'])
+            (symbol, data["bid"], data["ask"], data["feed"], data["updated_at"])
             for symbol, data in snapshot.items()
         ]
 

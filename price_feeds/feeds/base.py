@@ -3,10 +3,10 @@ Base class for all price feed implementations
 Defines the interface that all feeds must implement
 """
 
-from abc import ABC, abstractmethod
-from typing import Dict, Optional, List, Tuple
-from datetime import datetime
 import logging
+from abc import ABC, abstractmethod
+from datetime import datetime
+from typing import Dict, List, Optional, Tuple
 
 logger = logging.getLogger(__name__)
 
@@ -51,12 +51,10 @@ class BaseFeed(ABC):
         Returns:
             True if connection successful
         """
-        pass
 
     @abstractmethod
     async def disconnect(self):
         """Close connection to the price feed"""
-        pass
 
     @abstractmethod
     async def ensure_connected(self) -> bool:
@@ -66,7 +64,6 @@ class BaseFeed(ABC):
         Returns:
             True if connected or reconnected successfully
         """
-        pass
 
     @abstractmethod
     async def get_price(self, symbol: str) -> Optional[Dict]:
@@ -79,7 +76,6 @@ class BaseFeed(ABC):
         Returns:
             Dict with bid, ask, timestamp, or None if failed
         """
-        pass
 
     @abstractmethod
     async def get_batch_prices(self, symbols: List[str]) -> Dict[str, Dict]:
@@ -92,7 +88,6 @@ class BaseFeed(ABC):
         Returns:
             Dict mapping symbol to price data
         """
-        pass
 
     def get_health_status(self) -> Dict:
         """
@@ -103,34 +98,36 @@ class BaseFeed(ABC):
         """
         # Calculate success rates
         if self.successful_fetches + self.failed_fetches > 0:
-            fetch_success_rate = (self.successful_fetches /
-                                  (self.successful_fetches + self.failed_fetches)) * 100
+            fetch_success_rate = (
+                self.successful_fetches / (self.successful_fetches + self.failed_fetches)
+            ) * 100
         else:
             fetch_success_rate = 0
 
         if self.total_symbols_requested > 0:
-            batch_success_rate = (self.total_symbols_fetched /
-                                  self.total_symbols_requested) * 100
+            batch_success_rate = (self.total_symbols_fetched / self.total_symbols_requested) * 100
         else:
             batch_success_rate = 100
 
         # Calculate average symbols per batch
-        avg_symbols_per_batch = (self.total_symbols_requested /
-                                 self.total_batch_requests
-                                 if self.total_batch_requests > 0 else 0)
+        avg_symbols_per_batch = (
+            self.total_symbols_requested / self.total_batch_requests
+            if self.total_batch_requests > 0
+            else 0
+        )
 
         return {
-            'feed_name': self.feed_name,
-            'connected': self.connected,
-            'last_successful_fetch': self.last_successful_fetch,
-            'consecutive_failures': self.consecutive_failures,
-            'connection_attempts': self.connection_attempts,
-            'successful_fetches': self.successful_fetches,
-            'failed_fetches': self.failed_fetches,
-            'fetch_success_rate': f"{fetch_success_rate:.1f}%",
-            'total_batch_requests': self.total_batch_requests,
-            'batch_success_rate': f"{batch_success_rate:.1f}%",
-            'avg_symbols_per_batch': f"{avg_symbols_per_batch:.1f}"
+            "feed_name": self.feed_name,
+            "connected": self.connected,
+            "last_successful_fetch": self.last_successful_fetch,
+            "consecutive_failures": self.consecutive_failures,
+            "connection_attempts": self.connection_attempts,
+            "successful_fetches": self.successful_fetches,
+            "failed_fetches": self.failed_fetches,
+            "fetch_success_rate": f"{fetch_success_rate:.1f}%",
+            "total_batch_requests": self.total_batch_requests,
+            "batch_success_rate": f"{batch_success_rate:.1f}%",
+            "avg_symbols_per_batch": f"{avg_symbols_per_batch:.1f}",
         }
 
     async def test_connection(self) -> Tuple[bool, str]:
@@ -150,18 +147,19 @@ class BaseFeed(ABC):
             price = await self.get_price(test_symbol)
 
             if price:
-                return True, (f"{self.feed_name} connection successful! "
-                              f"{test_symbol}: Bid={price['bid']}, Ask={price['ask']}")
-            else:
-                return False, f"Connected but couldn't fetch {test_symbol} price"
+                return True, (
+                    f"{self.feed_name} connection successful! "
+                    f"{test_symbol}: Bid={price['bid']}, Ask={price['ask']}"
+                )
+            return False, f"Connected but couldn't fetch {test_symbol} price"
 
         except Exception as e:
-            return False, f"{self.feed_name} connection test failed: {str(e)}"
+            return False, f"{self.feed_name} connection test failed: {e!s}"
 
     def _get_test_symbol(self) -> str:
         """Get appropriate test symbol for this feed"""
         # Override in subclasses if needed
-        return 'EURUSD'
+        return "EURUSD"
 
     def _update_metrics(self, success: bool, batch_size: int = 1):
         """

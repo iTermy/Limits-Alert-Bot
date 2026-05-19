@@ -16,9 +16,9 @@ FEATURES:
 
 import json
 import logging
-from pathlib import Path
-from typing import Dict, Tuple, Optional, Literal
 from datetime import datetime, timezone
+from pathlib import Path
+from typing import Dict, Literal
 
 logger = logging.getLogger(__name__)
 
@@ -44,7 +44,9 @@ class AlertDistanceConfig:
     def __init__(self, config_path: str = None):
         """Initialize alert distance configuration"""
         if config_path is None:
-            self.config_path = Path(__file__).resolve().parent.parent / 'config' / 'alert_distances.json'
+            self.config_path = (
+                Path(__file__).resolve().parent.parent / "config" / "alert_distances.json"
+            )
         else:
             self.config_path = Path(config_path)
 
@@ -54,7 +56,8 @@ class AlertDistanceConfig:
         # Import SymbolMapper for asset class detection
         try:
             from price_feeds.symbol_mapper import SymbolMapper
-            mapper_config = self.config_path.parent / 'symbol_mappings.json'
+
+            mapper_config = self.config_path.parent / "symbol_mappings.json"
             self.mapper = SymbolMapper(str(mapper_config))
         except Exception as e:
             logger.warning(f"Could not initialize SymbolMapper: {e}, using fallback detection")
@@ -65,11 +68,11 @@ class AlertDistanceConfig:
     def _load_config(self) -> Dict:
         """Load configuration from JSON file"""
         try:
-            with open(self.config_path, 'r') as f:
+            with open(self.config_path) as f:
                 config = json.load(f)
 
             # Check if migration needed (old format)
-            if 'defaults' not in config or not self._is_new_format(config):
+            if "defaults" not in config or not self._is_new_format(config):
                 logger.warning("Old config format detected, migrating...")
                 config = self._migrate_old_config(config)
                 self._save_config(config)
@@ -87,10 +90,10 @@ class AlertDistanceConfig:
 
     def _is_new_format(self, config: Dict) -> bool:
         """Check if config is in new format with type/value/description"""
-        if 'defaults' not in config:
+        if "defaults" not in config:
             return False
 
-        defaults = config['defaults']
+        defaults = config["defaults"]
         if not isinstance(defaults, dict):
             return False
 
@@ -98,10 +101,10 @@ class AlertDistanceConfig:
         for asset_class, settings in defaults.items():
             if isinstance(settings, dict):
                 # New format has 'type' and 'value' keys
-                if 'type' in settings and 'value' in settings:
+                if "type" in settings and "value" in settings:
                     return True
                 # Old format has 'approaching_pips' or 'approaching_distance'
-                if 'approaching_pips' in settings or 'approaching_distance' in settings:
+                if "approaching_pips" in settings or "approaching_distance" in settings:
                     return False
 
         return False
@@ -110,43 +113,19 @@ class AlertDistanceConfig:
         """Create default configuration"""
         config = {
             "defaults": {
-                "forex": {
-                    "type": "pips",
-                    "value": 10.0,
-                    "description": "Standard forex pairs"
-                },
+                "forex": {"type": "pips", "value": 10.0, "description": "Standard forex pairs"},
                 "forex_jpy": {
                     "type": "pips",
                     "value": 20.0,
-                    "description": "JPY pairs (auto-detected)"
+                    "description": "JPY pairs (auto-detected)",
                 },
-                "metals": {
-                    "type": "dollars",
-                    "value": 10.0,
-                    "description": "Gold, Silver, etc."
-                },
-                "indices": {
-                    "type": "percentage",
-                    "value": 1.0,
-                    "description": "Stock indices"
-                },
-                "stocks": {
-                    "type": "percentage",
-                    "value": 1.0,
-                    "description": "Individual stocks"
-                },
-                "crypto": {
-                    "type": "percentage",
-                    "value": 0.5,
-                    "description": "Cryptocurrencies"
-                },
-                "oil": {
-                    "type": "dollars",
-                    "value": 0.5,
-                    "description": "Oil commodities"
-                }
+                "metals": {"type": "dollars", "value": 10.0, "description": "Gold, Silver, etc."},
+                "indices": {"type": "percentage", "value": 1.0, "description": "Stock indices"},
+                "stocks": {"type": "percentage", "value": 1.0, "description": "Individual stocks"},
+                "crypto": {"type": "percentage", "value": 0.5, "description": "Cryptocurrencies"},
+                "oil": {"type": "dollars", "value": 0.5, "description": "Oil commodities"},
             },
-            "overrides": {}
+            "overrides": {},
         }
 
         self._save_config(config)
@@ -167,40 +146,40 @@ class AlertDistanceConfig:
         new_config = self._create_default_config()
 
         # Determine old format type
-        if 'defaults' in old_config:
+        if "defaults" in old_config:
             # Format 2 or 3: Has 'defaults' key
-            old_defaults = old_config['defaults']
+            old_defaults = old_config["defaults"]
 
             for asset_class, settings in old_defaults.items():
                 if not isinstance(settings, dict):
                     continue
 
                 # Determine the distance type for this asset class
-                if asset_class in ['forex', 'forex_jpy']:
+                if asset_class in ["forex", "forex_jpy"]:
                     distance_type = "pips"
-                elif asset_class in ['metals', 'oil']:
+                elif asset_class in ["metals", "oil"]:
                     distance_type = "dollars"
-                elif asset_class in ['indices', 'stocks', 'crypto']:
+                elif asset_class in ["indices", "stocks", "crypto"]:
                     distance_type = "percentage"
                 else:
                     distance_type = "pips"  # Default
 
                 # Extract value from old format
                 value = None
-                if 'approaching_pips' in settings:
-                    value = settings['approaching_pips']
+                if "approaching_pips" in settings:
+                    value = settings["approaching_pips"]
                     distance_type = "pips"  # Override if explicitly using pips
-                elif 'approaching_distance' in settings:
-                    value = settings['approaching_distance']
+                elif "approaching_distance" in settings:
+                    value = settings["approaching_distance"]
 
                 if value is not None:
                     # For percentage type, convert large values to reasonable percentages
                     if distance_type == "percentage" and value > 10:
                         # Old config had pip-based values for indices/stocks
                         # Convert to reasonable percentage
-                        if asset_class == 'indices':
+                        if asset_class == "indices":
                             value = 1.0  # 1%
-                        elif asset_class == 'crypto':
+                        elif asset_class == "crypto":
                             value = 0.5  # 0.5%
                         else:
                             value = 1.0  # 1%
@@ -212,20 +191,20 @@ class AlertDistanceConfig:
         else:
             # Format 1: Flat format
             for asset_class, value in old_config.items():
-                if asset_class in ['overrides', 'dynamic_overrides']:
+                if asset_class in ["overrides", "dynamic_overrides"]:
                     continue
 
                 if isinstance(value, (int, float)):
                     # Determine type based on asset class
-                    if asset_class in ['forex', 'forex_jpy']:
+                    if asset_class in ["forex", "forex_jpy"]:
                         distance_type = "pips"
-                    elif asset_class in ['metals', 'oil']:
+                    elif asset_class in ["metals", "oil"]:
                         distance_type = "dollars"
-                    elif asset_class in ['indices', 'stocks', 'crypto']:
+                    elif asset_class in ["indices", "stocks", "crypto"]:
                         distance_type = "percentage"
                         # Convert large values to reasonable percentages
                         if value > 10:
-                            value = 1.0 if asset_class != 'crypto' else 0.5
+                            value = 1.0 if asset_class != "crypto" else 0.5
                     else:
                         distance_type = "pips"
 
@@ -235,43 +214,43 @@ class AlertDistanceConfig:
                         new_config["defaults"][asset_class]["type"] = distance_type
 
         # Migrate any existing overrides
-        if 'overrides' in old_config and isinstance(old_config['overrides'], dict):
-            for symbol, settings in old_config['overrides'].items():
+        if "overrides" in old_config and isinstance(old_config["overrides"], dict):
+            for symbol, settings in old_config["overrides"].items():
                 if isinstance(settings, dict):
                     # Extract override value and type
-                    if 'approaching_pips' in settings:
-                        new_config['overrides'][symbol] = {
+                    if "approaching_pips" in settings:
+                        new_config["overrides"][symbol] = {
                             "type": "pips",
-                            "value": settings['approaching_pips'],
+                            "value": settings["approaching_pips"],
                             "set_by": "Migration",
-                            "set_at": datetime.now(timezone.utc).isoformat()
+                            "set_at": datetime.now(timezone.utc).isoformat(),
                         }
-                    elif 'approaching_distance' in settings:
-                        new_config['overrides'][symbol] = {
+                    elif "approaching_distance" in settings:
+                        new_config["overrides"][symbol] = {
                             "type": "dollars",
-                            "value": settings['approaching_distance'],
+                            "value": settings["approaching_distance"],
                             "set_by": "Migration",
-                            "set_at": datetime.now(timezone.utc).isoformat()
+                            "set_at": datetime.now(timezone.utc).isoformat(),
                         }
 
         # Migrate dynamic_overrides if present
-        if 'dynamic_overrides' in old_config and isinstance(old_config['dynamic_overrides'], dict):
-            for symbol, settings in old_config['dynamic_overrides'].items():
-                if isinstance(settings, dict) and symbol not in new_config['overrides']:
+        if "dynamic_overrides" in old_config and isinstance(old_config["dynamic_overrides"], dict):
+            for symbol, settings in old_config["dynamic_overrides"].items():
+                if isinstance(settings, dict) and symbol not in new_config["overrides"]:
                     # Extract override value and type
-                    if 'approaching_pips' in settings:
-                        new_config['overrides'][symbol] = {
+                    if "approaching_pips" in settings:
+                        new_config["overrides"][symbol] = {
                             "type": "pips",
-                            "value": settings['approaching_pips'],
+                            "value": settings["approaching_pips"],
                             "set_by": "Migration",
-                            "set_at": datetime.now(timezone.utc).isoformat()
+                            "set_at": datetime.now(timezone.utc).isoformat(),
                         }
-                    elif 'approaching_distance' in settings:
-                        new_config['overrides'][symbol] = {
+                    elif "approaching_distance" in settings:
+                        new_config["overrides"][symbol] = {
                             "type": "dollars",
-                            "value": settings['approaching_distance'],
+                            "value": settings["approaching_distance"],
                             "set_by": "Migration",
-                            "set_at": datetime.now(timezone.utc).isoformat()
+                            "set_at": datetime.now(timezone.utc).isoformat(),
                         }
 
         logger.info("Configuration migrated successfully")
@@ -294,7 +273,7 @@ class AlertDistanceConfig:
                 self.config["defaults"][asset_class] = {
                     "type": "pips",
                     "value": 10.0,
-                    "description": "Default"
+                    "description": "Default",
                 }
                 continue
 
@@ -320,7 +299,7 @@ class AlertDistanceConfig:
             # Ensure directory exists
             self.config_path.parent.mkdir(parents=True, exist_ok=True)
 
-            with open(self.config_path, 'w') as f:
+            with open(self.config_path, "w") as f:
                 json.dump(config, f, indent=2)
             logger.info("Configuration saved successfully")
         except Exception as e:
@@ -347,11 +326,11 @@ class AlertDistanceConfig:
             pip_size = self.get_pip_size(symbol)
             return value * pip_size
 
-        elif distance_type == "dollars":
+        if distance_type == "dollars":
             # Dollars are already in price units
             return value
 
-        elif distance_type == "percentage":
+        if distance_type == "percentage":
             # Convert percentage to price units
             if current_price is None:
                 logger.error(f"Current price required for percentage calculation: {symbol}")
@@ -360,9 +339,8 @@ class AlertDistanceConfig:
 
             return (value / 100.0) * current_price
 
-        else:
-            logger.error(f"Unknown distance type: {distance_type}")
-            return self._get_fallback_distance(symbol)
+        logger.error(f"Unknown distance type: {distance_type}")
+        return self._get_fallback_distance(symbol)
 
     def _get_config_for_symbol(self, symbol: str) -> Dict:
         """
@@ -379,27 +357,18 @@ class AlertDistanceConfig:
         # Check for override first
         if symbol_upper in self.config["overrides"]:
             override = self.config["overrides"][symbol_upper]
-            return {
-                "type": override["type"],
-                "value": override["value"]
-            }
+            return {"type": override["type"], "value": override["value"]}
 
         # Use default based on asset class
         asset_class = self._determine_asset_class(symbol)
 
         if asset_class in self.config["defaults"]:
             default = self.config["defaults"][asset_class]
-            return {
-                "type": default["type"],
-                "value": default["value"]
-            }
+            return {"type": default["type"], "value": default["value"]}
 
         # Ultimate fallback
         logger.warning(f"No config found for {symbol}, using forex default")
-        return {
-            "type": "pips",
-            "value": 10.0
-        }
+        return {"type": "pips", "value": 10.0}
 
     def _determine_asset_class(self, symbol: str) -> str:
         """
@@ -419,42 +388,63 @@ class AlertDistanceConfig:
         symbol_upper = symbol.upper()
 
         # Check crypto
-        if any(crypto in symbol_upper for crypto in ['BTC', 'ETH', 'BNB', 'XRP', 'ADA', 'DOGE', 'SOL', 'DOT']):
-            return 'crypto'
-        if 'USDT' in symbol_upper:
-            return 'crypto'
+        if any(
+            crypto in symbol_upper
+            for crypto in ["BTC", "ETH", "BNB", "XRP", "ADA", "DOGE", "SOL", "DOT"]
+        ):
+            return "crypto"
+        if "USDT" in symbol_upper:
+            return "crypto"
 
         # Check metals
-        if any(metal in symbol_upper for metal in ['XAU', 'XAG', 'GOLD', 'SILVER']):
-            return 'metals'
+        if any(metal in symbol_upper for metal in ["XAU", "XAG", "GOLD", "SILVER"]):
+            return "metals"
 
         # Check oil
-        if any(oil in symbol_upper for oil in ['WTI', 'BRENT', 'OIL', 'USOIL', 'USOILSPOT']):
-            return 'oil'
+        if any(oil in symbol_upper for oil in ["WTI", "BRENT", "OIL", "USOIL", "USOILSPOT"]):
+            return "oil"
 
         # Check indices
-        if any(idx in symbol_upper for idx in ['SPX', 'NAS', 'DOW', 'DAX', 'CHINA50', 'US500', 'USTEC', 'US30',
-                                               'US2000', 'RUSSELL', 'GER', 'DE30', 'DE40', 'JP225', 'NIKKEI']):
-            return 'indices'
+        if any(
+            idx in symbol_upper
+            for idx in [
+                "SPX",
+                "NAS",
+                "DOW",
+                "DAX",
+                "CHINA50",
+                "US500",
+                "USTEC",
+                "US30",
+                "US2000",
+                "RUSSELL",
+                "GER",
+                "DE30",
+                "DE40",
+                "JP225",
+                "NIKKEI",
+            ]
+        ):
+            return "indices"
 
         # Check stocks
-        if '.' in symbol or any(exchange in symbol_upper for exchange in ['.NAS', '.NYSE', '.LON']):
-            return 'stocks'
+        if "." in symbol or any(exchange in symbol_upper for exchange in [".NAS", ".NYSE", ".LON"]):
+            return "stocks"
 
         # Check forex - JPY pairs get special handling
-        forex_currencies = ['EUR', 'USD', 'GBP', 'JPY', 'AUD', 'NZD', 'CAD', 'CHF']
+        forex_currencies = ["EUR", "USD", "GBP", "JPY", "AUD", "NZD", "CAD", "CHF"]
 
         if len(symbol_upper) == 6:
             currency1 = symbol_upper[:3]
             currency2 = symbol_upper[3:]
 
             if currency1 in forex_currencies and currency2 in forex_currencies:
-                if 'JPY' in symbol_upper:
-                    return 'forex_jpy'
-                return 'forex'
+                if "JPY" in symbol_upper:
+                    return "forex_jpy"
+                return "forex"
 
         # Default
-        return 'forex'
+        return "forex"
 
     def get_pip_size(self, symbol: str) -> float:
         """
@@ -469,21 +459,23 @@ class AlertDistanceConfig:
         symbol_upper = symbol.upper()
 
         # JPY pairs use 0.01
-        if 'JPY' in symbol_upper:
+        if "JPY" in symbol_upper:
             return 0.01
 
         # Indices use 1.0 (points)
-        if any(idx in symbol_upper for idx in ['SPX', 'NAS', 'DOW', 'DAX', 'US500', 'USTEC', 'US30']):
+        if any(
+            idx in symbol_upper for idx in ["SPX", "NAS", "DOW", "DAX", "US500", "USTEC", "US30"]
+        ):
             return 1.0
 
         # Metals
-        if 'XAU' in symbol_upper or 'GOLD' in symbol_upper:
+        if "XAU" in symbol_upper or "GOLD" in symbol_upper:
             return 0.01
-        if 'XAG' in symbol_upper or 'SILVER' in symbol_upper:
+        if "XAG" in symbol_upper or "SILVER" in symbol_upper:
             return 0.001
 
         # Crypto - varies widely
-        if 'BTC' in symbol_upper:
+        if "BTC" in symbol_upper:
             return 1.0  # $1 per pip for BTC
 
         # Default forex
@@ -494,19 +486,20 @@ class AlertDistanceConfig:
         asset_class = self._determine_asset_class(symbol)
 
         fallbacks = {
-            'forex': 0.0010,  # 10 pips
-            'forex_jpy': 0.20,  # 20 pips
-            'metals': 10.0,  # $10
-            'indices': 50.0,  # 50 points
-            'stocks': 1.0,  # $1
-            'crypto': 100.0,  # $100
-            'oil': 0.5  # $0.50
+            "forex": 0.0010,  # 10 pips
+            "forex_jpy": 0.20,  # 20 pips
+            "metals": 10.0,  # $10
+            "indices": 50.0,  # 50 points
+            "stocks": 1.0,  # $1
+            "crypto": 100.0,  # $100
+            "oil": 0.5,  # $0.50
         }
 
         return fallbacks.get(asset_class, 0.0010)
 
-    def set_override(self, symbol: str, value: float, distance_type: DistanceType,
-                    set_by: str = "User") -> bool:
+    def set_override(
+        self, symbol: str, value: float, distance_type: DistanceType, set_by: str = "User"
+    ) -> bool:
         """
         Set a manual override for a symbol
 
@@ -535,7 +528,7 @@ class AlertDistanceConfig:
             "type": distance_type,
             "value": value,
             "set_by": set_by,
-            "set_at": datetime.now(timezone.utc).isoformat()
+            "set_at": datetime.now(timezone.utc).isoformat(),
         }
 
         # Save to file
@@ -561,9 +554,8 @@ class AlertDistanceConfig:
             self._save_config()
             logger.info(f"Removed alert distance override: {symbol_upper}")
             return True
-        else:
-            logger.warning(f"No override found for: {symbol_upper}")
-            return False
+        logger.warning(f"No override found for: {symbol_upper}")
+        return False
 
     def get_config_display(self, symbol: str = None) -> Dict:
         """
@@ -588,7 +580,7 @@ class AlertDistanceConfig:
                 "type": config["type"],
                 "value": config["value"],
                 "asset_class": asset_class,
-                "is_override": is_override
+                "is_override": is_override,
             }
 
             if is_override:
@@ -598,15 +590,16 @@ class AlertDistanceConfig:
 
             return result
 
-        else:
-            # Show all configuration
-            return {
-                "defaults": self.config["defaults"],
-                "overrides": self.config["overrides"],
-                "total_overrides": len(self.config["overrides"])
-            }
+        # Show all configuration
+        return {
+            "defaults": self.config["defaults"],
+            "overrides": self.config["overrides"],
+            "total_overrides": len(self.config["overrides"]),
+        }
 
-    def format_distance_for_display(self, symbol: str, distance: float, current_price: float = None) -> str:
+    def format_distance_for_display(
+        self, symbol: str, distance: float, current_price: float = None
+    ) -> str:
         """
         Format distance for user-friendly display
 
@@ -626,20 +619,18 @@ class AlertDistanceConfig:
             pips = distance / pip_size
             return f"{pips:.1f} pips"
 
-        elif distance_type == "dollars":
+        if distance_type == "dollars":
             return f"${distance:.2f}"
 
-        elif distance_type == "percentage":
+        if distance_type == "percentage":
             # Calculate percentage if we have current price
             if current_price and current_price > 0:
                 percentage = (distance / current_price) * 100
                 return f"{percentage:.2f}%"
-            else:
-                # Fallback to showing as dollars
-                return f"${distance:.2f}"
+            # Fallback to showing as dollars
+            return f"${distance:.2f}"
 
-        else:
-            return f"{distance:.5f}"
+        return f"{distance:.5f}"
 
     # BACKWARD COMPATIBILITY METHODS
     def get_alert_config(self, symbol: str) -> Dict:
@@ -655,15 +646,8 @@ class AlertDistanceConfig:
         pip_size = self.get_pip_size(symbol)
 
         if distance_type == "pips":
-            return {
-                "approaching_pips": value,
-                "pip_size": pip_size
-            }
-        else:
-            return {
-                "approaching_distance": value,
-                "pip_size": pip_size
-            }
+            return {"approaching_pips": value, "pip_size": pip_size}
+        return {"approaching_distance": value, "pip_size": pip_size}
 
     def reload_config(self):
         """Reload configuration from file"""

@@ -2,20 +2,22 @@
 Discord Trading Alert Bot - Main Entry Point
 Stage 2 Enhanced: Modular Architecture
 """
+
 import asyncio
 import os
 import sys
+
 from dotenv import load_dotenv
 
 # Load .env from the project root before any other imports that may read env vars.
 _here = os.path.dirname(os.path.abspath(__file__))
 load_dotenv(dotenv_path=os.path.join(_here, ".env"))
 
-from utils.logger import logger
 from core.bot import TradingBot
+from utils.logger import logger
 
 # Get bot token
-DISCORD_TOKEN = os.getenv('DISCORD_BOT_TOKEN')
+DISCORD_TOKEN = os.getenv("DISCORD_BOT_TOKEN")
 if not DISCORD_TOKEN:
     logger.error("DISCORD_BOT_TOKEN not found in environment variables!")
     sys.exit(1)

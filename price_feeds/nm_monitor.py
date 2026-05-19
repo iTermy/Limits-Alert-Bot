@@ -21,7 +21,7 @@ since those are the only ones the bot has an embed for.
 """
 
 import asyncio
-from dataclasses import dataclass, field
+from dataclasses import dataclass
 from typing import Dict, Optional
 
 from utils.logger import get_logger
@@ -32,16 +32,17 @@ logger = get_logger("nm_monitor")
 @dataclass
 class NMTrackingState:
     """Per-signal near-miss tracking state."""
+
     signal_id: int
     instrument: str
-    direction: str            # 'long' or 'short'
+    direction: str  # 'long' or 'short'
     first_limit_price: float
 
     # True once price has entered the proximity zone (< max_proximity from limit)
     in_proximity: bool = False
 
     # Closest distance achieved to the first limit, in absolute price units
-    closest_distance: float = float('inf')
+    closest_distance: float = float("inf")
 
     # The price at which the closest approach was reached (for logging)
     closest_price: float = 0.0
@@ -89,7 +90,7 @@ class NearMissMonitor:
         Call this when a signal is manually reactivated after an NM cancel.
         The signal will remain immune until it closes (evict_signal clears it).
         """
-        self._tracking.pop(signal_id, None)   # clear any stale tracking state
+        self._tracking.pop(signal_id, None)  # clear any stale tracking state
         self._processing.discard(signal_id)
         self._nm_immune.add(signal_id)
         logger.info(f"Signal {signal_id} marked NM-immune (manually reactivated)")
@@ -132,9 +133,12 @@ class NearMissMonitor:
         # Find the first pending limit
         pending_limits = signal.get("pending_limits", [])
         first_limit = next(
-            (l for l in sorted(pending_limits, key=lambda x: x.get("sequence_number", 99))
-             if l.get("sequence_number") == 1),
-            None
+            (
+                l
+                for l in sorted(pending_limits, key=lambda x: x.get("sequence_number", 99))
+                if l.get("sequence_number") == 1
+            ),
+            None,
         )
         if first_limit is None:
             return False
@@ -215,11 +219,15 @@ class NearMissMonitor:
         instrument = signal["instrument"]
         state = self._tracking.get(signal_id)
 
-        closest_str = self.nm_config.format_value(instrument, state.closest_distance) if state else "N/A"
+        closest_str = (
+            self.nm_config.format_value(instrument, state.closest_distance) if state else "N/A"
+        )
         required_str = (
-            self.nm_config.format_value(instrument,
-                self.nm_config.get_required_bounce(instrument, state.closest_distance))
-            if state else "N/A"
+            self.nm_config.format_value(
+                instrument, self.nm_config.get_required_bounce(instrument, state.closest_distance)
+            )
+            if state
+            else "N/A"
         )
 
         logger.info(
@@ -260,6 +268,8 @@ class NearMissMonitor:
             try:
                 await self.alert_system.send_near_miss_cancel_alert(signal, tracking_state)
             except Exception as e:
-                logger.error(f"Signal {signal_id}: failed to send NM cancel alert: {e}", exc_info=True)
+                logger.error(
+                    f"Signal {signal_id}: failed to send NM cancel alert: {e}", exc_info=True
+                )
 
         return True

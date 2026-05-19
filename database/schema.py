@@ -1,6 +1,7 @@
 """
 Database schema creation and initialization (PostgreSQL / Supabase)
 """
+
 from utils.logger import get_logger
 
 logger = get_logger("database.schema")
@@ -14,7 +15,6 @@ async def initialize_database(db_manager):
         db_manager: DatabaseManager instance
     """
     async with db_manager.get_connection() as conn:
-
         # Create signals table
         await conn.execute("""
             CREATE TABLE IF NOT EXISTS signals (
@@ -164,7 +164,6 @@ async def _run_migrations(conn):
             END IF;
         END $$;
         """,
-
         # License system — per-user key allowance table
         """
         CREATE TABLE IF NOT EXISTS license_allowances (
@@ -172,7 +171,6 @@ async def _run_migrations(conn):
             max_keys    INTEGER NOT NULL DEFAULT 1
         );
         """,
-
         # License system — one row per issued license key
         # mt5_account is globally unique: one license per MT5 account
         """
@@ -189,7 +187,6 @@ async def _run_migrations(conn):
             CONSTRAINT licenses_status_check  CHECK (status IN ('active', 'revoked'))
         );
         """,
-
         # Bot mode status — single-row table tracking whether news mode / spread hour is active.
         # Updated in real-time as modes activate/deactivate.
         """
@@ -201,14 +198,12 @@ async def _run_migrations(conn):
             CONSTRAINT bot_mode_status_singleton CHECK (id = 1)
         );
         """,
-
         # Seed the single status row if it does not exist yet
         """
         INSERT INTO bot_mode_status (id, news_mode, spread_hour)
         VALUES (1, FALSE, FALSE)
         ON CONFLICT (id) DO NOTHING;
         """,
-
         # Add revoked_reason to licenses table (stage18 — auto-revoke tracking)
         """
         DO $$
@@ -221,7 +216,6 @@ async def _run_migrations(conn):
             END IF;
         END $$;
         """,
-
         # Index for fast lookups (optional — single row, mostly a hint)
         """
         CREATE INDEX IF NOT EXISTS idx_bot_mode_status_updated ON bot_mode_status(updated_at);

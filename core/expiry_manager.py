@@ -1,5 +1,5 @@
-import asyncio
 from discord.ext import tasks
+
 from utils.logger import get_logger
 
 
@@ -19,11 +19,11 @@ class ExpiryManager:
         try:
             alert_system = (
                 self.bot.monitor.alert_system
-                if hasattr(self.bot, 'monitor') and self.bot.monitor else None
+                if hasattr(self.bot, "monitor") and self.bot.monitor
+                else None
             )
             monitor = (
-                self.bot.monitor
-                if hasattr(self.bot, 'monitor') and self.bot.monitor else None
+                self.bot.monitor if hasattr(self.bot, "monitor") and self.bot.monitor else None
             )
 
             # ── 1. Query which signals are about to be expired BEFORE expiring ──
@@ -32,6 +32,7 @@ class ExpiryManager:
             if alert_system:
                 try:
                     from database.models import SignalStatus
+
                     pre_expire_rows = await self.bot.signal_db.db.fetch_all(
                         """
                         SELECT id, message_id, channel_id
@@ -53,13 +54,11 @@ class ExpiryManager:
 
             # ── 3. Per-signal post-expiry cleanup ────────────────────────────
             for row in about_to_expire:
-                sig_id = row['id']
+                sig_id = row["id"]
                 try:
                     await self._handle_expired_signal(sig_id, row, alert_system, monitor)
                 except Exception as _e:
-                    self.logger.warning(
-                        f"Post-expiry cleanup failed for signal {sig_id}: {_e}"
-                    )
+                    self.logger.warning(f"Post-expiry cleanup failed for signal {sig_id}: {_e}")
 
         except Exception as e:
             self.logger.error(f"Error in expiry loop: {e}", exc_info=True)
@@ -130,6 +129,7 @@ class ExpiryManager:
         """Delete the original signal message (used for gold-toll signals with no embed)."""
         try:
             import discord
+
             channel = self.bot.get_channel(int(channel_id))
             if channel:
                 try:

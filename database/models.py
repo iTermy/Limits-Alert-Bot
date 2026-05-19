@@ -1,18 +1,17 @@
 """
 Database models, constants, and enums
 """
-from enum import Enum
-from typing import List
 
 
 class SignalStatus:
     """Signal status constants matching the database schema"""
-    ACTIVE = 'active'
-    HIT = 'hit'
-    PROFIT = 'profit'
-    BREAKEVEN = 'breakeven'
-    STOP_LOSS = 'stop_loss'
-    CANCELLED = 'cancelled'
+
+    ACTIVE = "active"
+    HIT = "hit"
+    PROFIT = "profit"
+    BREAKEVEN = "breakeven"
+    STOP_LOSS = "stop_loss"
+    CANCELLED = "cancelled"
 
     # Final statuses for analytics
     FINAL_STATUSES = [PROFIT, BREAKEVEN, STOP_LOSS, CANCELLED]
@@ -33,15 +32,22 @@ class SignalStatus:
     @classmethod
     def is_valid(cls, status: str) -> bool:
         """Check if status is valid"""
-        return status in [cls.ACTIVE, cls.HIT, cls.PROFIT,
-                         cls.BREAKEVEN, cls.STOP_LOSS, cls.CANCELLED]
+        return status in [
+            cls.ACTIVE,
+            cls.HIT,
+            cls.PROFIT,
+            cls.BREAKEVEN,
+            cls.STOP_LOSS,
+            cls.CANCELLED,
+        ]
 
 
 class LimitStatus:
     """Limit status constants"""
-    PENDING = 'pending'
-    HIT = 'hit'
-    CANCELLED = 'cancelled'
+
+    PENDING = "pending"
+    HIT = "hit"
+    CANCELLED = "cancelled"
 
     @classmethod
     def is_valid(cls, status: str) -> bool:
@@ -51,14 +57,16 @@ class LimitStatus:
 
 class ChangeType:
     """Status change types"""
-    AUTOMATIC = 'automatic'
-    MANUAL = 'manual'
+
+    AUTOMATIC = "automatic"
+    MANUAL = "manual"
 
 
 class Direction:
     """Trade direction constants"""
-    LONG = 'long'
-    SHORT = 'short'
+
+    LONG = "long"
+    SHORT = "short"
 
     @classmethod
     def is_valid(cls, direction: str) -> bool:
@@ -70,25 +78,21 @@ class StatusTransitions:
     """Valid status transition rules"""
 
     VALID_TRANSITIONS = {
-        SignalStatus.ACTIVE: [
-            SignalStatus.HIT,
-            SignalStatus.CANCELLED,
-            SignalStatus.STOP_LOSS
-        ],
+        SignalStatus.ACTIVE: [SignalStatus.HIT, SignalStatus.CANCELLED, SignalStatus.STOP_LOSS],
         SignalStatus.HIT: [
             SignalStatus.PROFIT,
             SignalStatus.BREAKEVEN,
             SignalStatus.STOP_LOSS,
-            SignalStatus.CANCELLED
+            SignalStatus.CANCELLED,
         ],
         SignalStatus.CANCELLED: [
             SignalStatus.HIT,
-            SignalStatus.ACTIVE  # Can revert cancellation
+            SignalStatus.ACTIVE,  # Can revert cancellation
         ],
         # Final statuses can transition to cancelled for corrections
         SignalStatus.PROFIT: [SignalStatus.CANCELLED],
         SignalStatus.BREAKEVEN: [SignalStatus.CANCELLED],
-        SignalStatus.STOP_LOSS: [SignalStatus.CANCELLED]
+        SignalStatus.STOP_LOSS: [SignalStatus.CANCELLED],
     }
 
     @classmethod

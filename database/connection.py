@@ -1,10 +1,13 @@
 """
 Database connection manager using asyncpg for Supabase (PostgreSQL)
 """
-import asyncpg
+
 import os
-from typing import Optional, List, Dict, Any
 from contextlib import asynccontextmanager
+from typing import Any, Dict, List, Optional
+
+import asyncpg
+
 from utils.logger import get_logger
 
 logger = get_logger("database")
@@ -49,9 +52,8 @@ class DatabaseManager:
         """
         if self._pool is None:
             await self.connect()
-        async with self._pool.acquire() as conn:
-            async with conn.transaction():
-                yield conn
+        async with self._pool.acquire() as conn, conn.transaction():
+            yield conn
 
     async def execute(self, query: str, params: tuple = ()) -> int:
         """

@@ -1,10 +1,11 @@
 """
 Signal-specific database operations main module
 """
-from typing import Optional, List, Dict, Any, Tuple
+
+from typing import Any, Dict, List, Optional, Tuple
+
 from core.parser import ParsedSignal
 from utils.logger import get_logger
-
 
 logger = get_logger("signal_db")
 
@@ -22,9 +23,9 @@ class SignalDatabase:
         self.db = db_manager
 
         # Initialize sub-modules
-        from .lifecycle import LifecycleManager
-        from .crud import CrudOperations
         from .analytics import AnalyticsManager
+        from .crud import CrudOperations
+        from .lifecycle import LifecycleManager
 
         self._lifecycle = LifecycleManager(db_manager)
         self._crud = CrudOperations(db_manager)
@@ -32,8 +33,9 @@ class SignalDatabase:
 
     # ==================== CRUD Operations ====================
 
-    async def save_signal(self, parsed_signal: ParsedSignal, message_id: str,
-                         channel_id: str) -> Tuple[bool, Optional[int]]:
+    async def save_signal(
+        self, parsed_signal: ParsedSignal, message_id: str, channel_id: str
+    ) -> Tuple[bool, Optional[int]]:
         """
         Save a parsed signal to the database
 
@@ -96,9 +98,9 @@ class SignalDatabase:
         """
         return await self._crud.get_active_signals_detailed(instrument)
 
-    async def get_active_signals_detailed_sorted(self, instrument: str = None,
-                                                 sort_by: str = 'recent',
-                                                 limit: int = None) -> List[Dict[str, Any]]:
+    async def get_active_signals_detailed_sorted(
+        self, instrument: str = None, sort_by: str = "recent", limit: int = None
+    ) -> List[Dict[str, Any]]:
         """
         Get detailed active signals with sorting options
 
@@ -135,7 +137,9 @@ class SignalDatabase:
         """
         return await self._lifecycle.cancel_signal_by_message(message_id, self)
 
-    async def reactivate_cancelled_signal(self, signal_id: int, parsed_signal: ParsedSignal) -> bool:
+    async def reactivate_cancelled_signal(
+        self, signal_id: int, parsed_signal: ParsedSignal
+    ) -> bool:
         """
         Reactivate a cancelled signal (e.g., when message is undeleted or edited)
 
@@ -162,10 +166,14 @@ class SignalDatabase:
         """
         return await self._lifecycle.manually_set_signal_to_hit(signal_id, reason)
 
-    async def manually_set_signal_status(self, signal_id: int, new_status: str,
-                                        reason: str = None,
-                                        result_pips: float = None,
-                                        closed_reason: str = None) -> bool:
+    async def manually_set_signal_status(
+        self,
+        signal_id: int,
+        new_status: str,
+        reason: str = None,
+        result_pips: float = None,
+        closed_reason: str = None,
+    ) -> bool:
         """
         Manually set a signal's status (for admin override)
         Bypasses validation for manual overrides
@@ -181,8 +189,12 @@ class SignalDatabase:
             Success status
         """
         return await self._lifecycle.manually_set_signal_status(
-            signal_id, new_status, reason, self.db,
-            result_pips=result_pips, closed_reason=closed_reason
+            signal_id,
+            new_status,
+            reason,
+            self.db,
+            result_pips=result_pips,
+            closed_reason=closed_reason,
         )
 
     async def process_limit_hit(self, limit_id: int, actual_price: float = None) -> Dict[str, Any]:
@@ -210,8 +222,9 @@ class SignalDatabase:
         """
         return await self.db.get_hit_limits_for_signal(signal_id)
 
-    async def manually_set_signal_expiry(self, signal_id: int, expiry_type: str,
-                                        custom_datetime: str = None) -> bool:
+    async def manually_set_signal_expiry(
+        self, signal_id: int, expiry_type: str, custom_datetime: str = None
+    ) -> bool:
         """
         Manually set a signal's expiry type and recalculate expiry time
 
@@ -247,7 +260,7 @@ class SignalDatabase:
         """
         return await self._analytics.get_statistics(self.db)
 
-    async def get_trading_period_range(self, period: str = 'week') -> Dict[str, Any]:
+    async def get_trading_period_range(self, period: str = "week") -> Dict[str, Any]:
         """
         Get the date range for the current trading period
 
@@ -259,7 +272,9 @@ class SignalDatabase:
         """
         return await self._analytics.get_trading_period_range(period)
 
-    async def get_period_signals_with_results(self, start_date: str, end_date: str) -> List[Dict[str, Any]]:
+    async def get_period_signals_with_results(
+        self, start_date: str, end_date: str
+    ) -> List[Dict[str, Any]]:
         """
         Get all signals with final results within a date range
 

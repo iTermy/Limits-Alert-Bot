@@ -15,9 +15,9 @@ P&L is always calculated in the same native unit as the TP type:
 
 import json
 import logging
-from pathlib import Path
-from typing import Dict, Literal, Optional
 from datetime import datetime, timezone
+from pathlib import Path
+from typing import Dict, Literal
 
 logger = logging.getLogger(__name__)
 
@@ -38,13 +38,13 @@ class TPConfig:
 
     # Supported asset classes and their default TP type
     ASSET_CLASS_TYPES: Dict[str, TPType] = {
-        "forex":     "pips",
+        "forex": "pips",
         "forex_jpy": "pips",
-        "metals":    "dollars",
-        "indices":   "dollars",
-        "stocks":    "dollars",
-        "crypto":    "dollars",
-        "oil":       "dollars",
+        "metals": "dollars",
+        "indices": "dollars",
+        "stocks": "dollars",
+        "crypto": "dollars",
+        "oil": "dollars",
     }
 
     def __init__(self, config_path: str = None):
@@ -61,6 +61,7 @@ class TPConfig:
         # Borrow SymbolMapper for asset-class detection (same as alert_config)
         try:
             from price_feeds.symbol_mapper import SymbolMapper
+
             mapper_config = self.config_path.parent / "symbol_mappings.json"
             self.mapper = SymbolMapper(str(mapper_config))
         except Exception as e:
@@ -75,7 +76,7 @@ class TPConfig:
 
     def _load_config(self) -> Dict:
         try:
-            with open(self.config_path, "r") as f:
+            with open(self.config_path) as f:
                 return json.load(f)
         except FileNotFoundError:
             logger.warning(f"TP config not found, creating default: {self.config_path}")
@@ -87,22 +88,50 @@ class TPConfig:
     def _create_default_config(self) -> Dict:
         config = {
             "defaults": {
-                "forex":     {"type": "pips",    "value": 10.0,  "description": "Standard forex pairs"},
-                "forex_jpy": {"type": "pips",    "value": 10.0,  "description": "JPY pairs (auto-detected)"},
-                "metals":    {"type": "dollars", "value": 5.0,   "description": "Gold, Silver, etc."},
-                "indices":   {"type": "dollars", "value": 20.0,  "description": "Stock indices"},
-                "stocks":    {"type": "dollars", "value": 1.0,   "description": "Individual stocks"},
-                "crypto":    {"type": "dollars", "value": 50.0,  "description": "Cryptocurrencies"},
-                "oil":       {"type": "dollars", "value": 0.5,   "description": "Oil commodities"},
+                "forex": {"type": "pips", "value": 10.0, "description": "Standard forex pairs"},
+                "forex_jpy": {
+                    "type": "pips",
+                    "value": 10.0,
+                    "description": "JPY pairs (auto-detected)",
+                },
+                "metals": {"type": "dollars", "value": 5.0, "description": "Gold, Silver, etc."},
+                "indices": {"type": "dollars", "value": 20.0, "description": "Stock indices"},
+                "stocks": {"type": "dollars", "value": 1.0, "description": "Individual stocks"},
+                "crypto": {"type": "dollars", "value": 50.0, "description": "Cryptocurrencies"},
+                "oil": {"type": "dollars", "value": 0.5, "description": "Oil commodities"},
             },
             "scalp_defaults": {
-                "forex":     {"type": "pips",    "value": 3.0,   "description": "Scalp - Standard forex pairs"},
-                "forex_jpy": {"type": "pips",    "value": 5.0,   "description": "Scalp - JPY pairs (auto-detected)"},
-                "metals":    {"type": "dollars", "value": 2.0,   "description": "Scalp - Gold, Silver, etc."},
-                "indices":   {"type": "dollars", "value": 10.0,  "description": "Scalp - Stock indices"},
-                "stocks":    {"type": "dollars", "value": 0.5,   "description": "Scalp - Individual stocks"},
-                "crypto":    {"type": "dollars", "value": 20.0,  "description": "Scalp - Cryptocurrencies"},
-                "oil":       {"type": "dollars", "value": 0.2,   "description": "Scalp - Oil commodities"},
+                "forex": {
+                    "type": "pips",
+                    "value": 3.0,
+                    "description": "Scalp - Standard forex pairs",
+                },
+                "forex_jpy": {
+                    "type": "pips",
+                    "value": 5.0,
+                    "description": "Scalp - JPY pairs (auto-detected)",
+                },
+                "metals": {
+                    "type": "dollars",
+                    "value": 2.0,
+                    "description": "Scalp - Gold, Silver, etc.",
+                },
+                "indices": {
+                    "type": "dollars",
+                    "value": 10.0,
+                    "description": "Scalp - Stock indices",
+                },
+                "stocks": {
+                    "type": "dollars",
+                    "value": 0.5,
+                    "description": "Scalp - Individual stocks",
+                },
+                "crypto": {
+                    "type": "dollars",
+                    "value": 20.0,
+                    "description": "Scalp - Cryptocurrencies",
+                },
+                "oil": {"type": "dollars", "value": 0.2, "description": "Scalp - Oil commodities"},
             },
             "overrides": {},
             "scalp_overrides": {},
@@ -160,14 +189,33 @@ class TPConfig:
         # Fallback (mirrors alert_config._determine_asset_class)
         s = symbol.upper()
 
-        if any(c in s for c in ["BTC", "ETH", "BNB", "XRP", "ADA", "DOGE", "SOL", "DOT"]) or "USDT" in s:
+        if (
+            any(c in s for c in ["BTC", "ETH", "BNB", "XRP", "ADA", "DOGE", "SOL", "DOT"])
+            or "USDT" in s
+        ):
             return "crypto"
         if any(c in s for c in ["XAU", "XAG", "GOLD", "SILVER"]):
             return "metals"
         if any(c in s for c in ["WTI", "BRENT", "OIL", "USOIL"]):
             return "oil"
-        if any(c in s for c in ["SPX", "NAS", "DOW", "DAX", "US500", "USTEC", "US30",
-                                  "US2000", "GER", "DE30", "DE40", "JP225", "CHINA50"]):
+        if any(
+            c in s
+            for c in [
+                "SPX",
+                "NAS",
+                "DOW",
+                "DAX",
+                "US500",
+                "USTEC",
+                "US30",
+                "US2000",
+                "GER",
+                "DE30",
+                "DE40",
+                "JP225",
+                "CHINA50",
+            ]
+        ):
             return "indices"
         if "." in s:
             return "stocks"
@@ -238,9 +286,14 @@ class TPConfig:
         """Return 'pips' or 'dollars' for the symbol."""
         return self._get_config_for_symbol(symbol, scalp=scalp)["type"]  # type: ignore
 
-    def calculate_pnl(self, symbol: str, direction: str,
-                      entry_price: float, current_price: float,
-                      scalp: bool = False) -> float:
+    def calculate_pnl(
+        self,
+        symbol: str,
+        direction: str,
+        entry_price: float,
+        current_price: float,
+        scalp: bool = False,
+    ) -> float:
         """
         Calculate P&L for a single limit position in native units.
 
@@ -267,11 +320,12 @@ class TPConfig:
         if tp_type == "pips":
             pip_size = self.get_pip_size(symbol)
             return raw_diff / pip_size
-        else:  # dollars
-            return raw_diff
+        # dollars
+        return raw_diff
 
-    def set_override(self, symbol: str, value: float, tp_type: TPType,
-                     set_by: str = "User", scalp: bool = False) -> bool:
+    def set_override(
+        self, symbol: str, value: float, tp_type: TPType, set_by: str = "User", scalp: bool = False
+    ) -> bool:
         """Set a per-symbol TP override. Returns True on success."""
         if tp_type not in ("pips", "dollars"):
             logger.error(f"Invalid TP type: {tp_type}")
@@ -291,11 +345,19 @@ class TPConfig:
             "set_at": datetime.now(timezone.utc).isoformat(),
         }
         self._save_config()
-        logger.info(f"Set {'scalp ' if scalp else ''}TP override: {symbol.upper()} = {value} {tp_type}")
+        logger.info(
+            f"Set {'scalp ' if scalp else ''}TP override: {symbol.upper()} = {value} {tp_type}"
+        )
         return True
 
-    def set_default(self, asset_class: str, value: float, tp_type: TPType,
-                    set_by: str = "User", scalp: bool = False) -> bool:
+    def set_default(
+        self,
+        asset_class: str,
+        value: float,
+        tp_type: TPType,
+        set_by: str = "User",
+        scalp: bool = False,
+    ) -> bool:
         """Update the default TP for an asset class. Returns True on success."""
         section = "scalp_defaults" if scalp else "defaults"
         if asset_class not in self.config.get(section, {}):
@@ -367,5 +429,4 @@ class TPConfig:
         tp_type = self.get_tp_type(symbol)
         if tp_type == "pips":
             return f"{value:.1f} pips"
-        else:
-            return f"${value:.2f}"
+        return f"${value:.2f}"

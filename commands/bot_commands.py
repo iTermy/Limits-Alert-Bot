@@ -1,11 +1,14 @@
 """
 Bot Commands - Essential bot management and utility commands
 """
-from discord.ext import commands
-import discord
+
 import asyncio
-from .base_command import BaseCog
 from datetime import datetime
+
+import discord
+from discord.ext import commands
+
+from .base_command import BaseCog
 
 
 class BotCommands(BaseCog):
@@ -13,13 +16,13 @@ class BotCommands(BaseCog):
 
     # ==================== GENERAL COMMANDS ====================
 
-    @commands.command(name='ping')
+    @commands.command(name="ping")
     async def ping(self, ctx: commands.Context):
         """Check bot latency"""
         latency = round(self.bot.latency * 1000)
         await ctx.send(f"Latency: {latency}ms")
 
-    @commands.command(name='help')
+    @commands.command(name="help")
     async def help_command(self, ctx: commands.Context, *, topic: str = None):
         """Show available commands, or detailed help for a topic (e.g. !help cancel)"""
 
@@ -28,12 +31,12 @@ class BotCommands(BaseCog):
             embed = discord.Embed(
                 title="🚫 Cancel Command — Detailed Help",
                 description="Cancel one signal or bulk-cancel groups of signals.",
-                color=0xFF6600
+                color=0xFF6600,
             )
             embed.add_field(
                 name="Cancel a specific signal",
                 value="`!cancel <id>` — cancel signal by its ID",
-                inline=False
+                inline=False,
             )
             embed.add_field(
                 name="Cancel Gold signals by type",
@@ -51,12 +54,12 @@ class BotCommands(BaseCog):
                     "`!cancel gold shorts everything` — cancel ALL active Gold shorts\n"
                     "`!cancel gold both everything` — cancel ALL active Gold signals"
                 ),
-                inline=False
+                inline=False,
             )
             embed.add_field(
                 name="Cancel by instrument pair",
                 value="`!cancel all EURUSD` — cancel all active signals for EURUSD",
-                inline=False
+                inline=False,
             )
             embed.add_field(
                 name="Cancel by currency",
@@ -64,9 +67,11 @@ class BotCommands(BaseCog):
                     "`!cancel all EUR` — cancel all active signals whose instrument contains EUR\n"
                     "`!cancel all USD` — cancel all active signals whose instrument contains USD"
                 ),
-                inline=False
+                inline=False,
             )
-            embed.set_footer(text="All bulk cancels only affect signals with status 'active' or 'hit'.")
+            embed.set_footer(
+                text="All bulk cancels only affect signals with status 'active' or 'hit'."
+            )
             await ctx.send(embed=embed)
             return
 
@@ -74,7 +79,7 @@ class BotCommands(BaseCog):
             embed = discord.Embed(
                 title="Take-Profit Command — Detailed Help",
                 description="View and manage auto take-profit thresholds.",
-                color=0x00BFFF
+                color=0x00BFFF,
             )
             embed.add_field(
                 name="Show config",
@@ -82,7 +87,7 @@ class BotCommands(BaseCog):
                     "`!tp config` — show all defaults and per-symbol overrides\n"
                     "`!tp config <symbol>` — show TP config for a specific symbol (e.g. `!tp config XAUUSD`)"
                 ),
-                inline=False
+                inline=False,
             )
             embed.add_field(
                 name="Set TP threshold (admin)",
@@ -93,14 +98,16 @@ class BotCommands(BaseCog):
                     "`!tp set <target> <value> dollars` — specify dollars (e.g. `!tp set XAUUSD 5 dollars`)\n\n"
                     "Valid asset classes: forex, forex_jpy, metals, indices, stocks, crypto, oil"
                 ),
-                inline=False
+                inline=False,
             )
             embed.add_field(
                 name="Remove override (admin)",
                 value="`!tp remove <symbol>` — remove per-symbol override, reverting to asset-class default (e.g. `!tp remove XAUUSD`)",
-                inline=False
+                inline=False,
             )
-            embed.set_footer(text="Auto-TP triggers when the last limit hits the threshold and earlier limits are combined breakeven.")
+            embed.set_footer(
+                text="Auto-TP triggers when the last limit hits the threshold and earlier limits are combined breakeven."
+            )
             await ctx.send(embed=embed)
             return
 
@@ -108,7 +115,7 @@ class BotCommands(BaseCog):
             embed = discord.Embed(
                 title="Alert Distance Command — Detailed Help",
                 description="View and manage the approaching-alert distance thresholds.\nThis controls how close price must get to a limit before an 'approaching' alert fires.",
-                color=0x00BFFF
+                color=0x00BFFF,
             )
             embed.add_field(
                 name="Show config",
@@ -116,7 +123,7 @@ class BotCommands(BaseCog):
                     "`!alertdist config` — show all asset-class defaults and per-symbol overrides\n"
                     "`!alertdist config <symbol>` — show config for a specific symbol (e.g. `!alertdist config XAUUSD`)"
                 ),
-                inline=False
+                inline=False,
             )
             embed.add_field(
                 name="Set threshold (admin)",
@@ -129,12 +136,12 @@ class BotCommands(BaseCog):
                     "Valid asset classes: forex, forex_jpy, metals, indices, stocks, crypto, oil\n"
                     "Aliases: `!alertdistance`, `!adist`"
                 ),
-                inline=False
+                inline=False,
             )
             embed.add_field(
                 name="Remove per-symbol override (admin)",
                 value="`!alertdist remove <symbol>` — remove override, reverting to asset-class default (e.g. `!alertdist remove XAUUSD`)",
-                inline=False
+                inline=False,
             )
             embed.add_field(
                 name="Distance types",
@@ -143,9 +150,11 @@ class BotCommands(BaseCog):
                     "**dollars** — used for metals, oil (e.g. $8.00)\n"
                     "**percentage** — used for indices, crypto (e.g. 0.5%)"
                 ),
-                inline=False
+                inline=False,
             )
-            embed.set_footer(text="If no type is specified, the existing type for that target is preserved.")
+            embed.set_footer(
+                text="If no type is specified, the existing type for that target is preserved."
+            )
             await ctx.send(embed=embed)
             return
 
@@ -153,7 +162,7 @@ class BotCommands(BaseCog):
             embed = discord.Embed(
                 title="📰 News Command — Detailed Help",
                 description="Schedule news windows that auto-cancel signals hit during the window.",
-                color=0x5865F2
+                color=0x5865F2,
             )
             embed.add_field(
                 name="Schedule a news window",
@@ -163,7 +172,7 @@ class BotCommands(BaseCog):
                     "Example: `!news gold 8:30am tz:UTC` — Gold news at 8:30 AM UTC\n"
                     "Example: `!news all 14:00 30 date:2025-06-20` — All pairs on a specific date"
                 ),
-                inline=False
+                inline=False,
             )
             embed.add_field(
                 name="Immediate / open-ended window",
@@ -172,7 +181,7 @@ class BotCommands(BaseCog):
                     "`!news now USD` — activate immediately for USD pairs only\n"
                     "`!news off` — deactivate all open-ended windows"
                 ),
-                inline=False
+                inline=False,
             )
             embed.add_field(
                 name="Tags (optional)",
@@ -182,7 +191,7 @@ class BotCommands(BaseCog):
                     "`date:<date>` — specific date (default: today)\n"
                     "  e.g. `date:2025-06-15`  `date:06/15`  `date:tomorrow`"
                 ),
-                inline=False
+                inline=False,
             )
             embed.add_field(
                 name="Categories",
@@ -191,7 +200,7 @@ class BotCommands(BaseCog):
                     "Named: `gold`, `oil`, `btc`, `eth`, `crypto`\n"
                     "`all` — affects every instrument"
                 ),
-                inline=False
+                inline=False,
             )
             embed.add_field(
                 name="Managing events",
@@ -200,9 +209,11 @@ class BotCommands(BaseCog):
                     "`!newsclear <id>` — remove a specific event\n"
                     "`!newsclear` — remove all events"
                 ),
-                inline=False
+                inline=False,
             )
-            embed.set_footer(text="Window is ±N minutes around the news time. Default window is 10 minutes.")
+            embed.set_footer(
+                text="Window is ±N minutes around the news time. Default window is 10 minutes."
+            )
             await ctx.send(embed=embed)
             return
 
@@ -210,7 +221,7 @@ class BotCommands(BaseCog):
         embed = discord.Embed(
             title="📚 Bot Commands",
             description="Available commands for the trading bot",
-            color=0x00BFFF
+            color=0x00BFFF,
         )
 
         # Signal commands
@@ -255,14 +266,14 @@ class BotCommands(BaseCog):
 
     # ==================== PRICE & FEED COMMANDS ====================
 
-    @commands.command(name='price', aliases=['cp', 'checkprice'])
+    @commands.command(name="price", aliases=["cp", "checkprice"])
     async def check_price(self, ctx: commands.Context, symbol: str):
         """Check current price for a symbol"""
-        if not hasattr(self.bot, 'monitor') or not self.bot.monitor:
+        if not hasattr(self.bot, "monitor") or not self.bot.monitor:
             await ctx.send("❌ Price monitoring not available")
             return
 
-        if not hasattr(self.bot.monitor, 'stream_manager'):
+        if not hasattr(self.bot.monitor, "stream_manager"):
             await ctx.send("❌ Stream manager not available")
             return
 
@@ -274,51 +285,47 @@ class BotCommands(BaseCog):
                 await ctx.send(f"❌ No price data available for {symbol_upper}")
                 return
 
-            embed = discord.Embed(
-                title=f"{symbol_upper} Price",
-                color=0x00FF00
-            )
+            embed = discord.Embed(title=f"{symbol_upper} Price", color=0x00FF00)
 
             embed.add_field(name="Bid", value=f"{price_data['bid']:.5f}", inline=True)
             embed.add_field(name="Ask", value=f"{price_data['ask']:.5f}", inline=True)
 
-            spread = price_data['ask'] - price_data['bid']
+            spread = price_data["ask"] - price_data["bid"]
             embed.add_field(name="Spread", value=f"{spread:.5f}", inline=True)
 
-            if price_data.get('timestamp'):
-                timestamp = price_data['timestamp']
+            if price_data.get("timestamp"):
+                timestamp = price_data["timestamp"]
                 if isinstance(timestamp, (int, float)):
-                    embed.set_footer(text=f"Updated: {datetime.fromtimestamp(timestamp).strftime('%H:%M:%S')}")
+                    embed.set_footer(
+                        text=f"Updated: {datetime.fromtimestamp(timestamp).strftime('%H:%M:%S')}"
+                    )
 
             await ctx.send(embed=embed)
 
         except Exception as e:
-            await ctx.send(f"❌ Error fetching price: {str(e)}")
+            await ctx.send(f"❌ Error fetching price: {e!s}")
             self.logger.error(f"Error in check_price: {e}")
 
-    @commands.command(name='feeds', aliases=['feedstatus'])
+    @commands.command(name="feeds", aliases=["feedstatus"])
     async def feed_status(self, ctx: commands.Context):
         """Show feed connection status"""
-        if not hasattr(self.bot, 'monitor') or not self.bot.monitor:
+        if not hasattr(self.bot, "monitor") or not self.bot.monitor:
             await ctx.send("❌ Monitor not running")
             return
 
-        if not hasattr(self.bot.monitor, 'stream_manager'):
+        if not hasattr(self.bot.monitor, "stream_manager"):
             await ctx.send("❌ Stream manager not available")
             return
 
         stream_manager = self.bot.monitor.stream_manager
 
-        embed = discord.Embed(
-            title="📡 Feed Status",
-            color=0x00BFFF
-        )
+        embed = discord.Embed(title="📡 Feed Status", color=0x00BFFF)
 
         # Get feed statuses
         feeds_info = []
-        for feed_name in ['icmarkets', 'oanda', 'binance']:
-            if hasattr(stream_manager, f'{feed_name}_connected'):
-                is_connected = getattr(stream_manager, f'{feed_name}_connected', False)
+        for feed_name in ["icmarkets", "oanda", "binance"]:
+            if hasattr(stream_manager, f"{feed_name}_connected"):
+                is_connected = getattr(stream_manager, f"{feed_name}_connected", False)
                 status = "🟢 Connected" if is_connected else "🔴 Disconnected"
                 feeds_info.append(f"**{feed_name.upper()}**: {status}")
 
@@ -326,23 +333,23 @@ class BotCommands(BaseCog):
             embed.add_field(name="Feed Connections", value="\n".join(feeds_info), inline=False)
 
         # Active subscriptions
-        if hasattr(stream_manager, 'subscribed_symbols'):
+        if hasattr(stream_manager, "subscribed_symbols"):
             active_subs = len(stream_manager.subscribed_symbols)
             embed.add_field(name="Active Subscriptions", value=str(active_subs), inline=True)
 
         await ctx.send(embed=embed)
 
-    @commands.command(name='health')
+    @commands.command(name="health")
     async def health_check(self, ctx: commands.Context):
         """Complete bot health check - feeds, database, monitoring"""
         embed = discord.Embed(
-            title="Bot Health Check",
-            description="Complete system status",
-            color=0x00FF00
+            title="Bot Health Check", description="Complete system status", color=0x00FF00
         )
 
         # Bot status
-        uptime = datetime.utcnow() - self.bot.start_time if hasattr(self.bot, 'start_time') else None
+        uptime = (
+            datetime.utcnow() - self.bot.start_time if hasattr(self.bot, "start_time") else None
+        )
         if uptime:
             hours = int(uptime.total_seconds() // 3600)
             minutes = int((uptime.total_seconds() % 3600) // 60)
@@ -353,59 +360,61 @@ class BotCommands(BaseCog):
         # Database status
         try:
             stats = await self.signal_db.get_statistics()
-            total_signals = stats.get('total_signals', 0)
-            tracking = stats.get('tracking_count', 0)
+            total_signals = stats.get("total_signals", 0)
+            tracking = stats.get("tracking_count", 0)
             embed.add_field(
                 name="Database",
                 value=f"🟢 Connected\n{tracking} active / {total_signals} total",
-                inline=True
+                inline=True,
             )
         except Exception as e:
             embed.add_field(name="Database", value=f"🔴 Error: {str(e)[:50]}", inline=True)
 
         # Monitor status
-        if hasattr(self.bot, 'monitor') and self.bot.monitor:
-            if hasattr(self.bot.monitor, 'stream_manager'):
+        if hasattr(self.bot, "monitor") and self.bot.monitor:
+            if hasattr(self.bot.monitor, "stream_manager"):
                 stream_manager = self.bot.monitor.stream_manager
 
                 # Feed connections
                 feed_status = []
-                for feed_name in ['icmarkets', 'oanda', 'binance']:
-                    if hasattr(stream_manager, f'{feed_name}_connected'):
-                        is_connected = getattr(stream_manager, f'{feed_name}_connected', False)
+                for feed_name in ["icmarkets", "oanda", "binance"]:
+                    if hasattr(stream_manager, f"{feed_name}_connected"):
+                        is_connected = getattr(stream_manager, f"{feed_name}_connected", False)
                         emoji = "🟢" if is_connected else "🔴"
                         feed_status.append(f"{emoji} {feed_name.upper()}")
 
                 if feed_status:
-                    embed.add_field(
-                        name="Feeds",
-                        value="\n".join(feed_status),
-                        inline=True
-                    )
+                    embed.add_field(name="Feeds", value="\n".join(feed_status), inline=True)
 
                 # Subscriptions
-                if hasattr(stream_manager, 'subscribed_symbols'):
+                if hasattr(stream_manager, "subscribed_symbols"):
                     active_subs = len(stream_manager.subscribed_symbols)
                     embed.add_field(name="Subscriptions", value=str(active_subs), inline=True)
 
                 # Recent updates
-                if hasattr(stream_manager, 'last_price_update'):
+                if hasattr(stream_manager, "last_price_update"):
                     last_update = stream_manager.last_price_update
                     if last_update:
                         seconds_ago = (datetime.utcnow() - last_update).total_seconds()
                         status = "🟢 Active" if seconds_ago < 60 else "🟡 Slow"
-                        embed.add_field(name="🔄 Last Update", value=f"{status}\n{int(seconds_ago)}s ago", inline=True)
+                        embed.add_field(
+                            name="🔄 Last Update",
+                            value=f"{status}\n{int(seconds_ago)}s ago",
+                            inline=True,
+                        )
             else:
                 embed.add_field(name="Monitor", value="🔴 Stream manager unavailable", inline=False)
         else:
             embed.add_field(name="Monitor", value="🔴 Not running", inline=False)
 
         # Overall health color
-        if all([
-            hasattr(self.bot, 'monitor'),
-            self.bot.monitor,
-            hasattr(self.bot.monitor, 'stream_manager')
-        ]):
+        if all(
+            [
+                hasattr(self.bot, "monitor"),
+                self.bot.monitor,
+                hasattr(self.bot.monitor, "stream_manager"),
+            ]
+        ):
             embed.color = 0x00FF00  # Green - healthy
         else:
             embed.color = 0xFFA500  # Orange - degraded
@@ -419,12 +428,12 @@ class BotCommands(BaseCog):
         """Check for admin commands"""
         return self.is_admin(ctx.author)
 
-    @commands.command(name='clear')
+    @commands.command(name="clear")
     @commands.check(lambda ctx: ctx.cog.is_admin(ctx.author))
     async def clear_all_signals(self, ctx: commands.Context):
         """Clear all signals from database (Admin only)"""
         stats = await self.signal_db.get_statistics()
-        total_signals = stats.get('total_signals', 0)
+        total_signals = stats.get("total_signals", 0)
 
         if total_signals == 0:
             await ctx.send("✅ Database is already empty")
@@ -439,15 +448,18 @@ class BotCommands(BaseCog):
         await confirm_msg.add_reaction("❌")
 
         def check(reaction, user):
-            return (user == ctx.author and
-                    str(reaction.emoji) in ["✅", "❌"] and
-                    reaction.message.id == confirm_msg.id)
+            return (
+                user == ctx.author
+                and str(reaction.emoji) in ["✅", "❌"]
+                and reaction.message.id == confirm_msg.id
+            )
 
         try:
-            reaction, user = await self.bot.wait_for('reaction_add', timeout=30.0, check=check)
+            reaction, user = await self.bot.wait_for("reaction_add", timeout=30.0, check=check)
 
             if str(reaction.emoji) == "✅":
                 from database import db
+
                 async with db.get_connection() as conn:
                     await conn.execute("DELETE FROM status_changes")
                     await conn.execute("DELETE FROM limits")
@@ -466,11 +478,11 @@ class BotCommands(BaseCog):
             await confirm_msg.edit(content="⏱️ Clear timed out")
             await confirm_msg.clear_reactions()
 
-    @commands.command(name='cleanalerts', aliases=['clearalerts', 'purgealerts'])
+    @commands.command(name="cleanalerts", aliases=["clearalerts", "purgealerts"])
     @commands.check(lambda ctx: ctx.cog.is_admin(ctx.author))
     async def clean_alert_channels(self, ctx: commands.Context):
         """Delete messages from the past 7 days in all alert channels (Admin only)"""
-        if not hasattr(self.bot, 'channel_cleaner') or not self.bot.channel_cleaner:
+        if not hasattr(self.bot, "channel_cleaner") or not self.bot.channel_cleaner:
             await ctx.send("❌ Channel cleaner not available")
             return
 
@@ -491,7 +503,7 @@ class BotCommands(BaseCog):
             )
 
         try:
-            reaction, _ = await self.bot.wait_for('reaction_add', timeout=30.0, check=check)
+            reaction, _ = await self.bot.wait_for("reaction_add", timeout=30.0, check=check)
 
             if str(reaction.emoji) == "✅":
                 await confirm_msg.edit(content="🧹 Purging alert channels… this may take a moment.")
@@ -504,7 +516,7 @@ class BotCommands(BaseCog):
                     )
                     self.logger.info(f"Alert channels manually purged by {ctx.author.name}")
                 except Exception as e:
-                    await confirm_msg.edit(content=f"❌ Purge failed: {str(e)}")
+                    await confirm_msg.edit(content=f"❌ Purge failed: {e!s}")
                     self.logger.error(f"Manual alert purge error: {e}", exc_info=True)
             else:
                 await confirm_msg.edit(content="❌ Purge cancelled")
@@ -514,31 +526,32 @@ class BotCommands(BaseCog):
             await confirm_msg.edit(content="⏱️ Purge timed out")
             await confirm_msg.clear_reactions()
 
-    @commands.command(name='reload')
+    @commands.command(name="reload")
     @commands.check(lambda ctx: ctx.cog.is_admin(ctx.author))
     async def reload_config(self, ctx: commands.Context):
         """Reload bot configuration (Admin only)"""
         try:
             # Reload alert distances if available
-            if hasattr(self.bot, 'monitor') and self.bot.monitor:
-                if hasattr(self.bot.monitor, 'alert_config'):
+            if hasattr(self.bot, "monitor") and self.bot.monitor:
+                if hasattr(self.bot.monitor, "alert_config"):
                     self.bot.monitor.alert_config.reload_config()
-                if hasattr(self.bot.monitor, 'tp_config'):
+                if hasattr(self.bot.monitor, "tp_config"):
                     self.bot.monitor.tp_config.reload_config()
                     self.bot.monitor.tp_monitor.tp_config = self.bot.monitor.tp_config
 
             # Bust the gold-tolls SL offset cache so the parser picks up any
             # manual edits to settings.json
             from core.parser.pattern_parsers import invalidate_gold_tolls_sl_cache
+
             invalidate_gold_tolls_sl_cache()
 
             await ctx.send("✅ Configuration reloaded")
             self.logger.info(f"Config reloaded by {ctx.author.name}")
         except Exception as e:
-            await ctx.send(f"❌ Error reloading config: {str(e)}")
+            await ctx.send(f"❌ Error reloading config: {e!s}")
             self.logger.error(f"Error reloading config: {e}")
 
-    @commands.command(name='shutdown')
+    @commands.command(name="shutdown")
     @commands.check(lambda ctx: ctx.cog.is_admin(ctx.author))
     async def shutdown(self, ctx: commands.Context):
         """Shutdown the bot (Admin only)"""
@@ -546,7 +559,7 @@ class BotCommands(BaseCog):
         self.logger.info(f"Bot shutdown initiated by {ctx.author.name}")
         await self.bot.close()
 
-    @commands.command(name='goldtollssl', aliases=['gtsl', 'goldtollsl'])
+    @commands.command(name="goldtollssl", aliases=["gtsl", "goldtollsl"])
     @commands.check(lambda ctx: ctx.cog.is_admin(ctx.author))
     async def gold_tolls_sl(self, ctx: commands.Context, value: float = None):
         """
@@ -555,8 +568,11 @@ class BotCommands(BaseCog):
                 !goldtollssl 10       → set offset to $10
                 !goldtollssl 5        → reset to default $5
         """
+        from core.parser.pattern_parsers import (
+            get_gold_tolls_sl_offset,
+            invalidate_gold_tolls_sl_cache,
+        )
         from utils.config_loader import load_settings, save_settings
-        from core.parser.pattern_parsers import get_gold_tolls_sl_offset, invalidate_gold_tolls_sl_cache
 
         if value is None:
             # Show current setting
@@ -592,9 +608,7 @@ class BotCommands(BaseCog):
             self.logger.error(f"Failed to save gold_tolls_sl_offset: {e}", exc_info=True)
             return
 
-        self.logger.info(
-            f"gold_tolls_sl_offset changed {old_value} → {value} by {ctx.author}"
-        )
+        self.logger.info(f"gold_tolls_sl_offset changed {old_value} → {value} by {ctx.author}")
 
         # ── Retroactively update all active gold toll signals ─────────────────
         loading_msg = await ctx.send("🔄 Updating active gold toll signals…")
@@ -615,6 +629,7 @@ class BotCommands(BaseCog):
             if not toll_channel_ids:
                 # Fallback: derive directly from channels config
                 from utils.config_loader import load_channels_config
+
                 channels_cfg = load_channels_config()
                 monitored = channels_cfg.get("monitored_channels", {})
                 for ch_name, ch_id in monitored.items():
@@ -622,13 +637,15 @@ class BotCommands(BaseCog):
                         toll_channel_ids.add(str(ch_id))
 
             if not toll_channel_ids:
-                await loading_msg.edit(content="⚠️ No gold-toll channels found — offset saved but no signals updated.")
+                await loading_msg.edit(
+                    content="⚠️ No gold-toll channels found — offset saved but no signals updated."
+                )
             else:
                 from database import db
 
                 # Fetch all active/hit gold-toll signals with their pending limits
                 toll_ch_list = list(toll_channel_ids)
-                placeholders = ", ".join(f"${i+1}" for i in range(len(toll_ch_list)))
+                placeholders = ", ".join(f"${i + 1}" for i in range(len(toll_ch_list)))
                 query = f"""
                     SELECT
                         s.id,
@@ -670,8 +687,7 @@ class BotCommands(BaseCog):
                         # 1. Persist new SL to DB
                         async with db.get_connection() as conn:
                             await conn.execute(
-                                "UPDATE signals SET stop_loss = $1 WHERE id = $2",
-                                new_sl, sig_id
+                                "UPDATE signals SET stop_loss = $1 WHERE id = $2", new_sl, sig_id
                             )
 
                         # 2. Update streaming monitor in-memory state so price
@@ -683,9 +699,7 @@ class BotCommands(BaseCog):
 
                         # 3. Update the persistent embed (only if one exists)
                         if alert_system:
-                            await alert_system.update_embed_for_signal_id(
-                                sig_id, "edited"
-                            )
+                            await alert_system.update_embed_for_signal_id(sig_id, "edited")
 
                         updated_count += 1
                         self.logger.info(
@@ -742,6 +756,7 @@ class BotCommands(BaseCog):
     @staticmethod
     def _generate_license_key() -> str:
         import secrets
+
         return secrets.token_hex(16)
 
     @commands.command(name="activate")
@@ -792,7 +807,9 @@ class BotCommands(BaseCog):
             return m.author.id == member.id and isinstance(m.channel, discord.DMChannel)
 
         try:
-            reply = await self.bot.wait_for("message", check=dm_check, timeout=self.LICENSE_DM_TIMEOUT)
+            reply = await self.bot.wait_for(
+                "message", check=dm_check, timeout=self.LICENSE_DM_TIMEOUT
+            )
         except asyncio.TimeoutError:
             await member.send(
                 f"⏰ Activation timed out after {self.LICENSE_DM_TIMEOUT}s. "
@@ -843,7 +860,9 @@ class BotCommands(BaseCog):
                 INSERT INTO licenses (discord_id, mt5_account, license_key, status, created_at)
                 VALUES ($1, $2, $3, 'active', NOW())
                 """,
-                str(member.id), mt5_account, license_key,
+                str(member.id),
+                mt5_account,
+                license_key,
             )
 
         self.logger.info(f"License issued — user={member} ({member.id}), mt5={mt5_account}")
@@ -852,8 +871,8 @@ class BotCommands(BaseCog):
             f"**Your license key:**\n```\n{license_key}\n```\n\n"
             f"**Setup:**\n"
             f"1. Open `config.json` in your Auto-Limits-Adder folder.\n"
-            f"2. Add your key to the \"license\" section:\n"
-            f"```json\n\"license\": {{\n    \"key\": \"{license_key}\"\n}}\n```\n"
+            f'2. Add your key to the "license" section:\n'
+            f'```json\n"license": {{\n    "key": "{license_key}"\n}}\n```\n'
             f"3. Save and start the bot — it validates on startup.\n\n"
             f"⚠️ Keep this key private. It is locked to MT5 account `{mt5_account}`."
         )
@@ -875,11 +894,14 @@ class BotCommands(BaseCog):
                 VALUES ($1, $2)
                 ON CONFLICT (discord_id) DO UPDATE SET max_keys = EXCLUDED.max_keys
                 """,
-                str(member.id), max_keys,
+                str(member.id),
+                max_keys,
             )
 
         self.logger.info(f"Allowance updated — user={member} ({member.id}), max_keys={max_keys}")
-        await ctx.send(f"✅ **{member.display_name}** can now hold up to **{max_keys}** license key(s).")
+        await ctx.send(
+            f"✅ **{member.display_name}** can now hold up to **{max_keys}** license key(s)."
+        )
 
     @commands.command(name="grantkey")
     async def grantkey(self, ctx: commands.Context, member: discord.Member, mt5_account: str):
@@ -904,10 +926,13 @@ class BotCommands(BaseCog):
                 "SELECT COUNT(*) FROM licenses WHERE discord_id = $1 AND status = 'active'",
                 str(member.id),
             )
-            max_keys = await conn.fetchval(
-                "SELECT max_keys FROM license_allowances WHERE discord_id = $1",
-                str(member.id),
-            ) or 1
+            max_keys = (
+                await conn.fetchval(
+                    "SELECT max_keys FROM license_allowances WHERE discord_id = $1",
+                    str(member.id),
+                )
+                or 1
+            )
 
             if active_count >= max_keys:
                 await ctx.send(
@@ -922,18 +947,24 @@ class BotCommands(BaseCog):
                 INSERT INTO licenses (discord_id, mt5_account, license_key, status, created_at)
                 VALUES ($1, $2, $3, 'active', NOW())
                 """,
-                str(member.id), mt5_account, license_key,
+                str(member.id),
+                mt5_account,
+                license_key,
             )
 
-        self.logger.info(f"License granted by admin — user={member} ({member.id}), mt5={mt5_account}, by={ctx.author}")
-        await ctx.send(f"✅ License issued for **{member.display_name}** (MT5: `{mt5_account}`). Key sent to their DMs.")
+        self.logger.info(
+            f"License granted by admin — user={member} ({member.id}), mt5={mt5_account}, by={ctx.author}"
+        )
+        await ctx.send(
+            f"✅ License issued for **{member.display_name}** (MT5: `{mt5_account}`). Key sent to their DMs."
+        )
 
         try:
             await member.send(
                 f"🔑 An admin has issued you an **Auto-Limits-Adder** license key.\n\n"
                 f"**Your license key:**\n```\n{license_key}\n```\n\n"
-                f"Add this to `config.json` under the `\"license\"` section:\n"
-                f"```json\n\"license\": {{\n    \"key\": \"{license_key}\"\n}}\n```\n"
+                f'Add this to `config.json` under the `"license"` section:\n'
+                f'```json\n"license": {{\n    "key": "{license_key}"\n}}\n```\n'
                 f"This key is locked to MT5 account `{mt5_account}`. Keep it private."
             )
         except discord.Forbidden:
@@ -952,16 +983,21 @@ class BotCommands(BaseCog):
             if mt5_account:
                 row = await conn.fetchrow(
                     "SELECT id FROM licenses WHERE discord_id = $1 AND mt5_account = $2 AND status = 'active'",
-                    str(member.id), mt5_account,
+                    str(member.id),
+                    mt5_account,
                 )
                 if not row:
-                    await ctx.send(f"❌ No active license found for {member.display_name} with MT5 account `{mt5_account}`.")
+                    await ctx.send(
+                        f"❌ No active license found for {member.display_name} with MT5 account `{mt5_account}`."
+                    )
                     return
                 await conn.execute(
                     "UPDATE licenses SET status = 'revoked', revoked_at = NOW() WHERE id = $1",
                     row["id"],
                 )
-                await ctx.send(f"✅ License revoked for **{member.display_name}** (MT5: `{mt5_account}`).")
+                await ctx.send(
+                    f"✅ License revoked for **{member.display_name}** (MT5: `{mt5_account}`)."
+                )
             else:
                 rows = await conn.fetch(
                     "SELECT id, mt5_account FROM licenses WHERE discord_id = $1 AND status = 'active'",
@@ -982,9 +1018,13 @@ class BotCommands(BaseCog):
                     "UPDATE licenses SET status = 'revoked', revoked_at = NOW() WHERE id = $1",
                     row["id"],
                 )
-                await ctx.send(f"✅ License revoked for **{member.display_name}** (MT5: `{row['mt5_account']}`).")
+                await ctx.send(
+                    f"✅ License revoked for **{member.display_name}** (MT5: `{row['mt5_account']}`)."
+                )
 
-        self.logger.info(f"License revoked — user={member} ({member.id}), mt5={mt5_account or 'auto'}, by={ctx.author}")
+        self.logger.info(
+            f"License revoked — user={member} ({member.id}), mt5={mt5_account or 'auto'}, by={ctx.author}"
+        )
 
     @commands.command(name="licenses")
     async def licenses(self, ctx: commands.Context, member: discord.Member = None):
@@ -1000,9 +1040,13 @@ class BotCommands(BaseCog):
                     "WHERE discord_id = $1 ORDER BY created_at DESC",
                     str(member.id),
                 )
-                max_keys = await conn.fetchval(
-                    "SELECT max_keys FROM license_allowances WHERE discord_id = $1", str(member.id)
-                ) or 1
+                max_keys = (
+                    await conn.fetchval(
+                        "SELECT max_keys FROM license_allowances WHERE discord_id = $1",
+                        str(member.id),
+                    )
+                    or 1
+                )
                 active_count = sum(1 for r in rows if r["status"] == "active")
 
                 embed = discord.Embed(
@@ -1038,6 +1082,7 @@ class BotCommands(BaseCog):
                     return
 
                 from collections import defaultdict
+
                 grouped: dict = defaultdict(list)
                 for row in rows:
                     grouped[row["discord_id"]].append(row)
@@ -1062,7 +1107,9 @@ class BotCommands(BaseCog):
                         inline=False,
                     )
                     if len(embed.fields) >= 25:
-                        embed.set_footer(text="Showing first 25 users — use !licenses @user for details.")
+                        embed.set_footer(
+                            text="Showing first 25 users — use !licenses @user for details."
+                        )
                         break
 
                 await ctx.send(embed=embed)
@@ -1116,7 +1163,8 @@ class BotCommands(BaseCog):
                             revoked_reason = $1
                         WHERE id = $2
                         """,
-                        reason, row["id"],
+                        reason,
+                        row["id"],
                     )
 
             self.logger.info(
@@ -1145,7 +1193,9 @@ class BotCommands(BaseCog):
                 pass  # User has DMs disabled — log only
 
         except Exception as e:
-            self.logger.error(f"Failed to auto-revoke licenses for {member} ({member.id}): {e}", exc_info=True)
+            self.logger.error(
+                f"Failed to auto-revoke licenses for {member} ({member.id}): {e}", exc_info=True
+            )
 
     async def _auto_reactivate_licenses(self, member: discord.Member) -> None:
         """
@@ -1178,14 +1228,11 @@ class BotCommands(BaseCog):
                         row["id"],
                     )
 
-            self.logger.info(
-                f"Auto-reactivated {len(rows)} license(s) for {member} ({member.id})"
-            )
+            self.logger.info(f"Auto-reactivated {len(rows)} license(s) for {member} ({member.id})")
 
             # Notify the user by DM
             keys_info = "\n".join(
-                f"• MT5 `{r['mt5_account']}` → key `{r['license_key'][:8]}…`"
-                for r in rows
+                f"• MT5 `{r['mt5_account']}` → key `{r['license_key'][:8]}…`" for r in rows
             )
             try:
                 await member.send(
@@ -1198,7 +1245,9 @@ class BotCommands(BaseCog):
                 pass
 
         except Exception as e:
-            self.logger.error(f"Failed to auto-reactivate licenses for {member} ({member.id}): {e}", exc_info=True)
+            self.logger.error(
+                f"Failed to auto-reactivate licenses for {member} ({member.id}): {e}", exc_info=True
+            )
 
 
 async def setup(bot):

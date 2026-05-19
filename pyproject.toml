@@ -1,0 +1,38 @@
+[tool.ruff]
+line-length = 100
+target-version = "py39"
+
+[tool.ruff.lint]
+# Sensible default rule set. Each entry is a rule family.
+select = [
+    "E",      # pycodestyle errors
+    "F",      # pyflakes (unused imports, undefined names, etc.)
+    "W",      # pycodestyle warnings
+    "I",      # import sorting
+    "UP",     # pyupgrade (modernize syntax)
+    "B",      # bugbear (likely bugs)
+    "SIM",    # simplify (suggest cleaner equivalents)
+    "RET",    # return-statement issues
+    "PIE",    # misc anti-patterns
+    "PL",     # pylint subset (the useful parts)
+    "RUF",    # ruff-specific rules
+]
+
+ignore = [
+    "E501",     # line-too-long — formatter handles this where it can; the rest is fine
+    "PLR0913",  # too-many-arguments — fires too often on legitimate Discord/asyncpg signatures
+    "PLR0912",  # too-many-branches — same; fires on parser dispatch code
+    "PLR0915",  # too-many-statements — same
+    "PLR2004",  # magic-value-comparison — too noisy on `if status == "active":`
+    "B008",     # function-call-in-default — fires on FastAPI/discord patterns
+    "RET504",   # unnecessary-assignment-before-return — sometimes the name aids readability
+]
+
+[tool.ruff.lint.per-file-ignores]
+# Tests and migration scripts can be looser if you add them later
+"tests/*" = ["PLR2004", "S101"]
+
+[tool.ruff.format]
+quote-style = "double"
+indent-style = "space"
+skip-magic-trailing-comma = false

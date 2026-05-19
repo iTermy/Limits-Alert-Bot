@@ -4,11 +4,13 @@ Uses OANDA's native pricing stream endpoint for real-time updates
 """
 
 import asyncio
-import aiohttp
-import logging
 import json
-from typing import Dict, Set, AsyncIterator, Tuple
+import logging
+from collections.abc import AsyncIterator
 from datetime import datetime
+from typing import Dict, Set, Tuple
+
+import aiohttp
 
 logger = logging.getLogger(__name__)
 
@@ -24,8 +26,9 @@ class OANDAStream:
     def __init__(self, api_key: str = None, account_id: str = None, practice: bool = False):
         """Initialize OANDA stream"""
         import os
-        self.api_key = api_key or os.getenv('OANDA_API_KEY')
-        self.account_id = account_id or os.getenv('OANDA_ACCOUNT_ID')
+
+        self.api_key = api_key or os.getenv("OANDA_API_KEY")
+        self.account_id = account_id or os.getenv("OANDA_ACCOUNT_ID")
 
         if not self.api_key or not self.account_id:
             raise ValueError("OANDA API key and account ID required")
@@ -54,23 +57,26 @@ class OANDAStream:
         try:
             self.session = aiohttp.ClientSession(
                 headers={
-                    'Authorization': f'Bearer {self.api_key}',
-                    'Content-Type': 'application/json',
-                    'Accept-Datetime-Format': 'UNIX'
+                    "Authorization": f"Bearer {self.api_key}",
+                    "Content-Type": "application/json",
+                    "Accept-Datetime-Format": "UNIX",
                 },
-                timeout=aiohttp.ClientTimeout(total=None)  # No timeout for streaming
+                timeout=aiohttp.ClientTimeout(total=None),  # No timeout for streaming
             )
 
             # Test connection
-            test_url = f"{self.base_url.replace('stream-', 'api-')}/v3/accounts/{self.account_id}/summary"
-            async with self.session.get(test_url, timeout=aiohttp.ClientTimeout(total=10)) as response:
+            test_url = (
+                f"{self.base_url.replace('stream-', 'api-')}/v3/accounts/{self.account_id}/summary"
+            )
+            async with self.session.get(
+                test_url, timeout=aiohttp.ClientTimeout(total=10)
+            ) as response:
                 if response.status == 200:
                     self.connected = True
                     logger.info("Connected to OANDA stream")
                     return True
-                else:
-                    logger.error(f"OANDA connection failed: {response.status}")
-                    return False
+                logger.error(f"OANDA connection failed: {response.status}")
+                return False
 
         except Exception as e:
             logger.error(f"Error connecting to OANDA: {e}")
@@ -168,8 +174,8 @@ class OANDAStream:
         while self.streaming:
             try:
                 # Build instrument list
-                instruments = ','.join(self.subscribed_symbols)
-                params = {'instruments': instruments}
+                instruments = ",".join(self.subscribed_symbols)
+                params = {"instruments": instruments}
 
                 # Open streaming connection
                 async with self.session.get(self.stream_url, params=params) as response:
@@ -190,28 +196,28 @@ class OANDAStream:
                             data = json.loads(line)
 
                             # Check message type
-                            if data.get('type') == 'PRICE':
+                            if data.get("type") == "PRICE":
                                 # Extract price data
-                                symbol = data['instrument']
+                                symbol = data["instrument"]
 
                                 # Get best bid/ask
-                                bids = data.get('bids', [])
-                                asks = data.get('asks', [])
+                                bids = data.get("bids", [])
+                                asks = data.get("asks", [])
 
                                 if bids and asks:
-                                    bid = float(bids[0]['price'])
-                                    ask = float(asks[0]['price'])
+                                    bid = float(bids[0]["price"])
+                                    ask = float(asks[0]["price"])
 
                                     price_data = {
-                                        'bid': bid,
-                                        'ask': ask,
-                                        'timestamp': datetime.fromtimestamp(float(data['time'])),
-                                        'tradeable': data.get('tradeable', True)
+                                        "bid": bid,
+                                        "ask": ask,
+                                        "timestamp": datetime.fromtimestamp(float(data["time"])),
+                                        "tradeable": data.get("tradeable", True),
                                     }
 
                                     yield symbol, price_data
 
-                            elif data.get('type') == 'HEARTBEAT':
+                            elif data.get("type") == "HEARTBEAT":
                                 # Keep-alive message
                                 logger.debug("OANDA heartbeat received")
                                 continue

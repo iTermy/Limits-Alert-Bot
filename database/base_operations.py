@@ -1,11 +1,15 @@
 """
 Base database operations for signals and limits
 """
-from typing import Optional, List, Dict, Any
+
 from datetime import datetime
+from typing import Any, Dict, List, Optional
+
 import pytz
-from .models import SignalStatus, LimitStatus, StatusTransitions, ChangeType
+
 from utils.logger import get_logger
+
+from .models import ChangeType, LimitStatus, SignalStatus, StatusTransitions
 
 logger = get_logger("database.operations")
 
@@ -20,7 +24,7 @@ def _parse_dt(value) -> Optional[datetime]:
         return None
     if isinstance(value, datetime):
         return value if value.tzinfo else pytz.UTC.localize(value)
-    s = str(value).replace('Z', '+00:00')
+    s = str(value).replace("Z", "+00:00")
     dt = datetime.fromisoformat(s)
     # Only localize to UTC if the string had no timezone component at all
     if dt.tzinfo is None:
@@ -46,10 +50,18 @@ class BaseOperations:
         self.LIMIT_STATUS_HIT = LimitStatus.HIT
         self.LIMIT_STATUS_CANCELLED = LimitStatus.CANCELLED
 
-    async def insert_signal(self, message_id: str, channel_id: str, instrument: str,
-                            direction: str, stop_loss: float, expiry_type: str = None,
-                            expiry_time: str = None, total_limits: int = 0,
-                            scalp: bool = False) -> int:
+    async def insert_signal(
+        self,
+        message_id: str,
+        channel_id: str,
+        instrument: str,
+        direction: str,
+        stop_loss: float,
+        expiry_type: str = None,
+        expiry_time: str = None,
+        total_limits: int = 0,
+        scalp: bool = False,
+    ) -> int:
         """
         Insert a new signal with enhanced tracking
 
@@ -67,11 +79,23 @@ class BaseOperations:
 
         signal_id = await self.db.execute(
             query,
-            (message_id, channel_id, instrument, direction, stop_loss,
-             expiry_type, _parse_dt(expiry_time), total_limits, SignalStatus.ACTIVE, scalp)
+            (
+                message_id,
+                channel_id,
+                instrument,
+                direction,
+                stop_loss,
+                expiry_type,
+                _parse_dt(expiry_time),
+                total_limits,
+                SignalStatus.ACTIVE,
+                scalp,
+            ),
         )
 
-        logger.info(f"Inserted signal {signal_id} for {instrument} {direction} with {total_limits} limits (scalp={scalp})")
+        logger.info(
+            f"Inserted signal {signal_id} for {instrument} {direction} with {total_limits} limits (scalp={scalp})"
+        )
         return signal_id
 
     async def insert_limits(self, signal_id: int, price_levels: List[float]):
@@ -87,19 +111,19 @@ class BaseOperations:
         await self.db.execute_many(query, params_list)
         logger.info(f"Inserted {len(price_levels)} limits for signal {signal_id}")
 
-    async def update_signal_status(self, signal_id: int, new_status: str,
-                                   change_type: str = 'automatic', reason: str = None) -> bool:
+    async def update_signal_status(
+        self, signal_id: int, new_status: str, change_type: str = "automatic", reason: str = None
+    ) -> bool:
         """Update signal status with proper lifecycle management"""
         async with self.db.get_connection() as conn:
             current = await self.db.fetch_one(
-                "SELECT status FROM signals WHERE id = $1",
-                (signal_id,)
+                "SELECT status FROM signals WHERE id = $1", (signal_id,)
             )
             if not current:
                 logger.error(f"Signal {signal_id} not found")
                 return False
 
-            old_status = current['status']
+            old_status = current["status"]
 
             if not StatusTransitions.is_valid_transition(old_status, new_status):
                 logger.warning(f"Invalid status transition: {old_status} -> {new_status}")
@@ -108,22 +132,41 @@ class BaseOperations:
             now = datetime.now(pytz.UTC)
 
             if SignalStatus.is_final(new_status):
-                await conn.execute("""
+                await conn.execute(
+                    """
                     UPDATE signals
                     SET status = $1, updated_at = $2, closed_at = $3, closed_reason = $4
                     WHERE id = $5
-                """, new_status, now, now, change_type, signal_id)
+                """,
+                    new_status,
+                    now,
+                    now,
+                    change_type,
+                    signal_id,
+                )
             else:
-                await conn.execute("""
+                await conn.execute(
+                    """
                     UPDATE signals
                     SET status = $1, updated_at = $2
                     WHERE id = $3
-                """, new_status, now, signal_id)
+                """,
+                    new_status,
+                    now,
+                    signal_id,
+                )
 
-            await conn.execute("""
+            await conn.execute(
+                """
                 INSERT INTO status_changes (signal_id, old_status, new_status, change_type, reason)
                 VALUES ($1, $2, $3, $4, $5)
-            """, signal_id, old_status, new_status, change_type, reason)
+            """,
+                signal_id,
+                old_status,
+                new_status,
+                change_type,
+                reason,
+            )
 
             logger.info(f"Updated signal {signal_id}: {old_status} -> {new_status} ({change_type})")
             return True
@@ -131,77 +174,109 @@ class BaseOperations:
     async def mark_limit_hit(self, limit_id: int, hit_price: float = None) -> Dict[str, Any]:
         """Mark a limit as hit and update signal status if needed"""
         async with self.db.get_connection() as conn:
-            limit_data = await conn.fetchrow("""
+            limit_data = await conn.fetchrow(
+                """
                 SELECT l.*, s.status as signal_status, s.id as signal_id
                 FROM limits l
                 JOIN signals s ON l.signal_id = s.id
                 WHERE l.id = $1
-            """, limit_id)
+            """,
+                limit_id,
+            )
 
             if not limit_data:
                 logger.error(f"Limit {limit_id} not found")
-                return {'signal_id': None, 'status_changed': False}
+                return {"signal_id": None, "status_changed": False}
 
             limit_data = dict(limit_data)
-            signal_id = limit_data['signal_id']
+            signal_id = limit_data["signal_id"]
             now = datetime.now(pytz.UTC)
 
-            await conn.execute("""
+            await conn.execute(
+                """
                 UPDATE limits
                 SET status = $1, hit_time = $2, hit_price = $3, hit_alert_sent = TRUE
                 WHERE id = $4
-            """, LimitStatus.HIT, now, hit_price or limit_data['price_level'], limit_id)
+            """,
+                LimitStatus.HIT,
+                now,
+                hit_price or limit_data["price_level"],
+                limit_id,
+            )
 
-            await conn.execute("""
+            await conn.execute(
+                """
                 UPDATE signals
                 SET limits_hit = limits_hit + 1, updated_at = $1
                 WHERE id = $2
-            """, now, signal_id)
+            """,
+                now,
+                signal_id,
+            )
 
             status_changed = False
-            if limit_data['signal_status'] == SignalStatus.ACTIVE:
-                await conn.execute("""
+            if limit_data["signal_status"] == SignalStatus.ACTIVE:
+                await conn.execute(
+                    """
                     UPDATE signals
                     SET status = $1, first_limit_hit_time = $2, updated_at = $3
                     WHERE id = $4
-                """, SignalStatus.HIT, now, now, signal_id)
+                """,
+                    SignalStatus.HIT,
+                    now,
+                    now,
+                    signal_id,
+                )
 
-                await conn.execute("""
+                await conn.execute(
+                    """
                     INSERT INTO status_changes (signal_id, old_status, new_status, change_type, reason)
                     VALUES ($1, $2, $3, $4, $5)
-                """, signal_id, SignalStatus.ACTIVE, SignalStatus.HIT,
-                    ChangeType.AUTOMATIC, f'Limit {limit_id} hit')
+                """,
+                    signal_id,
+                    SignalStatus.ACTIVE,
+                    SignalStatus.HIT,
+                    ChangeType.AUTOMATIC,
+                    f"Limit {limit_id} hit",
+                )
 
                 status_changed = True
                 logger.info(f"Signal {signal_id} status changed to HIT (first limit hit)")
 
             return {
-                'signal_id': signal_id,
-                'status_changed': status_changed,
-                'signal_status': SignalStatus.HIT if status_changed else limit_data['signal_status']
+                "signal_id": signal_id,
+                "status_changed": status_changed,
+                "signal_status": SignalStatus.HIT
+                if status_changed
+                else limit_data["signal_status"],
             }
 
     async def check_stop_loss_hit(self, signal_id: int, current_price: float) -> bool:
         """Check if stop loss has been hit and update status if needed"""
-        signal = await self.db.fetch_one("""
+        signal = await self.db.fetch_one(
+            """
             SELECT direction, stop_loss, status
             FROM signals
             WHERE id = $1
-        """, (signal_id,))
+        """,
+            (signal_id,),
+        )
 
-        if not signal or signal['status'] not in [SignalStatus.HIT]:
+        if not signal or signal["status"] not in [SignalStatus.HIT]:
             return False
 
         stop_hit = False
-        if signal['direction'] == 'long' and current_price <= signal['stop_loss']:
-            stop_hit = True
-        elif signal['direction'] == 'short' and current_price >= signal['stop_loss']:
+        if (signal["direction"] == "long" and current_price <= signal["stop_loss"]) or (
+            signal["direction"] == "short" and current_price >= signal["stop_loss"]
+        ):
             stop_hit = True
 
         if stop_hit:
             await self.update_signal_status(
-                signal_id, SignalStatus.STOP_LOSS,
-                ChangeType.AUTOMATIC, f'Stop loss hit at {current_price}'
+                signal_id,
+                SignalStatus.STOP_LOSS,
+                ChangeType.AUTOMATIC,
+                f"Stop loss hit at {current_price}",
             )
             logger.info(f"Signal {signal_id} hit stop loss at {current_price}")
 
@@ -232,51 +307,50 @@ class BaseOperations:
             ORDER BY s.id, l.sequence_number
         """
         rows = await self.db.fetch_all(
-            query,
-            (LimitStatus.PENDING, SignalStatus.ACTIVE, SignalStatus.HIT)
+            query, (LimitStatus.PENDING, SignalStatus.ACTIVE, SignalStatus.HIT)
         )
 
         signals = {}
         for row in rows:
-            signal_id = row['signal_id']
+            signal_id = row["signal_id"]
             if signal_id not in signals:
                 signals[signal_id] = {
-                    'signal_id': signal_id,
-                    'message_id': row['message_id'],
-                    'channel_id': row['channel_id'],
-                    'instrument': row['instrument'],
-                    'direction': row['direction'],
-                    'stop_loss': row['stop_loss'],
-                    'status': row['status'],
-                    'limits_hit': row['limits_hit'],
-                    'total_limits': row['total_limits'],
-                    'scalp': row['scalp'] or False,
-                    'pending_limits': []
+                    "signal_id": signal_id,
+                    "message_id": row["message_id"],
+                    "channel_id": row["channel_id"],
+                    "instrument": row["instrument"],
+                    "direction": row["direction"],
+                    "stop_loss": row["stop_loss"],
+                    "status": row["status"],
+                    "limits_hit": row["limits_hit"],
+                    "total_limits": row["total_limits"],
+                    "scalp": row["scalp"] or False,
+                    "pending_limits": [],
                 }
-            if row['limit_id']:
-                signals[signal_id]['pending_limits'].append({
-                    'limit_id': row['limit_id'],
-                    'price_level': row['price_level'],
-                    'sequence_number': row['sequence_number'],
-                    'approaching_alert_sent': row['approaching_alert_sent'],
-                    'hit_alert_sent': row['hit_alert_sent']
-                })
+            if row["limit_id"]:
+                signals[signal_id]["pending_limits"].append(
+                    {
+                        "limit_id": row["limit_id"],
+                        "price_level": row["price_level"],
+                        "sequence_number": row["sequence_number"],
+                        "approaching_alert_sent": row["approaching_alert_sent"],
+                        "hit_alert_sent": row["hit_alert_sent"],
+                    }
+                )
 
         return list(signals.values())
 
     async def mark_approaching_alert_sent(self, limit_id: int) -> bool:
         """Mark that an approaching alert has been sent for a limit"""
         rows = await self.db.execute(
-            "UPDATE limits SET approaching_alert_sent = TRUE WHERE id = $1",
-            (limit_id,)
+            "UPDATE limits SET approaching_alert_sent = TRUE WHERE id = $1", (limit_id,)
         )
         return rows > 0
 
     async def mark_hit_alert_sent(self, limit_id: int) -> bool:
         """Mark that a hit alert has been sent for a limit"""
         rows = await self.db.execute(
-            "UPDATE limits SET hit_alert_sent = TRUE WHERE id = $1",
-            (limit_id,)
+            "UPDATE limits SET hit_alert_sent = TRUE WHERE id = $1", (limit_id,)
         )
         return rows > 0
 
@@ -298,8 +372,9 @@ class BaseOperations:
         rows = await self.db.fetch_all(query, (signal_id,))
         return [dict(r) for r in rows]
 
-    async def get_performance_stats(self, start_date: str = None, end_date: str = None,
-                                    instrument: str = None) -> Dict[str, Any]:
+    async def get_performance_stats(
+        self, start_date: str = None, end_date: str = None, instrument: str = None
+    ) -> Dict[str, Any]:
         """Get performance statistics for closed signals"""
         conditions = ["status IN ('profit', 'breakeven', 'stop_loss')"]
         params = []
@@ -346,10 +421,7 @@ class BaseOperations:
         """
         instrument_stats = await self.db.fetch_all(instrument_query, tuple(params))
 
-        return {
-            'overall': dict(stats) if stats else {},
-            'by_instrument': instrument_stats
-        }
+        return {"overall": dict(stats) if stats else {}, "by_instrument": instrument_stats}
 
     def _is_valid_transition(self, old_status: str, new_status: str) -> bool:
         """Check if a status transition is valid (wrapper for backward compatibility)"""
