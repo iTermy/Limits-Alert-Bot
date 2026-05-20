@@ -1,13 +1,10 @@
-"""
-Streaming Price Monitor - Simplified version using real-time price streams
-Replaces polling + caching with event-driven price updates
-ENHANCED: Added spread buffer system for limit checks
-ENHANCED: Passes spread info to alert system for display
-"""
+"""Streaming price monitor: event-driven signal evaluation from live price feeds."""
 
 import asyncio
+import json
 from datetime import datetime
 from datetime import time as dtime
+from pathlib import Path
 from typing import Dict, List
 
 import discord
@@ -30,16 +27,10 @@ logger = get_logger("stream_monitor")
 
 class StreamingPriceMonitor:
     """
-    Event-driven price monitor using streaming feeds
+    Event-driven price monitor using streaming feeds.
 
-    Much simpler than polling version:
-    - No cache management
-    - No batch fetching
-    - No priority calculations
-    - Just react to price updates in real-time
-
-    ENHANCED: Includes spread buffer system for approaching and hit alerts
-    ENHANCED: Passes spread values to alert system for display
+    Reacts to price updates in real-time; includes spread buffer system for
+    approaching and hit alerts.
     """
 
     def __init__(self, bot, signal_db, db):
@@ -84,10 +75,9 @@ class StreamingPriceMonitor:
         self.active_signals: Dict[int, Dict] = {}  # signal_id -> signal_data
         self.symbol_to_signals: Dict[str, List[int]] = {}  # symbol -> [signal_ids]
 
-        # Spread buffer cache (to avoid reloading settings every check)
+        # Spread buffer cache: reloaded every 30 s from settings.json
         self._spread_buffer_enabled = None
         self._last_settings_load = None
-        self._settings_cache_duration = 30  # Reload settings every 30 seconds
 
         # Track spread hour transitions so we can update bot_mode_status exactly once
         # per transition (not on every price tick).
@@ -114,9 +104,6 @@ class StreamingPriceMonitor:
             self.stream_manager.add_subscriber(self._on_price_update)
 
             # Setup alert channel
-            import json
-            from pathlib import Path
-
             config_path = Path(__file__).resolve().parent.parent / "config" / "channels.json"
 
             try:
@@ -197,43 +184,11 @@ class StreamingPriceMonitor:
             self.stream_manager.set_health_monitor(self.health_monitor)
             await self.health_monitor.start_monitoring()
 
-            # Load initial spread buffer setting
-            self._reload_spread_buffer_setting()
-
             logger.info("Streaming monitor initialized")
 
         except Exception as e:
             logger.error(f"Failed to initialize monitor: {e}")
             raise
-
-    def _reload_spread_buffer_setting(self):
-        """Reload spread buffer setting from config (with caching)"""
-        now = datetime.now()
-
-        # Check if we need to reload
-        if (
-            self._last_settings_load is None
-            or (now - self._last_settings_load).total_seconds() > self._settings_cache_duration
-        ):
-            try:
-                settings = load_settings()
-                self._spread_buffer_enabled = settings.get("spread_buffer_enabled", True)
-                self._last_settings_load = now
-                logger.debug(f"Spread buffer setting reloaded: {self._spread_buffer_enabled}")
-            except Exception as e:
-                logger.error(f"Error loading spread buffer setting: {e}, using default (True)")
-                self._spread_buffer_enabled = True
-                self._last_settings_load = now
-
-    def _is_spread_buffer_enabled(self) -> bool:
-        """
-        Check if spread buffer is enabled (with caching)
-
-        Returns:
-            True if spread buffer is enabled
-        """
-        self._reload_spread_buffer_setting()
-        return self._spread_buffer_enabled
 
     def _is_spread_hour(self) -> bool:
         """
@@ -308,12 +263,16 @@ class StreamingPriceMonitor:
             # Group signals by symbol
             symbols_needed = set()
 
+            guild_id = self.bot.guilds[0].id if self.bot.guilds else None
+
             for signal in signals:
                 signal_id = signal["signal_id"]
                 symbol = signal["instrument"]
 
                 # Store signal data
                 self.active_signals[signal_id] = signal
+                if guild_id is not None:
+                    signal["guild_id"] = guild_id
 
                 # Track which signals use this symbol
                 if symbol not in self.symbol_to_signals:
@@ -363,12 +322,16 @@ class StreamingPriceMonitor:
                 self.active_signals.clear()
                 self.symbol_to_signals.clear()
 
+                guild_id = self.bot.guilds[0].id if self.bot.guilds else None
+
                 for signal in signals:
                     signal_id = signal["signal_id"]
                     symbol = signal["instrument"]
 
                     # Store signal data (includes updated alert flags from database)
                     self.active_signals[signal_id] = signal
+                    if guild_id is not None:
+                        signal["guild_id"] = guild_id
 
                     if symbol not in self.symbol_to_signals:
                         self.symbol_to_signals[symbol] = []
@@ -416,6 +379,21 @@ class StreamingPriceMonitor:
         if not signal_ids:
             return
 
+        # Refresh spread buffer setting at most every 30 s
+        now = datetime.now()
+        if (
+            self._last_settings_load is None
+            or (now - self._last_settings_load).total_seconds() > 30
+        ):
+            try:
+                settings = load_settings()
+                self._spread_buffer_enabled = settings.get("spread_buffer_enabled", True)
+            except Exception as e:
+                logger.error(f"Error loading spread buffer setting: {e}, using default (True)")
+                self._spread_buffer_enabled = True
+            self._last_settings_load = now
+        spread_buffer_enabled = self._spread_buffer_enabled
+
         # Check each signal for this symbol
         for signal_id in signal_ids:
             signal = self.active_signals.get(signal_id)
@@ -427,32 +405,24 @@ class StreamingPriceMonitor:
                 # Add current spread to signal dict for use in checks
                 signal["current_spread"] = price_data.get("spread", 0.0)
 
-                await self._check_signal(signal, price_data)
+                await self._check_signal(signal, price_data, now_in_spread, spread_buffer_enabled)
                 self.stats["signals_checked"] += 1
             except Exception as e:
                 logger.error(f"Error checking signal {signal_id}: {e}")
                 self.stats["errors"] += 1
 
-    async def _check_signal(self, signal: Dict, price_data: Dict):
-        """
-        Check a signal against current price
-
-        Args:
-            signal: Signal dictionary
-            price_data: Current price data
-        """
+    async def _check_signal(
+        self, signal: Dict, price_data: Dict, is_spread_hour: bool, spread_buffer_enabled: bool
+    ):
+        """Check a signal against current price."""
         direction = signal["direction"].lower()
-
-        # Determine which price to use
         current_price = price_data["ask"] if direction == "long" else price_data["bid"]
-
-        # Add guild_id for message links
-        if hasattr(self.bot, "guilds") and self.bot.guilds:
-            signal["guild_id"] = self.bot.guilds[0].id
 
         # Check pending limits
         for limit in signal.get("pending_limits", []):
-            await self._check_limit(signal, limit, current_price, direction)
+            await self._check_limit(
+                signal, limit, current_price, direction, is_spread_hour, spread_buffer_enabled
+            )
 
         # Near-miss check: only for active signals (not hit) with approaching alert sent
         if signal.get("status") in ("active", None):
@@ -472,7 +442,7 @@ class StreamingPriceMonitor:
 
         # Check stop loss
         if signal.get("stop_loss"):
-            await self._check_stop_loss(signal, current_price, direction)
+            await self._check_stop_loss(signal, current_price, direction, is_spread_hour)
 
         # Check auto take-profit (runs for any HIT signal that has hit limits cached)
         if signal.get("status") == "hit":
@@ -487,17 +457,16 @@ class StreamingPriceMonitor:
                 # Remove signal from active tracking
                 await self._maybe_unsubscribe_symbol(signal["instrument"], signal["signal_id"])
 
-    async def _check_limit(self, signal: Dict, limit: Dict, current_price: float, direction: str):
-        """
-        Check if a limit is approaching or hit
-        ENHANCED: Applies spread buffer and passes spread info to alerts
-
-        Args:
-            signal: Signal dictionary (includes current_spread)
-            limit: Limit dictionary
-            current_price: Current market price (ask for long, bid for short)
-            direction: 'long' or 'short'
-        """
+    async def _check_limit(
+        self,
+        signal: Dict,
+        limit: Dict,
+        current_price: float,
+        direction: str,
+        is_spread_hour: bool,
+        spread_buffer_enabled: bool,
+    ):
+        """Check if a limit is approaching or hit; applies spread buffer."""
         limit_price = limit["price_level"]
         symbol = signal["instrument"]
 
@@ -508,9 +477,6 @@ class StreamingPriceMonitor:
         if spread is None or spread < 0:
             logger.warning(f"Invalid spread for {symbol}: {spread}, using 0")
             spread = 0.0
-
-        # Check if spread buffer is enabled
-        spread_buffer_enabled = self._is_spread_buffer_enabled()
 
         # Calculate distance and determine if hit
         if direction == "long":
@@ -561,47 +527,23 @@ class StreamingPriceMonitor:
                 news_event = self.bot.news_manager.is_news_active_for(signal["instrument"])
 
             if news_event is not None:
-                signal_id = signal["signal_id"]
-                # Evict from active tracking IMMEDIATELY (before any awaits) so
-                # that concurrent limit checks for other limits on this same signal
-                # bail out early and don't fire duplicate alerts.
-                if signal_id not in self.active_signals:
-                    return  # Already being handled by a concurrent check
-                self.active_signals.pop(signal_id, None)
-
                 logger.info(
                     f"News mode: suppressing limit hit for signal "
-                    f"{signal_id} limit #{limit['sequence_number']} "
+                    f"{signal['signal_id']} limit #{limit['sequence_number']} "
                     f"({signal['instrument']} @ {current_price:.5f}) "
                     f"— event: {news_event}"
                 )
-                await self.alert_system.send_news_cancel_alert(signal, current_price, news_event)
-                await self._react_to_original_signal(signal, "❌")
-                await self._process_news_cancel(signal, news_event)
-                return  # All subsequent limit/SL checks for this signal are moot
+                await self._cancel_signal_during_guard(signal, current_price, "news", news_event)
+                return
 
-            # --- Spread hour guard ---
-            # During the 5-6 PM EST spread hour, broker spreads widen wildly and
-            # can trigger false limit hits.  Instead of recording the hit, cancel
-            # the entire signal and send a single informational embed.
-            if self._is_spread_hour():
-                signal_id = signal["signal_id"]
-                # Pre-evict from active tracking BEFORE any awaits so that
-                # concurrent limit checks for other limits on this signal bail early
-                # (mirrors the news-mode guard above).
-                if signal_id not in self.active_signals:
-                    return  # Another limit already triggered the spread-hour cancel
-                self.active_signals.pop(signal_id, None)
-
+            if is_spread_hour:
                 logger.info(
                     f"Spread hour: suppressing limit hit for signal "
                     f"{signal['signal_id']} limit #{limit['sequence_number']} "
                     f"({signal['instrument']} @ {current_price:.5f})"
                 )
-                await self.alert_system.send_spread_hour_cancel_alert(signal, current_price)
-                await self._react_to_original_signal(signal, "❌")
-                await self._process_spread_hour_cancel(signal)
-                return  # All subsequent limit/SL checks for this signal are moot
+                await self._cancel_signal_during_guard(signal, current_price, "spread_hour")
+                return
 
             # ENHANCED: Pass spread and buffer status to alert system
             await self.alert_system.send_limit_hit_alert(
@@ -722,16 +664,10 @@ class StreamingPriceMonitor:
             # Don't fail the whole operation if reaction fails
             logger.error(f"Error adding reaction to original signal: {e}", exc_info=True)
 
-    async def _check_stop_loss(self, signal: Dict, current_price: float, direction: str):
-        """
-        Check if stop loss is hit
-        NOTE: Spread buffer is NOT applied to stop loss checks (must be exact)
-
-        Args:
-            signal: Signal dictionary
-            current_price: Current market price (ask for long, bid for short)
-            direction: 'long' or 'short'
-        """
+    async def _check_stop_loss(
+        self, signal: Dict, current_price: float, direction: str, is_spread_hour: bool
+    ):
+        """Check if stop loss is hit. Spread buffer is NOT applied."""
         stop_loss = signal["stop_loss"]
 
         # Guard against duplicate SL alerts if price ticks arrive faster than DB writes
@@ -745,15 +681,12 @@ class StreamingPriceMonitor:
             is_hit = current_price >= stop_loss
 
         if is_hit:
-            # --- Spread hour guard ---
-            if self._is_spread_hour():
+            if is_spread_hour:
                 logger.info(
                     f"Spread hour: suppressing stop loss hit for signal "
                     f"{signal['signal_id']} ({signal['instrument']} @ {current_price:.5f})"
                 )
-                await self.alert_system.send_spread_hour_cancel_alert(signal, current_price)
-                await self._react_to_original_signal(signal, "❌")
-                await self._process_spread_hour_cancel(signal)
+                await self._cancel_signal_during_guard(signal, current_price, "spread_hour")
                 return
 
             # CRITICAL: Set dedup flag immediately before any awaits
@@ -765,6 +698,28 @@ class StreamingPriceMonitor:
             await self._react_to_original_signal(signal, "🛑")
             await self._process_stop_loss_hit(signal)
             self.stats["stop_losses_hit"] += 1
+
+    async def _cancel_signal_during_guard(
+        self, signal: Dict, current_price: float, reason: str, news_event=None
+    ):
+        """Shared evict-alert-react-process path for news and spread-hour guards.
+
+        Evicts the signal from active tracking BEFORE any awaits so that concurrent
+        limit checks for the same signal bail out early.
+        """
+        signal_id = signal["signal_id"]
+        if signal_id not in self.active_signals:
+            return  # Already handled by a concurrent check
+        self.active_signals.pop(signal_id, None)
+        if reason == "news":
+            await self.alert_system.send_news_cancel_alert(signal, current_price, news_event)
+        else:
+            await self.alert_system.send_spread_hour_cancel_alert(signal, current_price)
+        await self._react_to_original_signal(signal, "❌")
+        if reason == "news":
+            await self._process_news_cancel(signal, news_event)
+        else:
+            await self._process_spread_hour_cancel(signal)
 
     async def _mark_approaching_sent(self, limit_id: int):
         """Mark that approaching alert has been sent"""
@@ -924,23 +879,3 @@ class StreamingPriceMonitor:
             "alert_stats": self.alert_system.get_stats(),
         }
 
-    async def test_signal_monitoring(self, signal_id: int):
-        """Test monitoring for a specific signal"""
-        try:
-            signal = await self.signal_db.get_signal_with_limits(signal_id)
-            if not signal:
-                logger.error(f"Signal {signal_id} not found")
-                return
-
-            # Get latest price
-            price = await self.stream_manager.get_latest_price(signal["instrument"])
-
-            if price:
-                # Manually trigger check
-                await self._on_price_update(signal["instrument"], price)
-                logger.info(f"Test check completed for signal {signal_id}")
-            else:
-                logger.error(f"No price data for {signal['instrument']}")
-
-        except Exception as e:
-            logger.error(f"Test monitoring failed: {e}", exc_info=True)

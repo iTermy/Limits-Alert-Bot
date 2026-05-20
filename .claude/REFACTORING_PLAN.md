@@ -99,45 +99,26 @@ After completing an area, mark the section as finished and briefly state what yo
 
 ## Area 4: Streaming monitor (price-tick hot path)
 
-### 4.1 Cache the spread-hour check on the tick path
-- **Location**: `price_feeds/streaming_monitor.py:235-256` (`_is_spread_hour`), and three call sites: `396, 580, 736`
-- **Current state**: `_is_spread_hour` builds `pytz.timezone('America/New_York')`, calls `datetime.now(est)`, and runs comparisons **on every price tick** (and is called up to 3 times per tick — once for transition tracking, once per limit check, once for SL check).
-- **Proposed change**: Compute once at the top of `_on_price_update` (already done at line 396 for the transition check) and pass the boolean down to `_check_signal` / `_check_limit` / `_check_stop_loss`. Or cache it per tick on `self`.
-- **Rationale**: Goal 1 (hot path efficiency — this is called on every tick for every symbol).
-- **Risk**: Medium — touches the tick path. The change is a pure mechanical refactor (pass-down vs recompute) but still warrants careful review.
-- **Behavior-preserving?**: Yes (assuming a single tick's spread-hour state is consistent).
+### ✅ 4.1 Cache the spread-hour check on the tick path
+- **Location**: `price_feeds/streaming_monitor.py`
+- **Done**: `now_in_spread` (already computed at top of `_on_price_update` for the transition check) is now passed as a parameter through `_check_signal` → `_check_limit` / `_check_stop_loss`. The two inner `_is_spread_hour()` calls removed.
 
-### 4.2 Drop `test_signal_monitoring`
-- **Location**: `price_feeds/streaming_monitor.py:916-934`
-- **Current state**: Never called from anywhere.
-- **Proposed change**: Delete.
-- **Rationale**: Goal 2.
-- **Risk**: Low.
-- **Behavior-preserving?**: Yes.
+### ✅ 4.2 Drop `test_signal_monitoring`
+- **Location**: `price_feeds/streaming_monitor.py`
+- **Done**: Deleted (was never called).
 
-### 4.3 Inline `_reload_spread_buffer_setting` + the cache machinery
-- **Location**: `price_feeds/streaming_monitor.py:207-233`
-- **Current state**: `_reload_spread_buffer_setting` plus `_is_spread_buffer_enabled` plus `_last_settings_load` plus `_settings_cache_duration` (~30 lines) all to gate a single boolean from `settings.json` with a 30s cache.
-- **Proposed change**: Replace with a single property that reads `load_settings()` directly (which is cheap — a 1KB JSON read), or push the cache into `load_settings()` itself in `utils/config_loader.py` so every consumer benefits. The `get_gold_tolls_sl_offset()` 30s cache is the same pattern duplicated separately.
-- **Rationale**: Goal 1 + Goal 3.
-- **Risk**: Medium — touches the tick path indirectly.
-- **Behavior-preserving?**: Yes.
+### ✅ 4.3 Inline `_reload_spread_buffer_setting` + the cache machinery
+- **Location**: `price_feeds/streaming_monitor.py`
+- **Done**: Deleted `_reload_spread_buffer_setting()` and `_is_spread_buffer_enabled()`. The 30s cache logic is now inlined at the top of `_on_price_update` (before the per-signal loop). `_settings_cache_duration` instance var removed; `_spread_buffer_enabled` and `_last_settings_load` kept for the cache. `spread_buffer_enabled` is computed once per tick and passed down through `_check_signal` → `_check_limit`.
+- **Adjacent fix**: `alert_system.py` live-update path had two bugs: the stale `_reload_spread_buffer_setting` call (now removed) and a wrong attribute name (`spread_buffer_enabled` vs `_spread_buffer_enabled`) that always fell back to `False`. Both fixed.
 
-### 4.4 Cancel-on-spread-hour and cancel-on-news share a guard scaffold
-- **Location**: `price_feeds/streaming_monitor.py:549-597` (news + spread-hour guards inside `_check_limit`)
-- **Current state**: Two nearly identical 25-line blocks: pre-evict from `active_signals`, log, send cancel alert, react to original, call `_process_X_cancel`. The only differences are the cancel function called and the log/alert text.
-- **Proposed change**: Extract a helper `_cancel_signal_during_guard(signal, current_price, reason: Literal['news','spread_hour'], extra=None)` that does the eviction + alert + react + DB update. Call it from both places.
-- **Rationale**: Goal 1 (hot-path clarity) + Goal 3.
-- **Risk**: High — touches concurrency-sensitive code where the pre-evict is the critical ordering. Worth doing but should be reviewed in isolation.
-- **Behavior-preserving?**: Yes if the eviction-then-await ordering is preserved exactly.
+### ✅ 4.4 Cancel-on-spread-hour and cancel-on-news share a guard scaffold
+- **Location**: `price_feeds/streaming_monitor.py`
+- **Done**: Extracted `_cancel_signal_during_guard(signal, current_price, reason, news_event=None)`. Eviction-before-await ordering preserved exactly. Used from both guards in `_check_limit` and the SL spread-hour guard in `_check_stop_loss`. The SL path now also benefits from the `not in active_signals` early-return guard (preventing duplicate cancels if a concurrent limit check fires first).
 
-### 4.5 The `signal['guild_id'] = self.bot.guilds[0].id` on every tick
-- **Location**: `price_feeds/streaming_monitor.py:442-444`
-- **Current state**: On every signal check on every tick, `_check_signal` looks up `bot.guilds[0].id` and patches the signal dict. Same value, every tick, ~hundreds of times per second across active signals.
-- **Proposed change**: Set `signal['guild_id']` once when the signal is added to `active_signals` in `_load_and_subscribe_signals` / `_periodic_signal_refresh`. Drop the patch from `_check_signal`.
-- **Rationale**: Goal 1 (tiny, but it's literal busywork on the hot path).
-- **Risk**: Low.
-- **Behavior-preserving?**: Yes.
+### ✅ 4.5 The `signal['guild_id'] = self.bot.guilds[0].id` on every tick
+- **Location**: `price_feeds/streaming_monitor.py`
+- **Done**: `guild_id` is set once when signals are added to `active_signals` in both `_load_and_subscribe_signals` and `_periodic_signal_refresh`. Removed the per-tick `hasattr(self.bot, "guilds")` patch from `_check_signal`.
 
 ---
 

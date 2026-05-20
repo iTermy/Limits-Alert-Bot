@@ -177,7 +177,7 @@ class BotCommands(BaseCog):
             embed.add_field(
                 name="Immediate / open-ended window",
                 value=(
-                    "`!news now` — activate news mode immediately for ALL pairs\n"
+                    "`!news now` / `!news on` — activate news mode immediately for ALL pairs\n"
                     "`!news now USD` — activate immediately for USD pairs only\n"
                     "`!news off` — deactivate all open-ended windows"
                 ),

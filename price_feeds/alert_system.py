@@ -1394,10 +1394,8 @@ class AlertSystem:
                     current_price = price_data["ask"] if direction == "long" else price_data["bid"]
                     spread = price_data.get("spread", 0.0)
 
-                    # Reload spread buffer setting
-                    if hasattr(monitor, "_reload_spread_buffer_setting"):
-                        monitor._reload_spread_buffer_setting()
-                    spread_buffer_enabled = getattr(monitor, "spread_buffer_enabled", False)
+                    _sbe = getattr(monitor, "_spread_buffer_enabled", None)
+                    spread_buffer_enabled = _sbe if _sbe is not None else True
 
                     # Calculate distance to nearest pending limit (for approaching state)
                     if event == "approaching" and limits:

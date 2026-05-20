@@ -1515,6 +1515,7 @@ class TradingCommands(BaseCog):
         Usage:
             !news <category> <time> [window] [tz:<tz>] [date:<date>]
             !news now [category]   → open-ended window active immediately (default: all)
+            !news on [category]    → alias for !news now
             !news off              → deactivate all 'now' windows
 
         Tags (optional, add in any order):
@@ -1533,7 +1534,7 @@ class TradingCommands(BaseCog):
         if not args:
             await ctx.send(
                 "❌ Usage: `!news <category> <time> [window] [tz:<tz>] [date:<date>]`\n"
-                "Or: `!news now [category]` / `!news off`\n"
+                "Or: `!news now [category]` / `!news on [category]` / `!news off`\n"
                 "Categories: any currency code (USD, EUR, GBP…), `gold`, `oil`, `btc`, `crypto`, or `all`\n"
                 "Timezone tag example: `tz:UTC`  `tz:EST`  `tz:London`  `tz:CET`\n"
                 "Date tag example: `date:2025-06-15`  `date:06/15`  `date:tomorrow`"
@@ -1558,12 +1559,18 @@ class TradingCommands(BaseCog):
                             logger.warning(
                                 f"Failed to send news ended alert for event #{event.event_id}: {e}"
                             )
+                # Update DB: news mode is off unless a scheduled event is still active
+                still_active = any(e.is_active() for e in news_manager.get_all_events())
+                try:
+                    await self.bot.db.set_news_mode(still_active)
+                except Exception as e:
+                    logger.warning(f"Failed to update news_mode in DB after !news off: {e}")
             else:
                 await ctx.send("ℹ️ No open-ended news windows were active.")
             return
 
-        # ── !news now [category] [N minutes] ──────────────────────────────
-        if subcommand == "now":
+        # ── !news now / !news on [category] [N minutes] ───────────────────
+        if subcommand in ("now", "on"):
             import datetime as _dt
             import re as _re
 
