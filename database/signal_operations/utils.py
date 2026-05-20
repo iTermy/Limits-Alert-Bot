@@ -10,6 +10,19 @@ import pytz
 from database.models import SignalStatus
 
 
+def _parse_dt(value) -> Optional[datetime]:
+    """Convert an ISO string or datetime to a timezone-aware datetime, or return None."""
+    if value is None:
+        return None
+    if isinstance(value, datetime):
+        return value if value.tzinfo else pytz.UTC.localize(value)
+    s = str(value).replace("Z", "+00:00")
+    dt = datetime.fromisoformat(s)
+    if dt.tzinfo is None:
+        return pytz.UTC.localize(dt)
+    return dt
+
+
 def calculate_expiry(expiry_type: str) -> Optional[str]:
     """
     Calculate expiry timestamp based on type
@@ -86,78 +99,3 @@ def get_status_emoji(status: str) -> str:
         SignalStatus.CANCELLED: "❌",
     }
     return emoji_map.get(status, "❓")
-
-
-def format_time_remaining(expiry_time: str) -> str:
-    """
-    Format time remaining until expiry
-
-    Args:
-        expiry_time: ISO format expiry timestamp
-
-    Returns:
-        Formatted string like "2h 30m" or "Expired"
-    """
-    if not expiry_time:
-        return "No expiry"
-
-    try:
-        if isinstance(expiry_time, datetime):
-            expiry = expiry_time if expiry_time.tzinfo else pytz.UTC.localize(expiry_time)
-        else:
-            s = str(expiry_time)
-            if "+" in s or s.endswith("Z"):
-                expiry = datetime.fromisoformat(s.replace("Z", "+00:00"))
-            else:
-                expiry = pytz.UTC.localize(datetime.fromisoformat(s))
-        now = datetime.now(pytz.UTC)
-
-        if expiry.tzinfo is None:
-            expiry = pytz.UTC.localize(expiry)
-
-        remaining = expiry - now
-
-        if remaining.total_seconds() <= 0:
-            return "Expired"
-
-        days = remaining.days
-        hours = int(remaining.total_seconds() // 3600)
-        minutes = int((remaining.total_seconds() % 3600) // 60)
-
-        if days > 0:
-            return f"{days}d {hours % 24}h"
-        if hours > 0:
-            return f"{hours}h {minutes}m"
-        return f"{minutes}m"
-
-    except Exception:
-        return "Unknown"
-
-
-def calculate_pip_difference(instrument: str, price1: float, price2: float) -> float:
-    """
-    Calculate pip difference between two prices
-
-    Args:
-        instrument: Trading instrument
-        price1: First price
-        price2: Second price
-
-    Returns:
-        Pip difference
-    """
-    # Determine pip size based on instrument
-    if "JPY" in instrument.upper():
-        # JPY pairs have 0.01 as 1 pip
-        pip_size = 0.01
-    elif "XAU" in instrument.upper() or "GOLD" in instrument.upper():
-        # Gold typically uses 0.1 as 1 pip
-        pip_size = 0.1
-    elif any(crypto in instrument.upper() for crypto in ["BTC", "ETH", "CRYPTO"]):
-        # Crypto uses whole numbers as pips
-        pip_size = 1.0
-    else:
-        # Most forex pairs use 0.0001 as 1 pip
-        pip_size = 0.0001
-
-    return abs(price2 - price1) / pip_size

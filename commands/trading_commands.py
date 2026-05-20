@@ -270,7 +270,7 @@ class TradingCommands(BaseCog):
             )
             return
 
-        signals = await self.signal_db.get_active_signals_detailed(
+        signals = await self.signal_db.get_active_signals_detailed_sorted(
             instrument if instrument else None
         )
 

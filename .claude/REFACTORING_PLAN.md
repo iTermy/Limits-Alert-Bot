@@ -10,6 +10,8 @@ The `signal['id']` vs `signal['signal_id']` key mismatch is currently papered ov
 
 Total scope is meaningful but bounded — most proposals are local cleanups, not architectural changes. I count roughly **1500–2000 lines that can be removed or consolidated** without changing behavior.
 
+After completing an area, mark the section as finished and briefly state what you did in 3 sections: Location, Done, Adjacent fixes (optional), Notes (optional) 
+
 ---
 
 ## Area 1: Hot path — `on_message` → channel gate
@@ -52,54 +54,25 @@ Total scope is meaningful but bounded — most proposals are local cleanups, not
 
 ## Area 3: DB layer (`database/`, `database/signal_operations/`)
 
-### 3.1 Single shared `_parse_dt` helper
-- **Location**: `database/base_operations.py:13-28`, `database/database_manager.py:12-23`, `database/signal_operations/crud.py:12-20` (as `_to_dt`), `database/signal_operations/lifecycle.py:11-24`
-- **Current state**: Four near-identical helpers that convert ISO strings or `datetime` to tz-aware datetimes. `database_manager.py`'s version uses `__import__('pytz')` instead of a top-level `import pytz` — a code smell suggesting it was added later to avoid an import cycle that no longer exists.
-- **Proposed change**: Move one canonical `_parse_dt` to `database/signal_operations/utils.py` (which already has `calculate_expiry` and other shared helpers). Import everywhere else.
-- **Rationale**: Goal 3 + Goal 4 (`__import__` pattern is AI-smell).
-- **Risk**: Low — these are pure functions with the same contract.
-- **Behavior-preserving?**: Yes.
+### ✅ 3.1 Single shared `_parse_dt` helper
+- **Location**: `database/base_operations.py`, `database/database_manager.py`, `database/signal_operations/crud.py` (was `_to_dt`), `database/signal_operations/lifecycle.py`
+- **Done**: Canonical `_parse_dt` added to `database/signal_operations/utils.py`. All four local copies removed and replaced with an import from there. `database_manager.py`'s `__import__("pytz")` smell is gone. `crud.py`'s inner `_parse_dt_local` function inside `save_signal` also removed; the inline `from datetime import datetime` / `import pytz` / `from database.models import LimitStatus, SignalStatus` duplicate imports inside `save_signal` removed. `calculate_expiry` import in `crud.py` moved to module level.
 
-### 3.2 Drop unused DB methods
-- **Location**: `database/base_operations.py:184-208` (`check_stop_loss_hit`), `265-281` (`mark_hit_alert_sent`, `mark_approaching_alert_sent`); `database/database_manager.py` matching delegates; `database/signal_operations/lifecycle.py:427-473` (`check_and_update_stop_loss`)
-- **Current state**:
-  - `check_stop_loss_hit` / `check_and_update_stop_loss`: never called from the hot path. Streaming monitor does its own SL check inline in `streaming_monitor._check_stop_loss` (correct — it needs to coordinate with the alert system, not just flip DB status).
-  - `mark_hit_alert_sent`: never called. The flag is already set inside `mark_limit_hit` (line 152).
-  - `mark_approaching_alert_sent` (on DB): streaming monitor uses its own inline query `_mark_approaching_sent` (`streaming_monitor.py:756-763`).
-- **Proposed change**: Delete the three DB methods + their delegate wrappers. Either keep `_mark_approaching_sent` inline in `streaming_monitor` (preferred, since it's a single 1-line UPDATE) **or** unify on the DB method — but pick one.
-- **Rationale**: Goal 2 (dead code) + Goal 1 (two paths to the same write is a hot-path smell).
-- **Risk**: Low for the deletes; **Medium** if you choose to consolidate the approaching-sent path — touches the price-tick code. Recommend the simpler delete-only path.
-- **Behavior-preserving?**: Yes.
+### ✅ 3.2 Drop unused DB methods
+- **Location**: `database/base_operations.py`, `database/database_manager.py`, `database/signal_operations/lifecycle.py`
+- **Done**: Deleted `check_stop_loss_hit`, `mark_approaching_alert_sent`, `mark_hit_alert_sent` from `base_operations.py` and their delegate wrappers from `database_manager.py`. Deleted `check_and_update_stop_loss` from `lifecycle.py`. `_mark_approaching_sent` stays inline in `streaming_monitor` (single 1-line UPDATE, correct path).
 
-### 3.3 Drop the unused `insert_signal` / `insert_limits` two-step path
-- **Location**: `database/base_operations.py:49-88`, `database/database_manager.py:66-100`
-- **Current state**: `insert_signal` + `insert_limits` were the original non-atomic creation path. The active path is `crud.save_signal` which does both in one transaction. `insert_signal`/`insert_limits` are still exposed as public methods on `DatabaseManager` but nothing calls them.
-- **Proposed change**: Delete both, plus their delegates.
-- **Rationale**: Goal 2.
-- **Risk**: Low — confirmed unused.
-- **Behavior-preserving?**: Yes.
+### ✅ 3.3 Drop the unused `insert_signal` / `insert_limits` two-step path
+- **Location**: `database/base_operations.py`, `database/database_manager.py`
+- **Done**: Deleted both methods and their delegate wrappers. Active path remains `crud.save_signal` (atomic transaction).
 
-### 3.4 Collapse `get_active_signals_detailed` and `get_active_signals_detailed_sorted`
-- **Location**: `database/signal_operations/crud.py:249-413`
-- **Current state**: Two methods (~160 lines combined) that share 95% of their body. The "sorted" variant adds an `ORDER BY` clause, an optional `LIMIT`, and an extra column (`first_pending_limit`) that it then `pop`s back out. `get_active_signals_detailed` is called once externally; `get_active_signals_detailed_sorted` is called from a few places.
-- **Proposed change**: Delete `get_active_signals_detailed`. Make `get_active_signals_detailed_sorted` the single implementation, defaulting `sort_by='recent', limit=None` (which matches the deleted method's behaviour). Drop the `first_pending_limit` SELECT entirely — it's added then discarded.
-- **Rationale**: Goal 1/2/3.
-- **Risk**: Medium — changes a query shape used by `!active` and report commands. Need to verify both branches return the same column shape after collapse.
-- **Behavior-preserving?**: Yes if the dropped column is genuinely unused (it is — `pop`'d immediately).
+### ✅ 3.4 Collapse `get_active_signals_detailed` and `get_active_signals_detailed_sorted`
+- **Location**: `database/signal_operations/crud.py`, `database/signal_operations/__init__.py`, `commands/trading_commands.py`
+- **Done**: Deleted `get_active_signals_detailed` (~80 lines) and its `SignalDatabase` delegate. Removed `first_pending_limit` from the SELECT in `get_active_signals_detailed_sorted`. Updated the one external caller in `trading_commands.py` to use `get_active_signals_detailed_sorted`. Inline `from .utils import get_status_emoji` imports inside the loop moved to module-level import.
 
-### 3.5 Normalise `signal['id']` → `signal['signal_id']` once at the DB layer
-- **Location**: `database/signal_operations/crud.py:138-167` (`get_signal_with_limits`); call sites in `discord_handlers/message_handler.py` (~6 sites), `core/expiry_manager.py:82-84`, `price_feeds/alert_system.py` (~4 sites in `update_embed_for_signal_id`, `reactivate_embed`).
-- **Current state**: CLAUDE.md documents this as a "critical gotcha". Every call site that hands a signal dict to the alert system has to do:
-  ```python
-  sig = dict(signal)
-  if 'signal_id' not in sig:
-      sig['signal_id'] = sig.get('id')
-  ```
-  This pattern appears 6+ times across the codebase.
-- **Proposed change**: In `CrudOperations.get_signal_with_limits` (and `get_signal_by_message_id`), add `signal['signal_id'] = signal['id']` before returning. Then delete the patch-up code everywhere else. The CLAUDE.md "gotcha" section can go.
-- **Rationale**: Goal 1 (eliminates a recurring lookup-then-dict-copy step on the hot path for embeds) + Goal 4 (this is the textbook "abstraction missing at the boundary" smell).
-- **Risk**: Low — adds a redundant key but doesn't remove `id`. Existing callers that read `signal['id']` keep working.
-- **Behavior-preserving?**: Yes.
+### ✅ 3.5 Normalise `signal['id']` → `signal['signal_id']` once at the DB layer
+- **Location**: `database/signal_operations/crud.py`, call sites in `discord_handlers/message_handler.py`, `core/expiry_manager.py`, `price_feeds/alert_system.py`
+- **Done**: `get_signal_with_limits` and `get_signal_by_message_id` now both set `signal["signal_id"] = signal["id"]` before returning. Removed all 8 call-site normalization patches (dict copies + conditional key assignment). CLAUDE.md "gotcha" section removed.
 
 ### 3.6 Inline or rename `SignalDatabase` wrappers
 - **Location**: `database/signal_operations/__init__.py` (the entire `SignalDatabase` class, ~270 lines)
@@ -117,13 +90,10 @@ Total scope is meaningful but bounded — most proposals are local cleanups, not
 - **Risk**: Medium — same blast radius as 3.6. Best done together.
 - **Behavior-preserving?**: Yes.
 
-### 3.8 Drop unused `format_time_remaining` / `calculate_pip_difference` / `get_status_emoji` duplicates
-- **Location**: `database/signal_operations/utils.py:86-130, 133-159`, `utils/formatting.py:56-71`
-- **Current state**: `get_status_emoji` exists in both `database/signal_operations/utils.py` and `utils/formatting.py` with different return values. `format_time_remaining` is only used inside the same utils.py file (and crud.py inlines an equivalent calculation instead of calling it). `calculate_pip_difference` is never called.
-- **Proposed change**: Delete `format_time_remaining` and `calculate_pip_difference`. Consolidate `get_status_emoji` — pick one location. Inline the time-remaining math into `crud.py` (already inlined; just delete the dead helper).
-- **Rationale**: Goal 2.
-- **Risk**: Low.
-- **Behavior-preserving?**: Yes.
+### ✅ 3.8 Drop unused `format_time_remaining` / `calculate_pip_difference` / `get_status_emoji` duplicates (partial)
+- **Location**: `database/signal_operations/utils.py`
+- **Done**: Deleted `format_time_remaining` (~44 lines) and `calculate_pip_difference` (~20 lines).
+- **Skipped**: `get_status_emoji` consolidation — the two copies (`database/signal_operations/utils.py` and `utils/formatting.py`) have different emoji values for `profit` ("✅" vs "💰") and the `utils/formatting.py` version checks for `"stoploss"` which doesn't match the DB value `"stop_loss"`. Consolidating requires a deliberate choice about which emoji set to use; skipped to avoid a silent visual regression.
 
 ---
 

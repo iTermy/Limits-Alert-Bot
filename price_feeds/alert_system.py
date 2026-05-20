@@ -696,9 +696,6 @@ class AlertSystem:
                     if self.bot and hasattr(self.bot, "signal_db") and self.bot.signal_db:
                         try:
                             sig_data = await self.bot.signal_db.get_signal_with_limits(signal_id)
-                            if sig_data and "signal_id" not in sig_data:
-                                sig_data = dict(sig_data)
-                                sig_data["signal_id"] = sig_data.get("id", signal_id)
                         except Exception as _fetch_err:
                             logger.warning(
                                 f"Could not fetch signal {signal_id} from DB for archive: {_fetch_err}"
@@ -1348,7 +1345,7 @@ class AlertSystem:
         If the persistent embed was previously auto-deleted (end-state deletion), a new
         message is sent to the alert channel — the signal is effectively re-announced.
         """
-        signal_id = signal.get("signal_id") or signal.get("id")
+        signal_id = signal["signal_id"]
         if signal_id is None:
             return False
 
@@ -1372,10 +1369,6 @@ class AlertSystem:
                 logger.warning(
                     f"Could not delete finished-channel embed for signal {signal_id}: {e}"
                 )
-
-        # Normalise signal dict so it always has signal_id
-        signal = dict(signal)
-        signal["signal_id"] = signal_id
 
         # Fetch fresh limits from DB
         limits = await self._fetch_limits(signal)
@@ -1548,10 +1541,6 @@ class AlertSystem:
             if not signal:
                 logger.warning(f"update_embed_for_signal_id: signal {signal_id} not found in DB")
                 return False
-            # Normalise key: update_signal_message expects signal["signal_id"]
-            if "signal_id" not in signal:
-                signal = dict(signal)
-                signal["signal_id"] = signal.get("id", signal_id)
             # Reactivation needs special handling to show live state + current price
             if event == "reactivated":
                 return await self.reactivate_embed(signal=signal, ping_text=ping_text)

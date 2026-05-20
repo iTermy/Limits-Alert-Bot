@@ -365,7 +365,13 @@ class MessageHandler:
                     logger.debug(f"Processing reactivate command for signal {signal_id}")
                     # Only allow if signal was cancelled
                     if signal["status"] == "cancelled":
-                        # Try to get the original message to re-parse
+                        # Try to fetch and re-parse the original message. If it no longer
+                        # exists (e.g. deleted for toll signals after archive move), fall
+                        # through to reactivation using DB state only — parsed_signal is
+                        # not used by reactivate_cancelled_signal's implementation.
+                        from core.parser import parse_signal
+
+                        parsed = None
                         if signal.get("message_id") and signal.get("channel_id"):
                             try:
                                 original_channel = self.bot.get_channel(int(signal["channel_id"]))
@@ -376,39 +382,26 @@ class MessageHandler:
                                 original_message = await original_channel.fetch_message(
                                     int(signal["message_id"])
                                 )
-
-                                from core.parser import parse_signal
-
                                 channel_name = self.get_channel_name(int(signal["channel_id"]))
                                 parsed = parse_signal(original_message.content, channel_name)
-
-                                if parsed:
-                                    success = await asyncio.wait_for(
-                                        self.signal_db.reactivate_cancelled_signal(
-                                            signal_id, parsed
-                                        ),
-                                        timeout=5.0,
-                                    )
-                                    if success:
-                                        action_taken = "reactivated"
-                                        # Mark NM-immune so the monitor can't auto-cancel again
-                                        if (
-                                            hasattr(self.bot, "monitor")
-                                            and self.bot.monitor
-                                            and hasattr(self.bot.monitor, "nm_monitor")
-                                        ):
-                                            self.bot.monitor.nm_monitor.mark_immune(signal_id)
-                                else:
-                                    await message.reply(
-                                        "❌ Cannot reactivate - failed to parse original signal."
-                                    )
-                                    return
                             except Exception as e:
-                                logger.error(f"Error getting original message: {e}")
-                                await message.reply(
-                                    "❌ Cannot reactivate - original signal message not found."
+                                logger.info(
+                                    f"Could not fetch original message for signal {signal_id} "
+                                    f"— reactivating from DB state: {e}"
                                 )
-                                return
+
+                        success = await asyncio.wait_for(
+                            self.signal_db.reactivate_cancelled_signal(signal_id, parsed),
+                            timeout=5.0,
+                        )
+                        if success:
+                            action_taken = "reactivated"
+                            if (
+                                hasattr(self.bot, "monitor")
+                                and self.bot.monitor
+                                and hasattr(self.bot.monitor, "nm_monitor")
+                            ):
+                                self.bot.monitor.nm_monitor.mark_immune(signal_id)
                     else:
                         await message.reply(
                             f"❌ Signal is not cancelled (current status: {signal['status']})"
@@ -494,22 +487,15 @@ class MessageHandler:
                             f"manually {action_taken.lower()} (by {message.author.display_name})"
                         )
                         try:
-                            # get_signal_with_limits returns 'id', not 'signal_id' —
-                            # normalise so update_signal_message can find the embed
-                            _signal_for_update = dict(signal)
-                            if "signal_id" not in _signal_for_update:
-                                _signal_for_update["signal_id"] = _signal_for_update.get(
-                                    "id", signal_id
-                                )
                             if embed_event == "reactivated":
                                 # Rebuild embed with correct live state (approaching/hit) + current price
                                 await self.alert_system.reactivate_embed(
-                                    signal=_signal_for_update,
+                                    signal=signal,
                                     ping_text=ping_text,
                                 )
                             else:
                                 await self.alert_system.update_signal_message(
-                                    signal=_signal_for_update,
+                                    signal=signal,
                                     event=embed_event,
                                     ping_text=ping_text,
                                 )
@@ -867,35 +853,36 @@ class MessageHandler:
                         pass  # Reaction might not exist
                     await referenced.add_reaction("❌")
 
-                    _sig_id_for_check = signal.get("signal_id") or signal.get("id")
+                    _sig_id_for_check = signal["signal_id"]
                     has_alert_embed = (
                         self.alert_system and _sig_id_for_check in self.alert_system.signal_messages
                     )
                     if not has_alert_embed:
-                        # No approaching embed was ever sent — delete the original signal
-                        # message immediately and send a cancellation embed straight to
-                        # the finished-signals channel so there's still a record.
-                        try:
-                            await referenced.delete()
-                            logger.info(
-                                f"Deleted original signal message {referenced.id} "
-                                f"(signal {_sig_id_for_check} cancelled with no alert embed)"
-                            )
-                        except Exception as _de:
-                            logger.warning(
-                                f"Could not delete original signal message {referenced.id}: {_de}"
-                            )
+                        # No approaching embed was ever sent.
+                        # For gold-toll channels: delete the original message and archive.
+                        # For all other channels: the ❌ reaction is sufficient.
+                        is_toll = (
+                            self.alert_system
+                            and str(referenced.channel.id) in self.alert_system.toll_channel_ids
+                        )
+                        if is_toll:
+                            try:
+                                await referenced.delete()
+                                logger.info(
+                                    f"Deleted original signal message {referenced.id} "
+                                    f"(signal {_sig_id_for_check} cancelled with no alert embed)"
+                                )
+                            except Exception as _de:
+                                logger.warning(
+                                    f"Could not delete original signal message {referenced.id}: {_de}"
+                                )
 
-                        # Send cancellation embed directly to finished-signals channel.
-                        if self.alert_system:
+                        # Send cancellation embed to finished-signals (toll channels only)
+                        if is_toll and self.alert_system:
                             try:
                                 finished_channel = self.alert_system._get_finished_channel()
                                 if finished_channel:
                                     from price_feeds.alert_system import _build_signal_embed
-
-                                    _sig_for_embed = dict(signal)
-                                    if "signal_id" not in _sig_for_embed:
-                                        _sig_for_embed["signal_id"] = _sig_id_for_check
 
                                     guild_id_val = signal.get("guild_id")
                                     if not guild_id_val and self.bot and self.bot.guilds:
@@ -920,7 +907,7 @@ class MessageHandler:
                                         )
 
                                     cancel_embed = _build_signal_embed(
-                                        signal=_sig_for_embed,
+                                        signal=signal,
                                         limits=_embed_limits,
                                         event="cancelled",
                                         guild_id=guild_id_val,
@@ -971,9 +958,6 @@ class MessageHandler:
 
                 # Update the persistent alert embed and send a ping saying who manually changed it
                 if self.alert_system:
-                    _sig_id = signal.get("signal_id") or signal.get("id")
-                    _signal_for_update = dict(signal)
-                    _signal_for_update["signal_id"] = _sig_id
                     event_map = {
                         "cancelled": "cancelled",
                         "marked as PROFIT": "profit",
@@ -1001,12 +985,12 @@ class MessageHandler:
                             if embed_event == "reactivated":
                                 # Rebuild embed with correct live state (approaching/hit) + current price
                                 await self.alert_system.reactivate_embed(
-                                    signal=_signal_for_update,
+                                    signal=signal,
                                     ping_text=ping_text,
                                 )
                             else:
                                 await self.alert_system.update_signal_message(
-                                    signal=_signal_for_update,
+                                    signal=signal,
                                     event=embed_event,
                                     ping_text=ping_text,
                                 )
@@ -1153,17 +1137,12 @@ class MessageHandler:
                                 existing["id"]
                             )
                             if updated_signal:
-                                _sig_id = updated_signal.get("signal_id") or updated_signal.get(
-                                    "id"
-                                )
-                                _signal_for_update = dict(updated_signal)
-                                _signal_for_update["signal_id"] = _sig_id
                                 ping_text = (
                                     f"♻️ **{updated_signal['instrument']}** {updated_signal['direction'].upper()} — "
                                     f"signal reactivated by sender (edited)"
                                 )
                                 await self.alert_system.update_signal_message(
-                                    signal=_signal_for_update,
+                                    signal=updated_signal,
                                     event="reactivated",
                                     ping_text=ping_text,
                                 )
@@ -1191,15 +1170,12 @@ class MessageHandler:
                     try:
                         updated_signal = await self.signal_db.get_signal_with_limits(existing["id"])
                         if updated_signal:
-                            _sig_id = updated_signal.get("signal_id") or updated_signal.get("id")
-                            _signal_for_update = dict(updated_signal)
-                            _signal_for_update["signal_id"] = _sig_id
                             ping_text = (
                                 f"📝 **{updated_signal['instrument']}** {updated_signal['direction'].upper()} — "
                                 f"signal updated by sender"
                             )
                             await self.alert_system.update_signal_message(
-                                signal=_signal_for_update,
+                                signal=updated_signal,
                                 event="edited",
                                 ping_text=ping_text,
                             )
@@ -1236,9 +1212,9 @@ class MessageHandler:
                         str(payload.message_id)
                     )
                     if cancelled_signal:
-                        sig_id = cancelled_signal.get("id") or cancelled_signal.get("signal_id")
-                        if sig_id:
-                            await self.alert_system.update_embed_for_signal_id(sig_id, "cancelled")
+                        await self.alert_system.update_embed_for_signal_id(
+                            cancelled_signal["id"], "cancelled"
+                        )
                 except Exception as _ue:
                     self.logger.warning(
                         f"Could not update embed after message delete cancel: {_ue}"

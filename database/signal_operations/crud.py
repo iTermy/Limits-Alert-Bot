@@ -8,20 +8,10 @@ from typing import Any, Dict, List, Optional, Tuple
 import pytz
 
 from core.parser import ParsedSignal
-from database.models import SignalStatus
+from database.models import LimitStatus, SignalStatus
 from utils.logger import get_logger
 
-
-def _to_dt(value) -> datetime:
-    """Return a timezone-aware datetime from either a datetime object or an ISO string."""
-    if isinstance(value, datetime):
-        return value if value.tzinfo else pytz.UTC.localize(value)
-    s = str(value).replace("Z", "+00:00")
-    dt = datetime.fromisoformat(s)
-    if dt.tzinfo is None:
-        return pytz.UTC.localize(dt)
-    return dt
-
+from .utils import _parse_dt, calculate_expiry, get_status_emoji
 
 logger = get_logger("signal_db.crud")
 
@@ -70,28 +60,10 @@ class CrudOperations:
                 logger.warning(f"Signal already exists for message {message_id}")
                 return False, existing["id"]
 
-            # Calculate expiry time
-            from .utils import calculate_expiry
-
             expiry_time = calculate_expiry(parsed_signal.expiry_type)
 
             # Insert signal and its limits atomically in a single transaction
             # so we never end up with a signal row that has no limit rows.
-            from datetime import datetime
-
-            import pytz
-
-            from database.models import LimitStatus, SignalStatus
-
-            def _parse_dt_local(value):
-                if value is None:
-                    return None
-                if isinstance(value, datetime):
-                    return value if value.tzinfo else pytz.UTC.localize(value)
-                s = str(value).replace("Z", "+00:00")
-                dt = datetime.fromisoformat(s)
-                return dt if dt.tzinfo else pytz.UTC.localize(dt)
-
             async with self.db.get_connection() as conn:
                 signal_id = await conn.fetchval(
                     """
@@ -108,7 +80,7 @@ class CrudOperations:
                     parsed_signal.direction,
                     parsed_signal.stop_loss,
                     parsed_signal.expiry_type,
-                    _parse_dt_local(expiry_time),
+                    _parse_dt(expiry_time),
                     len(parsed_signal.limits) if parsed_signal.limits else 0,
                     SignalStatus.ACTIVE,
                     getattr(parsed_signal, "scalp", False),
@@ -137,17 +109,12 @@ class CrudOperations:
             return False, None
 
     async def get_signal_by_message_id(self, message_id: str) -> Optional[Dict[str, Any]]:
-        """
-        Get signal by Discord message ID
-
-        Args:
-            message_id: Discord message ID
-
-        Returns:
-            Signal data or None
-        """
+        """Get signal by Discord message ID."""
         query = "SELECT * FROM signals WHERE message_id = $1"
-        return await self.db.fetch_one(query, (message_id,))
+        signal = await self.db.fetch_one(query, (message_id,))
+        if signal is not None:
+            signal["signal_id"] = signal["id"]
+        return signal
 
     async def get_signal_with_limits(self, signal_id: int) -> Optional[Dict[str, Any]]:
         """
@@ -177,6 +144,7 @@ class CrudOperations:
         signal["limits"] = limits
         signal["pending_limits"] = [l for l in limits if l["status"] == "pending"]
         signal["hit_limits"] = [l for l in limits if l["status"] == "hit"]
+        signal["signal_id"] = signal["id"]
 
         return signal
 
@@ -269,86 +237,6 @@ class CrudOperations:
             logger.error(f"Error updating signal from edit: {e}", exc_info=True)
             return False
 
-    async def get_active_signals_detailed(self, instrument: str = None) -> List[Dict[str, Any]]:
-        """
-        Get detailed active signals (ACTIVE or HIT status) with limits
-
-        Args:
-            instrument: Optional filter by instrument
-
-        Returns:
-            List of signals with detailed information
-        """
-        # Build query
-        base_query = """
-            SELECT 
-                s.*,
-                COUNT(DISTINCT l.id) as total_limit_count,
-                COUNT(DISTINCT CASE WHEN l.status = 'hit' THEN l.id END) as hit_limit_count,
-                STRING_AGG(
-                    (CASE WHEN l.status = 'pending' THEN l.price_level END)::TEXT, ',' ORDER BY l.sequence_number) as pending_limits_str,
-                STRING_AGG(
-                    (CASE WHEN l.status = 'hit' THEN l.price_level END)::TEXT, ',' ORDER BY l.sequence_number) as hit_limits_str
-            FROM signals s
-            LEFT JOIN limits l ON s.id = l.signal_id
-            WHERE s.status IN ($1, $2)
-        """
-
-        params = [SignalStatus.ACTIVE, SignalStatus.HIT]
-
-        if instrument:
-            base_query += " AND s.instrument = $3"
-            params.append(instrument)
-
-        base_query += " GROUP BY s.id ORDER BY s.created_at DESC"
-
-        signals = await self.db.fetch_all(base_query, tuple(params))
-
-        # Enhance with additional data
-        for signal in signals:
-            # Parse limit strings into lists
-            signal["pending_limits"] = []
-            signal["hit_limits"] = []
-
-            if signal.get("pending_limits_str"):
-                signal["pending_limits"] = [
-                    float(p) for p in signal["pending_limits_str"].split(",")
-                ]
-
-            if signal.get("hit_limits_str"):
-                signal["hit_limits"] = [float(p) for p in signal["hit_limits_str"].split(",")]
-
-            # Remove temporary string fields
-            signal.pop("pending_limits_str", None)
-            signal.pop("hit_limits_str", None)
-
-            # Add time remaining for expiry
-            if signal.get("expiry_time"):
-                expiry = _to_dt(signal["expiry_time"])
-                now = datetime.now(pytz.UTC)
-                if expiry.tzinfo is None:
-                    expiry = pytz.UTC.localize(expiry)
-
-                remaining = expiry - now
-                if remaining.total_seconds() > 0:
-                    hours = int(remaining.total_seconds() // 3600)
-                    minutes = int((remaining.total_seconds() % 3600) // 60)
-                    signal["time_remaining"] = f"{hours}h {minutes}m"
-                else:
-                    signal["time_remaining"] = "Expired"
-            else:
-                signal["time_remaining"] = "No expiry"
-
-            # Add status display info
-            from .utils import get_status_emoji
-
-            signal["status_emoji"] = get_status_emoji(signal["status"])
-            signal["progress"] = (
-                f"{signal['hit_limit_count']}/{signal['total_limit_count']} limits hit"
-            )
-
-        return signals
-
     async def get_active_signals_detailed_sorted(
         self, instrument: str = None, sort_by: str = "recent", limit: int = None
     ) -> List[Dict[str, Any]]:
@@ -365,15 +253,14 @@ class CrudOperations:
         """
         # Build query
         base_query = """
-            SELECT 
+            SELECT
                 s.*,
                 COUNT(DISTINCT l.id) as total_limit_count,
                 COUNT(DISTINCT CASE WHEN l.status = 'hit' THEN l.id END) as hit_limit_count,
                 STRING_AGG(
                     (CASE WHEN l.status = 'pending' THEN l.price_level END)::TEXT, ',' ORDER BY l.sequence_number) as pending_limits_str,
                 STRING_AGG(
-                    (CASE WHEN l.status = 'hit' THEN l.price_level END)::TEXT, ',' ORDER BY l.sequence_number) as hit_limits_str,
-                MIN(CASE WHEN l.status = 'pending' THEN l.price_level END) as first_pending_limit
+                    (CASE WHEN l.status = 'hit' THEN l.price_level END)::TEXT, ',' ORDER BY l.sequence_number) as hit_limits_str
             FROM signals s
             LEFT JOIN limits l ON s.id = l.signal_id
             WHERE s.status IN ($1, $2)
@@ -418,14 +305,10 @@ class CrudOperations:
 
             signal.pop("pending_limits_str", None)
             signal.pop("hit_limits_str", None)
-            signal.pop("first_pending_limit", None)
 
             if signal.get("expiry_time"):
-                expiry = _to_dt(signal["expiry_time"])
+                expiry = _parse_dt(signal["expiry_time"])
                 now = datetime.now(pytz.UTC)
-                if expiry.tzinfo is None:
-                    expiry = pytz.UTC.localize(expiry)
-
                 remaining = expiry - now
                 if remaining.total_seconds() > 0:
                     hours = int(remaining.total_seconds() // 3600)
@@ -435,8 +318,6 @@ class CrudOperations:
                     signal["time_remaining"] = "Expired"
             else:
                 signal["time_remaining"] = "No expiry"
-
-            from .utils import get_status_emoji
 
             signal["status_emoji"] = get_status_emoji(signal["status"])
             signal["progress"] = (

@@ -77,11 +77,6 @@ class ExpiryManager:
             self.logger.warning(f"Could not fetch signal {sig_id} after expiry")
             return
 
-        # Normalise key so alert_system methods work
-        if "signal_id" not in signal:
-            signal = dict(signal)
-            signal["signal_id"] = signal.get("id", sig_id)
-
         # ── 3a. Update the persistent embed (approaching alert or hit embed) ──
         if alert_system and sig_id in alert_system.signal_messages:
             try:

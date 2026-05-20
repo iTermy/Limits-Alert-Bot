@@ -45,18 +45,19 @@ database/
   __init__.py                   Loads .env; exposes global db (DatabaseManager) and initialize_signal_db()
   connection.py                 asyncpg pool; execute/fetch helpers; params as $1,$2,... positional args
   database_manager.py           Extends connection; delegates to BaseOperations; re-exports status constants
-  base_operations.py            Core CRUD: insert_signal, insert_limits, update_signal_status
-                                  (validates transitions), mark_limit_hit, get_active_signals_for_tracking
+  base_operations.py            Core ops: update_signal_status (validates transitions),
+                                  mark_limit_hit, get_active_signals_for_tracking
   models.py                     SignalStatus, LimitStatus, ChangeType, Direction, StatusTransitions
   schema.py                     DDL for all 7 tables + indexes + idempotent migrations
   signal_operations/
     __init__.py                 SignalDatabase coordinator; delegates to crud/lifecycle/analytics
-    crud.py                     get_signal_with_limits() returns key 'id' (not 'signal_id');
+    crud.py                     get_signal_with_limits() and get_signal_by_message_id() both return
+                                  signal dict with both 'id' and 'signal_id' keys (same value);
                                   save_signal(), get_active_signals_detailed_sorted() (sort: recent/oldest/progress)
     lifecycle.py                cancel, reactivate, manually_set_signal_status (bypasses validation),
                                   process_limit_hit, expire_old_signals
     analytics.py                get_statistics(), performance by period
-    utils.py                    calculate_expiry() (day_end → 4:45 PM EST), pip helpers, format_time_remaining()
+    utils.py                    calculate_expiry() (day_end → 4:45 PM EST), _parse_dt(), get_status_emoji()
 
 price_feeds/
   price_stream_manager.py       Coordinates all three feeds; calculates spread if missing (ask − bid);
@@ -328,20 +329,10 @@ Priority order:
 
 ## Critical Conventions / Gotchas
 
-### `signal['id']` vs `signal['signal_id']`
-Every DB query (`get_signal_with_limits`, `get_signal_by_message_id`, etc.) returns a dict with key `'id'`. `AlertSystem.update_signal_message()` and `_build_signal_embed()` expect `'signal_id'`. Always normalize before calling:
-```python
-sig = dict(signal)
-if 'signal_id' not in sig:
-    sig['signal_id'] = sig.get('id')
-await alert_system.update_signal_message(signal=sig, event=..., ping_text=...)
-```
-Or use `update_embed_for_signal_id(signal_id, event)` which handles this automatically.
-
 ### asyncpg parameter passing
 - Raw `conn.execute(query, val1, val2)` — positional splat, `$1`/`$2`/... placeholders
 - Wrapper `db.execute(query, (val1, val2))` — takes a **tuple**, unpacks with `*params` internally
-- Timestamps come back as native `datetime` objects — never pass to `datetime.fromisoformat()`. Use `_parse_dt()` helpers (handle both `datetime` and ISO strings)
+- Timestamps come back as native `datetime` objects — never pass to `datetime.fromisoformat()`. Use `_parse_dt` from `database.signal_operations.utils` (handles both `datetime` and ISO strings; single canonical copy)
 - `ROUND(x, 2)` in PostgreSQL requires `CAST(... AS NUMERIC)`, not `CAST(... AS FLOAT)`
 
 ### NM immunity after reactivation
@@ -363,8 +354,16 @@ Spread-hour and news cancels **edit the persistent embed** when one already exis
 `signals.stop_loss` is `NOT NULL`. Toll channels auto-calculate SL from limits; general-tolls derives SL from message numbers. Any new channel or parse path that doesn't produce a SL value will fail on insert.
 
 ### Reply command authorization
-- Reply to an **alert embed**: any user can execute reply commands
+- Reply to an **alert embed**: any user can execute reply commands; this includes embeds in the finished-signals channel (e.g. `reactivate` works from there)
 - Reply to the **original signal message** (has ✅ reaction): signal author **or** admins only
+
+### Cancel via original signal message reply (no prior alert embed)
+When `cancel` is replied to the original signal message and no approaching/hit embed exists yet:
+- **Gold-toll channels** (`alert_system.toll_channel_ids`): original message is deleted and a cancellation embed is posted to the finished-signals channel
+- **All other channels**: ❌ reaction is added to the original message; it is **not** deleted
+
+### Reactivate when original message is gone
+`reactivate_cancelled_signal` in `lifecycle.py` does not use its `parsed_signal` argument — it reactivates purely from DB state. The reactivate reply handler in `check_alert_management_reply` tries to fetch and re-parse the original message but falls back gracefully if it has been deleted (e.g. toll signals after archive move). Pass `None` as `parsed_signal` and reactivation proceeds.
 
 ### Message handler runs before prefix commands
 `bot.on_message()` calls `message_handler.handle_new_message()` before `await self.process_commands(message)`. Reply commands are fully handled in the message handler and are not registered as bot commands.

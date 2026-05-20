@@ -10,22 +10,7 @@ from .base_operations import BaseOperations
 from .connection import DatabaseManager as BaseConnectionManager
 from .models import LimitStatus, SignalStatus, StatusTransitions
 from .schema import initialize_database
-
-
-def _parse_dt(value):
-    """Convert ISO string or datetime to timezone-aware datetime, or None."""
-    if value is None:
-        return None
-    if hasattr(value, "tzinfo"):
-        return value if value.tzinfo else __import__("pytz").UTC.localize(value)
-    from datetime import datetime
-
-    s = str(value).replace("Z", "+00:00")
-    dt = datetime.fromisoformat(s)
-    if dt.tzinfo is None:
-        return __import__("pytz").UTC.localize(dt)
-    return dt
-
+from .signal_operations.utils import _parse_dt
 
 logger = get_logger("database")
 
@@ -66,58 +51,6 @@ class DatabaseManager(BaseConnectionManager):
         await initialize_database(self)
         logger.info("Database manager initialized successfully")
 
-    # Delegate all operations to the operations handler
-    async def insert_signal(
-        self,
-        message_id: str,
-        channel_id: str,
-        instrument: str,
-        direction: str,
-        stop_loss: float,
-        expiry_type: str = None,
-        expiry_time: str = None,
-        total_limits: int = 0,
-        scalp: bool = False,
-    ) -> int:
-        """
-        Insert a new signal with enhanced tracking
-
-        Args:
-            message_id: Discord message ID
-            channel_id: Discord channel ID
-            instrument: Trading instrument (e.g., GBPUSD)
-            direction: Trade direction (long/short)
-            stop_loss: Stop loss price
-            expiry_type: Expiry type (day_end, week_end, etc.)
-            expiry_time: Calculated expiry timestamp
-            total_limits: Total number of limit orders
-            scalp: Whether this is a scalp signal
-
-        Returns:
-            Signal ID
-        """
-        return await self._ops.insert_signal(
-            message_id,
-            channel_id,
-            instrument,
-            direction,
-            stop_loss,
-            expiry_type,
-            expiry_time,
-            total_limits,
-            scalp,
-        )
-
-    async def insert_limits(self, signal_id: int, price_levels: List[float]):
-        """
-        Insert limits for a signal with sequence numbers
-
-        Args:
-            signal_id: Parent signal ID
-            price_levels: List of limit prices (ordered)
-        """
-        return await self._ops.insert_limits(signal_id, price_levels)
-
     async def update_signal_status(
         self, signal_id: int, new_status: str, change_type: str = "automatic", reason: str = None
     ) -> bool:
@@ -148,19 +81,6 @@ class DatabaseManager(BaseConnectionManager):
         """
         return await self._ops.mark_limit_hit(limit_id, hit_price)
 
-    async def check_stop_loss_hit(self, signal_id: int, current_price: float) -> bool:
-        """
-        Check if stop loss has been hit and update status if needed
-
-        Args:
-            signal_id: Signal ID
-            current_price: Current market price
-
-        Returns:
-            True if stop loss was hit
-        """
-        return await self._ops.check_stop_loss_hit(signal_id, current_price)
-
     async def get_active_signals_for_tracking(self) -> List[Dict[str, Any]]:
         """
         Get all signals that need price tracking (ACTIVE or HIT status)
@@ -169,30 +89,6 @@ class DatabaseManager(BaseConnectionManager):
             List of signals with their pending limits
         """
         return await self._ops.get_active_signals_for_tracking()
-
-    async def mark_approaching_alert_sent(self, limit_id: int) -> bool:
-        """
-        Mark that an approaching alert has been sent for a limit
-
-        Args:
-            limit_id: Limit ID
-
-        Returns:
-            Success status
-        """
-        return await self._ops.mark_approaching_alert_sent(limit_id)
-
-    async def mark_hit_alert_sent(self, limit_id: int) -> bool:
-        """
-        Mark that a hit alert has been sent for a limit
-
-        Args:
-            limit_id: Limit ID
-
-        Returns:
-            Success status
-        """
-        return await self._ops.mark_hit_alert_sent(limit_id)
 
     async def get_hit_limits_for_signal(self, signal_id: int) -> List[Dict[str, Any]]:
         """Return all hit limits for a signal with hit_price for P&L calculations."""

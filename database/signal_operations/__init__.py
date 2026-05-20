@@ -86,18 +86,6 @@ class SignalDatabase:
         """
         return await self._crud.update_signal_from_edit(message_id, parsed_signal)
 
-    async def get_active_signals_detailed(self, instrument: str = None) -> List[Dict[str, Any]]:
-        """
-        Get detailed active signals (ACTIVE or HIT status) with limits
-
-        Args:
-            instrument: Optional filter by instrument
-
-        Returns:
-            List of signals with detailed information
-        """
-        return await self._crud.get_active_signals_detailed(instrument)
-
     async def get_active_signals_detailed_sorted(
         self, instrument: str = None, sort_by: str = "recent", limit: int = None
     ) -> List[Dict[str, Any]]:

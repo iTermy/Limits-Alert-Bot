@@ -9,28 +9,9 @@ import pytz
 
 from core.parser import ParsedSignal
 from database.models import SignalStatus
-
-
-def _parse_dt(value):
-    """Convert ISO string or datetime to timezone-aware datetime, or None."""
-    if value is None:
-        return None
-    if hasattr(value, "tzinfo"):
-        import pytz
-
-        return value if value.tzinfo else pytz.UTC.localize(value)
-    from datetime import datetime
-
-    import pytz
-
-    s = str(value).replace("Z", "+00:00")
-    dt = datetime.fromisoformat(s)
-    if dt.tzinfo is None:
-        return pytz.UTC.localize(dt)
-    return dt
-
-
 from utils.logger import get_logger
+
+from .utils import _parse_dt
 
 logger = get_logger("signal_db.lifecycle")
 
@@ -525,59 +506,6 @@ class LifecycleManager:
                 result["all_limits_hit"] = False
 
         return result
-
-    async def check_and_update_stop_loss(
-        self, signal_id: int, current_price: float, signal_db
-    ) -> bool:
-        """
-        Check if stop loss is hit and update status
-
-        Args:
-            signal_id: Signal ID
-            current_price: Current market price
-            signal_db: SignalDatabase instance
-
-        Returns:
-            True if stop loss was hit
-        """
-        try:
-            signal = await signal_db.db.fetch_one(
-                """
-                SELECT direction, stop_loss, status 
-                FROM signals 
-                WHERE id = $1
-            """,
-                (signal_id,),
-            )
-            if not signal or signal["status"] not in [SignalStatus.HIT]:
-                return False
-
-            stop_hit = False
-
-            if (signal["direction"] == "long" and current_price <= signal["stop_loss"]) or (
-                signal["direction"] == "short" and current_price >= signal["stop_loss"]
-            ):
-                stop_hit = True
-
-            if stop_hit:
-                # Directly update to stop_loss status
-                success = await self.manually_set_signal_status(
-                    signal_id,
-                    SignalStatus.STOP_LOSS,
-                    f"Stop loss hit at {current_price}",
-                    signal_db.db,
-                )
-
-                if success:
-                    logger.info(f"Signal {signal_id} hit stop loss at {current_price}")
-
-                return success
-
-            return False
-
-        except Exception as e:
-            logger.error(f"Error checking stop loss: {e}", exc_info=True)
-            return False
 
     async def manually_set_signal_expiry(
         self, signal_id: int, expiry_type: str, custom_datetime: str = None, db_manager=None

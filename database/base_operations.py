@@ -3,33 +3,16 @@ Base database operations for signals and limits
 """
 
 from datetime import datetime
-from typing import Any, Dict, List, Optional
+from typing import Any, Dict, List
 
 import pytz
 
 from utils.logger import get_logger
 
 from .models import ChangeType, LimitStatus, SignalStatus, StatusTransitions
+from .signal_operations.utils import _parse_dt
 
 logger = get_logger("database.operations")
-
-
-def _parse_dt(value) -> Optional[datetime]:
-    """Convert an ISO string or datetime to a timezone-aware datetime, or return None.
-
-    Handles all ISO formats including negative UTC offsets like -05:00 (EST/EDT).
-    Only assumes UTC for truly naive strings (no timezone info at all).
-    """
-    if value is None:
-        return None
-    if isinstance(value, datetime):
-        return value if value.tzinfo else pytz.UTC.localize(value)
-    s = str(value).replace("Z", "+00:00")
-    dt = datetime.fromisoformat(s)
-    # Only localize to UTC if the string had no timezone component at all
-    if dt.tzinfo is None:
-        return pytz.UTC.localize(dt)
-    return dt
 
 
 class BaseOperations:
@@ -49,67 +32,6 @@ class BaseOperations:
         self.LIMIT_STATUS_PENDING = LimitStatus.PENDING
         self.LIMIT_STATUS_HIT = LimitStatus.HIT
         self.LIMIT_STATUS_CANCELLED = LimitStatus.CANCELLED
-
-    async def insert_signal(
-        self,
-        message_id: str,
-        channel_id: str,
-        instrument: str,
-        direction: str,
-        stop_loss: float,
-        expiry_type: str = None,
-        expiry_time: str = None,
-        total_limits: int = 0,
-        scalp: bool = False,
-    ) -> int:
-        """
-        Insert a new signal with enhanced tracking
-
-        Returns:
-            Signal ID
-        """
-        query = """
-            INSERT INTO signals (
-                message_id, channel_id, instrument, direction,
-                stop_loss, expiry_type, expiry_time, total_limits, status, scalp
-            )
-            VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10)
-            RETURNING id
-        """
-
-        signal_id = await self.db.execute(
-            query,
-            (
-                message_id,
-                channel_id,
-                instrument,
-                direction,
-                stop_loss,
-                expiry_type,
-                _parse_dt(expiry_time),
-                total_limits,
-                SignalStatus.ACTIVE,
-                scalp,
-            ),
-        )
-
-        logger.info(
-            f"Inserted signal {signal_id} for {instrument} {direction} with {total_limits} limits (scalp={scalp})"
-        )
-        return signal_id
-
-    async def insert_limits(self, signal_id: int, price_levels: List[float]):
-        """Insert limits for a signal with sequence numbers"""
-        query = """
-            INSERT INTO limits (signal_id, price_level, sequence_number, status)
-            VALUES ($1, $2, $3, $4)
-        """
-        params_list = [
-            (signal_id, level, idx + 1, LimitStatus.PENDING)
-            for idx, level in enumerate(price_levels)
-        ]
-        await self.db.execute_many(query, params_list)
-        logger.info(f"Inserted {len(price_levels)} limits for signal {signal_id}")
 
     async def update_signal_status(
         self, signal_id: int, new_status: str, change_type: str = "automatic", reason: str = None
@@ -251,37 +173,6 @@ class BaseOperations:
                 else limit_data["signal_status"],
             }
 
-    async def check_stop_loss_hit(self, signal_id: int, current_price: float) -> bool:
-        """Check if stop loss has been hit and update status if needed"""
-        signal = await self.db.fetch_one(
-            """
-            SELECT direction, stop_loss, status
-            FROM signals
-            WHERE id = $1
-        """,
-            (signal_id,),
-        )
-
-        if not signal or signal["status"] not in [SignalStatus.HIT]:
-            return False
-
-        stop_hit = False
-        if (signal["direction"] == "long" and current_price <= signal["stop_loss"]) or (
-            signal["direction"] == "short" and current_price >= signal["stop_loss"]
-        ):
-            stop_hit = True
-
-        if stop_hit:
-            await self.update_signal_status(
-                signal_id,
-                SignalStatus.STOP_LOSS,
-                ChangeType.AUTOMATIC,
-                f"Stop loss hit at {current_price}",
-            )
-            logger.info(f"Signal {signal_id} hit stop loss at {current_price}")
-
-        return stop_hit
-
     async def get_active_signals_for_tracking(self) -> List[Dict[str, Any]]:
         """Get all signals that need price tracking (ACTIVE or HIT status)"""
         query = """
@@ -339,20 +230,6 @@ class BaseOperations:
                 )
 
         return list(signals.values())
-
-    async def mark_approaching_alert_sent(self, limit_id: int) -> bool:
-        """Mark that an approaching alert has been sent for a limit"""
-        rows = await self.db.execute(
-            "UPDATE limits SET approaching_alert_sent = TRUE WHERE id = $1", (limit_id,)
-        )
-        return rows > 0
-
-    async def mark_hit_alert_sent(self, limit_id: int) -> bool:
-        """Mark that a hit alert has been sent for a limit"""
-        rows = await self.db.execute(
-            "UPDATE limits SET hit_alert_sent = TRUE WHERE id = $1", (limit_id,)
-        )
-        return rows > 0
 
     async def get_hit_limits_for_signal(self, signal_id: int) -> List[Dict[str, Any]]:
         """
