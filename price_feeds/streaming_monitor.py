@@ -565,7 +565,9 @@ class StreamingPriceMonitor:
         # Check if approaching (first limit only)
         elif not is_hit and not limit.get("approaching_alert_sent", False):
             # Suppress approaching alerts during active news windows
-            if self.bot.news_manager and self.bot.news_manager.is_news_active_for(signal["instrument"]):
+            if self.bot.news_manager and self.bot.news_manager.is_news_active_for(
+                signal["instrument"]
+            ):
                 return
 
             if limit["sequence_number"] == 1:

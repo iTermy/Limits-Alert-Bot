@@ -147,9 +147,7 @@ class TradingCommands(BaseCog):
                     alert_config = AlertDistanceConfig()
 
                     symbol = signal["instrument"]
-                    cached_price = await self.bot.monitor.stream_manager.get_latest_price(
-                        symbol
-                    )
+                    cached_price = await self.bot.monitor.stream_manager.get_latest_price(symbol)
 
                     if cached_price:
                         direction = signal["direction"].lower()
