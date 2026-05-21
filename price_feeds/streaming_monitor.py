@@ -67,7 +67,7 @@ class StreamingPriceMonitor:
         )
 
         # Connect alert system to message handler
-        if hasattr(bot, "message_handler") and bot.message_handler:
+        if bot.message_handler:
             bot.message_handler.alert_system = self.alert_system
             logger.info("Connected alert system to message handler")
 
@@ -524,7 +524,7 @@ class StreamingPriceMonitor:
             # If a news event window is active for this instrument, auto-cancel
             # the signal instead of recording the hit.
             news_event = None
-            if hasattr(self.bot, "news_manager") and self.bot.news_manager:
+            if self.bot.news_manager:
                 news_event = self.bot.news_manager.is_news_active_for(signal["instrument"])
 
             if news_event is not None:
@@ -546,7 +546,6 @@ class StreamingPriceMonitor:
                 await self._cancel_signal_during_guard(signal, current_price, "spread_hour")
                 return
 
-            # ENHANCED: Pass spread and buffer status to alert system
             await self.alert_system.send_limit_hit_alert(
                 signal,
                 limit,
@@ -566,9 +565,8 @@ class StreamingPriceMonitor:
         # Check if approaching (first limit only)
         elif not is_hit and not limit.get("approaching_alert_sent", False):
             # Suppress approaching alerts during active news windows
-            if hasattr(self.bot, "news_manager") and self.bot.news_manager:
-                if self.bot.news_manager.is_news_active_for(signal["instrument"]):
-                    return
+            if self.bot.news_manager and self.bot.news_manager.is_news_active_for(signal["instrument"]):
+                return
 
             if limit["sequence_number"] == 1:
                 try:
@@ -586,7 +584,6 @@ class StreamingPriceMonitor:
                         symbol, abs(distance), current_price
                     )
 
-                    # ENHANCED: Send alert with spread info
                     sent = await self.alert_system.send_approaching_alert(
                         signal,
                         limit,

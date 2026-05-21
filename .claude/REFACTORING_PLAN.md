@@ -202,33 +202,22 @@ After completing an area, mark the section as finished and briefly state what yo
 
 ## Area 8: Misc / cross-cutting
 
-### 8.1 Top-of-file docstring noise (`Stage 2 Enhanced`, `REDESIGNED`, `ENHANCED`, `FIXED`)
-- **Location**: `main.py:3`, `price_feeds/streaming_monitor.py:1-7`, `price_feeds/price_stream_manager.py:1-6`, `price_feeds/alert_system.py:1-5`, and others
-- **Current state**: Many file/class docstrings carry refactor-history metadata ("Stage 2", "REDESIGNED:", "ENHANCED:", "FIXED: Added OANDA practice account support"). This is git-log content, not docs.
-- **Proposed change**: Strip the historical preamble lines. Keep the descriptive paragraph.
-- **Rationale**: Goal 3/4 (these are AI-generated-code-smell tags).
-- **Risk**: Low.
-- **Behavior-preserving?**: Yes.
+### ✅ 8.1 Top-of-file docstring noise (`Stage 2 Enhanced`, `REDESIGNED`, `ENHANCED`, `FIXED`)
+- **Location**: `main.py`, `price_feeds/price_stream_manager.py`, `price_feeds/feeds/binance_stream.py`, `price_feeds/streaming_monitor.py`, `price_feeds/symbol_mapper.py`
+- **Done**: Stripped historical preamble lines from module docstrings (Stage 2 Enhanced, FIXED, ENHANCED, Replaces polling…). Condensed verbose multi-line docstrings to one-liners where the content was only labelling. Removed `# ENHANCED:` / `# FIXED:` / `# NEW:` inline comment prefixes that described what (not why) across streaming_monitor.py, binance_stream.py, price_stream_manager.py, and symbol_mapper.py.
 
 ### ✅ 8.2 `enhanced_X` / `improved_X` / `EnhancedSignalParser` / `Enhanced DatabaseManager`
 - **Location**: `core/parser/__init__.py`, `database/database_manager.py`
 - **Done**: Renamed `EnhancedSignalParser` → `SignalParser` (class, type annotations, log message). Stripped "Enhanced" from both `DatabaseManager` docstrings.
 
-### 8.3 Inline `import json` / `from pathlib import Path` inside methods
-- **Location**: `price_feeds/alert_system.py:585-589, 605-608, 838-841, 855-858, 1792-1795`; `price_feeds/streaming_monitor.py:117-118, 181-186`; `discord_handlers/message_handler.py:525-528, 614-616`
-- **Current state**: ~10 places import `json` and/or `Path` inside method bodies. Same imports already happen at module-load time in other files.
-- **Proposed change**: Move to top of file.
-- **Rationale**: Goal 4.
-- **Risk**: Low.
-- **Behavior-preserving?**: Yes.
+### ✅ 8.3 Inline `import json` / `from pathlib import Path` inside methods
+- **Location**: `price_feeds/alert_system.py`, `price_feeds/streaming_monitor.py`, `discord_handlers/message_handler.py`
+- **Done**: All listed inline imports had already been moved to module level in Areas 5, 6, 7. Moved inline `import discord` in `core/expiry_manager.py` to module level (adjacent fix).
 
-### 8.4 Loosen the `if hasattr(...)` defensive walls
-- **Location**: Throughout `streaming_monitor.py` (e.g. `if hasattr(self.bot, 'guilds')`, `if hasattr(self.bot, 'news_manager')`, `if hasattr(monitor, "alert_config")`, etc.)
-- **Current state**: The bot wires up `news_manager`, `monitor`, `guilds`, `alert_config` at startup. The `hasattr` guards exist for "what if it isn't there" cases that can only happen if the bot is in a half-initialized state — which already has bigger problems.
-- **Proposed change**: Remove `hasattr` guards for attributes that are always set after `setup_hook` completes. Keep them only at genuine boundaries (e.g. before `bot.guilds[0]` access during startup race conditions).
-- **Rationale**: Goal 2 + Goal 4 (defensive checks for impossible cases).
-- **Risk**: Medium — these guards exist for a reason in some places. Audit each individually rather than bulk-removing.
-- **Behavior-preserving?**: Yes if audited carefully.
+### ✅ 8.4 Loosen the `if hasattr(...)` defensive walls
+- **Location**: `price_feeds/streaming_monitor.py`, `price_feeds/alert_system.py`, `core/expiry_manager.py`, `commands/bot_commands.py`, `commands/trading_commands.py`, `commands/config_commands.py`
+- **Done**: Removed all `hasattr(self.bot, "monitor")`, `hasattr(self.bot, "news_manager")`, `hasattr(self.bot, "channel_cleaner")`, `hasattr(self.bot, "signal_db")`, `hasattr(self.bot.monitor, "stream_manager")`, `hasattr(self.bot.monitor, "alert_config")`, `hasattr(self.bot.monitor, "tp_config")`, `hasattr(self.bot.monitor, "nm_config")`, `hasattr(self.bot.monitor, "nm_monitor")`, `hasattr(self.bot.monitor, "tp_monitor")`, `hasattr(monitor, "alert_config")` guards — all these attributes are always declared (as None or an object) before any command handler can run. Replaced double-if patterns with single truthiness check on `self.bot.monitor`. Kept `hasattr(self.bot, "start_time")` (genuinely optional attribute). Also removed `hasattr(monitor, "nm_monitor")` and `hasattr(monitor, "tp_monitor")` in bulk-cancel helper (always set in StreamingPriceMonitor.__init__). In health_check, collapsed `if monitor: if stream_manager:` into `if monitor:` and simplified color assignment to a ternary.
+- **Adjacent fix**: Moved inline `import discord` in `core/expiry_manager.py` to module level.
 
 ---
 

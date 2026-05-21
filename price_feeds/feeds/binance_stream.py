@@ -1,8 +1,4 @@
-"""
-Binance WebSocket Streaming Feed
-Uses Binance's WebSocket API for real-time crypto price updates
-FIXED: Added SSL certificate support for Windows VPS
-"""
+"""Binance WebSocket streaming feed for real-time crypto price updates."""
 
 import asyncio
 import json
@@ -42,7 +38,6 @@ class BinanceStream:
         else:
             self.ws_url = "wss://stream.binance.us:9443/stream"
 
-        # FIXED: Create SSL context for Windows VPS
         try:
             self.ssl_context = ssl.create_default_context(cafile=certifi.where())
             logger.info("SSL context created with certifi certificates")
@@ -70,7 +65,6 @@ class BinanceStream:
     async def connect(self) -> bool:
         """Initialize Binance WebSocket session with SSL support"""
         try:
-            # FIXED: Create connector with SSL context
             connector = aiohttp.TCPConnector(ssl=self.ssl_context)
 
             # Create session with SSL-configured connector

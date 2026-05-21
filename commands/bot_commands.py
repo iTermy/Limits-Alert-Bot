@@ -271,12 +271,8 @@ class BotCommands(BaseCog):
     @commands.command(name="price", aliases=["cp", "checkprice"])
     async def check_price(self, ctx: commands.Context, symbol: str):
         """Check current price for a symbol"""
-        if not hasattr(self.bot, "monitor") or not self.bot.monitor:
+        if not self.bot.monitor:
             await ctx.send("❌ Price monitoring not available")
-            return
-
-        if not hasattr(self.bot.monitor, "stream_manager"):
-            await ctx.send("❌ Stream manager not available")
             return
 
         try:
@@ -311,12 +307,8 @@ class BotCommands(BaseCog):
     @commands.command(name="feeds", aliases=["feedstatus"])
     async def feed_status(self, ctx: commands.Context):
         """Show feed connection status"""
-        if not hasattr(self.bot, "monitor") or not self.bot.monitor:
+        if not self.bot.monitor:
             await ctx.send("❌ Monitor not running")
-            return
-
-        if not hasattr(self.bot.monitor, "stream_manager"):
-            await ctx.send("❌ Stream manager not available")
             return
 
         stream_manager = self.bot.monitor.stream_manager
@@ -373,53 +365,40 @@ class BotCommands(BaseCog):
             embed.add_field(name="Database", value=f"🔴 Error: {str(e)[:50]}", inline=True)
 
         # Monitor status
-        if hasattr(self.bot, "monitor") and self.bot.monitor:
-            if hasattr(self.bot.monitor, "stream_manager"):
-                stream_manager = self.bot.monitor.stream_manager
+        if self.bot.monitor:
+            stream_manager = self.bot.monitor.stream_manager
 
-                # Feed connections
-                feed_status = []
-                for feed_name in ["icmarkets", "oanda", "binance"]:
-                    if hasattr(stream_manager, f"{feed_name}_connected"):
-                        is_connected = getattr(stream_manager, f"{feed_name}_connected", False)
-                        emoji = "🟢" if is_connected else "🔴"
-                        feed_status.append(f"{emoji} {feed_name.upper()}")
+            # Feed connections
+            feed_status = []
+            for feed_name in ["icmarkets", "oanda", "binance"]:
+                if hasattr(stream_manager, f"{feed_name}_connected"):
+                    is_connected = getattr(stream_manager, f"{feed_name}_connected", False)
+                    emoji = "🟢" if is_connected else "🔴"
+                    feed_status.append(f"{emoji} {feed_name.upper()}")
 
-                if feed_status:
-                    embed.add_field(name="Feeds", value="\n".join(feed_status), inline=True)
+            if feed_status:
+                embed.add_field(name="Feeds", value="\n".join(feed_status), inline=True)
 
-                # Subscriptions
-                if hasattr(stream_manager, "subscribed_symbols"):
-                    active_subs = len(stream_manager.subscribed_symbols)
-                    embed.add_field(name="Subscriptions", value=str(active_subs), inline=True)
+            # Subscriptions
+            if hasattr(stream_manager, "subscribed_symbols"):
+                active_subs = len(stream_manager.subscribed_symbols)
+                embed.add_field(name="Subscriptions", value=str(active_subs), inline=True)
 
-                # Recent updates
-                if hasattr(stream_manager, "last_price_update"):
-                    last_update = stream_manager.last_price_update
-                    if last_update:
-                        seconds_ago = (datetime.utcnow() - last_update).total_seconds()
-                        status = "🟢 Active" if seconds_ago < 60 else "🟡 Slow"
-                        embed.add_field(
-                            name="🔄 Last Update",
-                            value=f"{status}\n{int(seconds_ago)}s ago",
-                            inline=True,
-                        )
-            else:
-                embed.add_field(name="Monitor", value="🔴 Stream manager unavailable", inline=False)
+            # Recent updates
+            if hasattr(stream_manager, "last_price_update"):
+                last_update = stream_manager.last_price_update
+                if last_update:
+                    seconds_ago = (datetime.utcnow() - last_update).total_seconds()
+                    status = "🟢 Active" if seconds_ago < 60 else "🟡 Slow"
+                    embed.add_field(
+                        name="🔄 Last Update",
+                        value=f"{status}\n{int(seconds_ago)}s ago",
+                        inline=True,
+                    )
         else:
             embed.add_field(name="Monitor", value="🔴 Not running", inline=False)
 
-        # Overall health color
-        if all(
-            [
-                hasattr(self.bot, "monitor"),
-                self.bot.monitor,
-                hasattr(self.bot.monitor, "stream_manager"),
-            ]
-        ):
-            embed.color = 0x00FF00  # Green - healthy
-        else:
-            embed.color = 0xFFA500  # Orange - degraded
+        embed.color = 0x00FF00 if self.bot.monitor else 0xFFA500
 
         embed.set_footer(text=f"Generated at {datetime.utcnow().strftime('%H:%M:%S')} UTC")
         await ctx.send(embed=embed)
@@ -484,7 +463,7 @@ class BotCommands(BaseCog):
     @commands.check(lambda ctx: ctx.cog.is_admin(ctx.author))
     async def clean_alert_channels(self, ctx: commands.Context):
         """Delete messages from the past 7 days in all alert channels (Admin only)"""
-        if not hasattr(self.bot, "channel_cleaner") or not self.bot.channel_cleaner:
+        if not self.bot.channel_cleaner:
             await ctx.send("❌ Channel cleaner not available")
             return
 
@@ -534,24 +513,17 @@ class BotCommands(BaseCog):
         """Reload bot configuration (Admin only)"""
         try:
             # Reload alert distances if available
-            if hasattr(self.bot, "monitor") and self.bot.monitor:
-                if hasattr(self.bot.monitor, "alert_config"):
-                    self.bot.monitor.alert_config.reload_config()
-                if hasattr(self.bot.monitor, "tp_config"):
-                    self.bot.monitor.tp_config.reload_config()
-                    self.bot.monitor.tp_monitor.tp_config = self.bot.monitor.tp_config
+            if self.bot.monitor:
+                self.bot.monitor.alert_config.reload_config()
+                self.bot.monitor.tp_config.reload_config()
+                self.bot.monitor.tp_monitor.tp_config = self.bot.monitor.tp_config
+                self.bot.monitor.alert_system.reload_channels()
 
             # Bust the gold-tolls SL offset cache so the parser picks up any
             # manual edits to settings.json
             from core.parser.pattern_parsers import invalidate_gold_tolls_sl_cache
 
             invalidate_gold_tolls_sl_cache()
-
-            # Refresh alert system channel IDs in case channels.json was edited
-            if hasattr(self.bot, "monitor") and self.bot.monitor:
-                monitor = self.bot.monitor
-                if hasattr(monitor, "alert_system") and monitor.alert_system:
-                    monitor.alert_system.reload_channels()
 
             await ctx.send("✅ Configuration reloaded")
             self.logger.info(f"Config reloaded by {ctx.author.name}")

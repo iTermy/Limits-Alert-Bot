@@ -1,7 +1,4 @@
-"""
-Discord Trading Alert Bot - Main Entry Point
-Stage 2 Enhanced: Modular Architecture
-"""
+"""Discord Trading Alert Bot — entry point."""
 
 import asyncio
 import os
@@ -28,7 +25,7 @@ async def main():
     bot = TradingBot()
 
     try:
-        logger.info("Starting Discord Trading Alert Bot (Stage 2 - Modular)...")
+        logger.info("Starting Discord Trading Alert Bot...")
         await bot.start(DISCORD_TOKEN)
     except KeyboardInterrupt:
         logger.info("Received interrupt signal, shutting down...")

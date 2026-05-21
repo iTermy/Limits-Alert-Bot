@@ -1,3 +1,4 @@
+import discord
 from discord.ext import tasks
 
 from utils.logger import get_logger
@@ -17,14 +18,8 @@ class ExpiryManager:
     async def check_expiry(self):
         """Check and expire signals past expiry_time."""
         try:
-            alert_system = (
-                self.bot.monitor.alert_system
-                if hasattr(self.bot, "monitor") and self.bot.monitor
-                else None
-            )
-            monitor = (
-                self.bot.monitor if hasattr(self.bot, "monitor") and self.bot.monitor else None
-            )
+            monitor = self.bot.monitor
+            alert_system = monitor.alert_system if monitor else None
 
             # ── 1. Query which signals are about to be expired BEFORE expiring ──
             # We need their IDs so we can do per-signal work afterward.
@@ -123,8 +118,6 @@ class ExpiryManager:
     async def _delete_original_message(self, channel_id: str, message_id: str, sig_id: int):
         """Delete the original signal message (used for gold-toll signals with no embed)."""
         try:
-            import discord
-
             channel = self.bot.get_channel(int(channel_id))
             if channel:
                 try:

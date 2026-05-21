@@ -205,10 +205,9 @@ class ConfigCommands(BaseCog):
                 f"{float_value:.1f} pips" if tp_type_lower == "pips" else f"${float_value:.2f}"
             )
 
-            if hasattr(self.bot, "monitor") and self.bot.monitor:
-                if hasattr(self.bot.monitor, "tp_config"):
-                    self.bot.monitor.tp_config.reload_config()
-                    self.bot.monitor.tp_monitor.tp_config = self.bot.monitor.tp_config
+            if self.bot.monitor:
+                self.bot.monitor.tp_config.reload_config()
+                self.bot.monitor.tp_monitor.tp_config = self.bot.monitor.tp_config
 
             embed = discord.Embed(title="TP Configuration Updated", color=discord.Color.green())
             embed.add_field(name="Target", value=label, inline=True)
@@ -225,10 +224,9 @@ class ConfigCommands(BaseCog):
             symbol_upper = symbol.upper()
             removed = self.tp_config.remove_override(symbol_upper)
 
-            if hasattr(self.bot, "monitor") and self.bot.monitor:
-                if hasattr(self.bot.monitor, "tp_config"):
-                    self.bot.monitor.tp_config.reload_config()
-                    self.bot.monitor.tp_monitor.tp_config = self.bot.monitor.tp_config
+            if self.bot.monitor:
+                self.bot.monitor.tp_config.reload_config()
+                self.bot.monitor.tp_monitor.tp_config = self.bot.monitor.tp_config
 
             if removed:
                 fallback_val = self.tp_config.get_tp_value(symbol_upper)
@@ -454,9 +452,8 @@ class ConfigCommands(BaseCog):
             else:
                 val_display = f"{float_value} pips"
 
-            if hasattr(self.bot, "monitor") and self.bot.monitor:
-                if hasattr(self.bot.monitor, "alert_config"):
-                    self.bot.monitor.alert_config.reload_config()
+            if self.bot.monitor:
+                self.bot.monitor.alert_config.reload_config()
 
             embed = discord.Embed(title="Alert Distance Updated", color=discord.Color.green())
             embed.add_field(name="Target", value=label, inline=True)
@@ -474,9 +471,8 @@ class ConfigCommands(BaseCog):
             symbol_upper = symbol.upper()
             removed = self.alert_dist_config.remove_override(symbol_upper)
 
-            if hasattr(self.bot, "monitor") and self.bot.monitor:
-                if hasattr(self.bot.monitor, "alert_config"):
-                    self.bot.monitor.alert_config.reload_config()
+            if self.bot.monitor:
+                self.bot.monitor.alert_config.reload_config()
 
             if removed:
                 fallback_cfg = self.alert_dist_config._get_config_for_symbol(symbol_upper)
@@ -720,10 +716,9 @@ class ConfigCommands(BaseCog):
                 )
                 label = f"**{target_upper}** (override)"
 
-            if hasattr(self.bot, "monitor") and self.bot.monitor:
-                if hasattr(self.bot.monitor, "nm_config"):
-                    self.bot.monitor.nm_config = NMConfig()
-                    self.bot.monitor.nm_monitor.nm_config = self.bot.monitor.nm_config
+            if self.bot.monitor:
+                self.bot.monitor.nm_config = NMConfig()
+                self.bot.monitor.nm_monitor.nm_config = self.bot.monitor.nm_config
 
             unit = nm_type if nm_type else "?"
             embed = discord.Embed(title="NM Configuration Updated", color=discord.Color.green())
@@ -749,10 +744,9 @@ class ConfigCommands(BaseCog):
             symbol_upper = symbol.upper()
             removed = self.nm_config.remove_override(symbol_upper)
 
-            if hasattr(self.bot, "monitor") and self.bot.monitor:
-                if hasattr(self.bot.monitor, "nm_config"):
-                    self.bot.monitor.nm_config = NMConfig()
-                    self.bot.monitor.nm_monitor.nm_config = self.bot.monitor.nm_config
+            if self.bot.monitor:
+                self.bot.monitor.nm_config = NMConfig()
+                self.bot.monitor.nm_monitor.nm_config = self.bot.monitor.nm_config
 
             if removed:
                 info = self.nm_config.get_params_display(symbol_upper)

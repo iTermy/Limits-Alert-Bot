@@ -452,7 +452,7 @@ class AlertSystem:
         """Refresh each live embed with the latest price, staggered 1s apart."""
         if not self._live_embeds:
             return
-        if not (self.bot and hasattr(self.bot, "monitor") and self.bot.monitor):
+        if not (self.bot and self.bot.monitor):
             return
 
         monitor = self.bot.monitor
@@ -504,12 +504,9 @@ class AlertSystem:
                             pending_limits, key=lambda l: abs(current_price - l["price_level"])
                         )
                         distance = abs(current_price - nearest["price_level"])
-                        if hasattr(monitor, "alert_config") and monitor.alert_config:
-                            distance_formatted = monitor.alert_config.format_distance_for_display(
-                                instrument, distance, current_price
-                            )
-                        else:
-                            distance_formatted = f"{distance:.5f}".rstrip("0").rstrip(".")
+                        distance_formatted = monitor.alert_config.format_distance_for_display(
+                            instrument, distance, current_price
+                        )
 
                 # Re-check that the signal is still live before editing — a manual
                 # status change (profit, sl, cancel) may have called _unregister_live_embed
@@ -667,7 +664,7 @@ class AlertSystem:
                 try:
                     # Fetch fresh signal data from DB once — used for both paths
                     sig_data = None
-                    if self.bot and hasattr(self.bot, "signal_db") and self.bot.signal_db:
+                    if self.bot and self.bot.signal_db:
                         try:
                             sig_data = await self.bot.signal_db.get_signal_with_limits(signal_id)
                         except Exception as _fetch_err:
@@ -782,7 +779,7 @@ class AlertSystem:
             # For signals originating in the gold-tolls-map channel, also remove
             # the sender's original message so the channel stays clean.
             try:
-                if self.bot and hasattr(self.bot, "signal_db") and self.bot.signal_db:
+                if self.bot and self.bot.signal_db:
                     sig_data = await self.bot.signal_db.get_signal_with_limits(signal_id)
                     if sig_data:
                         await self._maybe_delete_toll_original(sig_data, signal_id)
@@ -972,7 +969,7 @@ class AlertSystem:
         pending_limits (unhit), which would cause the embed to show wrong data.
         Falls back to signal dict only if the DB call fails or bot is unavailable.
         """
-        if self.bot and hasattr(self.bot, "signal_db") and self.bot.signal_db:
+        if self.bot and self.bot.signal_db:
             try:
                 full = await self.bot.signal_db.get_signal_with_limits(signal["signal_id"])
                 if full:
@@ -1496,7 +1493,7 @@ class AlertSystem:
                 f"update_embed_for_signal_id: signal {signal_id} has no embed yet — skipping"
             )
             return False
-        if not (self.bot and hasattr(self.bot, "signal_db") and self.bot.signal_db):
+        if not (self.bot and self.bot.signal_db):
             logger.warning("update_embed_for_signal_id: bot/signal_db not available")
             return False
         try:

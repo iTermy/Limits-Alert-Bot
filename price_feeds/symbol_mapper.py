@@ -66,16 +66,7 @@ class SymbolMapper:
                     logger.warning(f"Invalid regex pattern for {asset_class}: {pattern} - {e}")
 
     def determine_asset_class(self, symbol: str) -> str:
-        """
-        Determine the asset class of a symbol
-        ENHANCED: Properly identifies JPY pairs and other special cases
-
-        Args:
-            symbol: Trading symbol
-
-        Returns:
-            Asset class string (forex, forex_jpy, metals, crypto, indices, stocks, oil)
-        """
+        """Return the asset class for a symbol (forex, forex_jpy, metals, crypto, indices, stocks, oil)."""
         symbol_upper = symbol.upper()
 
         # Check crypto patterns
@@ -124,7 +115,6 @@ class SymbolMapper:
         ):
             return "indices"
 
-        # Check forex - FIXED: Simplified approach
         forex_currencies = [
             "EUR",
             "USD",

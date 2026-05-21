@@ -142,50 +142,46 @@ class TradingCommands(BaseCog):
             signal["is_index"] = is_index_symbol(signal["instrument"])
 
             # Calculate distance to next limit
-            if hasattr(self.bot, "monitor") and self.bot.monitor:
-                if hasattr(self.bot.monitor, "stream_manager") and signal.get("pending_limits"):
-                    try:
-                        alert_config = AlertDistanceConfig()
+            if self.bot.monitor and signal.get("pending_limits"):
+                try:
+                    alert_config = AlertDistanceConfig()
 
-                        symbol = signal["instrument"]
-                        cached_price = await self.bot.monitor.stream_manager.get_latest_price(
-                            symbol
+                    symbol = signal["instrument"]
+                    cached_price = await self.bot.monitor.stream_manager.get_latest_price(
+                        symbol
+                    )
+
+                    if cached_price:
+                        direction = signal["direction"].lower()
+                        current_price = (
+                            cached_price["ask"] if direction == "long" else cached_price["bid"]
                         )
+                        limit_price = signal["pending_limits"][0]
 
-                        if cached_price:
-                            direction = signal["direction"].lower()
-                            current_price = (
-                                cached_price["ask"] if direction == "long" else cached_price["bid"]
+                        # Calculate raw price distance
+                        if direction == "long":
+                            distance = current_price - limit_price
+                        else:
+                            distance = limit_price - current_price
+
+                        # Format based on asset type
+                        if signal["is_crypto"] or signal["is_index"]:
+                            distance_value = abs(distance)
+                            formatted = f"${distance_value:.2f} away"
+                        else:
+                            formatted = alert_config.format_distance_for_display(
+                                symbol, abs(distance), current_price
                             )
-                            limit_price = signal["pending_limits"][0]
+                            pip_size = alert_config.get_pip_size(symbol)
+                            distance_value = abs(distance) / pip_size
 
-                            # Calculate raw price distance
-                            if direction == "long":
-                                distance = current_price - limit_price
-                            else:
-                                distance = limit_price - current_price
-
-                            # Format based on asset type
-                            if signal["is_crypto"] or signal["is_index"]:
-                                # For crypto and indices, show dollar distance
-                                distance_value = abs(distance)
-                                formatted = f"${distance_value:.2f} away"
-                            else:
-                                # For forex, use the format_distance_for_display which handles pip conversion
-                                formatted = alert_config.format_distance_for_display(
-                                    symbol, abs(distance), current_price
-                                )
-                                # Extract pip value for sorting
-                                pip_size = alert_config.get_pip_size(symbol)
-                                distance_value = abs(distance) / pip_size
-
-                            signal["distance_info"] = {
-                                "distance": distance_value,
-                                "current_price": current_price,
-                                "formatted": formatted,
-                            }
-                    except Exception as e:
-                        logger.warning(f"Could not get price for {symbol}: {e}")
+                        signal["distance_info"] = {
+                            "distance": distance_value,
+                            "current_price": current_price,
+                            "formatted": formatted,
+                        }
+                except Exception as e:
+                    logger.warning(f"Could not get price for {symbol}: {e}")
 
         # Apply sorting
         if sort_method == "recent":
@@ -280,16 +276,15 @@ class TradingCommands(BaseCog):
         embed.add_field(name="Stop Loss", value=stop_loss_formatted, inline=True)
 
         # Streaming status
-        if hasattr(self.bot, "monitor") and self.bot.monitor:
-            if hasattr(self.bot.monitor, "stream_manager"):
-                is_subscribed = (
-                    signal["instrument"] in self.bot.monitor.stream_manager.subscribed_symbols
-                )
-                embed.add_field(
-                    name="Streaming Status",
-                    value="🟢 Subscribed" if is_subscribed else "⚪ Not Subscribed",
-                    inline=True,
-                )
+        if self.bot.monitor:
+            is_subscribed = (
+                signal["instrument"] in self.bot.monitor.stream_manager.subscribed_symbols
+            )
+            embed.add_field(
+                name="Streaming Status",
+                value="🟢 Subscribed" if is_subscribed else "⚪ Not Subscribed",
+                inline=True,
+            )
 
         # Limits info
         if signal["limits"]:
@@ -477,13 +472,8 @@ class TradingCommands(BaseCog):
             embed_event = status_to_event.get(status)
             if embed_event:
                 try:
-                    alert_system = (
-                        self.bot.monitor.alert_system
-                        if hasattr(self.bot, "monitor") and self.bot.monitor
-                        else None
-                    )
-                    if alert_system:
-                        await alert_system.update_embed_for_signal_id(
+                    if self.bot.monitor:
+                        await self.bot.monitor.alert_system.update_embed_for_signal_id(
                             signal_id,
                             embed_event,
                         )
@@ -494,9 +484,8 @@ class TradingCommands(BaseCog):
             # The existing embed is edited in place by reactivate_embed (no duplicate sent).
             if status == "active":
                 try:
-                    if hasattr(self.bot, "monitor") and self.bot.monitor:
-                        if hasattr(self.bot.monitor, "nm_monitor"):
-                            self.bot.monitor.nm_monitor.mark_immune(signal_id)
+                    if self.bot.monitor:
+                        self.bot.monitor.nm_monitor.mark_immune(signal_id)
                 except Exception as _ne:
                     logger.warning(f"Could not mark signal {signal_id} NM-immune: {_ne}")
         else:
@@ -527,22 +516,16 @@ class TradingCommands(BaseCog):
 
         if transitioned:
             # Populate TP cache immediately so auto-TP starts on the next tick
-            if hasattr(self.bot, "monitor") and self.bot.monitor:
-                monitor = self.bot.monitor
-                await monitor.tp_monitor.refresh_hit_limits(signal_id)
-                if signal_id in monitor.active_signals:
-                    monitor.active_signals[signal_id]["status"] = "hit"
+            if self.bot.monitor:
+                await self.bot.monitor.tp_monitor.refresh_hit_limits(signal_id)
+                if signal_id in self.bot.monitor.active_signals:
+                    self.bot.monitor.active_signals[signal_id]["status"] = "hit"
             await ctx.send(f"✅ Signal {signal_id} marked as HIT (limit 1 hit, auto-TP active)")
 
             # Update the persistent alert embed
             try:
-                alert_system = (
-                    self.bot.monitor.alert_system
-                    if hasattr(self.bot, "monitor") and self.bot.monitor
-                    else None
-                )
-                if alert_system:
-                    await alert_system.update_embed_for_signal_id(signal_id, "hit")
+                if self.bot.monitor:
+                    await self.bot.monitor.alert_system.update_embed_for_signal_id(signal_id, "hit")
             except Exception as _ue:
                 logger.warning(f"Could not update embed after !hit: {_ue}")
         else:
@@ -697,7 +680,7 @@ class TradingCommands(BaseCog):
         if not signals:
             return 0
 
-        monitor = self.bot.monitor if hasattr(self.bot, "monitor") and self.bot.monitor else None
+        monitor = self.bot.monitor
         alert_system = monitor.alert_system if monitor else None
 
         count = 0
@@ -719,10 +702,8 @@ class TradingCommands(BaseCog):
             # 1. Evict from streaming monitor so price-checking stops immediately
             if monitor:
                 monitor.active_signals.pop(sid, None)
-                if hasattr(monitor, "nm_monitor"):
-                    monitor.nm_monitor.evict_signal(sid)
-                if hasattr(monitor, "tp_monitor"):
-                    monitor.tp_monitor.evict_signal(sid)
+                monitor.nm_monitor.evict_signal(sid)
+                monitor.tp_monitor.evict_signal(sid)
 
             # 2. React to the original signal message
             if signal_dict and monitor:
@@ -817,10 +798,7 @@ class TradingCommands(BaseCog):
 
         # Notify finished-signals channel that all of this type were cancelled
         if cancelled > 0:
-            monitor = (
-                self.bot.monitor if hasattr(self.bot, "monitor") and self.bot.monitor else None
-            )
-            alert_system = monitor.alert_system if monitor else None
+            alert_system = self.bot.monitor.alert_system if self.bot.monitor else None
             if alert_system:
                 finished_channel = alert_system._get_finished_channel()
                 if finished_channel:
@@ -888,10 +866,7 @@ class TradingCommands(BaseCog):
 
         # Notify finished-signals channel that all of this type were cancelled
         if cancelled > 0:
-            monitor = (
-                self.bot.monitor if hasattr(self.bot, "monitor") and self.bot.monitor else None
-            )
-            alert_system = monitor.alert_system if monitor else None
+            alert_system = self.bot.monitor.alert_system if self.bot.monitor else None
             if alert_system:
                 finished_channel = alert_system._get_finished_channel()
                 if finished_channel:

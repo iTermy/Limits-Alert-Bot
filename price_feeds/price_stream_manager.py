@@ -1,9 +1,4 @@
-"""
-Price Stream Manager - Coordinates streaming price feeds
-Replaces polling + caching with real-time WebSocket/streaming connections
-FIXED: Added OANDA practice account support
-ENHANCED: Added spread calculation in _process_price_update
-"""
+"""Price Stream Manager — coordinates streaming price feeds."""
 
 import asyncio
 import logging
@@ -81,7 +76,6 @@ class PriceStreamManager:
             self.feed_status["icmarkets"] = False
 
         # Initialize OANDA stream
-        # FIXED: Added practice account support
         try:
             import os
 
@@ -326,15 +320,7 @@ class PriceStreamManager:
                     await asyncio.sleep(30)
 
     async def _process_price_update(self, symbol: str, price_data: Dict, feed: str):
-        """
-        Process a price update and notify subscribers
-        ENHANCED: Automatically calculates spread if not present
-
-        Args:
-            symbol: Internal format symbol
-            price_data: Price dictionary with bid, ask, timestamp
-            feed: Feed name
-        """
+        """Process a price update, compute spread if absent, and notify subscribers."""
         # Calculate spread if not already present
         if "spread" not in price_data and "bid" in price_data and "ask" in price_data:
             try:
