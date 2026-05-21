@@ -19,6 +19,7 @@ from price_feeds.nm_monitor import NearMissMonitor
 from price_feeds.price_stream_manager import PriceStreamManager
 from price_feeds.tp_config import TPConfig
 from price_feeds.tp_monitor import AutoTPMonitor
+from database.signal_operations.utils import calculate_sl_pnl
 from utils.config_loader import load_settings
 from utils.logger import get_logger
 
@@ -760,20 +761,11 @@ class StreamingPriceMonitor:
     async def _process_stop_loss_hit(self, signal: Dict):
         """Process stop loss hit"""
         try:
-            # Calculate combined P&L for all hit limits at the stop loss price
             sl_result_pips = None
             try:
-                hit_limits = await self.signal_db.get_hit_limits_for_signal(signal["signal_id"])
-                stop_price = signal.get("stop_loss")
-                if hit_limits and stop_price:
-                    combined = 0.0
-                    for lim in hit_limits:
-                        entry = lim.get("hit_price") or lim.get("price_level")
-                        if entry is not None:
-                            combined += self.tp_config.calculate_pnl(
-                                signal["instrument"], signal["direction"], entry, stop_price
-                            )
-                    sl_result_pips = combined
+                sl_result_pips = await calculate_sl_pnl(
+                    signal["signal_id"], signal, self.signal_db, self.tp_config
+                )
             except Exception as e:
                 logger.warning(
                     f"Could not calculate SL result_pips for signal {signal['signal_id']}: {e}"

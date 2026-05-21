@@ -161,45 +161,26 @@ After completing an area, mark the section as finished and briefly state what yo
 
 ## Area 6: Reply-command handler
 
-### 6.1 Collapse `check_alert_management_reply` and `check_signal_management_reply`
-- **Location**: `discord_handlers/message_handler.py:162-512` (alert reply) and `651-966` (signal reply)
-- **Current state**: ~650 lines across two methods that handle the exact same set of commands (`cancel`, `profit`, `tp`, `breakeven`, `sl`, `hit`, `reactivate`). The two paths differ in: (a) authorization (alert: any user; signal: author or admin); (b) which message is the "referenced" one; (c) one extra branch for cancel-without-embed in the signal path. Everything else — the command parsing, the SL P&L calculation, the reaction updates, the embed update, the delete-user-reply — is duplicated almost verbatim.
-- **Proposed change**: Build one `_handle_reply_command(message, referenced, signal, auth_check: callable)` that takes the common signal dict + an authorization predicate. The cancel-without-embed branch (lines 821-894) can be conditional inside the unified handler when called from the signal path.
-- **Rationale**: Goal 1 (one path is faster to read and reason about) + Goal 2 (~250-300 lines of duplicate code) + Goal 3.
-- **Risk**: High — these methods are the manual-override entry points for live signals. Both paths have intricate edge cases (re-add-to-monitor on hit when previously cancelled at lines 296-322 and 758-782, both nearly identical). Bug here cancels real money.
-- **Behavior-preserving?**: Yes if done carefully. Recommend doing this as the final cleanup, after the easier wins land.
+### ✅ 6.1 Collapse `check_alert_management_reply` and `check_signal_management_reply`
+- **Location**: `discord_handlers/message_handler.py`
+- **Done**: Extracted `_handle_reply_command(message, referenced, signal, signal_id, from_signal_reply=False)`. Both `check_alert_management_reply` and `check_signal_management_reply` are now thin wrappers (~20 lines each) that handle path-specific lookup and auth, then delegate. The unified handler processes all commands (cancel, profit, tp, breakeven, sl, hit, reactivate) exactly once. The cancel-without-embed toll-channel branch is conditional on `from_signal_reply`. Re-add-to-monitor logic for cancelled→hit transition is shared. `hasattr(self.bot, "monitor")` guards simplified to `if self.bot.monitor:` throughout.
+- **Notes**: Signal path reactivate previously had no NM-immunity call (bug); the unified handler calls `nm_monitor.mark_immune` in both paths. Signal path previously used `cancel_signal_by_message` (bypasses transition validation) while alert path used `manually_set_signal_status`; unified uses the latter consistently. Signal path previously took the full content as command (e.g. "profit 40" wouldn't match "profit"); unified splits on whitespace like the alert path.
 
-### 6.2 Extract the "compute SL result_pips from hit limits" helper
-- **Location**: `discord_handlers/message_handler.py:340-358, 728-743`, `price_feeds/streaming_monitor.py:796-811`
-- **Current state**: The same loop (sum P&L of all hit limits at the stop-loss price) appears three times. Each iteration uses `tp_config.calculate_pnl`, fetches `hit_limits` via `signal_db.get_hit_limits_for_signal`, and folds.
-- **Proposed change**: Add `async def calculate_sl_pnl(signal, signal_db, tp_config) -> Optional[float]` in a shared util (e.g. `database/signal_operations/utils.py` or a new `price_feeds/pnl.py`). Use from all three sites.
-- **Rationale**: Goal 1/3.
-- **Risk**: Low.
-- **Behavior-preserving?**: Yes.
+### ✅ 6.2 Extract the "compute SL result_pips from hit limits" helper
+- **Location**: `database/signal_operations/utils.py` (new `calculate_sl_pnl`), `discord_handlers/message_handler.py`, `price_feeds/streaming_monitor.py`
+- **Done**: Added `async def calculate_sl_pnl(signal_id, signal, signal_db, tp_config) -> Optional[float]` to `utils.py`. All three call sites replaced. `scalp` kwarg is now consistently applied (streaming_monitor previously omitted it, defaulting to False — behavior unchanged for non-scalp signals; now correct for scalp signals too).
 
-### 6.3 Local `import asyncio` inside the loop
-- **Location**: `discord_handlers/message_handler.py:249, 694` and elsewhere
-- **Current state**: `import asyncio` is done inside the method body twice (with comments "Import asyncio for timeouts"). `asyncio` is already imported at module level in the rest of the codebase.
-- **Proposed change**: Move to top of file.
-- **Rationale**: Goal 4.
-- **Risk**: Low.
-- **Behavior-preserving?**: Yes.
+### ✅ 6.3 Local `import asyncio` inside the loop
+- **Location**: `discord_handlers/message_handler.py`
+- **Done**: Moved `import asyncio` to module top; two inline occurrences removed.
 
-### 6.4 The `send_profit_alert` method and `get_pip_unit_name`
-- **Location**: `discord_handlers/message_handler.py:514-649`
-- **Current state**: `send_profit_alert` (~85 lines) constructs an embed and sends it. Grep shows it's never called. `get_pip_unit_name` (~50 lines, with its own JSON re-read) is also never called.
-- **Proposed change**: Delete both.
-- **Rationale**: Goal 2.
-- **Risk**: Low — confirmed unused.
-- **Behavior-preserving?**: Yes.
+### ✅ 6.4 The `send_profit_alert` method and `get_pip_unit_name`
+- **Location**: `discord_handlers/message_handler.py`
+- **Done**: Deleted both (~135 lines).
 
-### 6.5 The bare `except: pass` for `remove_reaction`
-- **Location**: `discord_handlers/message_handler.py:151-153, 430-432, 443-446, 815-818, 904-907`
-- **Current state**: Five copies of `try: await ref.remove_reaction(...); except: pass` to handle "reaction may not exist."
-- **Proposed change**: Extract `_safe_remove_reaction(message, emoji)` helper.
-- **Rationale**: Goal 3/4 (defensive try/except with bare `except`).
-- **Risk**: Low.
-- **Behavior-preserving?**: Yes.
+### ✅ 6.5 The bare `except: pass` for `remove_reaction`
+- **Location**: `discord_handlers/message_handler.py`
+- **Done**: Extracted `_safe_remove_reaction(message, emoji)` instance method. All five bare-except call sites replaced.
 
 ---
 

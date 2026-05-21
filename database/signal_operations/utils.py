@@ -10,6 +10,28 @@ import pytz
 from database.models import SignalStatus
 
 
+async def calculate_sl_pnl(signal_id: int, signal: dict, signal_db, tp_config) -> Optional[float]:
+    """Return combined P&L of all hit limits at the stop-loss price, or None if no hit limits."""
+    stop_price = signal.get("stop_loss")
+    if not stop_price:
+        return None
+    hit_limits = await signal_db.get_hit_limits_for_signal(signal_id)
+    if not hit_limits:
+        return None
+    combined = 0.0
+    for lim in hit_limits:
+        entry = lim.get("hit_price") or lim.get("price_level")
+        if entry is not None:
+            combined += tp_config.calculate_pnl(
+                signal["instrument"],
+                signal["direction"],
+                entry,
+                stop_price,
+                scalp=signal.get("scalp", False),
+            )
+    return combined
+
+
 def _parse_dt(value) -> Optional[datetime]:
     """Convert an ISO string or datetime to a timezone-aware datetime, or return None."""
     if value is None:
