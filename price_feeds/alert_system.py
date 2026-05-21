@@ -1,19 +1,29 @@
 """
-Alert System - Handles all alert generation and sending for the price monitor
-REDESIGNED: Single persistent message per signal, edited in-place for all events.
+Alert System - Handles all alert generation and sending for the price monitor.
+One persistent embed per signal; all events edit it in-place.
 Separate short ping messages are sent for each event so role pings still fire.
 """
 
 import asyncio
+import collections
+import json
 from datetime import datetime, timezone
 from enum import Enum
+from pathlib import Path
 from typing import Dict, List, Optional
 
 import discord
 
+from price_feeds.nm_config import NMConfig
+from price_feeds.tp_config import TPConfig
 from utils.logger import get_logger
 
 logger = get_logger("alert_system")
+
+try:
+    _tp_config = TPConfig()
+except Exception:
+    _tp_config = None
 
 
 class AlertType(Enum):
@@ -27,6 +37,13 @@ class AlertType(Enum):
 # ──────────────────────────────────────────────────────────────────────────────
 # Embed builder helpers
 # ──────────────────────────────────────────────────────────────────────────────
+
+
+def _set_archive_footer(embed: discord.Embed, label: str = "📁 Archived") -> None:
+    """Append the archive label to an embed footer, stripping any prior timer suffixes."""
+    old = embed.footer.text or ""
+    clean = old.split(" • ⏳")[0].split(" • 🗑️")[0]
+    embed.set_footer(text=f"{clean} • {label}")
 
 
 def _fmt(price: float) -> str:
@@ -113,15 +130,6 @@ def _build_signal_embed(
     )
 
     # ── Limits section ───────────────────────────────────────────────────────
-    # Load tp_config once for live pnl calculations on hit limits
-    _tp_config = None
-    try:
-        from price_feeds.tp_config import TPConfig
-
-        _tp_config = TPConfig()
-    except Exception:
-        pass
-
     direction = signal.get("direction", "long").lower()
     is_scalp = bool(signal.get("scalp", False))
 
@@ -303,10 +311,7 @@ def _build_profit_archive_embed(
 
     if result_pips is not None:
         try:
-            from price_feeds.tp_config import TPConfig
-
-            _tp = TPConfig()
-            pnl_str = _tp.format_value(instrument, abs(float(result_pips)))
+            pnl_str = _tp_config.format_value(instrument, abs(float(result_pips)))
             sign = "+" if float(result_pips) >= 0 else "-"
             embed.add_field(name="P&L", value=f"**{sign}{pnl_str}**", inline=True)
         except Exception:
@@ -373,9 +378,8 @@ class AlertSystem:
         self.toll_alert_channel = None
         self.general_toll_alert_channel = None
         self.legends_alert_channel = None
-        self._load_pa_channels()
-        self._load_toll_channels()
         self.bot = bot
+        self._load_channels_config()
 
         # signal_id → discord.Message  (the one persistent embed per signal)
         self.signal_messages: Dict[int, discord.Message] = {}
@@ -386,8 +390,8 @@ class AlertSystem:
         # signal_id → discord.Message  (embed in finished-signals channel after move)
         self.signal_finished_messages: Dict[int, discord.Message] = {}
 
-        # BACKWARDS COMPAT: alert message ID (str) → signal_id
-        self.alert_messages: Dict[str, int] = {}
+        # alert message ID (str) → signal_id; bounded at 1000 entries
+        self.alert_messages: collections.OrderedDict = collections.OrderedDict()
 
         # signal_id → {"signal": dict, "event": str, "spread_buffer_enabled": bool}
         # Tracks which signals have "live" embeds that should be refreshed with prices
@@ -593,46 +597,16 @@ class AlertSystem:
             logger.debug(f"Cancelled pending move-to-finished task for signal {signal_id}")
 
     def _get_finished_channel(self) -> Optional[discord.TextChannel]:
-        """
-        Return the finished-signals Discord channel, or None if not configured.
-        Reads `finished_signals` from channels.json each time so hot-reloads work.
-        """
-        try:
-            import json
-            from pathlib import Path
-
-            config_path = Path(__file__).resolve().parent.parent / "config" / "channels.json"
-            with open(config_path) as f:
-                cfg = json.load(f)
-            finished_id = cfg.get("finished_signals")
-            if not finished_id:
-                return None
-            channel = self.bot.get_channel(int(finished_id)) if self.bot else None
-            return channel
-        except Exception as e:
-            logger.warning(f"Could not load finished_signals channel: {e}")
+        """Return the finished-signals Discord channel, or None if not configured."""
+        if not self._finished_channel_id or not self.bot:
             return None
+        return self.bot.get_channel(int(self._finished_channel_id))
 
     def _get_profit_channel_sync(self) -> Optional[discord.TextChannel]:
-        """
-        Return the profit Discord channel from channels.json synchronously,
-        or None if not configured. Used inside the archive-move task.
-        """
-        try:
-            import json
-            from pathlib import Path
-
-            config_path = Path(__file__).resolve().parent.parent / "config" / "channels.json"
-            with open(config_path) as f:
-                cfg = json.load(f)
-            profit_id = cfg.get("profit_channel")
-            if not profit_id:
-                return None
-            channel = self.bot.get_channel(int(profit_id)) if self.bot else None
-            return channel
-        except Exception as e:
-            logger.warning(f"Could not load profit_channel: {e}")
+        """Return the profit Discord channel, or None if not configured."""
+        if not self._profit_channel_id or not self.bot:
             return None
+        return self.bot.get_channel(int(self._profit_channel_id))
 
     # Profit events — moved to profit_channel instead of finished_signals channel
     _PROFIT_EVENTS = {"profit", "auto_tp"}
@@ -737,9 +711,7 @@ class AlertSystem:
                                     guild_id=guild_id_val,
                                     bot=self.bot,
                                 )
-                                old_footer = new_embed.footer.text or ""
-                                clean_footer = old_footer.split(" • ⏳")[0].split(" • 🗑️")[0]
-                                new_embed.set_footer(text=f"{clean_footer} • 📁 Archived")
+                                _set_archive_footer(new_embed)
                             except Exception as _rebuild_err:
                                 logger.warning(
                                     f"Could not rebuild embed for signal {signal_id} from DB: {_rebuild_err}"
@@ -750,9 +722,7 @@ class AlertSystem:
                             existing_embed = embed_msg.embeds[0] if embed_msg.embeds else None
                             if existing_embed:
                                 new_embed = existing_embed.copy()
-                                old_footer = existing_embed.footer.text or ""
-                                clean_footer = old_footer.split(" • ⏳")[0].split(" • 🗑️")[0]
-                                new_embed.set_footer(text=f"{clean_footer} • 📁 Archived")
+                                _set_archive_footer(new_embed)
                             else:
                                 new_embed = discord.Embed(
                                     description="Signal reached a final state.",
@@ -764,7 +734,7 @@ class AlertSystem:
                     # the profit channel, which already gets a dedicated summary embed.
                     if not is_profit:
                         try:
-                            await dest_channel.send("<@&1334203997107650662>")
+                            await dest_channel.send(self.role_mention)
                         except Exception as _ping_err:
                             logger.warning(
                                 f"Could not send role ping to {dest_name} for signal {signal_id}: {_ping_err}"
@@ -851,64 +821,62 @@ class AlertSystem:
         self.legends_alert_channel = channel
         logger.info(f"Legends alert channel set: #{channel.name} ({channel.id})")
 
-    def _load_pa_channels(self):
+    def _load_channels_config(self):
+        """Load channels.json once and cache all derived channel ID sets and role mention."""
+        config_path = Path(__file__).parent.parent / "config" / "channels.json"
         try:
-            import json
-            from pathlib import Path
-
-            config_path = Path(__file__).parent.parent / "config" / "channels.json"
             with open(config_path) as f:
                 cfg = json.load(f)
-            monitored = cfg.get("monitored_channels", {})
-            self.pa_channel_ids = {
-                str(v)
-                for k, v in monitored.items()
-                if "pa" in k.lower() or "price-action" in k.lower()
-            }
-            logger.info(f"Loaded {len(self.pa_channel_ids)} PA channel IDs")
         except Exception as e:
-            logger.error(f"Failed to load PA channels: {e}")
-            self.pa_channel_ids = set()
+            logger.error(f"Failed to load channels.json: {e}")
+            cfg = {}
 
-    def _load_toll_channels(self):
-        try:
-            import json
-            from pathlib import Path
+        monitored = cfg.get("monitored_channels", {})
 
-            config_path = Path(__file__).parent.parent / "config" / "channels.json"
-            with open(config_path) as f:
-                cfg = json.load(f)
-            monitored = cfg.get("monitored_channels", {})
-            self.toll_channel_ids = set()
-            self.general_toll_channel_ids = set()
-            self.oil_toll_channel_ids = set()
-            self.legends_channel_ids = set()
-            for channel_name, channel_id in monitored.items():
-                if not channel_id:
-                    continue
-                name_lower = channel_name.lower()
-                if name_lower == "general-tolls":
-                    self.general_toll_channel_ids.add(str(channel_id))
-                elif name_lower == "oil-tolls":
-                    # Oil-tolls: toll-style auto-SL + source cleanup, but alerts
-                    # go to the general-tolls-alert channel (same as general-tolls).
-                    self.oil_toll_channel_ids.add(str(channel_id))
-                    self.toll_channel_ids.add(str(channel_id))
-                elif name_lower == "legends-trades":
-                    self.legends_channel_ids.add(str(channel_id))
-                elif "toll" in name_lower:
-                    self.toll_channel_ids.add(str(channel_id))
-            logger.info(
-                f"Loaded {len(self.toll_channel_ids)} toll channel IDs "
-                f"(incl. {len(self.oil_toll_channel_ids)} oil-toll)"
-            )
-            logger.info(f"Loaded {len(self.general_toll_channel_ids)} general-toll channel IDs")
-            logger.info(f"Loaded {len(self.legends_channel_ids)} legends channel IDs")
-        except Exception as e:
-            logger.error(f"Failed to load toll channels: {e}")
-            self.toll_channel_ids = set()
-            self.general_toll_channel_ids = set()
-            self.oil_toll_channel_ids = set()
+        # PA channels
+        self.pa_channel_ids = {
+            str(v) for k, v in monitored.items() if "pa" in k.lower() or "price-action" in k.lower()
+        }
+
+        # Toll / general-toll / oil-toll / legends channels
+        self.toll_channel_ids = set()
+        self.general_toll_channel_ids = set()
+        self.oil_toll_channel_ids = set()
+        self.legends_channel_ids = set()
+        for channel_name, channel_id in monitored.items():
+            if not channel_id:
+                continue
+            name_lower = channel_name.lower()
+            if name_lower == "general-tolls":
+                self.general_toll_channel_ids.add(str(channel_id))
+            elif name_lower == "oil-tolls":
+                # Oil-tolls: toll-style auto-SL + source cleanup; alerts go to general-toll channel.
+                self.oil_toll_channel_ids.add(str(channel_id))
+                self.toll_channel_ids.add(str(channel_id))
+            elif name_lower == "legends-trades":
+                self.legends_channel_ids.add(str(channel_id))
+            elif "toll" in name_lower:
+                self.toll_channel_ids.add(str(channel_id))
+
+        # Destination channel IDs (resolved to objects on demand via bot.get_channel)
+        self._finished_channel_id = cfg.get("finished_signals")
+        self._profit_channel_id = cfg.get("profit_channel")
+
+        # Role mention string — falls back to hardcoded ID if key absent from config
+        role_id = cfg.get("alert_role_id", "1334203997107650662")
+        self.role_mention = f"<@&{role_id}>"
+
+        logger.info(
+            f"Channels loaded: {len(self.pa_channel_ids)} PA, "
+            f"{len(self.toll_channel_ids)} toll "
+            f"(incl. {len(self.oil_toll_channel_ids)} oil-toll), "
+            f"{len(self.general_toll_channel_ids)} general-toll, "
+            f"{len(self.legends_channel_ids)} legends"
+        )
+
+    def reload_channels(self):
+        """Re-read channels.json and refresh all cached channel IDs. Call on !reload."""
+        self._load_channels_config()
 
     def is_pa_signal(self, signal: Dict) -> bool:
         return str(signal.get("channel_id", "")) in self.pa_channel_ids
@@ -989,9 +957,8 @@ class AlertSystem:
     def track_alert_message(self, message_id: int, signal_id: int):
         """Register a message_id → signal_id mapping (used by reply handler)."""
         self.alert_messages[str(message_id)] = signal_id
-        if len(self.alert_messages) > 1000:
-            for k in list(self.alert_messages)[: len(self.alert_messages) - 1000]:
-                del self.alert_messages[k]
+        while len(self.alert_messages) > 1000:
+            self.alert_messages.popitem(last=False)
 
     def get_signal_from_alert(self, message_id: str) -> Optional[int]:
         return self.alert_messages.get(str(message_id))
@@ -1089,8 +1056,7 @@ class AlertSystem:
             try:
                 # On the initial send, include the role mention as content so users
                 # are notified even though there's no separate ping reply yet.
-                role_mention = "<@&1334203997107650662>"
-                embed_msg = await target_channel.send(content=role_mention, embed=embed)
+                embed_msg = await target_channel.send(content=self.role_mention, embed=embed)
                 self.signal_messages[signal_id] = embed_msg
                 self.track_alert_message(embed_msg.id, signal_id)
                 logger.info(f"Created persistent message for signal {signal_id} (event={event})")
@@ -1111,8 +1077,7 @@ class AlertSystem:
                     logger.warning(f"Could not delete old ping for signal {signal_id}: {e}")
 
             try:
-                role_mention = "<@&1334203997107650662>"
-                new_ping = await embed_msg.reply(f"{role_mention} {ping_text}")
+                new_ping = await embed_msg.reply(f"{self.role_mention} {ping_text}")
                 self.signal_ping_messages[signal_id] = new_ping
                 logger.debug(f"Sent new ping for signal {signal_id} (event={event})")
             except Exception as e:
@@ -1657,7 +1622,7 @@ class AlertSystem:
                         guild_id = self.bot.guilds[0].id
                     url = f"https://discord.com/channels/{guild_id}/{signal['channel_id']}/{signal['message_id']}"
                     embed.add_field(name="Source", value=url, inline=False)
-            await target_channel.send("<@&1334203997107650662>")
+            await target_channel.send(self.role_mention)
             message = await target_channel.send(embed=embed)
             self.track_alert_message(message.id, signal_id)
             self.stats["news_cancelled"] = self.stats.get("news_cancelled", 0) + 1
@@ -1677,9 +1642,7 @@ class AlertSystem:
                     try:
                         # Rebuild embed with archive footer
                         archived_embed = embed.copy()
-                        old_footer = embed.footer.text or ""
-                        clean_footer = old_footer.split(" • ⏳")[0].split(" • 🗑️")[0]
-                        archived_embed.set_footer(text=f"{clean_footer} • 📁 Archived")
+                        _set_archive_footer(archived_embed)
                         await finished_channel.send(embed=archived_embed)
                         logger.info(
                             f"Moved standalone news-cancel embed for signal {signal_id} to finished-signals"
@@ -1722,9 +1685,6 @@ class AlertSystem:
         bounce_str = "N/A"
         if nm_state is not None:
             try:
-                # Import here to avoid circular imports
-                from price_feeds.nm_config import NMConfig
-
                 _cfg = NMConfig()
                 closest_str = _cfg.format_value(instrument, nm_state.closest_distance)
                 required_bounce = _cfg.get_required_bounce(instrument, nm_state.closest_distance)
@@ -1866,25 +1826,6 @@ class AlertSystem:
                         pass
 
             asyncio.ensure_future(_delete_later())
-
-    async def _get_profit_channel(self) -> Optional[discord.TextChannel]:
-        try:
-            import json
-            from pathlib import Path
-
-            config_path = Path(__file__).resolve().parent.parent / "config" / "channels.json"
-            with open(config_path) as f:
-                cfg = json.load(f)
-            profit_channel_id = cfg.get("profit_channel")
-            if not profit_channel_id:
-                return None
-            channel = self.bot.get_channel(int(profit_channel_id))
-            if not channel:
-                channel = await self.bot.fetch_channel(int(profit_channel_id))
-            return channel
-        except Exception as e:
-            logger.error(f"Could not load profit channel: {e}")
-            return None
 
     def get_stats(self) -> Dict:
         return {

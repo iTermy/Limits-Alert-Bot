@@ -124,70 +124,38 @@ After completing an area, mark the section as finished and briefly state what yo
 
 ## Area 5: Alert system
 
-### 5.1 Remove the dead `EmbedFactory` import + the entire `utils/embed_factory.py`
-- **Location**: `utils/embed_factory.py` (371 lines); imports in `discord_handlers/message_handler.py:7` and `price_feeds/alert_system.py:14`.
-- **Current state**: `EmbedFactory` is imported in both files but never referenced anywhere outside its own definition. The current embed builder is `alert_system._build_signal_embed` (a module-level function).
-- **Proposed change**: Delete `utils/embed_factory.py` and the two imports.
-- **Rationale**: Goal 2 — 371 lines of dead module.
-- **Risk**: Low — confirmed via grep no caller references it.
-- **Behavior-preserving?**: Yes.
+### ✅ 5.1 Remove the dead `EmbedFactory` import + the entire `utils/embed_factory.py`
+- **Location**: `utils/embed_factory.py`
+- **Done**: Deleted `utils/embed_factory.py` (371 lines). The imports had already been removed from both `message_handler.py` and `alert_system.py` in prior work.
 
-### 5.2 Consolidate the toll-channel/PA-channel/legends-channel JSON re-reads
-- **Location**: `price_feeds/alert_system.py:579-617` (`_get_finished_channel`, `_get_profit_channel_sync`), `835-887` (`_load_pa_channels`, `_load_toll_channels`), `1789-1805` (`_get_profit_channel` async variant).
-- **Current state**: At least 5 different functions re-read `channels.json` from disk on every call (`_get_finished_channel`, `_get_profit_channel_sync`, the async `_get_profit_channel`, plus the PA/toll loaders during `__init__`). The two profit-channel functions return the same value via different paths.
-- **Proposed change**: Read `channels.json` once at `AlertSystem.__init__` (or accept the parsed dict as a constructor param from `streaming_monitor.initialize`), keep the IDs on `self`. Delete `_get_profit_channel` (async) — only `_get_profit_channel_sync` is called. The "every call re-reads" pattern was likely added for hot-reloads but those happen via `!reload` which can call a new `reload_channels()` method instead.
-- **Rationale**: Goal 1 (filesystem I/O on every embed move) + Goal 2.
-- **Risk**: Low/Medium — needs a `reload_channels()` path if `!reload` is meant to refresh these.
-- **Behavior-preserving?**: Yes if `!reload` is updated.
+### ✅ 5.2 Consolidate the toll-channel/PA-channel/legends-channel JSON re-reads
+- **Location**: `price_feeds/alert_system.py`
+- **Done**: Merged `_load_pa_channels()` + `_load_toll_channels()` into a single `_load_channels_config()` that reads `channels.json` once. Added cached `self._finished_channel_id` and `self._profit_channel_id`. Simplified `_get_finished_channel()` and `_get_profit_channel_sync()` to use cached IDs (no disk I/O). Deleted `_get_profit_channel()` async variant (never called). Added `reload_channels()` public method called by `!reload` in `bot_commands.py`.
+- **Adjacent fix**: Added `alert_system.reload_channels()` call to `reload_config` command in `bot_commands.py`.
 
-### 5.3 Hardcoded role-mention constant `<@&1334203997107650662>`
-- **Location**: `price_feeds/alert_system.py:748, 878, 1064, 1086, 1589` and `discord_handlers/message_handler.py:878`
-- **Current state**: Same Discord role ID hardcoded in 6+ places.
-- **Proposed change**: Read from `channels.json` once into `AlertSystem.role_mention_id`. Construct the mention string in one place.
-- **Rationale**: Goal 3 (magic number).
-- **Risk**: Low.
-- **Behavior-preserving?**: Yes.
+### ✅ 5.3 Hardcoded role-mention constant `<@&1334203997107650662>`
+- **Location**: `price_feeds/alert_system.py`, `discord_handlers/message_handler.py`, `config/channels.json`
+- **Done**: Added `"alert_role_id": "1334203997107650662"` to `channels.json`. `_load_channels_config()` reads it and sets `self.role_mention`. Replaced all 5 occurrences in `alert_system.py` with `self.role_mention` and the 1 occurrence in `message_handler.py` with `self.alert_system.role_mention`. Fallback to the hardcoded ID if key absent from config.
 
-### 5.4 Two near-identical "rebuild archived embed with archive footer" blocks
-- **Location**: `price_feeds/alert_system.py:692-742` (`_move_after_delay` finished-channel branch), `1607-1625` (the analogous block inside `send_news_cancel_alert._move_standalone_after_delay`).
-- **Current state**: Two parallel after-delay tasks that share the same "rebuild embed, set archived footer, post to finished, delete original" recipe. The footer-cleanup pattern (`old_footer.split(" • ⏳")[0].split(" • 🗑️")[0]`) appears in three places.
-- **Proposed change**: Extract `_archive_footer(embed, label="📁 Archived")` and a single `_move_to_archive_channel(signal_id, source_msg, build_archive_embed)` coroutine. Reuse from both call sites.
-- **Rationale**: Goal 1/3.
-- **Risk**: Medium — touches the deletion-task lifecycle. Tests with reactivation-while-archive-pending are the key edge cases.
-- **Behavior-preserving?**: Yes.
+### ✅ 5.4 Extract archive-footer helper
+- **Location**: `price_feeds/alert_system.py`, `discord_handlers/message_handler.py`
+- **Done**: Extracted module-level `_set_archive_footer(embed, label="📁 Archived")` helper. Applied at all 4 call sites (two in `_move_after_delay`, one in `_move_standalone_after_delay`, one in `message_handler.py`). The full `_move_to_archive_channel` coroutine merge was not attempted (Medium risk, closure complexity).
 
-### 5.5 Embed builder `_build_signal_embed` lazy-imports `TPConfig` on every call
-- **Location**: `price_feeds/alert_system.py:116-121`
-- **Current state**:
-  ```python
-  _tp_config = None
-  try:
-      from price_feeds.tp_config import TPConfig
-      _tp_config = TPConfig()
-  except Exception:
-      pass
-  ```
-  This runs once per embed build. `TPConfig()` reads `tp_configuration.json` from disk in its constructor (verify, but likely).
-- **Proposed change**: Pass `tp_config` in as an argument to `_build_signal_embed` (callers in `AlertSystem` already have one available on `self.bot.monitor.tp_config`), or import once at module level.
-- **Rationale**: Goal 1 — JSON read per embed render is the kind of thing that scales badly with active signals.
-- **Risk**: Low.
-- **Behavior-preserving?**: Yes.
+### ✅ 5.5 Move `TPConfig`/`NMConfig` imports to module level
+- **Location**: `price_feeds/alert_system.py`
+- **Done**: `TPConfig` and `NMConfig` now imported at module top. Module-level `_tp_config` singleton instantiated once (no more per-call JSON read). Inline `from price_feeds.tp_config import TPConfig` removed from `_build_signal_embed` and `_build_profit_archive_embed`. Inline `from price_feeds.nm_config import NMConfig` (with stale "avoid circular imports" comment) removed from `send_near_miss_cancel_alert`.
+- **Adjacent fix**: Moved inline `import json` / `from pathlib import Path` to module level in `alert_system.py` (were in 5 inline sites).
 
 ### 5.6 The status_map → cancel_type → reason_text branching
-- **Location**: `price_feeds/alert_system.py:189-238`
-- **Current state**: A 50-line block of `if/elif` mapping `event` strings + `cancel_type` strings to display text and footer suffix. Has at least 4 different conditional branches that compute "reason_text" and "footer".
-- **Proposed change**: Build a single `EVENT_DESCRIPTORS` dict mapping `(event, cancel_type_prefix)` → `(color, status_label, reason_text, footer_suffix)`. Look up once.
-- **Rationale**: Goal 3 (dispatch table beats `if/elif` chain).
-- **Risk**: Medium — it's the embed that members see. Behavior-preserving requires careful matching of edge cases.
-- **Behavior-preserving?**: Yes if done carefully.
+- **Skipped**: Medium risk — the `if/elif` chain covers event-specific edge cases (news currency suffix, `cancel_type == "automatic"` vs `"expiry"` distinction). A dispatch table that handles all cases correctly is larger than the original and harder to audit for regressions. Leaving as-is.
 
-### 5.7 Drop the bounded-`alert_messages` cleanup as a separate concern
-- **Location**: `price_feeds/alert_system.py:963-968`
-- **Current state**: After every track, if `len > 1000`, evict the first N. This is fine, but it's a 4-line in-method loop where a `collections.OrderedDict.popitem(last=False)` or a `lru_cache`-style pattern would be 1 line.
-- **Proposed change**: Use `collections.OrderedDict` or just leave it — it's harmless but not pretty.
-- **Rationale**: Goal 3.
-- **Risk**: Low.
-- **Behavior-preserving?**: Yes. (Marginal value — could be skipped.)
+### ✅ 5.7 `alert_messages` bounded eviction
+- **Location**: `price_feeds/alert_system.py`
+- **Done**: Changed `self.alert_messages` from `dict` to `collections.OrderedDict`. Eviction loop replaced with `while len > 1000: popitem(last=False)`.
+
+### Adjacent fixes (Area 5 session)
+- `discord_handlers/message_handler.py`: Moved `_build_signal_embed` import to module top (was inline). Added `_set_archive_footer` to the same import. Removed redundant inline `from price_feeds.alert_system import _build_signal_embed`.
+- `price_feeds/alert_system.py`: Stripped "REDESIGNED:" from module docstring (8.1).
 
 ---
 

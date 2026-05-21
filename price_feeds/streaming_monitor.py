@@ -878,4 +878,3 @@ class StreamingPriceMonitor:
             "stream_manager": self.stream_manager.get_stats(),
             "alert_stats": self.alert_system.get_stats(),
         }
-

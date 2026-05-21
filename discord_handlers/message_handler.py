@@ -7,6 +7,7 @@ from typing import Optional
 
 import discord
 
+from price_feeds.alert_system import _build_signal_embed, _set_archive_footer
 from price_feeds.tp_config import TPConfig
 from utils.logger import get_logger
 
@@ -882,8 +883,6 @@ class MessageHandler:
                             try:
                                 finished_channel = self.alert_system._get_finished_channel()
                                 if finished_channel:
-                                    from price_feeds.alert_system import _build_signal_embed
-
                                     guild_id_val = signal.get("guild_id")
                                     if not guild_id_val and self.bot and self.bot.guilds:
                                         guild_id_val = self.bot.guilds[0].id
@@ -913,13 +912,10 @@ class MessageHandler:
                                         guild_id=guild_id_val,
                                         bot=self.bot,
                                     )
-                                    old_footer = cancel_embed.footer.text or ""
-                                    clean_footer = old_footer.split(" • ⏳")[0].split(" • 🗑️")[0]
-                                    cancel_embed.set_footer(text=f"{clean_footer} • 📁 Archived")
+                                    _set_archive_footer(cancel_embed)
 
-                                    role_mention = "<@&1334203997107650662>"
                                     ping_line = (
-                                        f"{role_mention} ❌ **{signal['instrument']}** "
+                                        f"{self.alert_system.role_mention} ❌ **{signal['instrument']}** "
                                         f"{signal['direction'].upper()} — cancelled by sender "
                                         f"(by {message.author.display_name})"
                                     )

@@ -545,6 +545,12 @@ class BotCommands(BaseCog):
 
             invalidate_gold_tolls_sl_cache()
 
+            # Refresh alert system channel IDs in case channels.json was edited
+            if hasattr(self.bot, "monitor") and self.bot.monitor:
+                monitor = self.bot.monitor
+                if hasattr(monitor, "alert_system") and monitor.alert_system:
+                    monitor.alert_system.reload_channels()
+
             await ctx.send("✅ Configuration reloaded")
             self.logger.info(f"Config reloaded by {ctx.author.name}")
         except Exception as e:

@@ -1,7 +1,8 @@
 {
   "permissions": {
     "allow": [
-      "Bash(ruff format *)"
+      "Bash(ruff format *)",
+      "Bash(Remove-Item *)"
     ]
   }
 }

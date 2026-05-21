@@ -95,7 +95,6 @@ commands/
 utils/
   logger.py                     Rotating logs: bot.log (10 MB×5) + errors.log (5 MB×3); UTF-8; LOG_LEVEL env
   config_loader.py              JSON config read/write helpers
-  embed_factory.py              Standardized Discord embed builder
   formatting.py                 Price/pip/distance formatting helpers
 
 config/                         (see Configuration Files section)

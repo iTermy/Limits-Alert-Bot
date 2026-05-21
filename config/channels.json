@@ -27,6 +27,7 @@
   "command_channel": "1402971848731398174",
   "profit_channel": "1414288228206514279",
   "finished_signals": "1479245676377407610",
+  "alert_role_id": "1334203997107650662",
   "channel_settings": {
     "daily_trade_setup": {
       "default_expiry": "day_end"
