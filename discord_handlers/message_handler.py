@@ -51,7 +51,9 @@ class MessageHandler:
             message_id = signal.get("message_id")
             channel_id = signal.get("channel_id")
             if not message_id or not channel_id or str(message_id).startswith("manual_"):
-                self.logger.debug("Skipping original message reaction - manual signal or missing IDs")
+                self.logger.debug(
+                    "Skipping original message reaction - manual signal or missing IDs"
+                )
                 return
             try:
                 channel = self.bot.get_channel(int(channel_id))
@@ -119,7 +121,9 @@ class MessageHandler:
                         keyword in embed.title.lower()
                         for keyword in ["approaching", "hit", "stop loss"]
                     ):
-                        logger.warning(f"Message looks like alert but isn't tracked: {referenced.id}")
+                        logger.warning(
+                            f"Message looks like alert but isn't tracked: {referenced.id}"
+                        )
                         await message.reply(
                             "❌ This alert is not tracked. It may have been sent before the bot restarted."
                         )
@@ -215,7 +219,9 @@ class MessageHandler:
                             from database import db as _db
 
                             await _db.mark_limit_hit(pending[0]["id"], pending[0]["price_level"])
-                            signal = await self.signal_db.get_signal_with_limits(signal_id) or signal
+                            signal = (
+                                await self.signal_db.get_signal_with_limits(signal_id) or signal
+                            )
                         except Exception as _he:
                             logger.warning(
                                 f"Could not auto-hit limit for signal {signal_id} on profit reply: {_he}"
@@ -390,7 +396,9 @@ class MessageHandler:
                                 guild_id_val = signal.get("guild_id")
                                 if not guild_id_val and self.bot.guilds:
                                     guild_id_val = self.bot.guilds[0].id
-                                _embed_limits = signal.get("limits") or signal.get("pending_limits") or []
+                                _embed_limits = (
+                                    signal.get("limits") or signal.get("pending_limits") or []
+                                )
                                 try:
                                     _full = await self.signal_db.get_signal_with_limits(sig_id)
                                     if _full:
@@ -417,7 +425,9 @@ class MessageHandler:
                                 # Register so the user can reply "reactivate" to this embed
                                 # and reactivate_embed() can delete it on reactivation.
                                 self.alert_system.track_alert_message(cancel_embed_msg.id, sig_id)
-                                self.alert_system.signal_finished_messages[sig_id] = cancel_embed_msg
+                                self.alert_system.signal_finished_messages[sig_id] = (
+                                    cancel_embed_msg
+                                )
                                 logger.info(
                                     f"Sent direct cancellation embed to finished-signals "
                                     f"for signal {sig_id} (no prior alert embed)"
@@ -477,9 +487,7 @@ class MessageHandler:
                 )
                 try:
                     if embed_event == "reactivated":
-                        await self.alert_system.reactivate_embed(
-                            signal=signal, ping_text=ping_text
-                        )
+                        await self.alert_system.reactivate_embed(signal=signal, ping_text=ping_text)
                     else:
                         await self.alert_system.update_signal_message(
                             signal=signal, event=embed_event, ping_text=ping_text

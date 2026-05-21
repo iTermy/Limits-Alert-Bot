@@ -3,7 +3,6 @@ Config Commands — runtime configuration for TP, alert distances, and near-miss
 """
 
 from datetime import datetime
-from typing import Optional
 
 import discord
 from discord.ext import commands

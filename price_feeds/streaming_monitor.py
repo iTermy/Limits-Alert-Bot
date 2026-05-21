@@ -10,6 +10,7 @@ from typing import Dict, List
 import discord
 import pytz
 
+from database.signal_operations.utils import calculate_sl_pnl
 from price_feeds.alert_config import AlertDistanceConfig
 from price_feeds.alert_system import AlertSystem
 from price_feeds.feed_health_monitor import FeedHealthMonitor
@@ -19,7 +20,6 @@ from price_feeds.nm_monitor import NearMissMonitor
 from price_feeds.price_stream_manager import PriceStreamManager
 from price_feeds.tp_config import TPConfig
 from price_feeds.tp_monitor import AutoTPMonitor
-from database.signal_operations.utils import calculate_sl_pnl
 from utils.config_loader import load_settings
 from utils.logger import get_logger
 
