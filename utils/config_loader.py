@@ -226,3 +226,8 @@ def save_settings(settings: dict):
     except Exception as e:
         logger.error(f"Error saving settings: {e}")
         raise
+
+
+def load_channels_config() -> dict:
+    """Load channels configuration from channels.json"""
+    return config.load("channels.json")

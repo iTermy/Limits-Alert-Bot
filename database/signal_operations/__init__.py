@@ -237,6 +237,13 @@ class SignalDatabase:
         """
         return await self._lifecycle.expire_old_signals(self.db)
 
+    async def bulk_update_toll_sl(self, offset: float, channel_ids: list) -> tuple:
+        """
+        Recompute and persist stop-loss for active/hit toll signals given a new offset.
+        Returns (updated_list, skipped_count, error_count).
+        """
+        return await self._lifecycle.bulk_update_toll_sl(offset, channel_ids)
+
     # ==================== Analytics Operations ====================
 
     async def get_statistics(self) -> Dict[str, Any]:

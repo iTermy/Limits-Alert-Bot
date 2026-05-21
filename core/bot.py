@@ -149,6 +149,7 @@ class TradingBot(commands.Bot):
         extensions = [
             "commands.bot_commands",
             "commands.trading_commands",
+            "commands.config_commands",
         ]
 
         for extension in extensions:

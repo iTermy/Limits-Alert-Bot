@@ -186,33 +186,18 @@ After completing an area, mark the section as finished and briefly state what yo
 
 ## Area 7: Commands (broad cleanup)
 
-### 7.1 Fix the broken `load_channels_config` import
-- **Location**: `commands/bot_commands.py:617-622`
-- **Current state**: `from utils.config_loader import load_channels_config` — but `load_channels_config` is **not defined** in `config_loader.py`. This would crash at runtime if the `if not toll_channel_ids:` fallback branch is ever taken. Currently masked because the primary branch (using `alert_system.toll_channel_ids`) always succeeds.
-- **Proposed change**: Either define `load_channels_config()` in `config_loader.py` (one line: `return config.load("channels.json")`) **or** delete the fallback branch and require `alert_system` to be initialized.
-- **Rationale**: Goal 4 — dead-branch import would crash if reached.
-- **Risk**: Low — fixing a latent bug.
-- **Behavior-preserving?**: No (this fixes a bug — the fallback path would currently raise).
+### ✅ 7.1 Fix the broken `load_channels_config` import
+- **Location**: `commands/bot_commands.py`, `utils/config_loader.py`
+- **Done**: Added `load_channels_config()` to `config_loader.py` (`return config.load("channels.json")`). Moved the import to module level in `bot_commands.py`. The fallback branch now works correctly.
 
-### 7.2 `commands/trading_commands.py` is 2367 lines
-- **Location**: Whole file
-- **Current state**: One mega-cog with command handlers, the `ActiveSignalsView` pagination class, and inline implementations for `!signal`, `!cancel`, `!setstatus`, `!tp set/show/remove`, `!alertdist set/show`, `!nmconfig`, `!news`, `!setexpiry`, `!report`, etc. This is the single largest file in the codebase.
-- **Proposed change**: I am **not** recommending a full split here — that's the kind of "refactor for refactor's sake" that this task explicitly excludes. But two specific extractions are worth it:
-  - Pull `ActiveSignalsView` out into `commands/views.py` (it's a self-contained pagination component).
-  - Pull `!tp`, `!alertdist`, `!nmconfig` config command groups out into a single `commands/config_commands.py` file — they share the "load JSON, validate, save JSON, confirm" pattern.
-- **Rationale**: Goal 3.
-- **Risk**: Medium — many call sites import from `trading_commands`. Touches the load_extensions list in `bot.py:122-127`.
-- **Behavior-preserving?**: Yes.
-- **Note**: Unsure if the user wants this. Flagged as the lowest priority in this plan.
+### ✅ 7.2 `commands/trading_commands.py` extraction
+- **Location**: `commands/trading_commands.py`, `commands/views.py` (new), `commands/config_commands.py` (new), `core/bot.py`
+- **Done**: Created `commands/views.py` with `ActiveSignalsView` class (~142 lines). Created `commands/config_commands.py` with `ConfigCommands(BaseCog)` cog containing `!tp`, `!alertdist`, `!nmconfig` and all their helpers (~787 lines). Removed these from `trading_commands.py` (now 1656 lines, down from 2594). Added `"commands.config_commands"` to `bot.py` extensions list. Module-level constants `ASSET_CLASSES`, `VALID_TP_TYPES`, `VALID_DIST_TYPES`, `VALID_NM_TYPES` defined in `config_commands.py`; removed from `trading_commands.py`. `AlertDistanceConfig` and `NMConfig` removed from `TradingCommands.__init__`; `TPConfig` kept (still used in `set_signal_status`).
+- **Adjacent fixes**: Removed duplicate `EST = pytz.timezone(...)` redefinition; added `import json` and `from pathlib import Path` to module-level imports (removed 4 inline occurrences); removed redundant inline `from price_feeds.alert_config import AlertDistanceConfig` in `active_signals`; removed 2 redundant inline `from datetime import datetime` in `signal_info`; fixed `set_expiry` (was calling nonexistent `signal_db.set_signal_expiry` via stale inline import — now uses `self.signal_db.manually_set_signal_expiry`); added admin check to `!alertdist set` in `config_commands.py` (was missing in original).
 
-### 7.3 The `!goldtollssl` retroactive-update branch
-- **Location**: `commands/bot_commands.py:600-731`
-- **Current state**: ~130 lines that build a raw SQL `IN (...)` placeholder string by hand, walk the active toll signals, recompute SL, write back, update the in-memory monitor state, and update the embed. This is a one-shot maintenance operation that includes a custom error/skip/update tally.
-- **Proposed change**: Extract `database/signal_operations/lifecycle.py::bulk_update_toll_sl(offset, channel_ids) -> {updated, skipped, errored}` helper. The command then just calls it and renders the result. The in-memory-monitor patch can stay in the command file or move into a `monitor.refresh_signal(signal_id)` method.
-- **Rationale**: Goal 3 (sprawling function) + Goal 1 (the manual `placeholders = ", ".join(f"${i+1}" ...)` is a SQL-injection-adjacent pattern that should not be repeated).
-- **Risk**: Medium — touches DB + embed update + in-memory state.
-- **Behavior-preserving?**: Yes.
-
+### ✅ 7.3 The `!goldtollssl` retroactive-update branch
+- **Location**: `commands/bot_commands.py`, `database/signal_operations/lifecycle.py`, `database/signal_operations/__init__.py`
+- **Done**: Added `bulk_update_toll_sl(offset, channel_ids) -> tuple[list, int, int]` to `LifecycleManager`; uses `= ANY($1)` instead of hand-built `IN (...)` placeholder string. Delegate added to `SignalDatabase`. `!goldtollssl` command simplified: calls `self.signal_db.bulk_update_toll_sl(...)`, then loops over returned `updated_list` to patch in-memory monitor state and update embeds. ~85 lines removed from the command.
 ---
 
 ## Area 8: Misc / cross-cutting

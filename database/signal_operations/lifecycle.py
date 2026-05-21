@@ -685,3 +685,67 @@ class LifecycleManager:
             logger.info(f"Expired {count} signals")
 
         return count
+
+    async def bulk_update_toll_sl(self, offset: float, channel_ids: list) -> tuple:
+        """
+        Recompute and persist stop-loss for all active/hit toll signals given a new offset.
+        Returns (updated_list, skipped_count, error_count).
+        updated_list entries: {"id": sig_id, "new_sl": float}
+        """
+        try:
+            async with self.db.get_connection() as conn:
+                rows = await conn.fetch(
+                    """
+                    SELECT
+                        s.id, s.direction, s.stop_loss,
+                        ARRAY_AGG(l.price_level ORDER BY l.sequence_number)
+                            FILTER (WHERE l.id IS NOT NULL) AS all_price_levels
+                    FROM signals s
+                    LEFT JOIN limits l ON l.signal_id = s.id
+                    WHERE s.status IN ('active', 'hit')
+                      AND CAST(s.channel_id AS TEXT) = ANY($1)
+                    GROUP BY s.id, s.direction, s.stop_loss
+                    """,
+                    channel_ids,
+                )
+        except Exception as e:
+            logger.error(f"bulk_update_toll_sl fetch failed: {e}", exc_info=True)
+            return [], 0, 0
+
+        updated = []
+        skipped = 0
+        errors = 0
+
+        for row in rows:
+            sig_id = row["id"]
+            direction = row["direction"]
+            old_sl = row["stop_loss"]
+            price_levels = row["all_price_levels"] or []
+
+            if not price_levels:
+                skipped += 1
+                continue
+
+            new_sl = (
+                min(price_levels) - offset if direction == "long" else max(price_levels) + offset
+            )
+
+            if old_sl is not None and abs(float(old_sl) - new_sl) < 0.001:
+                skipped += 1
+                continue
+
+            try:
+                async with self.db.get_connection() as conn:
+                    await conn.execute(
+                        "UPDATE signals SET stop_loss = $1 WHERE id = $2", new_sl, sig_id
+                    )
+                updated.append({"id": sig_id, "new_sl": new_sl})
+                logger.info(
+                    f"Updated SL for toll signal {sig_id}: {old_sl} → {new_sl} "
+                    f"(offset={offset}, dir={direction})"
+                )
+            except Exception as e:
+                errors += 1
+                logger.error(f"Failed to update SL for toll signal {sig_id}: {e}", exc_info=True)
+
+        return updated, skipped, errors
