@@ -8,7 +8,7 @@ from typing import Any, Dict, List, Optional, Tuple
 import pytz
 
 from core.parser import ParsedSignal
-from models.signal import LimitData, SignalData
+from models.signal import SignalData
 from utils.logger import get_logger
 
 from .models import LimitStatus, SignalStatus
@@ -639,9 +639,7 @@ class SignalDatabase:
             logger.error(f"Error manually setting signal {signal_id} to hit: {e}", exc_info=True)
             return False
 
-    async def process_limit_hit(
-        self, limit_id: int, actual_price: float = None
-    ) -> Dict[str, Any]:
+    async def process_limit_hit(self, limit_id: int, actual_price: float = None) -> Dict[str, Any]:
         """Process a limit hit event."""
         result = await self.db.mark_limit_hit(limit_id, actual_price)
 
@@ -943,9 +941,7 @@ class SignalDatabase:
 
         raise ValueError(f"Invalid period: {period}")
 
-    async def get_period_signals_with_results(
-        self, start_date, end_date
-    ) -> List[Dict[str, Any]]:
+    async def get_period_signals_with_results(self, start_date, end_date) -> List[Dict[str, Any]]:
         """Get all signals with final results within a date range."""
         query = """
             SELECT

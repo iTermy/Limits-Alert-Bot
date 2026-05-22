@@ -313,7 +313,7 @@ class LicenseCog(BaseCog):
                     color=discord.Color.blue(),
                 )
                 if not rows:
-                    embed.add_field(name="No licenses found", value="​", inline=False)
+                    embed.add_field(name="No licenses found", value="\u200b", inline=False)
                 for row in rows:
                     status_emoji = "✅" if row["status"] == "active" else "❌"
                     created = row["created_at"].strftime("%Y-%m-%d") if row["created_at"] else "?"

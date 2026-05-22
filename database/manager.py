@@ -3,11 +3,11 @@ DatabaseManager — integrates connection and core signal/limit operations
 """
 
 from datetime import datetime
-from typing import Any, Dict, List, Optional
+from typing import Any, Dict, List
 
 import pytz
 
-from models.signal import LimitData, SignalData
+from models.signal import SignalData
 from utils.logger import get_logger
 
 from .connection import DatabaseManager as BaseConnectionManager
@@ -48,9 +48,7 @@ class DatabaseManager(BaseConnectionManager):
     ) -> bool:
         """Update signal status with proper lifecycle management."""
         async with self.get_connection() as conn:
-            current = await self.fetch_one(
-                "SELECT status FROM signals WHERE id = $1", (signal_id,)
-            )
+            current = await self.fetch_one("SELECT status FROM signals WHERE id = $1", (signal_id,))
             if not current:
                 logger.error(f"Signal {signal_id} not found")
                 return False

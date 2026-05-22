@@ -8,7 +8,7 @@ asset-class detection with fallback, pip-size lookup, and reload.
 import json
 import logging
 from pathlib import Path
-from typing import Dict, Optional
+from typing import Dict
 
 logger = logging.getLogger(__name__)
 
@@ -124,8 +124,22 @@ class BaseThresholdConfig:
         if any(
             x in s
             for x in [
-                "SPX", "NAS", "DOW", "DAX", "CHINA50", "US500", "USTEC", "US30",
-                "US2000", "RUSSELL", "GER", "DE30", "DE40", "JP225", "NIKKEI", "FTSE",
+                "SPX",
+                "NAS",
+                "DOW",
+                "DAX",
+                "CHINA50",
+                "US500",
+                "USTEC",
+                "US30",
+                "US2000",
+                "RUSSELL",
+                "GER",
+                "DE30",
+                "DE40",
+                "JP225",
+                "NIKKEI",
+                "FTSE",
             ]
         ):
             return "indices"

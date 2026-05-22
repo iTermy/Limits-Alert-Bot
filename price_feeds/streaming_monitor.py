@@ -9,7 +9,6 @@ import discord
 import pytz
 
 from database.utils import calculate_sl_pnl
-from models.signal import SignalData
 from utils.config_loader import load_settings
 from utils.logger import get_logger
 

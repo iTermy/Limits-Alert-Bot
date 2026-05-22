@@ -44,8 +44,13 @@ class AlertSystem:
 
     LIVE_UPDATE_INTERVAL = 15
 
-    def __init__(self, alert_channel: Optional[discord.TextChannel] = None, bot=None,
-                 stream_manager=None, alert_config=None):
+    def __init__(
+        self,
+        alert_channel: Optional[discord.TextChannel] = None,
+        bot=None,
+        stream_manager=None,
+        alert_config=None,
+    ):
         self.alert_channel = alert_channel
         self.pa_alert_channel = None
         self.toll_alert_channel = None
@@ -993,7 +998,9 @@ class AlertSystem:
                 delete_after_minutes=END_STATE_DELETE_MINUTES,
             )
             if msg:
-                self._archive_manager.schedule_end_state_move(signal_id, event="near_miss_cancelled")
+                self._archive_manager.schedule_end_state_move(
+                    signal_id, event="near_miss_cancelled"
+                )
                 self.stats["nm_cancelled"] = self.stats.get("nm_cancelled", 0) + 1
                 self.stats["total_alerts"] += 1
                 logger.info(f"Near-miss cancel alert sent for signal {signal_id} ({instrument})")

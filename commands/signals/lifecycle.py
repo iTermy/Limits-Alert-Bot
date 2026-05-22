@@ -269,9 +269,7 @@ class LifecycleCog(BaseCog):
 
         # Streaming status
         if self.services.monitor:
-            is_subscribed = (
-                signal["instrument"] in self.services.stream_manager.subscribed_symbols
-            )
+            is_subscribed = signal["instrument"] in self.services.stream_manager.subscribed_symbols
             embed.add_field(
                 name="Streaming Status",
                 value="🟢 Subscribed" if is_subscribed else "⚪ Not Subscribed",

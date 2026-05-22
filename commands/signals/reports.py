@@ -117,7 +117,9 @@ class ReportsCog(BaseCog):
             signals = enriched_signals
 
             # Load channels.json directly
-            channels_file = Path(__file__).resolve().parent.parent.parent / "config" / "channels.json"
+            channels_file = (
+                Path(__file__).resolve().parent.parent.parent / "config" / "channels.json"
+            )
             try:
                 with open(channels_file) as f:
                     channels_data = json.load(f)

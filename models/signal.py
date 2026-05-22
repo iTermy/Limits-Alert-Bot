@@ -92,7 +92,9 @@ class SignalData(BaseModel):
         return len(self.hit_limits)
 
     @classmethod
-    def from_db_row(cls, row: dict[str, Any], limits: Optional[list[dict[str, Any]]] = None) -> SignalData:
+    def from_db_row(
+        cls, row: dict[str, Any], limits: Optional[list[dict[str, Any]]] = None
+    ) -> SignalData:
         """Build a SignalData from an asyncpg Record dict.
 
         Handles the id/signal_id normalization: the DB column is ``id`` but
