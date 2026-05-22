@@ -11,7 +11,7 @@ from price_feeds.alert_config import AlertDistanceConfig
 from price_feeds.nm_config import NMConfig
 from price_feeds.tp_config import TPConfig
 
-from .base_command import BaseCog
+from .._base import BaseCog
 
 ASSET_CLASSES = frozenset(["forex", "forex_jpy", "metals", "indices", "stocks", "crypto", "oil"])
 VALID_TP_TYPES = ["pips", "dollars"]
@@ -19,7 +19,7 @@ VALID_DIST_TYPES = ["pips", "dollars", "percentage"]
 VALID_NM_TYPES = frozenset(["pips", "dollars"])
 
 
-class ConfigCommands(BaseCog):
+class ThresholdsCog(BaseCog):
     """Runtime configuration commands for TP, alert distance, and near-miss thresholds"""
 
     def __init__(self, bot):
@@ -205,9 +205,9 @@ class ConfigCommands(BaseCog):
                 f"{float_value:.1f} pips" if tp_type_lower == "pips" else f"${float_value:.2f}"
             )
 
-            if self.bot.monitor:
-                self.bot.monitor.tp_config.reload_config()
-                self.bot.monitor.tp_monitor.tp_config = self.bot.monitor.tp_config
+            if self.services.monitor:
+                self.services.tp_config.reload_config()
+                self.services.tp_monitor.tp_config = self.services.tp_config
 
             embed = discord.Embed(title="TP Configuration Updated", color=discord.Color.green())
             embed.add_field(name="Target", value=label, inline=True)
@@ -224,9 +224,9 @@ class ConfigCommands(BaseCog):
             symbol_upper = symbol.upper()
             removed = self.tp_config.remove_override(symbol_upper)
 
-            if self.bot.monitor:
-                self.bot.monitor.tp_config.reload_config()
-                self.bot.monitor.tp_monitor.tp_config = self.bot.monitor.tp_config
+            if self.services.monitor:
+                self.services.tp_config.reload_config()
+                self.services.tp_monitor.tp_config = self.services.tp_config
 
             if removed:
                 fallback_val = self.tp_config.get_tp_value(symbol_upper)
@@ -452,8 +452,8 @@ class ConfigCommands(BaseCog):
             else:
                 val_display = f"{float_value} pips"
 
-            if self.bot.monitor:
-                self.bot.monitor.alert_config.reload_config()
+            if self.services.monitor:
+                self.services.alert_config.reload_config()
 
             embed = discord.Embed(title="Alert Distance Updated", color=discord.Color.green())
             embed.add_field(name="Target", value=label, inline=True)
@@ -471,8 +471,8 @@ class ConfigCommands(BaseCog):
             symbol_upper = symbol.upper()
             removed = self.alert_dist_config.remove_override(symbol_upper)
 
-            if self.bot.monitor:
-                self.bot.monitor.alert_config.reload_config()
+            if self.services.monitor:
+                self.services.alert_config.reload_config()
 
             if removed:
                 fallback_cfg = self.alert_dist_config._get_config_for_symbol(symbol_upper)
@@ -716,9 +716,9 @@ class ConfigCommands(BaseCog):
                 )
                 label = f"**{target_upper}** (override)"
 
-            if self.bot.monitor:
-                self.bot.monitor.nm_config = NMConfig()
-                self.bot.monitor.nm_monitor.nm_config = self.bot.monitor.nm_config
+            if self.services.monitor:
+                self.services.nm_config = NMConfig()
+                self.services.nm_monitor.nm_config = self.services.nm_config
 
             unit = nm_type if nm_type else "?"
             embed = discord.Embed(title="NM Configuration Updated", color=discord.Color.green())
@@ -744,9 +744,9 @@ class ConfigCommands(BaseCog):
             symbol_upper = symbol.upper()
             removed = self.nm_config.remove_override(symbol_upper)
 
-            if self.bot.monitor:
-                self.bot.monitor.nm_config = NMConfig()
-                self.bot.monitor.nm_monitor.nm_config = self.bot.monitor.nm_config
+            if self.services.monitor:
+                self.services.nm_config = NMConfig()
+                self.services.nm_monitor.nm_config = self.services.nm_config
 
             if removed:
                 info = self.nm_config.get_params_display(symbol_upper)
@@ -773,8 +773,3 @@ class ConfigCommands(BaseCog):
         except Exception as e:
             self.logger.error(f"Error in nmconfig remove: {e}", exc_info=True)
             await ctx.send(f"❌ Error removing NM override: {e}")
-
-
-async def setup(bot):
-    """Setup function for Discord.py to load this cog"""
-    await bot.add_cog(ConfigCommands(bot))

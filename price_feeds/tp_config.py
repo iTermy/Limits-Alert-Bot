@@ -2,7 +2,6 @@
 Take Profit Configuration for Trading Alert Bot
 
 Manages TP thresholds per asset class and per instrument.
-Mirrors the structure of alert_config.py / alert_distances.json.
 
 Supported types:
   - pips     (forex)
@@ -13,18 +12,18 @@ P&L is always calculated in the same native unit as the TP type:
   - dollars for everything else
 """
 
-import json
 import logging
 from datetime import datetime, timezone
-from pathlib import Path
 from typing import Dict, Literal
+
+from ._base_config import BaseThresholdConfig
 
 logger = logging.getLogger(__name__)
 
 TPType = Literal["pips", "dollars"]
 
 
-class TPConfig:
+class TPConfig(BaseThresholdConfig):
     """
     Manages take-profit configuration with per-asset-class defaults
     and per-symbol overrides.
@@ -36,7 +35,8 @@ class TPConfig:
     combined P&L >= 0 (breakeven) at the same moment.
     """
 
-    # Supported asset classes and their default TP type
+    CONFIG_FILENAME = "tp_configuration.json"
+
     ASSET_CLASS_TYPES: Dict[str, TPType] = {
         "forex": "pips",
         "forex_jpy": "pips",
@@ -48,42 +48,10 @@ class TPConfig:
     }
 
     def __init__(self, config_path: str = None):
-        if config_path is None:
-            self.config_path = (
-                Path(__file__).resolve().parent.parent / "config" / "tp_configuration.json"
-            )
-        else:
-            self.config_path = Path(config_path)
-
-        self.config = self._load_config()
-        self._validate_config()
-
-        # Borrow SymbolMapper for asset-class detection (same as alert_config)
-        try:
-            from price_feeds.symbol_mapper import SymbolMapper
-
-            mapper_config = self.config_path.parent / "symbol_mappings.json"
-            self.mapper = SymbolMapper(str(mapper_config))
-        except Exception as e:
-            logger.warning(f"Could not initialise SymbolMapper: {e}, using fallback detection")
-            self.mapper = None
-
+        super().__init__(config_path)
         logger.info("TPConfig initialised")
 
-    # ------------------------------------------------------------------
-    # Config I/O
-    # ------------------------------------------------------------------
-
-    def _load_config(self) -> Dict:
-        try:
-            with open(self.config_path) as f:
-                return json.load(f)
-        except FileNotFoundError:
-            logger.warning(f"TP config not found, creating default: {self.config_path}")
-            return self._create_default_config()
-        except json.JSONDecodeError as e:
-            logger.error(f"Invalid JSON in TP config: {e}. Using defaults.")
-            return self._create_default_config()
+    # === Config defaults & validation ===
 
     def _create_default_config(self) -> Dict:
         config = {
@@ -140,20 +108,15 @@ class TPConfig:
         return config
 
     def _validate_config(self):
-        for key in ("defaults", "overrides"):
-            if key not in self.config:
-                logger.error(f"TP config missing key '{key}', resetting to defaults")
-                self.config = self._create_default_config()
-                return
+        super()._validate_config()
 
-        # Ensure scalp sections exist (migration for older configs)
         if "scalp_defaults" not in self.config:
             self.config["scalp_defaults"] = self._create_default_config()["scalp_defaults"]
         if "scalp_overrides" not in self.config:
             self.config["scalp_overrides"] = {}
 
         for section in ("defaults", "scalp_defaults"):
-            for asset_class, settings in self.config[section].items():
+            for asset_class, settings in self.config.get(section, {}).items():
                 if not isinstance(settings, dict):
                     logger.error(f"Invalid TP settings for {asset_class} in {section}")
                     continue
@@ -164,105 +127,22 @@ class TPConfig:
                 if "description" not in settings:
                     settings["description"] = f"Default for {asset_class}"
 
-    def _save_config(self, config: Dict = None):
-        if config is None:
-            config = self.config
-        try:
-            self.config_path.parent.mkdir(parents=True, exist_ok=True)
-            with open(self.config_path, "w") as f:
-                json.dump(config, f, indent=2)
-        except Exception as e:
-            logger.error(f"Failed to save TP config: {e}")
-            raise
-
-    # ------------------------------------------------------------------
-    # Asset-class detection (delegated to SymbolMapper or fallback)
-    # ------------------------------------------------------------------
-
-    def determine_asset_class(self, symbol: str) -> str:
-        if self.mapper:
-            try:
-                return self.mapper.determine_asset_class(symbol)
-            except Exception as e:
-                logger.warning(f"SymbolMapper failed for {symbol}: {e}, using fallback")
-
-        # Fallback (mirrors alert_config._determine_asset_class)
-        s = symbol.upper()
-
-        if (
-            any(c in s for c in ["BTC", "ETH", "BNB", "XRP", "ADA", "DOGE", "SOL", "DOT"])
-            or "USDT" in s
-        ):
-            return "crypto"
-        if any(c in s for c in ["XAU", "XAG", "GOLD", "SILVER"]):
-            return "metals"
-        if any(c in s for c in ["WTI", "BRENT", "OIL", "USOIL"]):
-            return "oil"
-        if any(
-            c in s
-            for c in [
-                "SPX",
-                "NAS",
-                "DOW",
-                "DAX",
-                "US500",
-                "USTEC",
-                "US30",
-                "US2000",
-                "GER",
-                "DE30",
-                "DE40",
-                "JP225",
-                "CHINA50",
-            ]
-        ):
-            return "indices"
-        if "." in s:
-            return "stocks"
-
-        forex_ccys = {"EUR", "USD", "GBP", "JPY", "AUD", "NZD", "CAD", "CHF"}
-        if len(s) == 6 and s[:3] in forex_ccys and s[3:] in forex_ccys:
-            return "forex_jpy" if "JPY" in s else "forex"
-
-        return "forex"  # safe default
-
-    def get_pip_size(self, symbol: str) -> float:
-        """Return pip size in price units for the given symbol."""
-        s = symbol.upper()
-        if "JPY" in s:
-            return 0.01
-        if any(c in s for c in ["XAU", "GOLD"]):
-            return 0.01
-        if any(c in s for c in ["XAG", "SILVER"]):
-            return 0.001
-        if "BTC" in s:
-            return 1.0
-        if any(c in s for c in ["SPX", "NAS", "DOW", "US500", "USTEC", "US30", "DAX"]):
-            return 1.0
-        return 0.0001  # Standard forex
-
-    # ------------------------------------------------------------------
-    # Public API
-    # ------------------------------------------------------------------
+    # === Public API ===
 
     def _get_config_for_symbol(self, symbol: str, scalp: bool = False) -> Dict:
         """Return {type, value} for a symbol, respecting overrides and scalp mode."""
         s = symbol.upper()
 
         if scalp:
-            # Check scalp overrides first
             if s in self.config.get("scalp_overrides", {}):
                 ov = self.config["scalp_overrides"][s]
                 return {"type": ov["type"], "value": ov["value"]}
-            # Fall back to scalp defaults
             asset_class = self.determine_asset_class(s)
             scalp_defaults = self.config.get("scalp_defaults", {})
             if asset_class in scalp_defaults:
                 d = scalp_defaults[asset_class]
                 return {"type": d["type"], "value": d["value"]}
-            # If no scalp config found, fall through to regular config
 
-        # Regular (setup) path
         if s in self.config["overrides"]:
             ov = self.config["overrides"][s]
             return {"type": ov["type"], "value": ov["value"]}
@@ -276,10 +156,7 @@ class TPConfig:
         return {"type": "dollars", "value": 5.0}
 
     def get_tp_value(self, symbol: str, scalp: bool = False) -> float:
-        """
-        Return the TP threshold in its native unit (pips or dollars).
-        Use this to compare against calculate_pnl().
-        """
+        """Return the TP threshold in its native unit (pips or dollars)."""
         return self._get_config_for_symbol(symbol, scalp=scalp)["value"]
 
     def get_tp_type(self, symbol: str, scalp: bool = False) -> TPType:
@@ -299,16 +176,6 @@ class TPConfig:
 
         For 'pips' instruments: result is in pips (positive = profit).
         For 'dollars' instruments: result is in dollars per unit (positive = profit).
-
-        Args:
-            symbol: Instrument name
-            direction: 'long' or 'short'
-            entry_price: hit_price of the limit
-            current_price: current market price (bid for long, ask for short)
-            scalp: Whether to use scalp TP config
-
-        Returns:
-            P&L in native units (pips or dollars)
         """
         tp_type = self.get_tp_type(symbol, scalp=scalp)
 
@@ -320,13 +187,12 @@ class TPConfig:
         if tp_type == "pips":
             pip_size = self.get_pip_size(symbol)
             return raw_diff / pip_size
-        # dollars
         return raw_diff
 
     def set_override(
         self, symbol: str, value: float, tp_type: TPType, set_by: str = "User", scalp: bool = False
     ) -> bool:
-        """Set a per-symbol TP override. Returns True on success."""
+        """Set a per-symbol TP override."""
         if tp_type not in ("pips", "dollars"):
             logger.error(f"Invalid TP type: {tp_type}")
             return False
@@ -358,7 +224,7 @@ class TPConfig:
         set_by: str = "User",
         scalp: bool = False,
     ) -> bool:
-        """Update the default TP for an asset class. Returns True on success."""
+        """Update the default TP for an asset class."""
         section = "scalp_defaults" if scalp else "defaults"
         if asset_class not in self.config.get(section, {}):
             logger.error(f"Unknown asset class: {asset_class} in {section}")
@@ -377,7 +243,7 @@ class TPConfig:
         return True
 
     def remove_override(self, symbol: str, scalp: bool = False) -> bool:
-        """Remove a per-symbol override. Returns True if one existed."""
+        """Remove a per-symbol override."""
         s = symbol.upper()
         section = "scalp_overrides" if scalp else "overrides"
         if s in self.config.get(section, {}):
@@ -386,12 +252,6 @@ class TPConfig:
             logger.info(f"Removed {'scalp ' if scalp else ''}TP override: {s}")
             return True
         return False
-
-    def reload_config(self):
-        """Reload configuration from disk."""
-        self.config = self._load_config()
-        self._validate_config()
-        logger.info("TP configuration reloaded")
 
     def get_display_info(self, symbol: str = None, scalp: bool = False) -> Dict:
         """Return formatted config dict for display in Discord."""

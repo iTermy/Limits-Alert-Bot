@@ -12,8 +12,9 @@ The bot monitors trading-signal messages in designated Discord channels, parses 
 - **Discord**: discord.py 2.3.0+, `commands.Bot` with cog extensions
 - **Database**: PostgreSQL via Supabase; `asyncpg` pool (min 2, max 10 connections, 30 s timeout)
 - **Price Feeds**: ICMarkets/MT5 (polling 100 ms/symbol), OANDA (REST streaming), Binance (WebSocket bookTicker)
+- **Models**: Pydantic v2 for domain objects (`SignalData`, `LimitData`, `BotSettings`) with dict-protocol methods for backward compat
 - **AI Fallback Parser**: OpenAI `gpt-4o-mini`; disabled by default (`enable_openai_fallback: false` in `settings.json`)
-- **Config**: `.env` for secrets; JSON files in `config/` for runtime settings
+- **Config**: `.env` for secrets; JSON files in `config/` for runtime settings; Pydantic validation on load
 
 ---
 
@@ -22,16 +23,26 @@ The bot monitors trading-signal messages in designated Discord channels, parses 
 ```
 main.py                         Entry point; loads .env, creates TradingBot, runs asyncio.run(main())
 
+models/
+  __init__.py                   Re-exports SignalData, LimitData, BotSettings, enums
+  enums.py                      SignalStatus, LimitStatus, ChangeType, Direction (str enums)
+  signal.py                     SignalData, LimitData (Pydantic); computed pending_limits/hit_limits;
+                                  dict-protocol methods (__getitem__, get, etc.) for transition;
+                                  from_db_row() handles id→signal_id normalization
+  config.py                     BotSettings, SpreadBufferConfig, ChannelSettings, ThresholdEntry (Pydantic)
+
 core/
   bot.py                        TradingBot(commands.Bot); wires all subsystems in setup_hook();
-                                  on_message() routes to handler before process_commands();
-                                  admin_ids hardcoded here; close() stops all background tasks
+                                  creates all price_feeds subsystems and injects into StreamingPriceMonitor;
+                                  admin_ids read from settings.json; ServiceRegistry populated here
+  services.py                   ServiceRegistry — typed container for subsystem references;
+                                  replaces bot.monitor.X.Y reach-through coupling
   expiry_manager.py             @tasks.loop(5min) — expires ACTIVE/HIT signals past expiry_time;
-                                  updates embeds; deletes original messages for toll-channel no-embed signals
-  news_manager.py               Tracks active news windows; persists to news_events.json;
+                                  updates embeds; uses react_to_original_signal() from streaming_monitor
+  news_manager.py               Tracks active news windows; persists to data/news_events.json;
                                   cleanup polls every 30 s; parse_news_command() parses !news args
   channel_cleaner.py            @tasks.loop(1min) — bulk-deletes alert-channel messages every
-                                  Friday 18:00 local time (7-day window); stop() called in bot.close()
+                                  Friday 18:00 local time (7-day window)
   parser/
     __init__.py                 parse_signal(message, channel_name) entry point;
                                   ParsedSignal / RejectedSignal types; lazy sub-parser init
@@ -44,36 +55,42 @@ core/
 database/
   __init__.py                   Loads .env; exposes global db (DatabaseManager) and initialize_signal_db()
   connection.py                 asyncpg pool; execute/fetch helpers; params as $1,$2,... positional args
-  database_manager.py           Extends connection; delegates to BaseOperations; re-exports status constants
-  base_operations.py            Core ops: update_signal_status (validates transitions),
-                                  mark_limit_hit, get_active_signals_for_tracking
-  models.py                     SignalStatus, LimitStatus, ChangeType, Direction, StatusTransitions
+  manager.py                    DatabaseManager — extends connection with core signal/limit ops:
+                                  update_signal_status (validates transitions), mark_limit_hit,
+                                  get_active_signals_for_tracking (returns List[SignalData]),
+                                  get_hit_limits_for_signal, expiry ops, bot_mode_status
+  models.py                     Re-exports enums from models/enums.py for backward compat
   schema.py                     DDL for all 7 tables + indexes + idempotent migrations
-  signal_operations/
-    __init__.py                 SignalDatabase coordinator; delegates to crud/lifecycle/analytics
-    crud.py                     get_signal_with_limits() and get_signal_by_message_id() both return
-                                  signal dict with both 'id' and 'signal_id' keys (same value);
-                                  save_signal(), get_active_signals_detailed_sorted() (sort: recent/oldest/progress)
-    lifecycle.py                cancel, reactivate, manually_set_signal_status (bypasses validation),
-                                  process_limit_hit, expire_old_signals
-    analytics.py                get_statistics(), performance by period
-    utils.py                    calculate_expiry() (day_end → 4:45 PM EST), _parse_dt(), get_status_emoji()
+  signal_ops.py                 SignalDatabase — flattened CRUD + Lifecycle + Analytics in one file;
+                                  get_signal_with_limits() returns Optional[SignalData];
+                                  save_signal, cancel, reactivate, manually_set_signal_status,
+                                  process_limit_hit, expire_old_signals, get_statistics
+  utils.py                      calculate_expiry() (day_end → 4:45 PM EST), _parse_dt(),
+                                  get_status_emoji(), calculate_sl_pnl()
 
 price_feeds/
   price_stream_manager.py       Coordinates all three feeds; calculates spread if missing (ask − bid);
                                   routes symbols to feeds via SymbolMapper; notifies all subscribers
-  streaming_monitor.py          Per-tick signal evaluation; check order documented below;
-                                  updates bot_mode_status table on spread-hour transitions
-  alert_system.py               Persistent embed manager; 4 data dicts; 5-channel routing;
-                                  15 s live-refresh background task for active embeds
-  alert_config.py               AlertDistanceConfig — approaching distance thresholds; runtime-editable
-  tp_config.py                  TPConfig — TP thresholds + calculate_pnl(); runtime-editable
+  streaming_monitor.py          Per-tick signal evaluation; receives all deps via constructor;
+                                  react_to_original_signal() as module-level function;
+                                  check order documented below
+  alert_system.py               Persistent embed orchestrator; 4 data dicts; 5-channel routing;
+                                  15 s live-refresh background task; delegates embed building and archiving
+  embed_builders.py             Pure functions: _build_signal_embed(), _build_profit_archive_embed(),
+                                  _set_archive_footer() + formatting helpers
+  archive_manager.py            ArchiveManager — schedule_end_state_move(), cancel_pending_move(),
+                                  delayed move/delete for finished signals
+  _base_config.py               BaseThresholdConfig — shared JSON load/save/validate/override management;
+                                  shared SymbolMapper singleton across all config types
+  alert_config.py               AlertDistanceConfig(BaseThresholdConfig) — approaching distance thresholds
+  tp_config.py                  TPConfig(BaseThresholdConfig) — TP thresholds + calculate_pnl()
   tp_monitor.py                 AutoTPMonitor — checks HIT-status signals per tick; per-signal limit cache
-  nm_config.py                  NMConfig — max_proximity + base_bounce per asset class; runtime-editable
+  nm_config.py                  NMConfig(BaseThresholdConfig) — max_proximity + base_bounce per asset class
   nm_monitor.py                 NearMissMonitor — in-memory NMTrackingState; _nm_immune set;
                                   mark_immune(signal_id) called on every reactivation
   feed_health_monitor.py        Stale threshold 300 s; 3 max reconnect attempts; 120 s startup grace;
                                   15 min alert cooldown; DMs admin_user_id from health_config.json
+  live_price_writer.py          Writes bid/ask/feed to live_prices table on each tick
   symbol_mapper.py              Internal ↔ feed-specific symbol translation; always returns UPPERCASE
   feeds/
     icmarkets_stream.py         MT5 polling 100 ms/symbol — Windows only
@@ -85,19 +102,33 @@ discord_handlers/
                                   both alert embeds (any user) and signal messages (author/admin only)
 
 commands/
-  base_command.py               BaseCog: is_admin(), is_command_channel()
-  bot_commands.py               !ping, !help, !price, !feeds, !health, !clear, !reload, !shutdown,
-                                  !cleanalerts, !goldtollssl; license management commands
-  trading_commands.py           Signal lifecycle (!setstatus, !cancel, !profit, !hit, !stoploss, !active,
-                                  !info, !delete, !signal, !setexpiry, !report); bulk cancels; TP/alertdist/
-                                  NM/news config subcommands
+  __init__.py
+  _base.py                      BaseCog: is_admin(), is_command_channel(), get_channel_name();
+                                  stores self.services = bot.services for cog access
+  views.py                      Discord UI views (confirmation buttons, etc.)
+  admin/
+    __init__.py                 Cog setup: BotManagementCog + LicenseCog
+    bot_management.py           !ping, !help, !price, !feeds, !health, !clear, !reload, !shutdown,
+                                  !cleanalerts, !goldtollssl
+    license.py                  !activate, !setkeys, !grantkey, !revoke, !licenses + member listeners
+  signals/
+    __init__.py                 Cog setup: LifecycleCog + ReportsCog + NewsCog
+    lifecycle.py                !signal, !active, !delete, !info, !setstatus, !profit, !hit,
+                                  !stoploss, !cancel (+ bulk), !setexpiry, !breakeven
+    reports.py                  !report (performance statistics generator)
+    news.py                     !news, !newslist, !newsclear
+  config/
+    __init__.py                 Cog setup: ThresholdsCog
+    thresholds.py               !tp, !alertdist, !nmconfig
 
 utils/
   logger.py                     Rotating logs: bot.log (10 MB×5) + errors.log (5 MB×3); UTF-8; LOG_LEVEL env
-  config_loader.py              JSON config read/write helpers
-  formatting.py                 Price/pip/distance formatting helpers
+  config_loader.py              ConfigLoader class + load_settings() → BotSettings, save_settings(),
+                                  load_channels_config()
+  formatting.py                 Price/pip/distance formatting; get_channel_name(); get_status_emoji()
 
-config/                         (see Configuration Files section)
+config/                         Runtime JSON configs (see Configuration Files section)
+data/                           Auto-generated runtime data (news_events.json)
 ```
 
 ---
@@ -206,7 +237,7 @@ All PKs: `BIGINT GENERATED ALWAYS AS IDENTITY`. Timestamps: `TIMESTAMPTZ`. RLS: 
 ### signals
 | Column | Notes |
 |--------|-------|
-| id | PK — returned as `signal['id']` from all DB queries |
+| id | PK — normalized to `signal_id` by `SignalData.from_db_row()` |
 | message_id | TEXT UNIQUE; `manual_xxx` for manually entered signals |
 | channel_id | TEXT |
 | instrument | TEXT (e.g. GBPUSD, XAUUSD, BTCUSDT) |
@@ -224,7 +255,7 @@ All PKs: `BIGINT GENERATED ALWAYS AS IDENTITY`. Timestamps: `TIMESTAMPTZ`. RLS: 
 ### limits
 | Column | Notes |
 |--------|-------|
-| id | PK |
+| id | PK — `LimitData` normalizes `limit_id` → `id` via model validator |
 | signal_id | FK → signals(id) CASCADE DELETE |
 | price_level | DOUBLE PRECISION (entry price) |
 | sequence_number | INTEGER; UNIQUE with signal_id |
@@ -240,7 +271,7 @@ Audit trail: signal_id FK, old_status, new_status, change_type (`automatic`/`man
 Daily aggregates per instrument (total, profitable, breakeven, stop_loss, cancelled, win_rate). UNIQUE(date, instrument).
 
 ### live_prices
-`symbol TEXT PK`, bid, ask, feed, updated_at. Written on every price tick by streaming_monitor.
+`symbol TEXT PK`, bid, ask, feed, updated_at. Written on every price tick by `LivePriceWriter`.
 
 ### bot_mode_status
 Singleton row (id=1, enforced by CHECK). `news_mode BOOLEAN`, `spread_hour BOOLEAN`. Updated in real-time by streaming_monitor on spread-hour state transitions.
@@ -268,7 +299,7 @@ CANCELLED ◄──────────────────────�
   └─► ACTIVE / HIT
 ```
 
-Valid transitions from `models.py::StatusTransitions.VALID_TRANSITIONS`:
+Valid transitions from `database/models.py::StatusTransitions.VALID_TRANSITIONS`:
 ```python
 'active':    ['hit', 'cancelled', 'stop_loss']
 'hit':       ['profit', 'breakeven', 'stop_loss', 'cancelled']
@@ -278,8 +309,8 @@ Valid transitions from `models.py::StatusTransitions.VALID_TRANSITIONS`:
 'stop_loss': ['cancelled']
 ```
 
-`base_operations.update_signal_status()` validates transitions and writes audit record.
-`lifecycle.manually_set_signal_status()` bypasses validation — used by admin commands.
+`manager.update_signal_status()` validates transitions and writes audit record.
+`signal_ops.manually_set_signal_status()` bypasses validation — used by admin commands.
 
 ---
 
@@ -319,19 +350,49 @@ Priority order:
 - `send_stop_loss_alert(signal, current_price)` — edits embed; sends ping; unregisters live updates
 - `send_auto_tp_alert(signal, hit_limits, last_pnl, tp_config, cumulative_pnl, limit_pnl_map)` — edits embed; sends ping
 - `send_near_miss_cancel_alert(signal, nm_state)` — edits embed; sends ping
-- `update_signal_message(signal, event, limits, current_price, ping_text)` — generic editor; **requires `signal['signal_id']` key**
-- `update_embed_for_signal_id(signal_id, event, ping_text)` — fetches signal, normalizes key, calls `update_signal_message`; safe to call from anywhere
+- `update_signal_message(signal, event, limits, current_price, ping_text)` — generic editor
+- `update_embed_for_signal_id(signal_id, event, ping_text)` — fetches signal, calls `update_signal_message`; safe to call from anywhere
 - `reactivate_embed(signal, ping_text)` — rebuilds embed for reactivated signals with live price/distance
 - `track_alert_message(message_id, signal_id)` / `get_signal_from_alert(message_id)` — reply-handler lookup
 
 ---
 
+## Dependency Injection Pattern
+
+`TradingBot.initialize_price_monitor()` in `core/bot.py` creates all subsystems and injects them into `StreamingPriceMonitor` via constructor kwargs:
+
+```python
+monitor = StreamingPriceMonitor(
+    bot, signal_db, db,
+    alert_system=alert_system, stream_manager=stream_manager,
+    alert_config=alert_config, tp_config=tp_config, tp_monitor=tp_monitor,
+    nm_config=nm_config, nm_monitor=nm_monitor,
+    live_price_writer=live_price_writer, health_monitor=health_monitor,
+)
+```
+
+`ServiceRegistry` (`core/services.py`) is a typed container holding references to all subsystems. Populated in `setup_hook()` and injected into cogs via `BaseCog.__init__`:
+```python
+self.services = bot.services
+self.services.alert_system   # instead of bot.monitor.alert_system
+self.services.tp_config      # instead of bot.monitor.tp_config
+```
+
+---
+
 ## Critical Conventions / Gotchas
+
+### Pydantic models with dict-protocol
+`SignalData` and `LimitData` in `models/signal.py` have `__getitem__`, `__setitem__`, `get`, `__contains__`, and `pop` methods so existing dict-style access (`signal["instrument"]`) continues to work alongside attribute access (`signal.instrument`). New code should prefer attribute access.
+
+### id normalization
+- DB column is `signals.id`, but the domain name is `signal_id`. `SignalData.from_db_row()` and `SignalData._normalise_id` handle this automatically.
+- DB column is `limits.id`, but tracking queries return `limit_id`. `LimitData._normalise_limit_id` handles this automatically.
 
 ### asyncpg parameter passing
 - Raw `conn.execute(query, val1, val2)` — positional splat, `$1`/`$2`/... placeholders
 - Wrapper `db.execute(query, (val1, val2))` — takes a **tuple**, unpacks with `*params` internally
-- Timestamps come back as native `datetime` objects — never pass to `datetime.fromisoformat()`. Use `_parse_dt` from `database.signal_operations.utils` (handles both `datetime` and ISO strings; single canonical copy)
+- Timestamps come back as native `datetime` objects — never pass to `datetime.fromisoformat()`. Use `_parse_dt` from `database.utils` (handles both `datetime` and ISO strings)
 - `ROUND(x, 2)` in PostgreSQL requires `CAST(... AS NUMERIC)`, not `CAST(... AS FLOAT)`
 
 ### NM immunity after reactivation
@@ -341,13 +402,13 @@ Priority order:
 `MetaTrader5` package requires Windows. On Linux/Mac, the ICMarkets feed will be unavailable. The bot handles this gracefully but loses that feed.
 
 ### Spread/news cancel behavior
-Spread-hour and news cancels **edit the persistent embed** when one already exists. They only fall back to standalone messages if no embed has been created yet for that signal. The pattern "send standalone, not embed edit" in older docs is incorrect.
+Spread-hour and news cancels **edit the persistent embed** when one already exists. They only fall back to standalone messages if no embed has been created yet for that signal.
 
 ### `SCALP_CHANNELS` has 5 members
 `pattern_parsers.SCALP_CHANNELS = {'scalps', 'gold-pa-signals', 'gold-tolls-map', 'general-tolls', 'oil-tolls'}`. Any code that lists only 4 channels is missing `'oil-tolls'`.
 
 ### Gold-tolls SL offset is configurable
-`get_gold_tolls_sl_offset()` reads `settings.json['gold_tolls_sl_offset']` (default `5.0`) with a 30 s cache. It is **not** hardcoded. Change it via `!goldtollssl <value>` or edit `settings.json` directly (takes effect within 30 s).
+`get_gold_tolls_sl_offset()` reads `settings.json` via `load_settings()` → `BotSettings.gold_tolls_sl_offset` (default `5.0`) with a 30 s cache. Change it via `!goldtollssl <value>` or edit `settings.json` directly.
 
 ### `stop_loss` is required in DB
 `signals.stop_loss` is `NOT NULL`. Toll channels auto-calculate SL from limits; general-tolls derives SL from message numbers. Any new channel or parse path that doesn't produce a SL value will fail on insert.
@@ -362,7 +423,7 @@ When `cancel` is replied to the original signal message and no approaching/hit e
 - **All other channels**: ❌ reaction is added to the original message; it is **not** deleted
 
 ### Reactivate when original message is gone
-`reactivate_cancelled_signal` in `lifecycle.py` does not use its `parsed_signal` argument — it reactivates purely from DB state. The reactivate reply handler in `check_alert_management_reply` tries to fetch and re-parse the original message but falls back gracefully if it has been deleted (e.g. toll signals after archive move). Pass `None` as `parsed_signal` and reactivation proceeds.
+`reactivate_cancelled_signal` in `signal_ops.py` does not use its `parsed_signal` argument — it reactivates purely from DB state. The reactivate reply handler tries to fetch and re-parse the original message but falls back gracefully if it has been deleted (e.g. toll signals after archive move). Pass `None` as `parsed_signal` and reactivation proceeds.
 
 ### Message handler runs before prefix commands
 `bot.on_message()` calls `message_handler.handle_new_message()` before `await self.process_commands(message)`. Reply commands are fully handled in the message handler and are not registered as bot commands.
@@ -370,22 +431,23 @@ When `cancel` is replied to the original signal message and no approaching/hit e
 ### TP logic is per-limit, not fully cumulative
 Auto-TP fires when: **last hit limit's P&L ≥ threshold** AND (if 2+ limits hit) **sum of earlier limits' P&L ≥ 0** (epsilon tolerance 1e-9). It is not a simple cumulative P&L check across all limits.
 
+### react_to_original_signal
+Module-level function in `price_feeds/streaming_monitor.py`. Called from `streaming_monitor`, `expiry_manager`, and `commands/signals/lifecycle.py` to add emoji reactions to original signal messages.
+
 ---
 
 ## Configuration Files
 
-| File | Contents | Runtime-editable |
-|------|----------|-----------------|
-| `channels.json` | 18 monitored channel IDs; alert/command/profit/finished channel IDs; per-channel defaults (instrument, expiry type) | No (restart needed for new channels) |
-| `settings.json` | `bot_prefix`, `spread_buffer_enabled`, `enable_openai_fallback`, `gold_tolls_sl_offset`, `debug_mode`, `license_role_name` | Yes (30 s cache for some) |
-| `tp_configuration.json` | TP thresholds per asset class + per-symbol overrides; `scalp_defaults` | Yes (`!tp set`) |
-| `alert_distances.json` | Approaching alert distances per asset class + overrides | Yes (`!alertdist set`) |
-| `nm_configuration.json` | NM max_proximity + base_bounce per asset class + overrides | Yes (`!nmconfig set`) |
-| `news_events.json` | Active/upcoming news windows; persisted across restarts | Yes (written by `!news`) |
-| `expiry_config.json` | Expiry type definitions and daily close times | No |
-| `health_config.json` | Feed health thresholds; `admin_user_id` for DM alerts; market hours per asset class; US holidays | No |
-| `symbol_mappings.json` | Feed-specific symbol name translations | No |
-| `tracking_config.json` | Update interval thresholds per distance bucket (critical 1 s, near 5 s, medium 30 s, far 60 s) | No |
+| File | Location | Contents | Runtime-editable |
+|------|----------|----------|-----------------|
+| `channels.json` | `config/` | 18 monitored channel IDs; alert/command/profit/finished channel IDs; per-channel defaults | No (restart needed) |
+| `settings.json` | `config/` | `bot_prefix`, `spread_buffer_enabled`, `enable_openai_fallback`, `gold_tolls_sl_offset`, `debug_mode`, `license_role_name`, `admin_ids` | Yes (30 s cache for some); loaded as `BotSettings` Pydantic model |
+| `tp_configuration.json` | `config/` | TP thresholds per asset class + per-symbol overrides; `scalp_defaults` | Yes (`!tp set`) |
+| `alert_distances.json` | `config/` | Approaching alert distances per asset class + overrides | Yes (`!alertdist set`) |
+| `nm_configuration.json` | `config/` | NM max_proximity + base_bounce per asset class + overrides | Yes (`!nmconfig set`) |
+| `health_config.json` | `config/` | Feed health thresholds; `admin_user_id` for DM alerts; market hours; US holidays | No |
+| `symbol_mappings.json` | `config/` | Feed-specific symbol name translations | No |
+| `news_events.json` | `data/` | Active/upcoming news windows; persisted across restarts | Yes (written by `!news`) |
 
 ---
 

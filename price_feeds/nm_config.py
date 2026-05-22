@@ -21,35 +21,23 @@ Two parameters per asset class / symbol:
   The closer price gets, the LESS additional bounce is needed — but you always
   need at least base_bounce regardless.
 
-Example (forex, pips):  max_proximity=7, base_bounce=4
-  closest 1 pip  -> need 1+4 = 5 pip bounce
-  closest 2 pips -> need 2+4 = 6 pip bounce
-  closest 7 pips -> need 7+4 = 11 pip bounce
-  >7 pips away   -> not tracked
-
-Example (gold, dollars):  max_proximity=6, base_bounce=3
-  closest $1  -> need $1+$3 = $4 bounce
-  closest $3  -> need $3+$3 = $6 bounce
-  closest $6  -> need $6+$3 = $9 bounce
-  >$6 away    -> not tracked
-
 Supported types:
   - pips     (forex / forex_jpy)
   - dollars  (metals, indices, crypto, oil, stocks)
 """
 
-import json
 import logging
 from datetime import datetime, timezone
-from pathlib import Path
 from typing import Dict, Literal
+
+from ._base_config import BaseThresholdConfig
 
 logger = logging.getLogger(__name__)
 
 NMType = Literal["pips", "dollars"]
 
 
-class NMConfig:
+class NMConfig(BaseThresholdConfig):
     """
     Near-miss configuration with per-asset-class defaults and per-symbol overrides.
 
@@ -59,6 +47,8 @@ class NMConfig:
 
     required_bounce = closest_distance + base_bounce
     """
+
+    CONFIG_FILENAME = "nm_configuration.json"
 
     ASSET_CLASS_TYPES: Dict[str, NMType] = {
         "forex": "pips",
@@ -70,7 +60,6 @@ class NMConfig:
         "oil": "dollars",
     }
 
-    # Pip sizes for pips <-> price conversion
     PIP_SIZES: Dict[str, float] = {
         "forex": 0.0001,
         "forex_jpy": 0.01,
@@ -82,51 +71,18 @@ class NMConfig:
     }
 
     def __init__(self, config_path: str = None):
-        if config_path is None:
-            self.config_path = (
-                Path(__file__).resolve().parent.parent / "config" / "nm_configuration.json"
-            )
-        else:
-            self.config_path = Path(config_path)
-
-        self.config = self._load_config()
-
-        try:
-            from price_feeds.symbol_mapper import SymbolMapper
-
-            mapper_config = self.config_path.parent / "symbol_mappings.json"
-            self.mapper = SymbolMapper(str(mapper_config))
-        except Exception as e:
-            logger.warning(f"Could not initialise SymbolMapper in NMConfig: {e}")
-            self.mapper = None
-
+        super().__init__(config_path)
         logger.info("NMConfig initialised (linear bounce model)")
 
-    # ------------------------------------------------------------------
-    # Config I/O
-    # ------------------------------------------------------------------
+    # === Config defaults & migration ===
 
-    def _load_config(self) -> Dict:
-        try:
-            with open(self.config_path) as f:
-                raw = json.load(f)
-            return self._migrate_if_needed(raw)
-        except FileNotFoundError:
-            logger.warning(f"NM config not found, creating default: {self.config_path}")
-            config = self._create_default_config()
-            self._save_config(config)
-            return config
-        except json.JSONDecodeError as e:
-            logger.error(f"Invalid JSON in NM config: {e}. Using defaults.")
-            return self._create_default_config()
+    def _post_load(self, raw: Dict) -> Dict:
+        return self._migrate_if_needed(raw)
 
     def _migrate_if_needed(self, config: Dict) -> Dict:
         """
         Migrate from old proximity_threshold/bounce_threshold format to
         max_proximity/base_bounce format.
-        Maps:
-          max_proximity = old proximity_threshold
-          base_bounce   = old bounce_threshold - old proximity_threshold (min 1.0)
         """
         migrated = False
         for section in ("defaults", "overrides"):
@@ -141,15 +97,6 @@ class NMConfig:
             logger.info("NM config migrated from fixed-threshold to linear-bounce model")
             self._save_config(config)
         return config
-
-    def _save_config(self, config: Dict = None):
-        if config is None:
-            config = self.config
-        try:
-            with open(self.config_path, "w") as f:
-                json.dump(config, f, indent=2)
-        except Exception as e:
-            logger.error(f"Failed to save NM config: {e}")
 
     def _create_default_config(self) -> Dict:
         return {
@@ -200,40 +147,17 @@ class NMConfig:
             "overrides": {},
         }
 
-    # ------------------------------------------------------------------
-    # Asset class detection
-    # ------------------------------------------------------------------
-
-    def _get_asset_class(self, symbol: str) -> str:
-        if self.mapper:
-            try:
-                return self.mapper.get_asset_class(symbol)
-            except Exception:
-                pass
-        s = symbol.upper()
-        if any(x in s for x in ["XAU", "XAG", "GOLD", "SILVER"]):
-            return "metals"
-        if any(x in s for x in ["BTC", "ETH", "USDT", "USDC"]):
-            return "crypto"
-        if "JPY" in s:
-            return "forex_jpy"
-        if any(x in s for x in ["NAS", "SPX", "DAX", "FTSE", "DOW"]):
-            return "indices"
-        if any(x in s for x in ["OIL", "WTI", "BRENT"]):
-            return "oil"
-        return "forex"
+    # === Config entry lookup ===
 
     def _get_config_entry(self, symbol: str) -> Dict:
         overrides = self.config.get("overrides", {})
         if symbol.upper() in overrides:
             return overrides[symbol.upper()]
-        asset_class = self._get_asset_class(symbol)
+        asset_class = self.determine_asset_class(symbol)
         defaults = self.config.get("defaults", {})
         return defaults.get(asset_class, defaults.get("forex", {}))
 
-    # ------------------------------------------------------------------
-    # Core linear-model API
-    # ------------------------------------------------------------------
+    # === Core linear-model API ===
 
     def get_nm_type(self, symbol: str) -> NMType:
         return self._get_config_entry(symbol).get("type", "pips")
@@ -242,7 +166,7 @@ class NMConfig:
         """Convert a stored value (pips or dollars) to absolute price units."""
         entry = self._get_config_entry(symbol)
         if entry.get("type") == "pips":
-            asset_class = self._get_asset_class(symbol)
+            asset_class = self.determine_asset_class(symbol)
             pip_size = self.PIP_SIZES.get(asset_class, 0.0001)
             return value * pip_size
         return value
@@ -260,13 +184,6 @@ class NMConfig:
         Return the required bounce (absolute price units) given the closest approach.
 
         Formula:  required_bounce = closest_distance + base_bounce
-
-        Args:
-            symbol: Trading symbol e.g. "EURUSD"
-            closest_distance_price_units: distance from limit at closest approach (>=0)
-
-        Returns:
-            Minimum bounce required in absolute price units.
         """
         entry = self._get_config_entry(symbol)
         base_bounce_price = self._to_price_units(symbol, entry.get("base_bounce", 4.0))
@@ -286,7 +203,7 @@ class NMConfig:
         """Format a price-unit value for human display."""
         entry = self._get_config_entry(symbol)
         if entry.get("type") == "pips":
-            asset_class = self._get_asset_class(symbol)
+            asset_class = self.determine_asset_class(symbol)
             pip_size = self.PIP_SIZES.get(asset_class, 0.0001)
             pips = value_price_units / pip_size if pip_size else value_price_units
             return f"{pips:.1f} pips"
@@ -301,7 +218,6 @@ class NMConfig:
         nm_type = entry.get("type", "pips")
         max_prox = entry.get("max_proximity", 7.0)
         base_b = entry.get("base_bounce", 4.0)
-        unit = "pip" if nm_type == "pips" else "$"
         dollar = nm_type == "dollars"
 
         lines = []
@@ -314,9 +230,7 @@ class NMConfig:
                 lines.append(f"within {d} pip → need {req} pip bounce")
         return "\n".join(lines)
 
-    # ------------------------------------------------------------------
-    # Override / default management
-    # ------------------------------------------------------------------
+    # === Override / default management ===
 
     def set_override(
         self,
@@ -328,7 +242,7 @@ class NMConfig:
     ) -> bool:
         symbol = symbol.upper()
         if nm_type is None:
-            asset_class = self._get_asset_class(symbol)
+            asset_class = self.determine_asset_class(symbol)
             nm_type = self.ASSET_CLASS_TYPES.get(asset_class, "pips")
         self.config.setdefault("overrides", {})[symbol] = {
             "type": nm_type,

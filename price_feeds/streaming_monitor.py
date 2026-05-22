@@ -1,29 +1,69 @@
 """Streaming price monitor: event-driven signal evaluation from live price feeds."""
 
 import asyncio
-import json
 from datetime import datetime
 from datetime import time as dtime
-from pathlib import Path
 from typing import Dict, List
 
 import discord
 import pytz
 
-from database.signal_operations.utils import calculate_sl_pnl
-from price_feeds.alert_config import AlertDistanceConfig
-from price_feeds.alert_system import AlertSystem
-from price_feeds.feed_health_monitor import FeedHealthMonitor
-from price_feeds.live_price_writer import LivePriceWriter
-from price_feeds.nm_config import NMConfig
-from price_feeds.nm_monitor import NearMissMonitor
-from price_feeds.price_stream_manager import PriceStreamManager
-from price_feeds.tp_config import TPConfig
-from price_feeds.tp_monitor import AutoTPMonitor
+from database.utils import calculate_sl_pnl
+from models.signal import SignalData
 from utils.config_loader import load_settings
 from utils.logger import get_logger
 
 logger = get_logger("stream_monitor")
+
+
+async def react_to_original_signal(bot, signal: Dict, emoji: str):
+    """
+    Add a reaction to the original signal message.
+
+    Args:
+        bot: The Discord bot instance (used to fetch channels/messages).
+        signal: Signal dictionary containing message_id and channel_id.
+        emoji: The emoji to add as a reaction.
+    """
+    try:
+        message_id = signal.get("message_id")
+        channel_id = signal.get("channel_id")
+
+        if not message_id or not channel_id or str(message_id).startswith("manual_"):
+            return
+
+        try:
+            channel = bot.get_channel(int(channel_id))
+            if not channel:
+                channel = await bot.fetch_channel(int(channel_id))
+            if not channel:
+                logger.warning(f"Could not find channel {channel_id} for original signal")
+                return
+            original_message = await channel.fetch_message(int(message_id))
+        except discord.NotFound:
+            logger.warning(f"Original signal message {message_id} not found")
+            return
+        except discord.Forbidden:
+            logger.warning(f"No permission to access message {message_id}")
+            return
+        except Exception as e:
+            logger.error(f"Error fetching original message: {e}")
+            return
+
+        try:
+            await original_message.add_reaction(emoji)
+            logger.info(f"Added {emoji} reaction to original signal message {message_id}")
+        except discord.NotFound:
+            logger.warning(f"Could not add reaction to message {message_id} - message not found")
+        except discord.Forbidden:
+            logger.warning(f"Could not add reaction to message {message_id} - missing permissions")
+        except discord.HTTPException as e:
+            logger.warning(f"Could not add reaction to message {message_id} - HTTP error: {e}")
+        except Exception as e:
+            logger.error(f"Unexpected error adding reaction: {e}", exc_info=False)
+
+    except Exception as e:
+        logger.error(f"Error adding reaction to original signal: {e}", exc_info=True)
 
 
 class StreamingPriceMonitor:
@@ -32,44 +72,42 @@ class StreamingPriceMonitor:
 
     Reacts to price updates in real-time; includes spread buffer system for
     approaching and hit alerts.
+
+    All subsystems are received via constructor — the monitor does not create
+    them.  Channel setup (fetching Discord channels) is handled by the bot
+    before the monitor is started.
     """
 
-    def __init__(self, bot, signal_db, db):
-        """Initialize streaming monitor"""
+    def __init__(
+        self,
+        bot,
+        signal_db,
+        db,
+        *,
+        alert_system,
+        stream_manager,
+        alert_config,
+        tp_config,
+        tp_monitor,
+        nm_config,
+        nm_monitor,
+        live_price_writer,
+        health_monitor,
+    ):
         self.bot = bot
         self.signal_db = signal_db
         self.db = db
 
-        # Initialize components
-        self.alert_config = AlertDistanceConfig()
-        self.stream_manager = PriceStreamManager()
-        self.alert_system = AlertSystem(bot=bot)
-        self.tp_config = TPConfig()
-        self.tp_monitor = AutoTPMonitor(
-            tp_config=self.tp_config,
-            signal_db=signal_db,
-            db=db,
-            alert_system=self.alert_system,
-        )
-        self.nm_config = NMConfig()
-        self.nm_monitor = NearMissMonitor(
-            nm_config=self.nm_config,
-            signal_db=signal_db,
-            db=db,
-            alert_system=self.alert_system,
-        )
-
-        # Live price writer: persists OANDA/Binance prices to DB every 5s
-        # so the execution bot can calculate feed-vs-MT5 distance
-        self.live_price_writer = LivePriceWriter(
-            db_manager=db,
-            stream_manager=self.stream_manager,
-        )
-
-        # Connect alert system to message handler
-        if bot.message_handler:
-            bot.message_handler.alert_system = self.alert_system
-            logger.info("Connected alert system to message handler")
+        # Injected subsystems
+        self.alert_system = alert_system
+        self.stream_manager = stream_manager
+        self.alert_config = alert_config
+        self.tp_config = tp_config
+        self.tp_monitor = tp_monitor
+        self.nm_config = nm_config
+        self.nm_monitor = nm_monitor
+        self.live_price_writer = live_price_writer
+        self.health_monitor = health_monitor
 
         # Monitoring state
         self.running = False
@@ -96,97 +134,13 @@ class StreamingPriceMonitor:
         }
 
     async def initialize(self):
-        """Initialize stream manager and alert system"""
+        """Initialize stream manager and connect health monitoring"""
         try:
-            # Initialize streaming feeds
             await self.stream_manager.initialize()
-
-            # Register this monitor as a subscriber for price updates
             self.stream_manager.add_subscriber(self._on_price_update)
-
-            # Setup alert channel
-            config_path = Path(__file__).resolve().parent.parent / "config" / "channels.json"
-
-            try:
-                with open(config_path) as f:
-                    config = json.load(f)
-                    channel_id = config.get("alert_channel")
-                    if channel_id:
-                        channel = await self.bot.fetch_channel(int(channel_id))
-                        self.alert_system.set_channel(channel)
-                        logger.info(f"Alert channel set: #{channel.name}")
-                    # NEW: Setup PA alert channel
-                    pa_channel_id = config.get("pa-alert-channel")
-                    if pa_channel_id:
-                        try:
-                            pa_channel = await self.bot.fetch_channel(int(pa_channel_id))
-                            self.alert_system.set_pa_channel(pa_channel)
-                            logger.info(f"PA alert channel set: #{pa_channel.name}")
-                        except Exception as e:
-                            logger.error(f"Failed to set PA alert channel: {e}")
-                    else:
-                        logger.warning("No PA alert channel configured in channels.json")
-                    # Setup toll alert channel
-                    toll_channel_id = config.get("toll-alert-channel")
-                    if toll_channel_id:
-                        try:
-                            toll_channel = await self.bot.fetch_channel(int(toll_channel_id))
-                            self.alert_system.set_toll_channel(toll_channel)
-                            logger.info(f"Toll alert channel set: #{toll_channel.name}")
-                        except Exception as e:
-                            logger.error(f"Failed to set toll alert channel: {e}")
-                    else:
-                        logger.warning("No toll alert channel configured in channels.json")
-                    # Setup general-tolls alert channel
-                    general_toll_alert_id = config.get("general-tolls-alert")
-                    if general_toll_alert_id:
-                        try:
-                            general_toll_channel = await self.bot.fetch_channel(
-                                int(general_toll_alert_id)
-                            )
-                            self.alert_system.set_general_toll_channel(general_toll_channel)
-                            logger.info(
-                                f"General-toll alert channel set: #{general_toll_channel.name}"
-                            )
-                        except Exception as e:
-                            logger.error(f"Failed to set general-toll alert channel: {e}")
-                    else:
-                        logger.warning("No general-tolls-alert channel configured in channels.json")
-                    # Setup legends alert channel
-                    legends_alert_id = config.get("legends-trade-alert")
-                    if legends_alert_id:
-                        try:
-                            legends_channel = await self.bot.fetch_channel(int(legends_alert_id))
-                            self.alert_system.set_legends_channel(legends_channel)
-                            logger.info(f"Legends alert channel set: #{legends_channel.name}")
-                        except Exception as e:
-                            logger.error(f"Failed to set legends alert channel: {e}")
-                    else:
-                        logger.warning("No legends-trade-alert channel configured in channels.json")
-            except Exception as e:
-                logger.error(f"Error setting up alert channel: {e}")
-
-            config_path = Path(__file__).resolve().parent.parent / "config" / "health_config.json"
-            admin_user_id = None
-
-            try:
-                with open(config_path) as f:
-                    health_config = json.load(f)
-                    admin_user_id_str = health_config.get("admin_user_id")
-                    if admin_user_id_str:
-                        admin_user_id = int(admin_user_id_str)
-            except Exception as e:
-                logger.warning(f"Could not load admin user ID: {e}")
-
-            self.health_monitor = FeedHealthMonitor(
-                stream_manager=self.stream_manager, bot=self.bot, admin_user_id=admin_user_id
-            )
-
             self.stream_manager.set_health_monitor(self.health_monitor)
             await self.health_monitor.start_monitoring()
-
             logger.info("Streaming monitor initialized")
-
         except Exception as e:
             logger.error(f"Failed to initialize monitor: {e}")
             raise
@@ -196,21 +150,17 @@ class StreamingPriceMonitor:
         Check whether the current time falls within the daily spread hour.
 
         Spread hour runs from 5:00 PM to 6:00 PM US/Eastern (America/New_York)
-        on weekdays (Monday–Friday).  During this window broker spreads widen
+        on weekdays (Monday-Friday).  During this window broker spreads widen
         significantly, causing false limit/stop hits.
-
-        Returns:
-            True if we are currently in spread hour, False otherwise.
         """
         est = pytz.timezone("America/New_York")
         now_est = datetime.now(est)
 
-        # Weekends have no spread hour (forex is closed / near-closed anyway)
-        if now_est.weekday() >= 5:  # 5 = Saturday, 6 = Sunday
+        if now_est.weekday() >= 5:
             return False
 
-        spread_start = dtime(17, 0)  # 5:00 PM EST
-        spread_end = dtime(18, 0)  # 6:00 PM EST
+        spread_start = dtime(17, 0)
+        spread_end = dtime(18, 0)
 
         return spread_start <= now_est.time() < spread_end
 
@@ -222,13 +172,10 @@ class StreamingPriceMonitor:
 
         self.running = True
 
-        # Load active signals and subscribe to their symbols
         await self._load_and_subscribe_signals()
 
-        # Start periodic signal refresh task (every 30 seconds)
         asyncio.create_task(self._periodic_signal_refresh())
 
-        # Start writing OANDA/Binance prices to live_prices table
         self.live_price_writer.start()
 
         logger.info("Streaming price monitor started")
@@ -237,10 +184,7 @@ class StreamingPriceMonitor:
         """Stop the streaming monitor"""
         self.running = False
 
-        # Shutdown stream manager
         await self.stream_manager.shutdown()
-
-        # Stop live price writer (does a final flush)
         await self.live_price_writer.stop()
 
         if self.health_monitor:
@@ -257,35 +201,28 @@ class StreamingPriceMonitor:
                 logger.info("No active signals to monitor")
                 return
 
-            # Clear existing tracking
             self.active_signals.clear()
             self.symbol_to_signals.clear()
 
-            # Group signals by symbol
             symbols_needed = set()
-
             guild_id = self.bot.guilds[0].id if self.bot.guilds else None
 
             for signal in signals:
                 signal_id = signal["signal_id"]
                 symbol = signal["instrument"]
 
-                # Store signal data
                 self.active_signals[signal_id] = signal
                 if guild_id is not None:
                     signal["guild_id"] = guild_id
 
-                # Track which signals use this symbol
                 if symbol not in self.symbol_to_signals:
                     self.symbol_to_signals[symbol] = []
                 self.symbol_to_signals[symbol].append(signal_id)
 
                 symbols_needed.add(symbol)
 
-            # Subscribe to all needed symbols
             await self.stream_manager.bulk_subscribe(list(symbols_needed))
 
-            # Pre-populate TP hit-limit cache for any signals already in HIT status
             for signal in signals:
                 if signal.get("status") == "hit":
                     await self.tp_monitor.refresh_hit_limits(signal["signal_id"])
@@ -303,23 +240,19 @@ class StreamingPriceMonitor:
             await asyncio.sleep(30)
 
             try:
-                # Reload signals and update subscriptions
                 signals = await self.db.get_active_signals_for_tracking()
 
                 old_symbols = set(self.symbol_to_signals.keys())
                 new_symbols = set(signal["instrument"] for signal in signals)
 
-                # Unsubscribe from symbols no longer needed
                 symbols_to_remove = old_symbols - new_symbols
                 for symbol in symbols_to_remove:
                     await self.stream_manager.unsubscribe_symbol(symbol)
 
-                # Subscribe to new symbols
                 symbols_to_add = new_symbols - old_symbols
                 if symbols_to_add:
                     await self.stream_manager.bulk_subscribe(list(symbols_to_add))
 
-                # Update active signals - CRITICAL: This refreshes alert flags
                 self.active_signals.clear()
                 self.symbol_to_signals.clear()
 
@@ -329,7 +262,6 @@ class StreamingPriceMonitor:
                     signal_id = signal["signal_id"]
                     symbol = signal["instrument"]
 
-                    # Store signal data (includes updated alert flags from database)
                     self.active_signals[signal_id] = signal
                     if guild_id is not None:
                         signal["guild_id"] = guild_id
@@ -338,7 +270,6 @@ class StreamingPriceMonitor:
                         self.symbol_to_signals[symbol] = []
                     self.symbol_to_signals[symbol].append(signal_id)
 
-                    # Keep TP cache fresh for HIT signals
                     if signal.get("status") == "hit":
                         await self.tp_monitor.refresh_hit_limits(signal_id)
 
@@ -351,19 +282,10 @@ class StreamingPriceMonitor:
                 logger.error(f"Error in periodic refresh: {e}")
 
     async def _on_price_update(self, symbol: str, price_data: Dict):
-        """
-        Callback for price updates from stream manager
-        This is where the magic happens - instant reaction to price changes
-
-        Args:
-            symbol: Symbol that updated
-            price_data: Price dictionary with bid, ask, timestamp, spread
-        """
+        """Callback for price updates from stream manager."""
         self.stats["price_updates"] += 1
 
-        # ── Spread-hour transition tracking ─────────────────────────────────
-        # Update bot_mode_status.spread_hour in the DB exactly once per
-        # start/end transition (not on every tick).
+        # Spread-hour transition tracking
         now_in_spread = self._is_spread_hour()
         if now_in_spread != self._spread_hour_active:
             self._spread_hour_active = now_in_spread
@@ -372,9 +294,7 @@ class StreamingPriceMonitor:
                 logger.info(f"Spread hour {'started' if now_in_spread else 'ended'} — DB updated")
             except Exception as _sh_err:
                 logger.error(f"Failed to update spread_hour in DB: {_sh_err}")
-        # ─────────────────────────────────────────────────────────────────────
 
-        # Check if we have any signals for this symbol
         signal_ids = self.symbol_to_signals.get(symbol, [])
 
         if not signal_ids:
@@ -388,14 +308,13 @@ class StreamingPriceMonitor:
         ):
             try:
                 settings = load_settings()
-                self._spread_buffer_enabled = settings.get("spread_buffer_enabled", True)
+                self._spread_buffer_enabled = settings.spread_buffer_enabled
             except Exception as e:
                 logger.error(f"Error loading spread buffer setting: {e}, using default (True)")
                 self._spread_buffer_enabled = True
             self._last_settings_load = now
         spread_buffer_enabled = self._spread_buffer_enabled
 
-        # Check each signal for this symbol
         for signal_id in signal_ids:
             signal = self.active_signals.get(signal_id)
 
@@ -403,9 +322,7 @@ class StreamingPriceMonitor:
                 continue
 
             try:
-                # Add current spread to signal dict for use in checks
                 signal["current_spread"] = price_data.get("spread", 0.0)
-
                 await self._check_signal(signal, price_data, now_in_spread, spread_buffer_enabled)
                 self.stats["signals_checked"] += 1
             except Exception as e:
@@ -419,7 +336,6 @@ class StreamingPriceMonitor:
         direction = signal["direction"].lower()
         current_price = price_data["ask"] if direction == "long" else price_data["bid"]
 
-        # Check pending limits
         for limit in signal.get("pending_limits", []):
             await self._check_limit(
                 signal, limit, current_price, direction, is_spread_hour, spread_buffer_enabled
@@ -429,17 +345,16 @@ class StreamingPriceMonitor:
         if signal.get("status") in ("active", None):
             nm_triggered = self.nm_monitor.update(signal, current_price)
             if nm_triggered:
-                # Evict from all active tracking before awaiting DB write
                 signal_id = signal["signal_id"]
                 self.active_signals.pop(signal_id, None)
-                await self._react_to_original_signal(signal, "❌")
+                await react_to_original_signal(self.bot, signal, "❌")
                 success = await self.nm_monitor.trigger_near_miss(signal)
                 if success:
                     self.nm_monitor.evict_signal(signal_id)
                     self.tp_monitor.evict_signal(signal_id)
                     await self._maybe_unsubscribe_symbol(signal["instrument"], signal_id)
                     self.stats["nm_cancels"] = self.stats.get("nm_cancels", 0) + 1
-                return  # Signal is done
+                return
 
         # Check stop loss
         if signal.get("stop_loss"):
@@ -453,9 +368,7 @@ class StreamingPriceMonitor:
                 current_ask=price_data["ask"],
             )
             if tp_triggered:
-                # React to original signal message with profit emoji
-                await self._react_to_original_signal(signal, "💰")
-                # Remove signal from active tracking
+                await react_to_original_signal(self.bot, signal, "💰")
                 await self._maybe_unsubscribe_symbol(signal["instrument"], signal["signal_id"])
 
     async def _check_limit(
@@ -471,23 +384,17 @@ class StreamingPriceMonitor:
         limit_price = limit["price_level"]
         symbol = signal["instrument"]
 
-        # Get spread from signal dict (set in _on_price_update)
         spread = signal.get("current_spread", 0.0)
 
-        # Validate spread
         if spread is None or spread < 0:
             logger.warning(f"Invalid spread for {symbol}: {spread}, using 0")
             spread = 0.0
 
-        # Calculate distance and determine if hit
         if direction == "long":
             distance = current_price - limit_price
 
-            # Apply spread buffer if enabled
             if spread_buffer_enabled:
-                # For long: alert when ask <= limit + spread
                 is_hit = current_price <= (limit_price + spread)
-
                 if spread > 0 and is_hit and current_price > limit_price:
                     logger.debug(
                         f"Spread buffer ALLOWED alert for {symbol}: "
@@ -496,17 +403,13 @@ class StreamingPriceMonitor:
                     )
                     self.stats["buffer_allowed_alerts"] += 1
             else:
-                # No buffer: exact price check
                 is_hit = current_price <= limit_price
 
         else:  # short
             distance = limit_price - current_price
 
-            # Apply spread buffer if enabled
             if spread_buffer_enabled:
-                # For short: alert when bid >= limit - spread
                 is_hit = current_price >= (limit_price - spread)
-
                 if spread > 0 and is_hit and current_price < limit_price:
                     logger.debug(
                         f"Spread buffer ALLOWED alert for {symbol}: "
@@ -515,14 +418,11 @@ class StreamingPriceMonitor:
                     )
                     self.stats["buffer_allowed_alerts"] += 1
             else:
-                # No buffer: exact price check
                 is_hit = current_price >= limit_price
 
         # Check if hit (with in-memory flag check)
         if is_hit and not limit.get("hit_alert_sent", False):
-            # --- News mode guard ---
-            # If a news event window is active for this instrument, auto-cancel
-            # the signal instead of recording the hit.
+            # News mode guard
             news_event = None
             if self.bot.news_manager:
                 news_event = self.bot.news_manager.is_news_active_for(signal["instrument"])
@@ -553,13 +453,10 @@ class StreamingPriceMonitor:
                 spread=spread,
                 spread_buffer_enabled=spread_buffer_enabled,
             )
-            # Add reaction to original signal message for limit hit
-            await self._react_to_original_signal(signal, "🎯")
+            await react_to_original_signal(self.bot, signal, "🎯")
             await self._process_limit_hit(signal, limit, current_price)
 
-            # CRITICAL: Update in-memory flag immediately
             limit["hit_alert_sent"] = True
-
             self.stats["limits_hit"] += 1
 
         # Check if approaching (first limit only)
@@ -579,9 +476,7 @@ class StreamingPriceMonitor:
                     logger.error(f"Error getting approaching distance for {symbol}: {e}")
                     approaching_distance = 0.0010
 
-                # Distance is now in absolute price units, compare directly
                 if abs(distance) <= approaching_distance:
-                    # Format distance for display
                     formatted_distance = self.alert_config.format_distance_for_display(
                         symbol, abs(distance), current_price
                     )
@@ -596,73 +491,8 @@ class StreamingPriceMonitor:
                     )
 
                     if sent:
-                        # Mark as sent in database
-                        await self._mark_approaching_sent(limit["limit_id"])
-
-                        # CRITICAL: Update in-memory flag
+                        await self._mark_approaching_sent(limit["id"])
                         limit["approaching_alert_sent"] = True
-
-    async def _react_to_original_signal(self, signal: Dict, emoji: str):
-        """
-        Add a reaction to the original signal message
-
-        Args:
-            signal: Signal dictionary containing message_id and channel_id
-            emoji: The emoji to add as a reaction
-        """
-        try:
-            # Get the original message ID and channel ID
-            message_id = signal.get("message_id")
-            channel_id = signal.get("channel_id")
-
-            # Skip if this is a manual signal or missing info
-            if not message_id or not channel_id or str(message_id).startswith("manual_"):
-                logger.debug("Skipping original message reaction - manual signal or missing IDs")
-                return
-
-            # Fetch the original signal message
-            try:
-                channel = self.bot.get_channel(int(channel_id))
-                if not channel:
-                    # Try fetching the channel
-                    channel = await self.bot.fetch_channel(int(channel_id))
-
-                if not channel:
-                    logger.warning(f"Could not find channel {channel_id} for original signal")
-                    return
-
-                original_message = await channel.fetch_message(int(message_id))
-
-            except discord.NotFound:
-                logger.warning(f"Original signal message {message_id} not found")
-                return
-            except discord.Forbidden:
-                logger.warning(f"No permission to access message {message_id}")
-                return
-            except Exception as e:
-                logger.error(f"Error fetching original message: {e}")
-                return
-
-            # Add the reaction
-            try:
-                await original_message.add_reaction(emoji)
-                logger.info(f"Added {emoji} reaction to original signal message {message_id}")
-            except discord.NotFound:
-                logger.warning(
-                    f"Could not add reaction to message {message_id} - message not found"
-                )
-            except discord.Forbidden:
-                logger.warning(
-                    f"Could not add reaction to message {message_id} - missing permissions"
-                )
-            except discord.HTTPException as e:
-                logger.warning(f"Could not add reaction to message {message_id} - HTTP error: {e}")
-            except Exception as e:
-                logger.error(f"Unexpected error adding reaction: {e}", exc_info=False)
-
-        except Exception as e:
-            # Don't fail the whole operation if reaction fails
-            logger.error(f"Error adding reaction to original signal: {e}", exc_info=True)
 
     async def _check_stop_loss(
         self, signal: Dict, current_price: float, direction: str, is_spread_hour: bool
@@ -670,11 +500,9 @@ class StreamingPriceMonitor:
         """Check if stop loss is hit. Spread buffer is NOT applied."""
         stop_loss = signal["stop_loss"]
 
-        # Guard against duplicate SL alerts if price ticks arrive faster than DB writes
-        if signal.get("_sl_alert_sent", False):
+        if signal.get("sl_alert_sent", False):
             return
 
-        # Check if hit (NO SPREAD BUFFER - exact prices only)
         if direction == "long":
             is_hit = current_price <= stop_loss
         else:
@@ -689,33 +517,26 @@ class StreamingPriceMonitor:
                 await self._cancel_signal_during_guard(signal, current_price, "spread_hour")
                 return
 
-            # CRITICAL: Set dedup flag immediately before any awaits
-            signal["_sl_alert_sent"] = True
+            signal["sl_alert_sent"] = True
 
-            # Stop loss alerts never show spread
             await self.alert_system.send_stop_loss_alert(signal, current_price)
-            # Add reaction to original signal message
-            await self._react_to_original_signal(signal, "🛑")
+            await react_to_original_signal(self.bot, signal, "🛑")
             await self._process_stop_loss_hit(signal)
             self.stats["stop_losses_hit"] += 1
 
     async def _cancel_signal_during_guard(
         self, signal: Dict, current_price: float, reason: str, news_event=None
     ):
-        """Shared evict-alert-react-process path for news and spread-hour guards.
-
-        Evicts the signal from active tracking BEFORE any awaits so that concurrent
-        limit checks for the same signal bail out early.
-        """
+        """Shared evict-alert-react-process path for news and spread-hour guards."""
         signal_id = signal["signal_id"]
         if signal_id not in self.active_signals:
-            return  # Already handled by a concurrent check
+            return
         self.active_signals.pop(signal_id, None)
         if reason == "news":
             await self.alert_system.send_news_cancel_alert(signal, current_price, news_event)
         else:
             await self.alert_system.send_spread_hour_cancel_alert(signal, current_price)
-        await self._react_to_original_signal(signal, "❌")
+        await react_to_original_signal(self.bot, signal, "❌")
         if reason == "news":
             await self._process_news_cancel(signal, news_event)
         else:
@@ -733,25 +554,18 @@ class StreamingPriceMonitor:
     async def _process_limit_hit(self, signal: Dict, limit: Dict, actual_price: float):
         """Process limit hit in database"""
         try:
-            result = await self.signal_db.process_limit_hit(limit["limit_id"], actual_price)
+            result = await self.signal_db.process_limit_hit(limit["id"], actual_price)
 
             if result.get("all_limits_hit"):
                 logger.info(
                     f"All limits hit for signal {signal['signal_id']} — refreshing TP cache, continuing to watch for auto-TP"
                 )
-                # Refresh TP cache so the final limit's hit_price is included
                 await self.tp_monitor.refresh_hit_limits(signal["signal_id"])
-                # Keep signal status as 'hit' so TP checks keep running
                 signal["status"] = "hit"
-                # Near-miss no longer relevant
                 self.nm_monitor.evict_signal(signal["signal_id"])
-                # Do NOT unsubscribe here — let auto-TP (or manual close/SL) handle that
             else:
-                # Signal is now HIT — refresh TP hit-limit cache so TP checks start immediately
                 await self.tp_monitor.refresh_hit_limits(signal["signal_id"])
-                # Update in-memory status so _check_signal starts running TP checks
                 signal["status"] = "hit"
-                # Near-miss no longer relevant once a limit is hit
                 self.nm_monitor.evict_signal(signal["signal_id"])
 
         except Exception as e:
@@ -779,8 +593,6 @@ class StreamingPriceMonitor:
 
             if success:
                 logger.info(f"Signal {signal['signal_id']} marked as stop loss")
-
-                # Remove from active tracking and TP cache
                 self.tp_monitor.evict_signal(signal["signal_id"])
                 await self._maybe_unsubscribe_symbol(signal["instrument"], signal["signal_id"])
 
@@ -788,14 +600,7 @@ class StreamingPriceMonitor:
             logger.error(f"Failed to process stop loss: {e}")
 
     async def _process_spread_hour_cancel(self, signal: Dict):
-        """
-        Cancel a signal that was falsely triggered during spread hour.
-
-        The signal is marked cancelled with closed_reason='automatic' so it
-        appears in reports with a clear audit trail.  It is removed from
-        active tracking and the symbol subscription is cleaned up if nothing
-        else needs it.
-        """
+        """Cancel a signal that was falsely triggered during spread hour."""
         signal_id = signal["signal_id"]
         try:
             success = await self.signal_db.manually_set_signal_status(
@@ -815,12 +620,7 @@ class StreamingPriceMonitor:
             logger.error(f"Error cancelling signal {signal_id} for spread hour: {e}")
 
     async def _process_news_cancel(self, signal: Dict, news_event) -> None:
-        """
-        Cancel a signal that was triggered during an active news window.
-
-        Mirrors _process_spread_hour_cancel but records the reason as
-        'news_auto_cancel' so it is distinct in reports and audit logs.
-        """
+        """Cancel a signal that was triggered during an active news window."""
         signal_id = signal["signal_id"]
         try:
             success = await self.signal_db.manually_set_signal_status(
@@ -841,18 +641,15 @@ class StreamingPriceMonitor:
 
     async def _maybe_unsubscribe_symbol(self, symbol: str, completed_signal_id: int):
         """Unsubscribe from symbol if no other active signals need it"""
-        # Remove signal from tracking
         if symbol in self.symbol_to_signals:
             if completed_signal_id in self.symbol_to_signals[symbol]:
                 self.symbol_to_signals[symbol].remove(completed_signal_id)
 
-            # If no more signals for this symbol, unsubscribe
             if not self.symbol_to_signals[symbol]:
                 await self.stream_manager.unsubscribe_symbol(symbol)
                 del self.symbol_to_signals[symbol]
                 logger.info(f"Unsubscribed from {symbol} (no active signals)")
 
-        # Remove from active signals and TP/NM cache
         self.active_signals.pop(completed_signal_id, None)
         self.tp_monitor.evict_signal(completed_signal_id)
         self.nm_monitor.evict_signal(completed_signal_id)

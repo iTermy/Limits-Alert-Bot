@@ -7,7 +7,15 @@
       "Bash(python -c \"import ast; ast.parse\\(open\\('price_feeds/streaming_monitor.py', encoding='utf-8'\\).read\\(\\)\\); print\\('OK'\\)\")",
       "Bash(python -c \"import ast; ast.parse\\(open\\('discord_handlers/message_handler.py', encoding='utf-8'\\).read\\(\\)\\); print\\('OK'\\)\")",
       "Bash(python -c ' *)",
-      "Bash(python *)"
+      "Bash(python *)",
+      "Bash(Get-ChildItem -Recurse price_feeds -Filter \"*.py\")",
+      "Bash(Select-Object -ExpandProperty FullName)",
+      "Bash(Get-ChildItem -Path \"C:\\\\Python Stuff\\\\TM Bot\" -Recurse -Filter \"*.py\")",
+      "Bash(Select-Object -First 50 FullName)",
+      "Bash(Sort-Object FullName)",
+      "Bash(pip show *)",
+      "PowerShell(Remove-Item *)",
+      "PowerShell(Move-Item *)"
     ]
   }
 }

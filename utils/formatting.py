@@ -64,6 +64,14 @@ def is_index_symbol(symbol: str) -> bool:
     return any(idx in symbol_upper for idx in index_indicators)
 
 
+def get_channel_name(channels_config: dict, channel_id: int) -> str | None:
+    """Look up a monitored channel's name by its Discord ID."""
+    for name, ch_id in channels_config.get("monitored_channels", {}).items():
+        if int(ch_id) == channel_id:
+            return name
+    return None
+
+
 def get_status_emoji(status: str) -> str:
     """Get emoji for signal status"""
     status_lower = status.lower()

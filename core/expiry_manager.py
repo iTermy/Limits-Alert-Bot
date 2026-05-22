@@ -18,8 +18,8 @@ class ExpiryManager:
     async def check_expiry(self):
         """Check and expire signals past expiry_time."""
         try:
-            monitor = self.bot.monitor
-            alert_system = monitor.alert_system if monitor else None
+            monitor = self.bot.services.monitor
+            alert_system = self.bot.services.alert_system
 
             # ── 1. Query which signals are about to be expired BEFORE expiring ──
             # We need their IDs so we can do per-signal work afterward.
@@ -28,7 +28,7 @@ class ExpiryManager:
                 try:
                     from database.models import SignalStatus
 
-                    pre_expire_rows = await self.bot.signal_db.db.fetch_all(
+                    pre_expire_rows = await self.bot.services.signal_db.db.fetch_all(
                         """
                         SELECT id, message_id, channel_id
                         FROM signals
@@ -43,7 +43,7 @@ class ExpiryManager:
                     self.logger.warning(f"Could not pre-fetch expiring signals: {_pre}")
 
             # ── 2. Run the DB expiry (sets status=cancelled, closed_reason='expiry') ──
-            count = await self.bot.signal_db.expire_old_signals()
+            count = await self.bot.services.signal_db.expire_old_signals()
             if count > 0:
                 self.logger.info(f"Expired {count} signals")
 
@@ -67,7 +67,7 @@ class ExpiryManager:
           • Delete the original message for gold-toll signals with no embed
         """
         # Fetch the fresh signal data (status is now 'cancelled', closed_reason='expiry')
-        signal = await self.bot.signal_db.get_signal_with_limits(sig_id)
+        signal = await self.bot.services.signal_db.get_signal_with_limits(sig_id)
         if not signal:
             self.logger.warning(f"Could not fetch signal {sig_id} after expiry")
             return
@@ -109,7 +109,9 @@ class ExpiryManager:
         # ── 3b. Add ❌ reaction to the original signal message ────────────────
         if monitor:
             try:
-                await monitor._react_to_original_signal(signal, "❌")
+                from price_feeds.streaming_monitor import react_to_original_signal
+
+                await react_to_original_signal(self.bot, signal, "❌")
             except Exception as _re:
                 self.logger.warning(
                     f"Could not react to original message for expired signal {sig_id}: {_re}"

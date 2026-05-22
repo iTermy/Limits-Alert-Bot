@@ -8,9 +8,10 @@ from typing import Optional
 
 import discord
 
-from database.signal_operations.utils import calculate_sl_pnl
-from price_feeds.alert_system import _build_signal_embed, _set_archive_footer
+from database.utils import calculate_sl_pnl
+from price_feeds.embed_builders import _build_signal_embed, _set_archive_footer
 from price_feeds.tp_config import TPConfig
+from utils.formatting import get_channel_name as _get_channel_name
 from utils.logger import get_logger
 
 logger = get_logger("message_handler")
@@ -98,10 +99,10 @@ class MessageHandler:
             return
 
         if not self.alert_system:
-            if self.bot.monitor and self.bot.monitor.alert_system:
-                self.alert_system = self.bot.monitor.alert_system
+            if self.bot.services.alert_system:
+                self.alert_system = self.bot.services.alert_system
                 logger.info(
-                    f"Got alert system from bot.monitor, has {len(self.alert_system.alert_messages)} tracked messages"
+                    f"Got alert system from services, has {len(self.alert_system.alert_messages)} tracked messages"
                 )
             else:
                 logger.warning("Alert system not available - monitor may not be initialized")
@@ -249,9 +250,9 @@ class MessageHandler:
                     timeout=5.0,
                 )
                 if transitioned:
-                    if self.bot.monitor:
-                        monitor = self.bot.monitor
-                        await monitor.tp_monitor.refresh_hit_limits(signal_id)
+                    if self.bot.services.monitor:
+                        monitor = self.bot.services.monitor
+                        await self.bot.services.tp_monitor.refresh_hit_limits(signal_id)
                         if signal_id in monitor.active_signals:
                             monitor.active_signals[signal_id]["status"] = "hit"
                         elif was_cancelled:
@@ -343,8 +344,8 @@ class MessageHandler:
                 )
                 if success:
                     action_taken = "reactivated"
-                    if self.bot.monitor:
-                        self.bot.monitor.nm_monitor.mark_immune(signal_id)
+                    if self.bot.services.nm_monitor:
+                        self.bot.services.nm_monitor.mark_immune(signal_id)
 
             else:
                 await message.reply(
@@ -592,19 +593,14 @@ class MessageHandler:
 
         if parsed:
             if existing["status"] == "cancelled":
-                from database.signal_operations.lifecycle import LifecycleManager
-
-                lifecycle = LifecycleManager(self.signal_db.db)
-                reactivated = await lifecycle.reactivate_cancelled_signal(
-                    existing["id"], parsed, self.signal_db.db
+                reactivated = await self.signal_db.reactivate_cancelled_signal(
+                    existing["id"], parsed
                 )
                 if reactivated:
                     await self.signal_db.update_signal_from_edit(str(after.id), parsed)
 
-                    if self.bot.monitor:
-                        nm = getattr(self.bot.monitor, "nm_monitor", None)
-                        if nm:
-                            nm.mark_immune(existing["id"])
+                    if self.bot.services.nm_monitor:
+                        self.bot.services.nm_monitor.mark_immune(existing["id"])
 
                     await after.clear_reactions()
                     await after.add_reaction("✅")
@@ -713,8 +709,4 @@ class MessageHandler:
         return False
 
     def get_channel_name(self, channel_id: int) -> Optional[str]:
-        """Get channel name from configuration"""
-        for name, ch_id in self.bot.channels_config.get("monitored_channels", {}).items():
-            if int(ch_id) == channel_id:
-                return name
-        return None
+        return _get_channel_name(self.bot.channels_config, channel_id)

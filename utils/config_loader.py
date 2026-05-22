@@ -1,12 +1,13 @@
 """
 Configuration loader for the Trading Alert Bot
-Enhanced with spread buffer settings helpers
 """
 
 import json
 import logging
 from pathlib import Path
-from typing import Any, Dict
+from typing import Any, Dict, Union
+
+from models.config import BotSettings
 
 logger = logging.getLogger(__name__)
 
@@ -54,24 +55,6 @@ class ConfigLoader:
             "channel_settings": {},
         }
 
-        # Default tracking config
-        default_tracking = {
-            "update_intervals": {"critical": 1, "near": 5, "medium": 30, "far": 60},
-            "distance_thresholds": {"critical": 5, "near": 20, "medium": 50},
-            "approaching_alert_distance": 3,
-            "spread_multiplier": 1.0,
-        }
-
-        # Default expiry config
-        default_expiry = {
-            "session_times": {
-                "forex": {"daily_close": "17:00", "timezone": "America/New_York"},
-                "commodity": {"daily_close": "14:30", "timezone": "America/New_York"},
-            },
-            "expiry_check_interval": 300,
-            "default_expiry_type": "day_end",
-        }
-
         # Create config directory if it doesn't exist
         self.config_dir.mkdir(exist_ok=True)
 
@@ -79,8 +62,6 @@ class ConfigLoader:
         defaults = {
             "settings.json": default_settings,
             "channels.json": default_channels,
-            "tracking_config.json": default_tracking,
-            "expiry_config.json": default_expiry,
         }
 
         for filename, default_content in defaults.items():
@@ -182,46 +163,28 @@ def get_config(filename: str = "settings.json") -> Dict[str, Any]:
     return config.load(filename)
 
 
-def load_settings() -> dict:
-    """
-    Load settings from settings.json
-
-    Returns:
-        Settings dictionary with spread buffer defaults if file not found
-    """
+def load_settings() -> BotSettings:
+    """Load settings from settings.json as a validated BotSettings model."""
     config_path = Path(__file__).parent.parent / "config" / "settings.json"
     try:
         with open(config_path) as f:
-            return json.load(f)
+            data = json.load(f)
+        return BotSettings.model_validate(data)
     except FileNotFoundError:
         logger.warning("settings.json not found, using defaults")
-        return {
-            "bot_prefix": "!",
-            "spread_buffer_enabled": True,
-            "spread_buffer_config": {
-                "apply_to_approaching": True,
-                "apply_to_hit": True,
-                "apply_to_stop_loss": False,
-                "fallback_spread": 0.0,
-                "log_buffer_usage": True,
-            },
-        }
+        return BotSettings()
     except Exception as e:
         logger.error(f"Error loading settings: {e}")
-        return {"spread_buffer_enabled": True}
+        return BotSettings()
 
 
-def save_settings(settings: dict):
-    """
-    Save settings to settings.json
-
-    Args:
-        settings: Settings dictionary to save
-    """
+def save_settings(settings: Union[BotSettings, dict]):
+    """Save settings to settings.json. Accepts a BotSettings model or a dict."""
     config_path = Path(__file__).parent.parent / "config" / "settings.json"
+    data = settings.model_dump() if isinstance(settings, BotSettings) else settings
     try:
         with open(config_path, "w") as f:
-            json.dump(settings, f, indent=2)
+            json.dump(data, f, indent=2)
         logger.info("Settings saved successfully")
     except Exception as e:
         logger.error(f"Error saving settings: {e}")

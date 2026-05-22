@@ -7,8 +7,9 @@ from typing import Optional, Set
 import discord
 from discord.ext import commands, tasks
 
+from core.services import ServiceRegistry
 from database import db, initialize_signal_db
-from utils.config_loader import config
+from utils.config_loader import config, load_settings
 from utils.logger import get_logger
 
 logger = get_logger("bot")
@@ -48,8 +49,11 @@ class TradingBot(commands.Bot):
         self.signal_db = None
         self.message_handler = None
         self.expiry_manager = None
-        self.monitor = None  # Changed from price_monitor to monitor for consistency
+        self.monitor = None
         self.channel_cleaner = None
+
+        # Flat service registry — populated during setup_hook, injected into cogs/handlers
+        self.services = ServiceRegistry()
 
         # News mode manager — tracks active news windows
         from core.news_manager import NewsManager
@@ -58,8 +62,9 @@ class TradingBot(commands.Bot):
         self.news_manager.load_from_file()
         self.news_manager.start_cleanup_task()
 
-        # Admin user IDs
-        self.admin_ids = [582358569542877184]  # Replace with actual admin IDs
+        # Admin user IDs from settings.json
+        bot_settings = load_settings()
+        self.admin_ids = bot_settings.admin_ids
 
     async def setup_hook(self):
         """Called when bot is getting ready"""
@@ -68,6 +73,10 @@ class TradingBot(commands.Bot):
         # Initialize database FIRST
         await db.initialize()
         self.signal_db = initialize_signal_db(db)
+
+        # Populate service registry with DB layer
+        self.services.db = db
+        self.services.signal_db = self.signal_db
 
         # Give NewsManager a reference to the DB so it can persist mode status
         self.news_manager.set_db(db)
@@ -81,6 +90,17 @@ class TradingBot(commands.Bot):
         self.logger.info("Message handler initialized")
 
         await self.initialize_price_monitor()
+
+        # Populate service registry with monitor subsystems
+        if self.monitor:
+            self.services.monitor = self.monitor
+            self.services.alert_system = self.monitor.alert_system
+            self.services.stream_manager = self.monitor.stream_manager
+            self.services.tp_config = self.monitor.tp_config
+            self.services.tp_monitor = self.monitor.tp_monitor
+            self.services.nm_config = self.monitor.nm_config
+            self.services.nm_monitor = self.monitor.nm_monitor
+            self.services.alert_config = self.monitor.alert_config
 
         # Connect alert system to message handler
         if self.monitor and self.message_handler:
@@ -147,9 +167,9 @@ class TradingBot(commands.Bot):
     async def load_extensions(self):
         """Load all command cogs"""
         extensions = [
-            "commands.bot_commands",
-            "commands.trading_commands",
-            "commands.config_commands",
+            "commands.admin",
+            "commands.signals",
+            "commands.config",
         ]
 
         for extension in extensions:
@@ -239,30 +259,120 @@ class TradingBot(commands.Bot):
         await ctx.send(embed=embed)
 
     async def initialize_price_monitor(self):
-        """Initialize the price monitoring system"""
+        """Initialize the price monitoring system — creates all subsystems and injects them."""
         self.logger.info("Starting price monitor initialization...")
         try:
-            from price_feeds.streaming_monitor import StreamingPriceMonitor as PriceMonitor
+            import json
+            from pathlib import Path
 
-            # Create monitor instance - use self.monitor not self.price_monitor
-            self.monitor = PriceMonitor(bot=self, signal_db=self.signal_db, db=db)
+            from price_feeds.alert_config import AlertDistanceConfig
+            from price_feeds.alert_system import AlertSystem
+            from price_feeds.feed_health_monitor import FeedHealthMonitor
+            from price_feeds.live_price_writer import LivePriceWriter
+            from price_feeds.nm_config import NMConfig
+            from price_feeds.nm_monitor import NearMissMonitor
+            from price_feeds.price_stream_manager import PriceStreamManager
+            from price_feeds.streaming_monitor import StreamingPriceMonitor
+            from price_feeds.tp_config import TPConfig
+            from price_feeds.tp_monitor import AutoTPMonitor
+
+            # Create subsystems
+            alert_config = AlertDistanceConfig()
+            stream_manager = PriceStreamManager()
+            alert_system = AlertSystem(
+                bot=self, stream_manager=stream_manager, alert_config=alert_config
+            )
+            tp_config = TPConfig()
+            tp_monitor = AutoTPMonitor(
+                tp_config=tp_config,
+                signal_db=self.signal_db,
+                db=db,
+                alert_system=alert_system,
+            )
+            nm_config = NMConfig()
+            nm_monitor = NearMissMonitor(
+                nm_config=nm_config,
+                signal_db=self.signal_db,
+                db=db,
+                alert_system=alert_system,
+            )
+            live_price_writer = LivePriceWriter(
+                db_manager=db,
+                stream_manager=stream_manager,
+            )
+
+            # Read health config for admin user ID
+            health_path = Path(__file__).resolve().parent.parent / "config" / "health_config.json"
+            admin_user_id = None
+            try:
+                with open(health_path) as f:
+                    health_config = json.load(f)
+                    admin_user_id_str = health_config.get("admin_user_id")
+                    if admin_user_id_str:
+                        admin_user_id = int(admin_user_id_str)
+            except Exception as e:
+                self.logger.warning(f"Could not load admin user ID: {e}")
+
+            health_monitor = FeedHealthMonitor(
+                stream_manager=stream_manager, bot=self, admin_user_id=admin_user_id
+            )
+
+            # Wire alert channels before creating the monitor
+            await self._setup_alert_channels(alert_system)
+
+            # Create monitor with all dependencies injected
+            self.monitor = StreamingPriceMonitor(
+                bot=self,
+                signal_db=self.signal_db,
+                db=db,
+                alert_system=alert_system,
+                stream_manager=stream_manager,
+                alert_config=alert_config,
+                tp_config=tp_config,
+                tp_monitor=tp_monitor,
+                nm_config=nm_config,
+                nm_monitor=nm_monitor,
+                live_price_writer=live_price_writer,
+                health_monitor=health_monitor,
+            )
 
             # Initialize and start monitoring
             await self.monitor.initialize()
             await self.monitor.start()
 
             # Re-start the news manager cleanup task now that we have an alert system
-            self.news_manager.start_cleanup_task(alert_system=self.monitor.alert_system)
+            self.news_manager.start_cleanup_task(alert_system=alert_system)
 
             self.logger.info("Price monitoring system initialized and started")
             self.logger.info(
-                f"Alert system created with {len(self.monitor.alert_system.alert_messages)} tracked messages"
+                f"Alert system created with {len(alert_system.alert_messages)} tracked messages"
             )
 
         except Exception as e:
             self.logger.error(f"Failed to initialize price monitor: {e}", exc_info=True)
             # Don't fail bot startup if monitor fails
             self.monitor = None
+
+    async def _setup_alert_channels(self, alert_system):
+        """Fetch Discord channels and wire them into the alert system."""
+        channel_setters = {
+            "alert_channel": alert_system.set_channel,
+            "pa-alert-channel": alert_system.set_pa_channel,
+            "toll-alert-channel": alert_system.set_toll_channel,
+            "general-tolls-alert": alert_system.set_general_toll_channel,
+            "legends-trade-alert": alert_system.set_legends_channel,
+        }
+        for key, setter in channel_setters.items():
+            channel_id = self.channels_config.get(key)
+            if channel_id:
+                try:
+                    channel = await self.fetch_channel(int(channel_id))
+                    setter(channel)
+                    self.logger.info(f"{key} channel set: #{channel.name}")
+                except Exception as e:
+                    self.logger.error(f"Failed to set {key} channel: {e}")
+            else:
+                self.logger.warning(f"No {key} configured in channels.json")
 
     @tasks.loop(seconds=30)
     async def heartbeat(self):

@@ -39,9 +39,7 @@ def get_gold_tolls_sl_offset() -> float:
             from utils.config_loader import load_settings
 
             settings = load_settings()
-            _gold_tolls_sl_cache = float(
-                settings.get("gold_tolls_sl_offset", _GOLD_TOLLS_SL_OFFSET_DEFAULT)
-            )
+            _gold_tolls_sl_cache = float(settings.gold_tolls_sl_offset)
         except Exception as e:
             logger.warning(
                 f"Could not load gold_tolls_sl_offset from settings: {e}. Using {_gold_tolls_sl_cache}."

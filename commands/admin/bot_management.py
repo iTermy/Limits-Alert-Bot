@@ -1,5 +1,5 @@
 """
-Bot Commands - Essential bot management and utility commands
+Bot Management Commands - ping, help, health, feeds, price, reload, shutdown, clear, cleanalerts, goldtollssl
 """
 
 import asyncio
@@ -10,10 +10,10 @@ from discord.ext import commands
 
 from utils.config_loader import load_channels_config
 
-from .base_command import BaseCog
+from .._base import BaseCog
 
 
-class BotCommands(BaseCog):
+class BotManagementCog(BaseCog):
     """Bot management and utility commands"""
 
     # ==================== GENERAL COMMANDS ====================
@@ -226,7 +226,6 @@ class BotCommands(BaseCog):
             color=0x00BFFF,
         )
 
-        # Signal commands
         signal_cmds = (
             "`!active [instrument] [sort:method]` - Show active signals\n"
             "  └ Sort options: recent, oldest, distance, progress\n"
@@ -244,7 +243,6 @@ class BotCommands(BaseCog):
         )
         embed.add_field(name="Signal Commands", value=signal_cmds, inline=False)
 
-        # Bot commands
         bot_cmds = (
             "`!ping` - Check bot latency\n"
             "`!health` - Complete bot health check\n"
@@ -253,7 +251,6 @@ class BotCommands(BaseCog):
         )
         embed.add_field(name="Bot Commands", value=bot_cmds, inline=False)
 
-        # Admin commands
         if self.is_admin(ctx.author):
             admin_cmds = (
                 "`!clear` - Clear all signals\n"
@@ -271,13 +268,13 @@ class BotCommands(BaseCog):
     @commands.command(name="price", aliases=["cp", "checkprice"])
     async def check_price(self, ctx: commands.Context, symbol: str):
         """Check current price for a symbol"""
-        if not self.bot.monitor:
+        if not self.services.stream_manager:
             await ctx.send("❌ Price monitoring not available")
             return
 
         try:
             symbol_upper = symbol.upper()
-            price_data = await self.bot.monitor.stream_manager.get_latest_price(symbol_upper)
+            price_data = await self.services.stream_manager.get_latest_price(symbol_upper)
 
             if not price_data:
                 await ctx.send(f"❌ No price data available for {symbol_upper}")
@@ -307,15 +304,14 @@ class BotCommands(BaseCog):
     @commands.command(name="feeds", aliases=["feedstatus"])
     async def feed_status(self, ctx: commands.Context):
         """Show feed connection status"""
-        if not self.bot.monitor:
+        if not self.services.monitor:
             await ctx.send("❌ Monitor not running")
             return
 
-        stream_manager = self.bot.monitor.stream_manager
+        stream_manager = self.services.stream_manager
 
         embed = discord.Embed(title="📡 Feed Status", color=0x00BFFF)
 
-        # Get feed statuses
         feeds_info = []
         for feed_name in ["icmarkets", "oanda", "binance"]:
             if hasattr(stream_manager, f"{feed_name}_connected"):
@@ -326,7 +322,6 @@ class BotCommands(BaseCog):
         if feeds_info:
             embed.add_field(name="Feed Connections", value="\n".join(feeds_info), inline=False)
 
-        # Active subscriptions
         if hasattr(stream_manager, "subscribed_symbols"):
             active_subs = len(stream_manager.subscribed_symbols)
             embed.add_field(name="Active Subscriptions", value=str(active_subs), inline=True)
@@ -340,7 +335,6 @@ class BotCommands(BaseCog):
             title="Bot Health Check", description="Complete system status", color=0x00FF00
         )
 
-        # Bot status
         uptime = (
             datetime.utcnow() - self.bot.start_time if hasattr(self.bot, "start_time") else None
         )
@@ -351,7 +345,6 @@ class BotCommands(BaseCog):
 
         embed.add_field(name="Latency", value=f"{round(self.bot.latency * 1000)}ms", inline=True)
 
-        # Database status
         try:
             stats = await self.signal_db.get_statistics()
             total_signals = stats.get("total_signals", 0)
@@ -364,11 +357,9 @@ class BotCommands(BaseCog):
         except Exception as e:
             embed.add_field(name="Database", value=f"🔴 Error: {str(e)[:50]}", inline=True)
 
-        # Monitor status
-        if self.bot.monitor:
-            stream_manager = self.bot.monitor.stream_manager
+        if self.services.monitor:
+            stream_manager = self.services.stream_manager
 
-            # Feed connections
             feed_status = []
             for feed_name in ["icmarkets", "oanda", "binance"]:
                 if hasattr(stream_manager, f"{feed_name}_connected"):
@@ -379,12 +370,10 @@ class BotCommands(BaseCog):
             if feed_status:
                 embed.add_field(name="Feeds", value="\n".join(feed_status), inline=True)
 
-            # Subscriptions
             if hasattr(stream_manager, "subscribed_symbols"):
                 active_subs = len(stream_manager.subscribed_symbols)
                 embed.add_field(name="Subscriptions", value=str(active_subs), inline=True)
 
-            # Recent updates
             if hasattr(stream_manager, "last_price_update"):
                 last_update = stream_manager.last_price_update
                 if last_update:
@@ -398,7 +387,7 @@ class BotCommands(BaseCog):
         else:
             embed.add_field(name="Monitor", value="🔴 Not running", inline=False)
 
-        embed.color = 0x00FF00 if self.bot.monitor else 0xFFA500
+        embed.color = 0x00FF00 if self.services.monitor else 0xFFA500
 
         embed.set_footer(text=f"Generated at {datetime.utcnow().strftime('%H:%M:%S')} UTC")
         await ctx.send(embed=embed)
@@ -512,15 +501,12 @@ class BotCommands(BaseCog):
     async def reload_config(self, ctx: commands.Context):
         """Reload bot configuration (Admin only)"""
         try:
-            # Reload alert distances if available
-            if self.bot.monitor:
-                self.bot.monitor.alert_config.reload_config()
-                self.bot.monitor.tp_config.reload_config()
-                self.bot.monitor.tp_monitor.tp_config = self.bot.monitor.tp_config
-                self.bot.monitor.alert_system.reload_channels()
+            if self.services.monitor:
+                self.services.alert_config.reload_config()
+                self.services.tp_config.reload_config()
+                self.services.tp_monitor.tp_config = self.services.tp_config
+                self.services.alert_system.reload_channels()
 
-            # Bust the gold-tolls SL offset cache so the parser picks up any
-            # manual edits to settings.json
             from core.parser.pattern_parsers import invalidate_gold_tolls_sl_cache
 
             invalidate_gold_tolls_sl_cache()
@@ -555,7 +541,6 @@ class BotCommands(BaseCog):
         from utils.config_loader import load_settings, save_settings
 
         if value is None:
-            # Show current setting
             current = get_gold_tolls_sl_offset()
             embed = discord.Embed(
                 title="🛑 Gold Tolls SL Offset",
@@ -576,11 +561,10 @@ class BotCommands(BaseCog):
             await ctx.send("❌ Offset must be a positive number.")
             return
 
-        # Save to settings.json
         try:
             settings = load_settings()
-            old_value = settings.get("gold_tolls_sl_offset", 5.0)
-            settings["gold_tolls_sl_offset"] = value
+            old_value = settings.gold_tolls_sl_offset
+            settings.gold_tolls_sl_offset = value
             save_settings(settings)
             invalidate_gold_tolls_sl_cache()
         except Exception as e:
@@ -590,7 +574,6 @@ class BotCommands(BaseCog):
 
         self.logger.info(f"gold_tolls_sl_offset changed {old_value} → {value} by {ctx.author}")
 
-        # ── Retroactively update all active gold toll signals ─────────────────
         loading_msg = await ctx.send("🔄 Updating active gold toll signals…")
 
         updated_count = 0
@@ -641,7 +624,6 @@ class BotCommands(BaseCog):
             self.logger.error(f"Retroactive gold-toll SL update failed: {bulk_err}", exc_info=True)
             await loading_msg.edit(content=f"⚠️ Retroactive update encountered an error: {bulk_err}")
 
-        # ── Final confirmation embed ──────────────────────────────────────────
         retro_lines = []
         if updated_count:
             retro_lines.append(f"✅ **{updated_count}** active signal(s) SL updated retroactively")
@@ -664,513 +646,3 @@ class BotCommands(BaseCog):
             color=discord.Color.green(),
         )
         await ctx.send(embed=embed)
-
-    # ==================== LICENSE COMMANDS ====================
-
-    # The Discord role that grants access to the Auto-Limits-Adder bot.
-    # Must exactly match the role name in your server (case-sensitive).
-    LICENSE_ROLE_NAME = "Signal Subscriber"
-
-    # Seconds to wait for the user to reply with their MT5 account in DM.
-    LICENSE_DM_TIMEOUT = 120
-
-    @staticmethod
-    def _generate_license_key() -> str:
-        import secrets
-
-        return secrets.token_hex(16)
-
-    @commands.command(name="activate")
-    async def activate(self, ctx: commands.Context):
-        """Get an Auto-Limits-Adder license key (requires Signal Subscriber role)"""
-        # Delete the public command message so the channel stays clean
-        try:
-            await ctx.message.delete()
-        except (discord.HTTPException, discord.Forbidden):
-            pass
-
-        member = ctx.author
-
-        # Role check
-        role_names = [r.name for r in getattr(member, "roles", [])]
-        if not any(self.LICENSE_ROLE_NAME in r for r in role_names):
-            try:
-                await member.send(
-                    f"❌ You need the **{self.LICENSE_ROLE_NAME}** role to activate a license.\n"
-                    "If you are a subscriber, please contact an admin."
-                )
-            except discord.Forbidden:
-                pass
-            return
-
-        # Open DM channel
-        try:
-            await member.send(
-                "👋 **Auto-Limits-Adder License Activation**\n\n"
-                "To activate your license, please reply here with your **MT5 account number** "
-                "(the login number shown in MetaTrader 5).\n\n"
-                "_Type `cancel` at any time to abort._"
-            )
-        except discord.Forbidden:
-            try:
-                notice = await ctx.send(
-                    f"❌ {member.mention} I can't DM you. "
-                    "Please **enable DMs from server members** in your Privacy Settings, "
-                    "then run `!activate` again."
-                )
-                await asyncio.sleep(20)
-                await notice.delete()
-            except discord.HTTPException:
-                pass
-            return
-
-        def dm_check(m: discord.Message) -> bool:
-            return m.author.id == member.id and isinstance(m.channel, discord.DMChannel)
-
-        try:
-            reply = await self.bot.wait_for(
-                "message", check=dm_check, timeout=self.LICENSE_DM_TIMEOUT
-            )
-        except asyncio.TimeoutError:
-            await member.send(
-                f"⏰ Activation timed out after {self.LICENSE_DM_TIMEOUT}s. "
-                "Run `!activate` in the server again when you're ready."
-            )
-            return
-
-        if reply.content.strip().lower() == "cancel":
-            await member.send("❌ Activation cancelled.")
-            return
-
-        mt5_account = reply.content.strip()
-        if not mt5_account:
-            await member.send("❌ No account number received. Please run `!activate` again.")
-            return
-
-        async with self.bot.signal_db.db.get_connection() as conn:
-            # User already has one or more active keys
-            existing_keys = await conn.fetch(
-                "SELECT mt5_account, license_key FROM licenses WHERE discord_id = $1 AND status = 'active'",
-                str(member.id),
-            )
-            if existing_keys:
-                accounts = ", ".join(f"`{r['mt5_account']}`" for r in existing_keys)
-                await member.send(
-                    f"ℹ️ You already have an active license for MT5 account(s): {accounts}.\n\n"
-                    "If you need to register a **different** MT5 account, contact an admin "
-                    "to revoke your existing key first.\n"
-                    "If you've **lost your key**, ask an admin to re-issue it with `!grantkey`."
-                )
-                return
-
-            # MT5 account already registered to someone else
-            existing_owner = await conn.fetchrow(
-                "SELECT discord_id FROM licenses WHERE mt5_account = $1 AND status = 'active'",
-                mt5_account,
-            )
-            if existing_owner:
-                await member.send(
-                    f"❌ MT5 account `{mt5_account}` is already registered to another user.\n"
-                    "If you believe this is an error, please contact an admin."
-                )
-                return
-
-            license_key = self._generate_license_key()
-            await conn.execute(
-                """
-                INSERT INTO licenses (discord_id, mt5_account, license_key, status, created_at)
-                VALUES ($1, $2, $3, 'active', NOW())
-                """,
-                str(member.id),
-                mt5_account,
-                license_key,
-            )
-
-        self.logger.info(f"License issued — user={member} ({member.id}), mt5={mt5_account}")
-        await member.send(
-            f"✅ **License activated!**\n\n"
-            f"**Your license key:**\n```\n{license_key}\n```\n\n"
-            f"**Setup:**\n"
-            f"1. Open `config.json` in your Auto-Limits-Adder folder.\n"
-            f'2. Add your key to the "license" section:\n'
-            f'```json\n"license": {{\n    "key": "{license_key}"\n}}\n```\n'
-            f"3. Save and start the bot — it validates on startup.\n\n"
-            f"⚠️ Keep this key private. It is locked to MT5 account `{mt5_account}`."
-        )
-
-    @commands.command(name="setkeys")
-    async def setkeys(self, ctx: commands.Context, member: discord.Member, max_keys: int):
-        """Admin: set how many license keys a user may hold. Usage: !setkeys @user <n>"""
-        if not self.is_admin(ctx.author):
-            await ctx.send("❌ Admin only.")
-            return
-        if max_keys < 1:
-            await ctx.send("❌ max_keys must be at least 1.")
-            return
-
-        async with self.bot.signal_db.db.get_connection() as conn:
-            await conn.execute(
-                """
-                INSERT INTO license_allowances (discord_id, max_keys)
-                VALUES ($1, $2)
-                ON CONFLICT (discord_id) DO UPDATE SET max_keys = EXCLUDED.max_keys
-                """,
-                str(member.id),
-                max_keys,
-            )
-
-        self.logger.info(f"Allowance updated — user={member} ({member.id}), max_keys={max_keys}")
-        await ctx.send(
-            f"✅ **{member.display_name}** can now hold up to **{max_keys}** license key(s)."
-        )
-
-    @commands.command(name="grantkey")
-    async def grantkey(self, ctx: commands.Context, member: discord.Member, mt5_account: str):
-        """Admin: issue a license key for a specific MT5 account. Usage: !grantkey @user <mt5_account>"""
-        if not self.is_admin(ctx.author):
-            await ctx.send("❌ Admin only.")
-            return
-
-        async with self.bot.signal_db.db.get_connection() as conn:
-            existing = await conn.fetchrow(
-                "SELECT discord_id FROM licenses WHERE mt5_account = $1 AND status = 'active'",
-                mt5_account,
-            )
-            if existing:
-                await ctx.send(
-                    f"❌ MT5 account `{mt5_account}` is already registered "
-                    f"to Discord user ID `{existing['discord_id']}`."
-                )
-                return
-
-            active_count = await conn.fetchval(
-                "SELECT COUNT(*) FROM licenses WHERE discord_id = $1 AND status = 'active'",
-                str(member.id),
-            )
-            max_keys = (
-                await conn.fetchval(
-                    "SELECT max_keys FROM license_allowances WHERE discord_id = $1",
-                    str(member.id),
-                )
-                or 1
-            )
-
-            if active_count >= max_keys:
-                await ctx.send(
-                    f"❌ {member.display_name} already has {active_count}/{max_keys} active license(s). "
-                    f"Use `!setkeys @{member.display_name} {active_count + 1}` to raise their limit first."
-                )
-                return
-
-            license_key = self._generate_license_key()
-            await conn.execute(
-                """
-                INSERT INTO licenses (discord_id, mt5_account, license_key, status, created_at)
-                VALUES ($1, $2, $3, 'active', NOW())
-                """,
-                str(member.id),
-                mt5_account,
-                license_key,
-            )
-
-        self.logger.info(
-            f"License granted by admin — user={member} ({member.id}), mt5={mt5_account}, by={ctx.author}"
-        )
-        await ctx.send(
-            f"✅ License issued for **{member.display_name}** (MT5: `{mt5_account}`). Key sent to their DMs."
-        )
-
-        try:
-            await member.send(
-                f"🔑 An admin has issued you an **Auto-Limits-Adder** license key.\n\n"
-                f"**Your license key:**\n```\n{license_key}\n```\n\n"
-                f'Add this to `config.json` under the `"license"` section:\n'
-                f'```json\n"license": {{\n    "key": "{license_key}"\n}}\n```\n'
-                f"This key is locked to MT5 account `{mt5_account}`. Keep it private."
-            )
-        except discord.Forbidden:
-            await ctx.send(
-                f"⚠️ Could not DM {member.display_name} — share the key manually:\n```\n{license_key}\n```"
-            )
-
-    @commands.command(name="revoke")
-    async def revoke(self, ctx: commands.Context, member: discord.Member, mt5_account: str = None):
-        """Admin: revoke a license. Usage: !revoke @user [mt5_account]"""
-        if not self.is_admin(ctx.author):
-            await ctx.send("❌ Admin only.")
-            return
-
-        async with self.bot.signal_db.db.get_connection() as conn:
-            if mt5_account:
-                row = await conn.fetchrow(
-                    "SELECT id FROM licenses WHERE discord_id = $1 AND mt5_account = $2 AND status = 'active'",
-                    str(member.id),
-                    mt5_account,
-                )
-                if not row:
-                    await ctx.send(
-                        f"❌ No active license found for {member.display_name} with MT5 account `{mt5_account}`."
-                    )
-                    return
-                await conn.execute(
-                    "UPDATE licenses SET status = 'revoked', revoked_at = NOW() WHERE id = $1",
-                    row["id"],
-                )
-                await ctx.send(
-                    f"✅ License revoked for **{member.display_name}** (MT5: `{mt5_account}`)."
-                )
-            else:
-                rows = await conn.fetch(
-                    "SELECT id, mt5_account FROM licenses WHERE discord_id = $1 AND status = 'active'",
-                    str(member.id),
-                )
-                if len(rows) == 0:
-                    await ctx.send(f"❌ {member.display_name} has no active licenses.")
-                    return
-                if len(rows) > 1:
-                    accounts = ", ".join(f"`{r['mt5_account']}`" for r in rows)
-                    await ctx.send(
-                        f"❌ {member.display_name} has {len(rows)} active licenses ({accounts}). "
-                        f"Specify the MT5 account: `!revoke @user <mt5_account>`"
-                    )
-                    return
-                row = rows[0]
-                await conn.execute(
-                    "UPDATE licenses SET status = 'revoked', revoked_at = NOW() WHERE id = $1",
-                    row["id"],
-                )
-                await ctx.send(
-                    f"✅ License revoked for **{member.display_name}** (MT5: `{row['mt5_account']}`)."
-                )
-
-        self.logger.info(
-            f"License revoked — user={member} ({member.id}), mt5={mt5_account or 'auto'}, by={ctx.author}"
-        )
-
-    @commands.command(name="licenses")
-    async def licenses(self, ctx: commands.Context, member: discord.Member = None):
-        """Admin: list licenses. Usage: !licenses  OR  !licenses @user"""
-        if not self.is_admin(ctx.author):
-            await ctx.send("❌ Admin only.")
-            return
-
-        async with self.bot.signal_db.db.get_connection() as conn:
-            if member:
-                rows = await conn.fetch(
-                    "SELECT mt5_account, license_key, status, created_at FROM licenses "
-                    "WHERE discord_id = $1 ORDER BY created_at DESC",
-                    str(member.id),
-                )
-                max_keys = (
-                    await conn.fetchval(
-                        "SELECT max_keys FROM license_allowances WHERE discord_id = $1",
-                        str(member.id),
-                    )
-                    or 1
-                )
-                active_count = sum(1 for r in rows if r["status"] == "active")
-
-                embed = discord.Embed(
-                    title=f"🔑 Licenses — {member.display_name}",
-                    description=f"Allowance: **{active_count}/{max_keys}** active keys",
-                    color=discord.Color.blue(),
-                )
-                if not rows:
-                    embed.add_field(name="No licenses found", value="\u200b", inline=False)
-                for row in rows:
-                    status_emoji = "✅" if row["status"] == "active" else "❌"
-                    created = row["created_at"].strftime("%Y-%m-%d") if row["created_at"] else "?"
-                    embed.add_field(
-                        name=f"{status_emoji} MT5: `{row['mt5_account']}`",
-                        value=f"Key: `{row['license_key'][:8]}...` | Created: {created} | {row['status']}",
-                        inline=False,
-                    )
-                await ctx.send(embed=embed)
-
-            else:
-                rows = await conn.fetch(
-                    """
-                    SELECT l.discord_id, l.mt5_account, l.license_key, l.created_at,
-                           COALESCE(la.max_keys, 1) AS max_keys
-                    FROM licenses l
-                    LEFT JOIN license_allowances la ON la.discord_id = l.discord_id
-                    WHERE l.status = 'active'
-                    ORDER BY l.discord_id, l.created_at
-                    """
-                )
-                if not rows:
-                    await ctx.send("ℹ️ No active licenses.")
-                    return
-
-                from collections import defaultdict
-
-                grouped: dict = defaultdict(list)
-                for row in rows:
-                    grouped[row["discord_id"]].append(row)
-
-                embed = discord.Embed(
-                    title="🔑 All Active Licenses",
-                    description=f"{len(rows)} license(s) across {len(grouped)} user(s)",
-                    color=discord.Color.green(),
-                )
-                for discord_id, user_rows in grouped.items():
-                    guild_member = ctx.guild.get_member(int(discord_id)) if ctx.guild else None
-                    display_name = guild_member.display_name if guild_member else f"ID:{discord_id}"
-                    max_k = user_rows[0]["max_keys"]
-                    lines = [
-                        f"• MT5 `{r['mt5_account']}` — key `{r['license_key'][:8]}...` — "
-                        f"{r['created_at'].strftime('%Y-%m-%d') if r['created_at'] else '?'}"
-                        for r in user_rows
-                    ]
-                    embed.add_field(
-                        name=f"{display_name} ({len(user_rows)}/{max_k})",
-                        value="\n".join(lines),
-                        inline=False,
-                    )
-                    if len(embed.fields) >= 25:
-                        embed.set_footer(
-                            text="Showing first 25 users — use !licenses @user for details."
-                        )
-                        break
-
-                await ctx.send(embed=embed)
-
-    # ==================== LICENSE AUTO-MANAGEMENT ====================
-
-    @commands.Cog.listener()
-    async def on_member_update(self, before: discord.Member, after: discord.Member):
-        """
-        Auto-revoke licenses when Signal Subscriber role is removed.
-        Auto-reactivate licenses (if previously revoked by this system) when role is re-added.
-        """
-        before_roles = {r.name for r in before.roles}
-        after_roles = {r.name for r in after.roles}
-
-        had_role = self.LICENSE_ROLE_NAME in before_roles
-        has_role = self.LICENSE_ROLE_NAME in after_roles
-
-        if had_role == has_role:
-            return  # No change in the relevant role
-
-        if had_role and not has_role:
-            # Role was REMOVED — revoke all active licenses
-            await self._auto_revoke_licenses(after, reason="role_removed")
-
-        elif not had_role and has_role:
-            # Role was ADDED (or re-added) — reactivate any role-revoked licenses
-            await self._auto_reactivate_licenses(after)
-
-    @commands.Cog.listener()
-    async def on_member_remove(self, member: discord.Member):
-        """Auto-revoke licenses when a member leaves the server."""
-        await self._auto_revoke_licenses(member, reason="left_server")
-
-    async def _auto_revoke_licenses(self, member: discord.Member, reason: str) -> None:
-        """Revoke all active licenses for *member* and notify them by DM."""
-        try:
-            async with self.bot.signal_db.db.get_connection() as conn:
-                rows = await conn.fetch(
-                    "SELECT id, mt5_account FROM licenses WHERE discord_id = $1 AND status = 'active'",
-                    str(member.id),
-                )
-                if not rows:
-                    return
-
-                for row in rows:
-                    await conn.execute(
-                        """
-                        UPDATE licenses
-                        SET status = 'revoked', revoked_at = NOW(),
-                            revoked_reason = $1
-                        WHERE id = $2
-                        """,
-                        reason,
-                        row["id"],
-                    )
-
-            self.logger.info(
-                f"Auto-revoked {len(rows)} license(s) for {member} ({member.id}) — reason={reason}"
-            )
-
-            # Notify the user by DM (best-effort)
-            if reason == "role_removed":
-                msg = (
-                    "⚠️ **Your Auto-Limits-Adder license has been revoked.**\n\n"
-                    f"Your **{self.LICENSE_ROLE_NAME}** role was removed, so your license key "
-                    "has been automatically deactivated.\n\n"
-                    "If you regain subscriber access your license will be reactivated automatically. "
-                    "Contact an admin if you believe this is a mistake."
-                )
-            else:
-                msg = (
-                    "⚠️ **Your Auto-Limits-Adder license has been revoked.**\n\n"
-                    "Your license was deactivated because you left the server. "
-                    "If you rejoin and regain subscriber access, contact an admin to restore your license."
-                )
-
-            try:
-                await member.send(msg)
-            except discord.Forbidden:
-                pass  # User has DMs disabled — log only
-
-        except Exception as e:
-            self.logger.error(
-                f"Failed to auto-revoke licenses for {member} ({member.id}): {e}", exc_info=True
-            )
-
-    async def _auto_reactivate_licenses(self, member: discord.Member) -> None:
-        """
-        Reactivate licenses previously revoked by the auto-revoke system
-        (i.e. revoked_reason = 'role_removed') when the subscriber role is restored.
-        """
-        try:
-            async with self.bot.signal_db.db.get_connection() as conn:
-                rows = await conn.fetch(
-                    """
-                    SELECT id, mt5_account, license_key
-                    FROM licenses
-                    WHERE discord_id = $1
-                      AND status = 'revoked'
-                      AND revoked_reason = 'role_removed'
-                    ORDER BY revoked_at DESC
-                    """,
-                    str(member.id),
-                )
-                if not rows:
-                    return
-
-                for row in rows:
-                    await conn.execute(
-                        """
-                        UPDATE licenses
-                        SET status = 'active', revoked_at = NULL, revoked_reason = NULL
-                        WHERE id = $1
-                        """,
-                        row["id"],
-                    )
-
-            self.logger.info(f"Auto-reactivated {len(rows)} license(s) for {member} ({member.id})")
-
-            # Notify the user by DM
-            keys_info = "\n".join(
-                f"• MT5 `{r['mt5_account']}` → key `{r['license_key'][:8]}…`" for r in rows
-            )
-            try:
-                await member.send(
-                    f"✅ **Your Auto-Limits-Adder license has been reactivated!**\n\n"
-                    f"Your **{self.LICENSE_ROLE_NAME}** role was restored, so your license key(s) "
-                    f"are active again:\n{keys_info}\n\n"
-                    "No changes needed in your config — just (re)start the Auto-Limits-Adder bot."
-                )
-            except discord.Forbidden:
-                pass
-
-        except Exception as e:
-            self.logger.error(
-                f"Failed to auto-reactivate licenses for {member} ({member.id}): {e}", exc_info=True
-            )
-
-
-async def setup(bot):
-    """Setup function for Discord.py to load this cog"""
-    await bot.add_cog(BotCommands(bot))

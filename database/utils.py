@@ -7,7 +7,7 @@ from typing import Optional
 
 import pytz
 
-from database.models import SignalStatus
+from .models import SignalStatus
 
 
 async def calculate_sl_pnl(signal_id: int, signal: dict, signal_db, tp_config) -> Optional[float]:
@@ -47,10 +47,7 @@ def _parse_dt(value) -> Optional[datetime]:
 
 def calculate_expiry(expiry_type: str) -> Optional[str]:
     """
-    Calculate expiry timestamp based on type
-
-    Args:
-        expiry_type: Type of expiry
+    Calculate expiry timestamp based on type.
 
     Returns:
         ISO format timestamp or None
@@ -58,19 +55,15 @@ def calculate_expiry(expiry_type: str) -> Optional[str]:
     if expiry_type == "no_expiry":
         return None
 
-    # Get current time in EST (typical trading timezone)
     est = pytz.timezone("America/New_York")
     now = datetime.now(est)
 
     if expiry_type == "day_end":
-        # End of current trading day (4:45 PM EST — 15 min before spread hour)
         expiry = now.replace(hour=16, minute=45, second=0, microsecond=0)
         if now >= expiry:
-            # If at or past 4:45 PM, set to next trading day
             expiry += timedelta(days=1)
 
     elif expiry_type == "week_end":
-        # End of trading week (Friday 4:45 PM EST)
         days_until_friday = (4 - now.weekday()) % 7
         if days_until_friday == 0 and now >= now.replace(
             hour=16, minute=45, second=0, microsecond=0
@@ -80,21 +73,18 @@ def calculate_expiry(expiry_type: str) -> Optional[str]:
         expiry = expiry.replace(hour=16, minute=45, second=0, microsecond=0)
 
     elif expiry_type == "month_end":
-        # Last trading day of month at 4:45 PM EST
         # Use est.localize() (not tzinfo=est) to get the correct modern UTC offset.
         # Passing tzinfo=est directly to datetime() uses pytz's LMT offset, which
         # is wrong by several minutes.
         next_month = now.month + 1 if now.month < 12 else 1
         year = now.year if now.month < 12 else now.year + 1
         first_of_next = est.localize(datetime(year, next_month, 1, 16, 45, 0))
-        # Go back to last weekday
         last_day = first_of_next - timedelta(days=1)
-        while last_day.weekday() > 4:  # Saturday = 5, Sunday = 6
+        while last_day.weekday() > 4:
             last_day -= timedelta(days=1)
         expiry = last_day
 
     else:
-        # Default to day end
         expiry = now.replace(hour=16, minute=45, second=0, microsecond=0)
         if now >= expiry:
             expiry += timedelta(days=1)
@@ -103,15 +93,7 @@ def calculate_expiry(expiry_type: str) -> Optional[str]:
 
 
 def get_status_emoji(status: str) -> str:
-    """
-    Get emoji for status display
-
-    Args:
-        status: Signal status
-
-    Returns:
-        Emoji string
-    """
+    """Get emoji for status display."""
     emoji_map = {
         SignalStatus.ACTIVE: "🟢",
         SignalStatus.HIT: "🎯",

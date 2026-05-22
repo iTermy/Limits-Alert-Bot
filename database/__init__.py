@@ -10,7 +10,7 @@ from dotenv import load_dotenv
 _here = os.path.dirname(os.path.abspath(__file__))
 load_dotenv(dotenv_path=os.path.join(_here, "..", ".env"))
 
-from .database_manager import DatabaseManager
+from .manager import DatabaseManager
 
 SignalDatabase = None
 
@@ -35,7 +35,7 @@ def initialize_signal_db(db_manager: DatabaseManager):
 
     # Lazy import to avoid circular dependencies
     if SignalDatabase is None:
-        from .signal_operations import SignalDatabase as SignalDB
+        from .signal_ops import SignalDatabase as SignalDB
 
         SignalDatabase = SignalDB
 

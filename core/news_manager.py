@@ -261,13 +261,12 @@ class NewsManager:
     Stores upcoming / active NewsEvent objects and provides fast lookup
     methods used by the streaming monitor.
 
-    Events are persisted to config/news_events.json so they survive bot
+    Events are persisted to data/news_events.json so they survive bot
     restarts.  The file is written synchronously on every mutation (events
     are infrequent so this is fine).
     """
 
-    # Path relative to this file: project_root/config/news_events.json
-    _CONFIG_PATH = Path(__file__).resolve().parent.parent / "config" / "news_events.json"
+    _CONFIG_PATH = Path(__file__).resolve().parent.parent / "data" / "news_events.json"
 
     def __init__(self):
         self._events: List[NewsEvent] = []

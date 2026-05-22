@@ -140,7 +140,7 @@ class AutoTPMonitor:
                 entry = lim.get("hit_price") or lim.get("price_level")
                 if entry is None:
                     logger.warning(
-                        f"Signal {signal_id}: limit {lim.get('limit_id')} has no entry price"
+                        f"Signal {signal_id}: limit {lim.get('id')} has no entry price"
                     )
                     continue
                 combined_earlier_pnl += self.tp_config.calculate_pnl(

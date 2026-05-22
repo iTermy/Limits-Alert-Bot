@@ -1,25 +1,28 @@
 """
-Base database operations for signals and limits
+DatabaseManager — integrates connection and core signal/limit operations
 """
 
 from datetime import datetime
-from typing import Any, Dict, List
+from typing import Any, Dict, List, Optional
 
 import pytz
 
+from models.signal import LimitData, SignalData
 from utils.logger import get_logger
 
+from .connection import DatabaseManager as BaseConnectionManager
 from .models import ChangeType, LimitStatus, SignalStatus, StatusTransitions
-from .signal_operations.utils import _parse_dt
+from .schema import initialize_database
+from .utils import _parse_dt, calculate_expiry
 
-logger = get_logger("database.operations")
+logger = get_logger("database")
 
 
-class BaseOperations:
-    """Base database operations for signals and limits"""
+class DatabaseManager(BaseConnectionManager):
+    """Database manager with all core operations integrated."""
 
-    def __init__(self, db_manager):
-        self.db = db_manager
+    def __init__(self, db_url: str = None):
+        super().__init__(db_url)
 
         self.STATUS_ACTIVE = SignalStatus.ACTIVE
         self.STATUS_HIT = SignalStatus.HIT
@@ -33,12 +36,19 @@ class BaseOperations:
         self.LIMIT_STATUS_HIT = LimitStatus.HIT
         self.LIMIT_STATUS_CANCELLED = LimitStatus.CANCELLED
 
+    async def initialize(self):
+        """Initialize database and create tables."""
+        await initialize_database(self)
+        logger.info("Database manager initialized successfully")
+
+    # === Signal Status Operations ===
+
     async def update_signal_status(
         self, signal_id: int, new_status: str, change_type: str = "automatic", reason: str = None
     ) -> bool:
-        """Update signal status with proper lifecycle management"""
-        async with self.db.get_connection() as conn:
-            current = await self.db.fetch_one(
+        """Update signal status with proper lifecycle management."""
+        async with self.get_connection() as conn:
+            current = await self.fetch_one(
                 "SELECT status FROM signals WHERE id = $1", (signal_id,)
             )
             if not current:
@@ -94,8 +104,8 @@ class BaseOperations:
             return True
 
     async def mark_limit_hit(self, limit_id: int, hit_price: float = None) -> Dict[str, Any]:
-        """Mark a limit as hit and update signal status if needed"""
-        async with self.db.get_connection() as conn:
+        """Mark a limit as hit and update signal status if needed."""
+        async with self.get_connection() as conn:
             limit_data = await conn.fetchrow(
                 """
                 SELECT l.*, s.status as signal_status, s.id as signal_id
@@ -173,8 +183,8 @@ class BaseOperations:
                 else limit_data["signal_status"],
             }
 
-    async def get_active_signals_for_tracking(self) -> List[Dict[str, Any]]:
-        """Get all signals that need price tracking (ACTIVE or HIT status)"""
+    async def get_active_signals_for_tracking(self) -> List[SignalData]:
+        """Get all signals that need price tracking (ACTIVE or HIT status)."""
         query = """
             SELECT
                 s.id as signal_id,
@@ -197,11 +207,11 @@ class BaseOperations:
             WHERE s.status IN ($2, $3)
             ORDER BY s.id, l.sequence_number
         """
-        rows = await self.db.fetch_all(
+        rows = await self.fetch_all(
             query, (LimitStatus.PENDING, SignalStatus.ACTIVE, SignalStatus.HIT)
         )
 
-        signals = {}
+        signals: Dict[int, dict] = {}
         for row in rows:
             signal_id = row["signal_id"]
             if signal_id not in signals:
@@ -216,12 +226,13 @@ class BaseOperations:
                     "limits_hit": row["limits_hit"],
                     "total_limits": row["total_limits"],
                     "scalp": row["scalp"] or False,
-                    "pending_limits": [],
+                    "limits": [],
                 }
             if row["limit_id"]:
-                signals[signal_id]["pending_limits"].append(
+                signals[signal_id]["limits"].append(
                     {
                         "limit_id": row["limit_id"],
+                        "signal_id": signal_id,
                         "price_level": row["price_level"],
                         "sequence_number": row["sequence_number"],
                         "approaching_alert_sent": row["approaching_alert_sent"],
@@ -229,13 +240,10 @@ class BaseOperations:
                     }
                 )
 
-        return list(signals.values())
+        return [SignalData.model_validate(s) for s in signals.values()]
 
     async def get_hit_limits_for_signal(self, signal_id: int) -> List[Dict[str, Any]]:
-        """
-        Return all hit limits for a signal ordered by sequence_number.
-        Includes hit_price (actual fill price) for P&L calculations.
-        """
+        """Return all hit limits for a signal ordered by sequence_number."""
         query = """
             SELECT id AS limit_id,
                    sequence_number,
@@ -246,13 +254,13 @@ class BaseOperations:
             WHERE signal_id = $1 AND status = 'hit'
             ORDER BY sequence_number
         """
-        rows = await self.db.fetch_all(query, (signal_id,))
+        rows = await self.fetch_all(query, (signal_id,))
         return [dict(r) for r in rows]
 
     async def get_performance_stats(
         self, start_date: str = None, end_date: str = None, instrument: str = None
     ) -> Dict[str, Any]:
-        """Get performance statistics for closed signals"""
+        """Get performance statistics for closed signals."""
         conditions = ["status IN ('profit', 'breakeven', 'stop_loss')"]
         params = []
         param_idx = 1
@@ -285,7 +293,7 @@ class BaseOperations:
             FROM signals
             WHERE {where_clause}
         """
-        stats = await self.db.fetch_one(query, tuple(params))
+        stats = await self.fetch_one(query, tuple(params))
 
         instrument_query = f"""
             SELECT
@@ -296,10 +304,100 @@ class BaseOperations:
             WHERE {where_clause}
             GROUP BY instrument
         """
-        instrument_stats = await self.db.fetch_all(instrument_query, tuple(params))
+        instrument_stats = await self.fetch_all(instrument_query, tuple(params))
 
         return {"overall": dict(stats) if stats else {}, "by_instrument": instrument_stats}
 
+    # === Expiry Operations ===
+
+    async def update_signal_expiry(self, signal_id: int, expiry_type: str) -> bool:
+        """Update a signal's expiry type and recalculate expiry time."""
+        valid_types = ["day_end", "week_end", "month_end", "no_expiry"]
+        if expiry_type not in valid_types:
+            logger.error(f"Invalid expiry type: {expiry_type}")
+            return False
+
+        signal = await self.fetch_one("SELECT * FROM signals WHERE id = $1", (signal_id,))
+
+        if not signal:
+            logger.error(f"Signal {signal_id} not found")
+            return False
+
+        if SignalStatus.is_final(signal["status"]):
+            logger.warning(
+                f"Cannot modify expiry for signal {signal_id} in final status {signal['status']}"
+            )
+            return False
+
+        new_expiry_time = calculate_expiry(expiry_type)
+
+        try:
+            now = datetime.now(pytz.UTC)
+
+            query = """
+                UPDATE signals
+                SET expiry_type = $1, expiry_time = $2, updated_at = $3
+                WHERE id = $4
+            """
+
+            rows = await self.execute(
+                query, (expiry_type, _parse_dt(new_expiry_time), now, signal_id)
+            )
+
+            if rows > 0:
+                logger.info(f"Updated expiry for signal {signal_id} to {expiry_type}")
+                return True
+            return False
+
+        except Exception as e:
+            logger.error(f"Error updating signal expiry: {e}", exc_info=True)
+            return False
+
     def _is_valid_transition(self, old_status: str, new_status: str) -> bool:
-        """Check if a status transition is valid (wrapper for backward compatibility)"""
+        """Check if a status transition is valid."""
         return StatusTransitions.is_valid_transition(old_status, new_status)
+
+    # === Bot Mode Status ===
+
+    async def set_news_mode(self, active: bool) -> None:
+        """Update the news_mode flag in bot_mode_status."""
+        try:
+            await self.execute(
+                """
+                UPDATE bot_mode_status
+                SET news_mode = $1, updated_at = NOW()
+                WHERE id = 1
+                """,
+                (active,),
+            )
+            logger.debug(f"bot_mode_status.news_mode → {active}")
+        except Exception as e:
+            logger.error(f"Failed to update news_mode status: {e}", exc_info=True)
+
+    async def set_spread_hour(self, active: bool) -> None:
+        """Update the spread_hour flag in bot_mode_status."""
+        try:
+            await self.execute(
+                """
+                UPDATE bot_mode_status
+                SET spread_hour = $1, updated_at = NOW()
+                WHERE id = 1
+                """,
+                (active,),
+            )
+            logger.debug(f"bot_mode_status.spread_hour → {active}")
+        except Exception as e:
+            logger.error(f"Failed to update spread_hour status: {e}", exc_info=True)
+
+    async def get_bot_mode_status(self) -> dict:
+        """Retrieve the current bot mode flags."""
+        try:
+            row = await self.fetch_one(
+                "SELECT news_mode, spread_hour, updated_at FROM bot_mode_status WHERE id = 1", ()
+            )
+            if row:
+                return dict(row)
+            return {"news_mode": False, "spread_hour": False, "updated_at": None}
+        except Exception as e:
+            logger.error(f"Failed to fetch bot_mode_status: {e}", exc_info=True)
+            return {"news_mode": False, "spread_hour": False, "updated_at": None}
