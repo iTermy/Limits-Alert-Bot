@@ -6,7 +6,6 @@ import asyncio
 import json
 from datetime import datetime
 from pathlib import Path
-from typing import Optional
 
 import discord
 from discord.ext import commands
@@ -28,56 +27,6 @@ class LifecycleCog(BaseCog):
     def __init__(self, bot):
         super().__init__(bot)
         self.tp_config = TPConfig()
-
-    @commands.command(name="signal")
-    async def add_signal(
-        self,
-        ctx: commands.Context,
-        instrument: str,
-        direction: str,
-        entry: float,
-        stop_loss: float,
-        limit1: float,
-        limit2: Optional[float] = None,
-        limit3: Optional[float] = None,
-        limit4: Optional[float] = None,
-    ):
-        """Add a new signal manually"""
-        limits = [limit1]
-        if limit2:
-            limits.append(limit2)
-        if limit3:
-            limits.append(limit3)
-        if limit4:
-            limits.append(limit4)
-
-        signal_data = {
-            "instrument": instrument.upper(),
-            "direction": direction.lower(),
-            "entry": entry,
-            "stop_loss": stop_loss,
-            "limits": limits,
-        }
-
-        signal_id = await self.signal_db.save_signal(
-            signal_data,
-            ctx.guild.id,
-            ctx.channel.id,
-            f"manual_{ctx.author.id}_{int(datetime.utcnow().timestamp())}",
-        )
-
-        embed = discord.Embed(
-            title="✅ Signal Added",
-            description=f"Signal #{signal_id} created successfully",
-            color=0x00FF00,
-        )
-        embed.add_field(name="Instrument", value=instrument.upper(), inline=True)
-        embed.add_field(name="Direction", value=direction.upper(), inline=True)
-        embed.add_field(name="Entry", value=str(entry), inline=True)
-        embed.add_field(name="Stop Loss", value=str(stop_loss), inline=True)
-        embed.add_field(name="Limits", value=", ".join(map(str, limits)), inline=False)
-
-        await ctx.send(embed=embed)
 
     @commands.command(name="active")
     async def active_signals(self, ctx: commands.Context, *, args: str = None):
@@ -212,32 +161,6 @@ class LifecycleCog(BaseCog):
         embed.set_footer(text=current_footer + sort_info)
 
         await loading_msg.edit(content=None, embed=embed, view=view)
-
-    @commands.command(name="delete")
-    async def delete_signal(self, ctx: commands.Context, signal_id: int):
-        """Delete a signal permanently"""
-        signal = await self.signal_db.get_signal_with_limits(signal_id)
-
-        if not signal:
-            await ctx.send(f"❌ Signal #{signal_id} not found")
-            return
-
-        from database import db
-
-        async with db.get_connection() as conn:
-            await conn.execute("DELETE FROM signals WHERE id = $1", signal_id)
-
-        embed = discord.Embed(
-            title="🗑️ Signal Deleted",
-            description=f"Signal #{signal_id} has been deleted",
-            color=0xFFA500,
-        )
-        embed.add_field(name="Instrument", value=signal["instrument"], inline=True)
-        embed.add_field(name="Direction", value=signal["direction"].upper(), inline=True)
-        embed.add_field(name="Status", value=signal["status"], inline=True)
-        embed.set_footer(text=f"Deleted by {ctx.author.name}")
-
-        await ctx.send(embed=embed)
 
     @commands.command(name="info")
     async def signal_info(self, ctx: commands.Context, signal_id: int):

@@ -15,7 +15,8 @@
       "Bash(Sort-Object FullName)",
       "Bash(pip show *)",
       "PowerShell(Remove-Item *)",
-      "PowerShell(Move-Item *)"
+      "PowerShell(Move-Item *)",
+      "Bash(Get-ChildItem -Path \"C:\\\\Python Stuff\\\\TM Bot\" -Exclude \".venv\" -File -Filter \"*.py\" -Recurse)"
     ]
   }
 }

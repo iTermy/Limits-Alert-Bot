@@ -19,9 +19,6 @@ class TradingBot(commands.Bot):
     """Main Discord bot class with modular architecture"""
 
     def __init__(self):
-        # Bot configuration
-        settings = config.load("settings.json")
-
         # Set up intents
         intents = discord.Intents.default()
         intents.message_content = True
@@ -33,14 +30,13 @@ class TradingBot(commands.Bot):
         )
 
         super().__init__(
-            command_prefix=settings.get("bot_prefix", "!"),
+            command_prefix="!",
             intents=intents,
             help_command=None,  # We have a custom help command
         )
 
         # Initialize attributes
         self.logger = get_logger("bot")
-        self.settings = settings
         self.channels_config = None
         self.monitored_channels: Set[int] = set()
         self.allowed_channel_ids: Set[int] = set()
@@ -262,9 +258,6 @@ class TradingBot(commands.Bot):
         """Initialize the price monitoring system — creates all subsystems and injects them."""
         self.logger.info("Starting price monitor initialization...")
         try:
-            import json
-            from pathlib import Path
-
             from price_feeds.alert_config import AlertDistanceConfig
             from price_feeds.alert_system import AlertSystem
             from price_feeds.feed_health_monitor import FeedHealthMonitor
@@ -301,20 +294,12 @@ class TradingBot(commands.Bot):
                 stream_manager=stream_manager,
             )
 
-            # Read health config for admin user ID
-            health_path = Path(__file__).resolve().parent.parent / "config" / "health_config.json"
-            admin_user_id = None
-            try:
-                with open(health_path) as f:
-                    health_config = json.load(f)
-                    admin_user_id_str = health_config.get("admin_user_id")
-                    if admin_user_id_str:
-                        admin_user_id = int(admin_user_id_str)
-            except Exception as e:
-                self.logger.warning(f"Could not load admin user ID: {e}")
-
+            bot_settings = load_settings()
             health_monitor = FeedHealthMonitor(
-                stream_manager=stream_manager, bot=self, admin_user_id=admin_user_id
+                stream_manager=stream_manager,
+                bot=self,
+                admin_user_id=bot_settings.health_alert_admin_id,
+                us_market_holidays=bot_settings.us_market_holidays,
             )
 
             # Wire alert channels before creating the monitor

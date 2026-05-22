@@ -34,7 +34,7 @@ models/
 core/
   bot.py                        TradingBot(commands.Bot); wires all subsystems in setup_hook();
                                   creates all price_feeds subsystems and injects into StreamingPriceMonitor;
-                                  admin_ids read from settings.json; ServiceRegistry populated here
+                                  admin_ids + health_alert_admin_id read from settings.json; ServiceRegistry populated here
   services.py                   ServiceRegistry — typed container for subsystem references;
                                   replaces bot.monitor.X.Y reach-through coupling
   expiry_manager.py             @tasks.loop(5min) — expires ACTIVE/HIT signals past expiry_time;
@@ -89,7 +89,8 @@ price_feeds/
   nm_monitor.py                 NearMissMonitor — in-memory NMTrackingState; _nm_immune set;
                                   mark_immune(signal_id) called on every reactivation
   feed_health_monitor.py        Stale threshold 300 s; 3 max reconnect attempts; 120 s startup grace;
-                                  15 min alert cooldown; DMs admin_user_id from health_config.json
+                                  15 min alert cooldown; DMs health_alert_admin_id from settings.json;
+                                  all knobs are module-level constants (no config file)
   live_price_writer.py          Writes bid/ask/feed to live_prices table on each tick
   symbol_mapper.py              Internal ↔ feed-specific symbol translation; always returns UPPERCASE
   feeds/
@@ -108,12 +109,11 @@ commands/
   views.py                      Discord UI views (confirmation buttons, etc.)
   admin/
     __init__.py                 Cog setup: BotManagementCog + LicenseCog
-    bot_management.py           !ping, !help, !price, !feeds, !health, !clear, !reload, !shutdown,
-                                  !cleanalerts, !goldtollssl
+    bot_management.py           !help, !health, !admin, !cleanalerts, !goldtollssl
     license.py                  !activate, !setkeys, !grantkey, !revoke, !licenses + member listeners
   signals/
     __init__.py                 Cog setup: LifecycleCog + ReportsCog + NewsCog
-    lifecycle.py                !signal, !active, !delete, !info, !setstatus, !profit, !hit,
+    lifecycle.py                !active, !info, !setstatus, !profit, !hit,
                                   !stoploss, !cancel (+ bulk), !setexpiry, !breakeven
     reports.py                  !report (performance statistics generator)
     news.py                     !news, !newslist, !newsclear
@@ -441,11 +441,10 @@ Module-level function in `price_feeds/streaming_monitor.py`. Called from `stream
 | File | Location | Contents | Runtime-editable |
 |------|----------|----------|-----------------|
 | `channels.json` | `config/` | 18 monitored channel IDs; alert/command/profit/finished channel IDs; per-channel defaults | No (restart needed) |
-| `settings.json` | `config/` | `bot_prefix`, `spread_buffer_enabled`, `enable_openai_fallback`, `gold_tolls_sl_offset`, `debug_mode`, `license_role_name`, `admin_ids` | Yes (30 s cache for some); loaded as `BotSettings` Pydantic model |
+| `settings.json` | `config/` | `admin_ids`, `health_alert_admin_id`, `spread_buffer_enabled`, `spread_buffer_config`, `license_role_name`, `gold_tolls_sl_offset`, `us_market_holidays` | Yes (30 s cache for some); loaded as `BotSettings` Pydantic model |
 | `tp_configuration.json` | `config/` | TP thresholds per asset class + per-symbol overrides; `scalp_defaults` | Yes (`!tp set`) |
 | `alert_distances.json` | `config/` | Approaching alert distances per asset class + overrides | Yes (`!alertdist set`) |
 | `nm_configuration.json` | `config/` | NM max_proximity + base_bounce per asset class + overrides | Yes (`!nmconfig set`) |
-| `health_config.json` | `config/` | Feed health thresholds; `admin_user_id` for DM alerts; market hours; US holidays | No |
 | `symbol_mappings.json` | `config/` | Feed-specific symbol name translations | No |
 | `news_events.json` | `data/` | Active/upcoming news windows; persisted across restarts | Yes (written by `!news`) |
 

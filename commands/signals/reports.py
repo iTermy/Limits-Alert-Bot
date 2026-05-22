@@ -134,18 +134,15 @@ class ReportsCog(BaseCog):
                 str(channel_id): name for name, channel_id in monitored_channels.items()
             }
 
-            # Separate signals into PA, toll, and regular based on channel
+            # Separate signals into PA and regular (toll signals fold into regular)
             pa_signals = []
-            toll_signals = []
             regular_signals = []
 
             for signal in signals:
                 channel_id = str(signal.get("channel_id", ""))
                 channel_name = channel_id_to_name.get(channel_id, "").lower()
 
-                if "toll" in channel_name:
-                    toll_signals.append(signal)
-                elif any(x in channel_name for x in ["pa", "price-action"]):
+                if any(x in channel_name for x in ["pa", "price-action"]):
                     pa_signals.append(signal)
                 else:
                     regular_signals.append(signal)
@@ -164,31 +161,18 @@ class ReportsCog(BaseCog):
                 s for s in pa_signals if s.get("status", "").lower() in ["stoploss", "stop_loss"]
             ]
 
-            # Process toll signals
-            toll_profit = [s for s in toll_signals if s.get("status", "").lower() == "profit"]
-            toll_stoploss = [
-                s for s in toll_signals if s.get("status", "").lower() in ["stoploss", "stop_loss"]
-            ]
-
             # Apply filter if specified
             if filter_normalized == "stoploss":
                 regular_profit = []
                 pa_profit = []
-                toll_profit = []
             elif filter_normalized == "profit":
                 regular_stoploss = []
                 pa_stoploss = []
-                toll_stoploss = []
 
             # Check if filter resulted in no signals
             if filter_normalized:
                 filtered_count = (
-                    len(regular_profit)
-                    + len(regular_stoploss)
-                    + len(pa_profit)
-                    + len(pa_stoploss)
-                    + len(toll_profit)
-                    + len(toll_stoploss)
+                    len(regular_profit) + len(regular_stoploss) + len(pa_profit) + len(pa_stoploss)
                 )
                 if filtered_count == 0:
                     filter_label = "stop loss" if filter_normalized == "stoploss" else "profit"
@@ -215,31 +199,20 @@ class ReportsCog(BaseCog):
                     if s.get("status", "").lower() in ["profit", "stoploss", "stop_loss"]
                 ]
             )
-            total_tolls = len(
-                [
-                    s
-                    for s in toll_signals
-                    if s.get("status", "").lower() in ["profit", "stoploss", "stop_loss"]
-                ]
-            )
-            total_signals = total_regular + total_pa + total_tolls
+            total_signals = total_regular + total_pa
 
             regular_profit_count = len(regular_profit)
             regular_sl_count = len(regular_stoploss)
             pa_profit_count = len(pa_profit)
             pa_sl_count = len(pa_stoploss)
-            toll_profit_count = len(toll_profit)
-            toll_sl_count = len(toll_stoploss)
 
-            total_profit = regular_profit_count + pa_profit_count + toll_profit_count
-            total_sl = regular_sl_count + pa_sl_count + toll_sl_count
+            total_profit = regular_profit_count + pa_profit_count
 
             # Calculate win rates
             regular_win_rate = (
                 (regular_profit_count / total_regular * 100) if total_regular > 0 else 0
             )
             pa_win_rate = (pa_profit_count / total_pa * 100) if total_pa > 0 else 0
-            toll_win_rate = (toll_profit_count / total_tolls * 100) if total_tolls > 0 else 0
             overall_win_rate = (total_profit / total_signals * 100) if total_signals > 0 else 0
 
             # Create embed
@@ -273,15 +246,6 @@ class ReportsCog(BaseCog):
                     name="PA Signals",
                     value=f"Total: {total_pa} | Win Rate: {pa_win_rate:.1f}%\n"
                     f"Profit: {pa_profit_count} | Stop Loss: {pa_sl_count}",
-                    inline=True,
-                )
-
-            # Tolls Signals Section
-            if total_tolls > 0:
-                embed.add_field(
-                    name="Tolls Signals",
-                    value=f"Total: {total_tolls} | Win Rate: {toll_win_rate:.1f}%\n"
-                    f"Profit: {toll_profit_count} | Stop Loss: {toll_sl_count}",
                     inline=True,
                 )
 
@@ -354,42 +318,6 @@ class ReportsCog(BaseCog):
                     embed.add_field(
                         name=f"PA Trades ({total_pa})",
                         value=cap_field_value(pa_trade_lines),
-                        inline=False,
-                    )
-
-            # Build TOLLS TRADES section (profit first, then stop loss)
-            if total_tolls > 0:
-                toll_trade_lines = []
-
-                for signal in toll_profit:
-                    limits = signal.get("limits", [])
-                    if limits:
-                        first_limit = format_price(limits[0]["price_level"], signal["instrument"])
-                        limit_display = (
-                            f"{first_limit}, +{len(limits) - 1} more"
-                            if len(limits) > 1
-                            else first_limit
-                        )
-                    else:
-                        limit_display = "N/A"
-                    toll_trade_lines.append(
-                        f"#{signal['signal_id']} | {signal['instrument']} | {limit_display} | {signal['direction'].upper()} 🟢"
-                    )
-
-                for signal in toll_stoploss:
-                    sl_value = (
-                        format_price(signal.get("stop_loss"), signal["instrument"])
-                        if signal.get("stop_loss")
-                        else "N/A"
-                    )
-                    toll_trade_lines.append(
-                        f"#{signal['signal_id']} | {signal['instrument']} | SL: {sl_value} | {signal['direction'].upper()} 🛑"
-                    )
-
-                if toll_trade_lines:
-                    embed.add_field(
-                        name=f"Tolls Trades ({total_tolls})",
-                        value=cap_field_value(toll_trade_lines),
                         inline=False,
                     )
 

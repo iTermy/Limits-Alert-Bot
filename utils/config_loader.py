@@ -30,21 +30,18 @@ class ConfigLoader:
         """Create default configuration files if they don't exist"""
         # Default settings
         default_settings = {
-            "bot_prefix": "!",
-            "enable_openai_fallback": False,
-            "max_retries": 3,
-            "connection_timeout": 30,
-            "alert_cooldown_minutes": 5,
-            "cleanup_days": 30,
-            "debug_mode": True,
+            "admin_ids": [],
+            "health_alert_admin_id": None,
             "spread_buffer_enabled": True,
             "spread_buffer_config": {
                 "apply_to_approaching": True,
                 "apply_to_hit": True,
                 "apply_to_stop_loss": False,
                 "fallback_spread": 0.0,
-                "log_buffer_usage": True,
             },
+            "license_role_name": "Signal Subscriber",
+            "gold_tolls_sl_offset": 5.0,
+            "us_market_holidays": [],
         }
 
         # Default channels (will need to be updated by user)

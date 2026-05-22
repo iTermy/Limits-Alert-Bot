@@ -12,22 +12,16 @@ class SpreadBufferConfig(BaseModel):
     apply_to_hit: bool = True
     apply_to_stop_loss: bool = False
     fallback_spread: float = 0.0
-    log_buffer_usage: bool = True
 
 
 class BotSettings(BaseModel):
-    bot_prefix: str = "!"
-    enable_openai_fallback: bool = False
-    max_retries: int = 3
-    connection_timeout: int = 30
-    alert_cooldown_minutes: int = 5
-    cleanup_days: int = 30
-    debug_mode: bool = False
+    admin_ids: list[int] = Field(default_factory=list)
+    health_alert_admin_id: Optional[int] = None
     spread_buffer_enabled: bool = True
     spread_buffer_config: SpreadBufferConfig = Field(default_factory=SpreadBufferConfig)
     license_role_name: str = "Signal Subscriber"
     gold_tolls_sl_offset: float = 5.0
-    admin_ids: list[int] = Field(default_factory=list)
+    us_market_holidays: list[str] = Field(default_factory=list)
 
     model_config = {"extra": "allow"}
 
