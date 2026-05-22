@@ -299,7 +299,7 @@ class ReportsCog(BaseCog):
                     else:
                         limit_display = "N/A"
                     trade_lines.append(
-                        f"#{signal['id']} | {signal['instrument']} | {limit_display} | {signal['direction'].upper()} 🟢"
+                        f"#{signal['signal_id']} | {signal['instrument']} | {limit_display} | {signal['direction'].upper()} 🟢"
                     )
 
                 for signal in regular_stoploss:
@@ -309,7 +309,7 @@ class ReportsCog(BaseCog):
                         else "N/A"
                     )
                     trade_lines.append(
-                        f"#{signal['id']} | {signal['instrument']} | SL: {sl_value} | {signal['direction'].upper()} 🛑"
+                        f"#{signal['signal_id']} | {signal['instrument']} | SL: {sl_value} | {signal['direction'].upper()} 🛑"
                     )
 
                 if trade_lines:
@@ -335,7 +335,7 @@ class ReportsCog(BaseCog):
                     else:
                         limit_display = "N/A"
                     pa_trade_lines.append(
-                        f"#{signal['id']} | {signal['instrument']} | {limit_display} | {signal['direction'].upper()} 🟢"
+                        f"#{signal['signal_id']} | {signal['instrument']} | {limit_display} | {signal['direction'].upper()} 🟢"
                     )
 
                 for signal in pa_stoploss:
@@ -345,7 +345,7 @@ class ReportsCog(BaseCog):
                         else "N/A"
                     )
                     pa_trade_lines.append(
-                        f"#{signal['id']} | {signal['instrument']} | SL: {sl_value} | {signal['direction'].upper()} 🛑"
+                        f"#{signal['signal_id']} | {signal['instrument']} | SL: {sl_value} | {signal['direction'].upper()} 🛑"
                     )
 
                 if pa_trade_lines:
@@ -371,7 +371,7 @@ class ReportsCog(BaseCog):
                     else:
                         limit_display = "N/A"
                     toll_trade_lines.append(
-                        f"#{signal['id']} | {signal['instrument']} | {limit_display} | {signal['direction'].upper()} 🟢"
+                        f"#{signal['signal_id']} | {signal['instrument']} | {limit_display} | {signal['direction'].upper()} 🟢"
                     )
 
                 for signal in toll_stoploss:
@@ -381,7 +381,7 @@ class ReportsCog(BaseCog):
                         else "N/A"
                     )
                     toll_trade_lines.append(
-                        f"#{signal['id']} | {signal['instrument']} | SL: {sl_value} | {signal['direction'].upper()} 🛑"
+                        f"#{signal['signal_id']} | {signal['instrument']} | SL: {sl_value} | {signal['direction'].upper()} 🛑"
                     )
 
                 if toll_trade_lines:
