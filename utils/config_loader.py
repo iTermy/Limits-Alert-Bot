@@ -1,7 +1,3 @@
-"""
-Configuration loader for the Trading Alert Bot
-"""
-
 import json
 import logging
 from pathlib import Path
@@ -11,183 +7,46 @@ from models.config import BotSettings
 
 logger = logging.getLogger(__name__)
 
+_CONFIG_DIR = Path(__file__).parent.parent / "config"
+
 
 class ConfigLoader:
-    """Manages loading and accessing configuration files"""
-
-    def __init__(self, config_dir: str = "config"):
-        """
-        Initialize configuration loader
-
-        Args:
-            config_dir: Directory containing configuration files
-        """
-        self.config_dir = Path(config_dir)
-        self._configs = {}
-        self._ensure_config_files()
-
-    def _ensure_config_files(self):
-        """Create default configuration files if they don't exist"""
-        # Default settings
-        default_settings = {
-            "admin_ids": [],
-            "health_alert_admin_id": None,
-            "spread_buffer_enabled": True,
-            "spread_buffer_config": {
-                "apply_to_approaching": True,
-                "apply_to_hit": True,
-                "apply_to_stop_loss": False,
-                "fallback_spread": 0.0,
-            },
-            "license_role_name": "Signal Subscriber",
-            "gold_tolls_sl_offset": 5.0,
-            "us_market_holidays": [],
-        }
-
-        # Default channels (will need to be updated by user)
-        default_channels = {
-            "monitored_channels": {},
-            "alert_channel": None,
-            "command_channel": None,
-            "channel_settings": {},
-        }
-
-        # Create config directory if it doesn't exist
-        self.config_dir.mkdir(exist_ok=True)
-
-        # Create default files if they don't exist
-        defaults = {
-            "settings.json": default_settings,
-            "channels.json": default_channels,
-        }
-
-        for filename, default_content in defaults.items():
-            filepath = self.config_dir / filename
-            if not filepath.exists():
-                with open(filepath, "w") as f:
-                    json.dump(default_content, f, indent=2)
-                logger.info(f"Created default {filename}")
+    def __init__(self, config_dir: Path = _CONFIG_DIR):
+        self.config_dir = config_dir
+        self._configs: Dict[str, Any] = {}
 
     def load(self, filename: str, reload: bool = False) -> Dict[str, Any]:
-        """
-        Load a configuration file
-
-        Args:
-            filename: Name of the configuration file
-            reload: Force reload from disk
-
-        Returns:
-            Configuration dictionary
-        """
         if not reload and filename in self._configs:
             return self._configs[filename]
-
         filepath = self.config_dir / filename
-
         if not filepath.exists():
             raise FileNotFoundError(f"Configuration file not found: {filepath}")
-
         try:
             with open(filepath) as f:
-                config = json.load(f)
-                self._configs[filename] = config
-                return config
+                data = json.load(f)
+            self._configs[filename] = data
+            return data
         except json.JSONDecodeError as e:
             raise ValueError(f"Invalid JSON in {filename}: {e}")
 
-    def get(self, filename: str, key: str, default: Any = None) -> Any:
-        """
-        Get a specific configuration value
-
-        Args:
-            filename: Configuration file name
-            key: Configuration key (supports dot notation)
-            default: Default value if key not found
-
-        Returns:
-            Configuration value
-        """
-        config = self.load(filename)
-
-        # Support dot notation for nested keys
-        keys = key.split(".")
-        value = config
-
-        for k in keys:
-            if isinstance(value, dict) and k in value:
-                value = value[k]
-            else:
-                return default
-
-        return value
-
-    def save(self, filename: str, config: Dict[str, Any]):
-        """
-        Save configuration to file
-
-        Args:
-            filename: Configuration file name
-            config: Configuration dictionary to save
-        """
+    def save(self, filename: str, data: Dict[str, Any]):
         filepath = self.config_dir / filename
-
         with open(filepath, "w") as f:
-            json.dump(config, f, indent=2)
-
-        self._configs[filename] = config
-
-    def reload_all(self):
-        """Reload all configuration files from disk"""
-        self._configs.clear()
-        for filepath in self.config_dir.glob("*.json"):
-            self.load(filepath.name, reload=True)
+            json.dump(data, f, indent=2)
+        self._configs[filename] = data
 
 
-# Global configuration instance
 config = ConfigLoader()
 
 
-def get_config(filename: str = "settings.json") -> Dict[str, Any]:
-    """
-    Quick access to configuration
-
-    Args:
-        filename: Configuration file to load
-
-    Returns:
-        Configuration dictionary
-    """
-    return config.load(filename)
-
-
 def load_settings() -> BotSettings:
-    """Load settings from settings.json as a validated BotSettings model."""
-    config_path = Path(__file__).parent.parent / "config" / "settings.json"
-    try:
-        with open(config_path) as f:
-            data = json.load(f)
-        return BotSettings.model_validate(data)
-    except FileNotFoundError:
-        logger.warning("settings.json not found, using defaults")
-        return BotSettings()
-    except Exception as e:
-        logger.error(f"Error loading settings: {e}")
-        return BotSettings()
+    return BotSettings.model_validate(config.load("settings.json"))
 
 
 def save_settings(settings: Union[BotSettings, dict]):
-    """Save settings to settings.json. Accepts a BotSettings model or a dict."""
-    config_path = Path(__file__).parent.parent / "config" / "settings.json"
     data = settings.model_dump() if isinstance(settings, BotSettings) else settings
-    try:
-        with open(config_path, "w") as f:
-            json.dump(data, f, indent=2)
-        logger.info("Settings saved successfully")
-    except Exception as e:
-        logger.error(f"Error saving settings: {e}")
-        raise
+    config.save("settings.json", data)
 
 
 def load_channels_config() -> dict:
-    """Load channels configuration from channels.json"""
     return config.load("channels.json")
