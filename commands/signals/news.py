@@ -303,9 +303,7 @@ class NewsCog(BaseCog):
             count = len(events)
             for ev in events:
                 news_manager.remove_event(ev.event_id)
-                if alert_system and ev.event_id in getattr(
-                    alert_system, "_news_activation_messages", {}
-                ):
+                if alert_system and ev.event_id in alert_system._news_activation_messages:
                     try:
                         await alert_system.send_news_ended_alert(ev)
                     except Exception as e:
@@ -318,7 +316,7 @@ class NewsCog(BaseCog):
         removed_event = news_manager.remove_event(event_id)
         if removed_event:
             await ctx.send(f"✅ News event #{event_id} removed.")
-            if alert_system and event_id in getattr(alert_system, "_news_activation_messages", {}):
+            if alert_system and event_id in alert_system._news_activation_messages:
                 try:
                     await alert_system.send_news_ended_alert(removed_event)
                 except Exception as e:

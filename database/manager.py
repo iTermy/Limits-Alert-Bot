@@ -10,8 +10,9 @@ import pytz
 from models.signal import SignalData
 from utils.logger import get_logger
 
+from models.enums import ChangeType, LimitStatus, SignalStatus, StatusTransitions
+
 from .connection import DatabaseManager as BaseConnectionManager
-from .models import ChangeType, LimitStatus, SignalStatus, StatusTransitions
 from .schema import initialize_database
 from .utils import _parse_dt, calculate_expiry
 
@@ -20,21 +21,6 @@ logger = get_logger("database")
 
 class DatabaseManager(BaseConnectionManager):
     """Database manager with all core operations integrated."""
-
-    def __init__(self, db_url: str = None):
-        super().__init__(db_url)
-
-        self.STATUS_ACTIVE = SignalStatus.ACTIVE
-        self.STATUS_HIT = SignalStatus.HIT
-        self.STATUS_PROFIT = SignalStatus.PROFIT
-        self.STATUS_BREAKEVEN = SignalStatus.BREAKEVEN
-        self.STATUS_STOP_LOSS = SignalStatus.STOP_LOSS
-        self.STATUS_CANCELLED = SignalStatus.CANCELLED
-        self.FINAL_STATUSES = SignalStatus.FINAL_STATUSES
-
-        self.LIMIT_STATUS_PENDING = LimitStatus.PENDING
-        self.LIMIT_STATUS_HIT = LimitStatus.HIT
-        self.LIMIT_STATUS_CANCELLED = LimitStatus.CANCELLED
 
     async def initialize(self):
         """Initialize database and create tables."""
@@ -350,10 +336,6 @@ class DatabaseManager(BaseConnectionManager):
         except Exception as e:
             logger.error(f"Error updating signal expiry: {e}", exc_info=True)
             return False
-
-    def _is_valid_transition(self, old_status: str, new_status: str) -> bool:
-        """Check if a status transition is valid."""
-        return StatusTransitions.is_valid_transition(old_status, new_status)
 
     # === Bot Mode Status ===
 

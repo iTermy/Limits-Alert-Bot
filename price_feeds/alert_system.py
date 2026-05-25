@@ -77,6 +77,7 @@ class AlertSystem:
         self._live_embeds: Dict[int, Dict] = {}
 
         self._live_update_task: Optional[asyncio.Task] = None
+        self._news_activation_messages: Dict[int, list] = {}
 
         self._archive_manager = ArchiveManager(
             bot=bot,
@@ -97,6 +98,8 @@ class AlertSystem:
             "stop_loss_sent": 0,
             "auto_tp_sent": 0,
             "spread_hour_cancelled": 0,
+            "news_cancelled": 0,
+            "nm_cancelled": 0,
             "total_alerts": 0,
             "errors": 0,
         }
@@ -899,7 +902,7 @@ class AlertSystem:
                     current_price=current_price,
                     ping_text=f"📰 **{instrument}** {direction} — cancelled (news: {news_event.category.upper()})",
                 )
-                self.stats["news_cancelled"] = self.stats.get("news_cancelled", 0) + 1
+                self.stats["news_cancelled"] += 1
                 self.stats["total_alerts"] += 1
                 return True
             except Exception as e:
@@ -951,7 +954,7 @@ class AlertSystem:
             await target_channel.send(self.role_mention)
             message = await target_channel.send(embed=embed)
             self.track_alert_message(message.id, signal_id)
-            self.stats["news_cancelled"] = self.stats.get("news_cancelled", 0) + 1
+            self.stats["news_cancelled"] += 1
             self.stats["total_alerts"] += 1
 
             asyncio.ensure_future(
@@ -1001,7 +1004,7 @@ class AlertSystem:
                 self._archive_manager.schedule_end_state_move(
                     signal_id, event="near_miss_cancelled"
                 )
-                self.stats["nm_cancelled"] = self.stats.get("nm_cancelled", 0) + 1
+                self.stats["nm_cancelled"] += 1
                 self.stats["total_alerts"] += 1
                 logger.info(f"Near-miss cancel alert sent for signal {signal_id} ({instrument})")
                 return True
@@ -1059,8 +1062,6 @@ class AlertSystem:
                 sent_messages.append(msg)
             self.stats["total_alerts"] += 1
 
-            if not hasattr(self, "_news_activation_messages"):
-                self._news_activation_messages = {}
             self._news_activation_messages[news_event.event_id] = sent_messages
 
             return True
@@ -1071,9 +1072,7 @@ class AlertSystem:
 
     async def send_news_ended_alert(self, news_event) -> None:
         """Edit all activation embeds for this event to show 'News Mode Ended'."""
-        messages = []
-        if hasattr(self, "_news_activation_messages"):
-            messages = self._news_activation_messages.pop(news_event.event_id, [])
+        messages = self._news_activation_messages.pop(news_event.event_id, [])
 
         end_ts = int(datetime.now(timezone.utc).timestamp())
         embed = discord.Embed(

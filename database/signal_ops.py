@@ -11,8 +11,10 @@ from core.parser import ParsedSignal
 from models.signal import SignalData
 from utils.logger import get_logger
 
-from .models import LimitStatus, SignalStatus
-from .utils import _parse_dt, calculate_expiry, get_status_emoji
+from models.enums import LimitStatus, SignalStatus
+from utils.formatting import get_status_emoji
+
+from .utils import _parse_dt, calculate_expiry
 
 logger = get_logger("signal_db")
 
@@ -120,7 +122,7 @@ class SignalDatabase:
 
             signal_id = existing["id"]
 
-            truly_final = [s for s in SignalStatus.FINAL_STATUSES if s != SignalStatus.CANCELLED]
+            truly_final = [s for s in SignalStatus.final_statuses() if s != SignalStatus.CANCELLED]
             if existing["status"] in truly_final:
                 logger.warning(
                     f"Cannot update signal {signal_id} in final status {existing['status']}"

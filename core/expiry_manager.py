@@ -26,7 +26,7 @@ class ExpiryManager:
             about_to_expire = []
             if alert_system:
                 try:
-                    from database.models import SignalStatus
+                    from models.enums import SignalStatus
 
                     pre_expire_rows = await self.bot.services.signal_db.db.fetch_all(
                         """

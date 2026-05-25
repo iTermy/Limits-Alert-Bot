@@ -16,7 +16,8 @@
       "Bash(pip show *)",
       "PowerShell(Remove-Item *)",
       "PowerShell(Move-Item *)",
-      "Bash(Get-ChildItem -Path \"C:\\\\Python Stuff\\\\TM Bot\" -Exclude \".venv\" -File -Filter \"*.py\" -Recurse)"
+      "Bash(Get-ChildItem -Path \"C:\\\\Python Stuff\\\\TM Bot\" -Exclude \".venv\" -File -Filter \"*.py\" -Recurse)",
+      "Bash(cd *)"
     ]
   }
 }

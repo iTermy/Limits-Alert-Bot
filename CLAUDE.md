@@ -59,14 +59,13 @@ database/
                                   update_signal_status (validates transitions), mark_limit_hit,
                                   get_active_signals_for_tracking (returns List[SignalData]),
                                   get_hit_limits_for_signal, expiry ops, bot_mode_status
-  models.py                     Re-exports enums from models/enums.py for backward compat
   schema.py                     DDL for all 7 tables + indexes + idempotent migrations
   signal_ops.py                 SignalDatabase — flattened CRUD + Lifecycle + Analytics in one file;
                                   get_signal_with_limits() returns Optional[SignalData];
                                   save_signal, cancel, reactivate, manually_set_signal_status,
                                   process_limit_hit, expire_old_signals, get_statistics
   utils.py                      calculate_expiry() (day_end → 4:45 PM EST), _parse_dt(),
-                                  get_status_emoji(), calculate_sl_pnl()
+                                  calculate_sl_pnl()
 
 price_feeds/
   price_stream_manager.py       Coordinates all three feeds; calculates spread if missing (ask − bid);
@@ -299,7 +298,7 @@ CANCELLED ◄──────────────────────�
   └─► ACTIVE / HIT
 ```
 
-Valid transitions from `database/models.py::StatusTransitions.VALID_TRANSITIONS`:
+Valid transitions from `models/enums.py::StatusTransitions.VALID_TRANSITIONS`:
 ```python
 'active':    ['hit', 'cancelled', 'stop_loss']
 'hit':       ['profit', 'breakeven', 'stop_loss', 'cancelled']

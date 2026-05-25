@@ -7,9 +7,6 @@ from typing import Optional
 
 import pytz
 
-from .models import SignalStatus
-
-
 async def calculate_sl_pnl(signal_id: int, signal: dict, signal_db, tp_config) -> Optional[float]:
     """Return combined P&L of all hit limits at the stop-loss price, or None if no hit limits."""
     stop_price = signal.get("stop_loss")
@@ -90,16 +87,3 @@ def calculate_expiry(expiry_type: str) -> Optional[str]:
             expiry += timedelta(days=1)
 
     return expiry.isoformat()
-
-
-def get_status_emoji(status: str) -> str:
-    """Get emoji for status display."""
-    emoji_map = {
-        SignalStatus.ACTIVE: "🟢",
-        SignalStatus.HIT: "🎯",
-        SignalStatus.PROFIT: "✅",
-        SignalStatus.BREAKEVEN: "➖",
-        SignalStatus.STOP_LOSS: "🛑",
-        SignalStatus.CANCELLED: "❌",
-    }
-    return emoji_map.get(status, "❓")

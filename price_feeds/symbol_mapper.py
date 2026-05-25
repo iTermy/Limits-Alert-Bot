@@ -1,17 +1,5 @@
-"""
-Symbol Mapper for Trading Alert Bot - FIXED VERSION
-Handles symbol translation between internal format and various price feeds
-Achieves 95%+ accuracy in feed selection and symbol mapping
-
-CRITICAL FIXES:
-1. OANDA: Properly adds underscores (SPX500USD → SPX500_USD)
-2. Binance: Returns lowercase (BTCUSDT → btcusdt)
-3. Reverse mapping: Properly converts back to database format
-"""
-
 import json
 import logging
-import re
 from pathlib import Path
 from typing import Dict, Optional, Tuple
 
@@ -39,7 +27,6 @@ class SymbolMapper:
         else:
             self.config_path = Path(config_path)
         self.mappings = self._load_mappings()
-        self._compile_patterns()
         logger.info(f"SymbolMapper initialized with config from {config_path}")
 
     def _load_mappings(self) -> Dict:
@@ -53,17 +40,6 @@ class SymbolMapper:
         except json.JSONDecodeError as e:
             logger.error(f"Invalid JSON in config file: {e}")
             raise
-
-    def _compile_patterns(self):
-        """Pre-compile regex patterns for performance"""
-        self.compiled_patterns = {}
-        for asset_class, config in self.mappings["asset_class_patterns"].items():
-            self.compiled_patterns[asset_class] = []
-            for pattern in config.get("patterns", []):
-                try:
-                    self.compiled_patterns[asset_class].append(re.compile(pattern, re.IGNORECASE))
-                except re.error as e:
-                    logger.warning(f"Invalid regex pattern for {asset_class}: {pattern} - {e}")
 
     def determine_asset_class(self, symbol: str) -> str:
         """Return the asset class for a symbol (forex, forex_jpy, metals, crypto, indices, stocks, oil)."""
@@ -445,9 +421,6 @@ class SymbolMapper:
 
         asset_class = self.determine_asset_class(symbol)
 
-        if asset_class == "unknown":
-            return False, f"Unknown symbol format: {symbol}"
-
         if asset_class == "oil":
             return False, f"Oil symbols not currently supported: {symbol}"
 
@@ -460,7 +433,5 @@ class SymbolMapper:
         return True, f"Valid {asset_class} symbol, maps to {feed_symbol} on {best_feed}"
 
     def reload_config(self):
-        """Reload configuration from file (useful for dynamic updates)"""
         self.mappings = self._load_mappings()
-        self._compile_patterns()
         logger.info("SymbolMapper configuration reloaded")

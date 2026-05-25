@@ -127,6 +127,7 @@ class StreamingPriceMonitor:
             "signals_checked": 0,
             "limits_hit": 0,
             "stop_losses_hit": 0,
+            "news_cancelled": 0,
             "errors": 0,
             "buffer_prevented_alerts": 0,
             "buffer_allowed_alerts": 0,
@@ -632,7 +633,7 @@ class StreamingPriceMonitor:
                 logger.info(f"Signal {signal_id} cancelled due to news mode (event: {news_event})")
                 self.tp_monitor.evict_signal(signal_id)
                 await self._maybe_unsubscribe_symbol(signal["instrument"], signal_id)
-                self.stats["news_cancelled"] = self.stats.get("news_cancelled", 0) + 1
+                self.stats["news_cancelled"] += 1
             else:
                 logger.error(f"Failed to cancel signal {signal_id} for news mode")
         except Exception as e:

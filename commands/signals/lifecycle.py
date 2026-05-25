@@ -12,7 +12,7 @@ from discord.ext import commands
 
 from price_feeds.alert_config import AlertDistanceConfig
 from price_feeds.tp_config import TPConfig
-from utils.formatting import format_price, get_status_emoji, is_crypto_symbol, is_index_symbol
+from utils.formatting import format_price, get_status_emoji
 from utils.logger import get_logger
 
 from .._base import BaseCog
@@ -80,9 +80,11 @@ class LifecycleCog(BaseCog):
             return
 
         # Add asset type flags and calculate distances
+        mapper = self.services.stream_manager.symbol_mapper
         for signal in signals:
-            signal["is_crypto"] = is_crypto_symbol(signal["instrument"])
-            signal["is_index"] = is_index_symbol(signal["instrument"])
+            asset_class = mapper.determine_asset_class(signal["instrument"])
+            signal["is_crypto"] = asset_class == "crypto"
+            signal["is_index"] = asset_class == "indices"
 
             # Calculate distance to next limit
             if self.services.monitor and signal.get("pending_limits"):
