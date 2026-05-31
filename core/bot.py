@@ -300,6 +300,7 @@ class TradingBot(commands.Bot):
                 bot=self,
                 admin_user_id=bot_settings.health_alert_admin_id,
                 us_market_holidays=bot_settings.us_market_holidays,
+                db=db,
             )
 
             # Wire alert channels before creating the monitor

@@ -66,12 +66,18 @@ class FeedHealthMonitor:
     """
 
     def __init__(
-        self, stream_manager, bot, admin_user_id: int = None, us_market_holidays: list = None
+        self,
+        stream_manager,
+        bot,
+        admin_user_id: int = None,
+        us_market_holidays: list = None,
+        db=None,
     ):
         self.stream_manager = stream_manager
         self.bot = bot
         self.admin_user_id = admin_user_id
         self.us_market_holidays = us_market_holidays or []
+        self.db = db
         self.symbol_mapper = SymbolMapper()
 
         # Monitoring state
@@ -214,6 +220,7 @@ class FeedHealthMonitor:
         if not feed_symbols:
             # No active subscriptions for this feed
             self.feed_status[feed_name] = "idle"
+            await self._write_feed_health(feed_name, "idle", None, None)
             return
 
         # Check each actively subscribed symbol
@@ -236,6 +243,8 @@ class FeedHealthMonitor:
                     )
 
         # Determine feed health
+        newest_seen = max(feed_symbols.values()) if feed_symbols else None
+
         if not stale_symbols:
             # All symbols healthy
             if self.feed_status.get(feed_name) in ["degraded", "down"]:
@@ -245,6 +254,7 @@ class FeedHealthMonitor:
             self.feed_status[feed_name] = "healthy"
             self.reconnect_attempts[feed_name] = 0
             self.first_stale_time.pop(feed_name, None)
+            await self._write_feed_health(feed_name, "healthy", 0, newest_seen)
 
         elif len(stale_symbols) < len(feed_symbols) * 0.5:
             # Less than 50% stale - degraded
@@ -254,6 +264,8 @@ class FeedHealthMonitor:
                     f"{feed_name} feed degraded: {len(stale_symbols)}/{len(feed_symbols)} symbols stale"
                 )
                 self.stats["false_positives_avoided"] += 1  # Might be temporary
+            max_stale_secs = int(max(s["time_since"].total_seconds() for s in stale_symbols))
+            await self._write_feed_health(feed_name, "degraded", max_stale_secs, newest_seen)
 
         else:
             # 50%+ stale - feed is down
@@ -266,6 +278,8 @@ class FeedHealthMonitor:
                 )
 
             self.feed_status[feed_name] = "down"
+            max_stale_secs = int(max(s["time_since"].total_seconds() for s in stale_symbols))
+            await self._write_feed_health(feed_name, "down", max_stale_secs, newest_seen)
             await self._handle_feed_failure(feed_name, stale_symbols)
 
     async def _handle_feed_failure(self, feed_name: str, stale_symbols: list):
@@ -501,6 +515,27 @@ class FeedHealthMonitor:
         days = hours // 24
         remaining_hours = hours % 24
         return f"{days} days, {remaining_hours} hours"
+
+    async def _write_feed_health(
+        self, feed_name: str, status: str, stale_seconds, last_seen_ts
+    ) -> None:
+        if self.db is None:
+            return
+        try:
+            await self.db.execute(
+                """
+                INSERT INTO feed_health (feed, status, stale_seconds, last_seen, updated_at)
+                VALUES ($1, $2, $3, $4, NOW())
+                ON CONFLICT (feed) DO UPDATE SET
+                    status        = EXCLUDED.status,
+                    stale_seconds = EXCLUDED.stale_seconds,
+                    last_seen     = EXCLUDED.last_seen,
+                    updated_at    = EXCLUDED.updated_at
+                """,
+                (feed_name, status, stale_seconds, last_seen_ts),
+            )
+        except Exception as e:
+            logger.error("Failed to write feed_health for %s: %s", feed_name, e)
 
     def get_health_stats(self) -> Dict:
         """

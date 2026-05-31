@@ -753,12 +753,14 @@ class SignalDatabase:
 
         count = 0
 
-        try:
-            async with self.db.get_connection() as conn:
-                for signal in expired:
-                    signal_id = signal["id"]
-                    old_status = signal["status"]
+        # Each signal gets its own transaction so a single failure does not
+        # roll back signals that were already successfully expired.
+        for signal in expired:
+            signal_id = signal["id"]
+            old_status = signal["status"]
 
+            try:
+                async with self.db.get_connection() as conn:
                     await conn.execute(
                         """
                         UPDATE signals
@@ -788,11 +790,9 @@ class SignalDatabase:
                     """,
                         signal_id,
                     )
-                    count += 1
-
-        except Exception as e:
-            logger.error(f"Error expiring signals: {e}", exc_info=True)
-            return 0
+                count += 1
+            except Exception as e:
+                logger.error(f"Error expiring signal {signal_id}: {e}", exc_info=True)
 
         if count > 0:
             logger.info(f"Expired {count} signals")

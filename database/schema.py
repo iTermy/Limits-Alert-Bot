@@ -127,6 +127,8 @@ async def initialize_database(db_manager):
                 bid        DOUBLE PRECISION NOT NULL,
                 ask        DOUBLE PRECISION NOT NULL,
                 feed       TEXT NOT NULL,
+                ic_bid     DOUBLE PRECISION,
+                ic_ask     DOUBLE PRECISION,
                 updated_at TIMESTAMPTZ NOT NULL DEFAULT NOW()
             )
         """)
@@ -239,6 +241,25 @@ async def _run_migrations(conn):
         # Index for fast lookups (optional — single row, mostly a hint)
         """
         CREATE INDEX IF NOT EXISTS idx_bot_mode_status_updated ON bot_mode_status(updated_at);
+        """,
+        # H1: ICMarkets mid-price columns on live_prices — allows EX to compute
+        # feed offset from two prices at the same updated_at, eliminating drift.
+        """
+        ALTER TABLE live_prices ADD COLUMN IF NOT EXISTS ic_bid DOUBLE PRECISION;
+        """,
+        """
+        ALTER TABLE live_prices ADD COLUMN IF NOT EXISTS ic_ask DOUBLE PRECISION;
+        """,
+        # M5: feed health table — written by FeedHealthMonitor each health check.
+        # EX reads this in Phase 4.4 to skip placement on stale feeds.
+        """
+        CREATE TABLE IF NOT EXISTS feed_health (
+            feed          TEXT PRIMARY KEY,
+            status        TEXT NOT NULL,
+            stale_seconds INTEGER,
+            last_seen     TIMESTAMPTZ,
+            updated_at    TIMESTAMPTZ NOT NULL DEFAULT NOW()
+        );
         """,
     ]
 
