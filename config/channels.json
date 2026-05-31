@@ -17,7 +17,8 @@
     "gold-tolls-map": "1472685381315989730",
     "general-tolls": "1477339674166169911",
     "oil-tolls": "1484316173515489392",
-    "legends-trades": "1500246110491639818"
+    "legends-trades": "1500246110491639818",
+    "gold-1-1-rr": "REPLACE_WITH_CHANNEL_ID"
   },
   "alert_channel": "1402971805890773005",
   "pa-alert-channel": "1442668785990631435",
@@ -86,6 +87,10 @@
       "default_instrument": "XTIUSD"
     },
     "legends-trades": {
+      "default_expiry": "week_end"
+    },
+    "gold-1-1-rr": {
+      "default_instrument": "XAUUSD",
       "default_expiry": "week_end"
     }
   }

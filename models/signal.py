@@ -7,6 +7,8 @@ from typing import Any, Optional
 
 from pydantic import BaseModel, Field, computed_field, model_validator
 
+VALID_SIGNAL_TYPES = ("standard", "scalp", "swing", "toll", "pa", "1-1")
+
 
 class LimitData(BaseModel):
     id: int = 0
@@ -57,7 +59,7 @@ class SignalData(BaseModel):
     expiry_type: Optional[str] = None
     expiry_time: Optional[datetime] = None
     status: str = "active"
-    scalp: bool = False
+    type: str = "standard"
     first_limit_hit_time: Optional[datetime] = None
     closed_at: Optional[datetime] = None
     closed_reason: Optional[str] = None
@@ -118,6 +120,20 @@ class SignalData(BaseModel):
     def _normalise_id(cls, values: Any) -> Any:
         if isinstance(values, dict) and "id" in values and "signal_id" not in values:
             values["signal_id"] = values.pop("id")
+        return values
+
+    @model_validator(mode="before")
+    @classmethod
+    def _normalise_type(cls, values: Any) -> Any:
+        if not isinstance(values, dict):
+            return values
+        # Drop legacy scalp payloads; if no type was supplied, infer it.
+        if "type" not in values and "scalp" in values:
+            values["type"] = "scalp" if values.get("scalp") else "standard"
+        values.pop("scalp", None)
+        type_val = values.get("type")
+        if type_val is not None and type_val not in VALID_SIGNAL_TYPES:
+            values["type"] = "standard"
         return values
 
     # Dict-protocol methods for seamless transition from dict-based code.

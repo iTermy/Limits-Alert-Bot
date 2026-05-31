@@ -48,7 +48,7 @@ class SignalDatabase:
                     """
                     INSERT INTO signals (
                         message_id, channel_id, instrument, direction,
-                        stop_loss, expiry_type, expiry_time, total_limits, status, scalp
+                        stop_loss, expiry_type, expiry_time, total_limits, status, type
                     )
                     VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10)
                     RETURNING id
@@ -62,7 +62,7 @@ class SignalDatabase:
                     _parse_dt(expiry_time),
                     len(parsed_signal.limits) if parsed_signal.limits else 0,
                     SignalStatus.ACTIVE,
-                    getattr(parsed_signal, "scalp", False),
+                    getattr(parsed_signal, "type", "standard"),
                 )
 
                 if signal_id and parsed_signal.limits:
@@ -134,7 +134,7 @@ class SignalDatabase:
                     """
                     UPDATE signals
                     SET instrument = $1, direction = $2, stop_loss = $3,
-                        expiry_type = $4, total_limits = $5, scalp = $6,
+                        expiry_type = $4, total_limits = $5, type = $6,
                         updated_at = CURRENT_TIMESTAMP
                     WHERE id = $7
                     """,
@@ -143,7 +143,7 @@ class SignalDatabase:
                     parsed_signal.stop_loss,
                     parsed_signal.expiry_type,
                     len(parsed_signal.limits),
-                    getattr(parsed_signal, "scalp", False),
+                    getattr(parsed_signal, "type", "standard"),
                     signal_id,
                 )
 

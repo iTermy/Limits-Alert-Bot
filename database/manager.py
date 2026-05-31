@@ -180,7 +180,7 @@ class DatabaseManager(BaseConnectionManager):
                 s.status,
                 s.limits_hit,
                 s.total_limits,
-                s.scalp,
+                s.type,
                 l.id as limit_id,
                 l.price_level,
                 l.sequence_number,
@@ -209,7 +209,7 @@ class DatabaseManager(BaseConnectionManager):
                     "status": row["status"],
                     "limits_hit": row["limits_hit"],
                     "total_limits": row["total_limits"],
-                    "scalp": row["scalp"] or False,
+                    "type": row["type"] or "standard",
                     "limits": [],
                 }
             if row["limit_id"]:

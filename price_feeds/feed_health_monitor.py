@@ -86,6 +86,9 @@ class FeedHealthMonitor:
         self.feed_status: Dict[str, str] = {}  # 'healthy', 'degraded', 'down'
         self.last_alert_time: Dict[str, datetime] = {}
         self.reconnect_attempts: Dict[str, int] = defaultdict(int)
+        # Earliest stale-symbol last_update timestamp captured when the feed first
+        # crossed the down threshold. Used to report accurate downtime on recovery.
+        self.first_stale_time: Dict[str, datetime] = {}
 
         # Track alert history to prevent spam
         self.alert_history: Dict[str, datetime] = {}
@@ -241,6 +244,7 @@ class FeedHealthMonitor:
 
             self.feed_status[feed_name] = "healthy"
             self.reconnect_attempts[feed_name] = 0
+            self.first_stale_time.pop(feed_name, None)
 
         elif len(stale_symbols) < len(feed_symbols) * 0.5:
             # Less than 50% stale - degraded
@@ -255,6 +259,11 @@ class FeedHealthMonitor:
             # 50%+ stale - feed is down
             if self.feed_status.get(feed_name) != "down":
                 self.stats["stale_detections"] += 1
+                # Capture the earliest last_update among stale symbols as the
+                # real "stall began" timestamp for downtime reporting.
+                self.first_stale_time[feed_name] = min(
+                    s["last_update"] for s in stale_symbols
+                )
 
             self.feed_status[feed_name] = "down"
             await self._handle_feed_failure(feed_name, stale_symbols)
@@ -392,12 +401,13 @@ class FeedHealthMonitor:
         try:
             admin_user = await self.bot.fetch_user(self.admin_user_id)
 
-            # Calculate downtime
-            last_alert = self.last_alert_time.get(feed_name)
+            # Downtime is measured from when the feed actually went stale (the
+            # oldest stale-symbol last_update captured at down-detection time),
+            # not from when the alert was sent.
             downtime = ""
-
-            if last_alert:
-                duration = datetime.now() - last_alert
+            stall_started = self.first_stale_time.get(feed_name)
+            if stall_started:
+                duration = datetime.now() - stall_started
                 downtime = f"\n**Downtime:** {self._format_duration(duration)}"
 
             message = (
@@ -456,10 +466,13 @@ class FeedHealthMonitor:
             if today_str in self.us_market_holidays:
                 return False
 
-        # During spread hour (5–6 PM EST) feeds update less frequently — not a failure
+        # Spread hour (5–6 PM EST) is an expected-quiet window for forex, metals,
+        # and indices. Liquidity drops and price ticks slow or stop — treating it
+        # as "open" would generate false-positive stale-feed alerts. Mirror the
+        # weekend skip above and treat it as closed.
         if asset_class in ("forex", "metals", "indices"):
             if _SPREAD_START <= now.time() < _SPREAD_END:
-                return True
+                return False
 
         open_time = datetime.strptime(market_config["open_time"], "%H:%M").time()
         close_time = datetime.strptime(market_config["close_time"], "%H:%M").time()

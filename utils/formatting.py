@@ -42,3 +42,18 @@ def get_status_emoji(status: str) -> str:
         SignalStatus.CANCELLED: "❌",
     }
     return emoji_map.get(status, "❓")
+
+
+SIGNAL_TYPE_LABELS = {
+    "standard": "📊 Setup",
+    "scalp": "⚡ Scalp",
+    "swing": "📈 Swing",
+    "toll": "💰 Toll",
+    "pa": "🎯 PA",
+    "1-1": "⚖️ 1:1 RR",
+}
+
+
+def format_signal_type(signal_type: str) -> str:
+    """Return a Discord-friendly label for a signal type."""
+    return SIGNAL_TYPE_LABELS.get(signal_type, SIGNAL_TYPE_LABELS["standard"])

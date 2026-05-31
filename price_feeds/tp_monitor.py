@@ -120,11 +120,11 @@ class AutoTPMonitor:
             logger.warning(f"Signal {signal_id}: last limit has no entry price, skipping TP check")
             return False
 
-        scalp = signal.get("scalp", False)
+        signal_type = signal.get("type", "standard")
         last_pnl = self.tp_config.calculate_pnl(
-            instrument, direction, last_entry, close_price, scalp=scalp
+            instrument, direction, last_entry, close_price, signal_type=signal_type
         )
-        tp_threshold = self.tp_config.get_tp_value(instrument, scalp=scalp)
+        tp_threshold = self.tp_config.get_tp_value(instrument, signal_type=signal_type)
 
         # Tiny epsilon to guard against floating-point rounding errors
         EPSILON = 1e-9
@@ -142,7 +142,7 @@ class AutoTPMonitor:
                     logger.warning(f"Signal {signal_id}: limit {lim.get('id')} has no entry price")
                     continue
                 combined_earlier_pnl += self.tp_config.calculate_pnl(
-                    instrument, direction, entry, close_price, scalp=scalp
+                    instrument, direction, entry, close_price, signal_type=signal_type
                 )
 
             if combined_earlier_pnl < -EPSILON:
@@ -155,7 +155,7 @@ class AutoTPMonitor:
                 entry = lim.get("hit_price") or lim.get("price_level")
                 if entry is not None:
                     cumulative_pnl += self.tp_config.calculate_pnl(
-                        instrument, direction, entry, close_price, scalp=scalp
+                        instrument, direction, entry, close_price, signal_type=signal_type
                     )
 
         success = await self._trigger_auto_profit(
@@ -184,7 +184,7 @@ class AutoTPMonitor:
         signal_id = signal["signal_id"]
         instrument = signal["instrument"]
         direction = signal["direction"].lower()
-        scalp = signal.get("scalp", False)
+        signal_type = signal.get("type", "standard")
 
         display_pnl = cumulative_pnl if cumulative_pnl is not None else last_pnl
         pnl_display = self.tp_config.format_value(instrument, display_pnl)
@@ -198,7 +198,7 @@ class AutoTPMonitor:
                 entry = lim.get("hit_price") or lim.get("price_level")
                 if seq is not None and entry is not None:
                     pnl = self.tp_config.calculate_pnl(
-                        instrument, direction, entry, close_price, scalp=scalp
+                        instrument, direction, entry, close_price, signal_type=signal_type
                     )
                     limit_pnl_map[seq] = self.tp_config.format_value(instrument, pnl)
 

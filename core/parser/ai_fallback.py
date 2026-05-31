@@ -12,7 +12,7 @@ from utils.logger import get_logger
 
 # Import from parent package
 from . import ParsedSignal
-from .pattern_parsers import is_scalp
+from .pattern_parsers import get_signal_type
 from .validators import validate_signal
 
 logger = get_logger("parser.ai_fallback")
@@ -249,7 +249,7 @@ If unable to confidently parse even after correction attempts, return null.
                 parse_method="ai",
                 keywords=data.get("keywords", []),
                 channel_name=channel_name,
-                scalp=is_scalp(original_message, channel_name),
+                type=get_signal_type(original_message, channel_name),
             )
 
             # Validate before returning

@@ -47,7 +47,8 @@ core/
     __init__.py                 parse_signal(message, channel_name) entry point;
                                   ParsedSignal / RejectedSignal types; lazy sub-parser init
     pattern_parsers.py          CorePatternParser / StockPatternParser / CryptoPatternParser;
-                                  SCALP_CHANNELS; get_gold_tolls_sl_offset() (settings.json, 30 s cache)
+                                  CHANNEL_TYPE_MAP + get_signal_type() (channel → standard/scalp/swing/toll/pa/1-1);
+                                  get_gold_tolls_sl_offset() (settings.json, 30 s cache)
     validators.py               is_potential_signal(), should_exclude(), validate_signal(),
                                   detect_channel_type()
     ai_fallback.py              AIFallbackParser (gpt-4o-mini); only runs if pattern fails + flag enabled
@@ -82,18 +83,24 @@ price_feeds/
   _base_config.py               BaseThresholdConfig — shared JSON load/save/validate/override management;
                                   shared SymbolMapper singleton across all config types
   alert_config.py               AlertDistanceConfig(BaseThresholdConfig) — approaching distance thresholds
-  tp_config.py                  TPConfig(BaseThresholdConfig) — TP thresholds + calculate_pnl()
+  tp_config.py                  TPConfig(BaseThresholdConfig) — per-signal-type TP thresholds (type_defaults / type_overrides);
+                                  calculate_pnl(); accepts signal_type kwarg (or legacy scalp bool)
   tp_monitor.py                 AutoTPMonitor — checks HIT-status signals per tick; per-signal limit cache
   nm_config.py                  NMConfig(BaseThresholdConfig) — max_proximity + base_bounce per asset class
   nm_monitor.py                 NearMissMonitor — in-memory NMTrackingState; _nm_immune set;
-                                  mark_immune(signal_id) called on every reactivation
+                                  mark_immune(signal_id) called on every reactivation;
+                                  signal.type == "swing" short-circuits NM (swing is not near-missable)
   feed_health_monitor.py        Stale threshold 300 s; 3 max reconnect attempts; 120 s startup grace;
                                   15 min alert cooldown; DMs health_alert_admin_id from settings.json;
+                                  spread hour (17–18 ET) treated as market-closed for forex/metals/indices;
+                                  first_stale_time tracks real stall start for accurate recovery downtime;
                                   all knobs are module-level constants (no config file)
   live_price_writer.py          Writes bid/ask/feed to live_prices table on each tick
   symbol_mapper.py              Internal ↔ feed-specific symbol translation; always returns UPPERCASE
   feeds/
-    icmarkets_stream.py         MT5 polling 100 ms/symbol — Windows only
+    icmarkets_stream.py         MT5 polling 100 ms/symbol — Windows only;
+                                  on_poll callback fires on every successful tick fetch (price-change-agnostic)
+                                  so the health monitor's last_seen timer doesn't age during quiet markets
     oanda_stream.py             OANDA REST stream; live/practice via OANDA_PRACTICE env var
     binance_stream.py           WebSocket bookTicker; US (binance.us) or international via BINANCE_USE_INTERNATIONAL
 
@@ -114,17 +121,21 @@ commands/
     __init__.py                 Cog setup: LifecycleCog + ReportsCog + NewsCog
     lifecycle.py                !active, !info, !setstatus, !profit, !hit,
                                   !stoploss, !cancel (+ bulk), !setexpiry, !breakeven
-    reports.py                  !report (performance statistics generator)
+    reports.py                  !report (performance statistics generator; partitions into
+                                  Regular / PA / Legends by channel name)
     news.py                     !news, !newslist, !newsclear
   config/
     __init__.py                 Cog setup: ThresholdsCog
-    thresholds.py               !tp, !alertdist, !nmconfig
+    thresholds.py               !tp (per-type targeting: `!tp set <type> <asset_class> <value>`,
+                                  `!tp set <symbol> <value> [--type=X]`, `!tp config <type|symbol>`,
+                                  `!tp remove <symbol> [--type=X]`); !alertdist, !nmconfig
 
 utils/
   logger.py                     Rotating logs: bot.log (10 MB×5) + errors.log (5 MB×3); UTF-8; LOG_LEVEL env
   config_loader.py              ConfigLoader class + load_settings() → BotSettings, save_settings(),
                                   load_channels_config()
-  formatting.py                 Price/pip/distance formatting; get_channel_name(); get_status_emoji()
+  formatting.py                 Price/pip/distance formatting; get_channel_name(); get_status_emoji();
+                                  format_signal_type() (SIGNAL_TYPE_LABELS map)
 
 config/                         Runtime JSON configs (see Configuration Files section)
 data/                           Auto-generated runtime data (news_events.json)
@@ -245,7 +256,7 @@ All PKs: `BIGINT GENERATED ALWAYS AS IDENTITY`. Timestamps: `TIMESTAMPTZ`. RLS: 
 | expiry_type | TEXT (`day_end` / `week_end` / `month_end` / `no_expiry`) |
 | expiry_time | TIMESTAMPTZ; `day_end` resolves to 4:45 PM EST |
 | status | TEXT; CHECK (active, hit, profit, breakeven, stop_loss, cancelled) |
-| scalp | BOOLEAN DEFAULT FALSE |
+| type | TEXT DEFAULT 'standard'; CHECK (standard, scalp, swing, toll, pa, 1-1) |
 | first_limit_hit_time | TIMESTAMPTZ |
 | closed_at / closed_reason | TIMESTAMPTZ / TEXT (`automatic` / `manual` / `expiry`) |
 | result_pips | DOUBLE PRECISION |
@@ -403,8 +414,16 @@ self.services.tp_config      # instead of bot.monitor.tp_config
 ### Spread/news cancel behavior
 Spread-hour and news cancels **edit the persistent embed** when one already exists. They only fall back to standalone messages if no embed has been created yet for that signal.
 
-### `SCALP_CHANNELS` has 5 members
-`pattern_parsers.SCALP_CHANNELS = {'scalps', 'gold-pa-signals', 'gold-tolls-map', 'general-tolls', 'oil-tolls'}`. Any code that lists only 4 channels is missing `'oil-tolls'`.
+### Signal type taxonomy
+`signals.type` ∈ `{standard, scalp, swing, toll, pa, 1-1}`. Determined by `pattern_parsers.get_signal_type(text, channel_name)`:
+- `CHANNEL_TYPE_MAP` wins first: `scalps` → scalp; `swing-trades` → swing; `gold-tolls-map`/`general-tolls`/`oil-tolls` → toll; `gold-pa-signals`/`price-action-trades` → pa; `gold-1-1-rr` → 1-1.
+- Otherwise body keyword: `\bswing\b` → swing, `\bscalp\b` → scalp.
+- Default: standard.
+
+Each type has its own `tp_configuration.json` defaults under `type_defaults[<type>]` and per-symbol overrides under `type_overrides[<type>]`. Default initialization: scalp/standard kept as before; toll initialized from scalp; pa initialized from standard; swing = 3× standard; 1-1 metals = $10. The TP resolution order is: per-type symbol override → standard symbol override → per-type asset-class default → standard asset-class default → hard fallback ($5).
+
+### Swing is not near-missable
+`NearMissMonitor.update` short-circuits when `signal.type == "swing"`. Swing signals can only close via hit, profit, SL, or manual cancel.
 
 ### Gold-tolls SL offset is configurable
 `get_gold_tolls_sl_offset()` reads `settings.json` via `load_settings()` → `BotSettings.gold_tolls_sl_offset` (default `5.0`) with a 30 s cache. Change it via `!goldtollssl <value>` or edit `settings.json` directly.
@@ -439,9 +458,9 @@ Module-level function in `price_feeds/streaming_monitor.py`. Called from `stream
 
 | File | Location | Contents | Runtime-editable |
 |------|----------|----------|-----------------|
-| `channels.json` | `config/` | 18 monitored channel IDs; alert/command/profit/finished channel IDs; per-channel defaults | No (restart needed) |
+| `channels.json` | `config/` | 19 monitored channel IDs; alert/command/profit/finished channel IDs; per-channel defaults | No (restart needed) |
 | `settings.json` | `config/` | `admin_ids`, `health_alert_admin_id`, `spread_buffer_enabled`, `spread_buffer_config`, `license_role_name`, `gold_tolls_sl_offset`, `us_market_holidays` | Yes (30 s cache for some); loaded as `BotSettings` Pydantic model |
-| `tp_configuration.json` | `config/` | TP thresholds per asset class + per-symbol overrides; `scalp_defaults` | Yes (`!tp set`) |
+| `tp_configuration.json` | `config/` | Per-type TP thresholds (`type_defaults`/`type_overrides`, keyed by signal type → asset class / symbol). Legacy `defaults`/`scalp_defaults`/`overrides`/`scalp_overrides` shape is auto-migrated on first load. | Yes (`!tp set`) |
 | `alert_distances.json` | `config/` | Approaching alert distances per asset class + overrides | Yes (`!alertdist set`) |
 | `nm_configuration.json` | `config/` | NM max_proximity + base_bounce per asset class + overrides | Yes (`!nmconfig set`) |
 | `symbol_mappings.json` | `config/` | Feed-specific symbol name translations | No |

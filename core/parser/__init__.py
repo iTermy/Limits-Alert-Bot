@@ -32,7 +32,7 @@ class ParsedSignal:
     parse_method: str  # high_confidence/stock/ai
     keywords: list[str] = field(default_factory=list)
     channel_name: str = None
-    scalp: bool = False
+    type: str = "standard"  # standard, scalp, swing, toll, pa, 1-1
 
 
 class RejectedSignal:

@@ -1,7 +1,8 @@
 """
 Take Profit Configuration for Trading Alert Bot
 
-Manages TP thresholds per asset class and per instrument.
+Manages TP thresholds per signal type (standard, scalp, swing, toll, pa, 1-1),
+per asset class, and per symbol.
 
 Supported types:
   - pips     (forex)
@@ -22,10 +23,12 @@ logger = logging.getLogger(__name__)
 
 TPType = Literal["pips", "dollars"]
 
+VALID_SIGNAL_TYPES = ("standard", "scalp", "swing", "toll", "pa", "1-1")
+
 
 class TPConfig(BaseThresholdConfig):
     """
-    Manages take-profit configuration with per-asset-class defaults
+    Manages take-profit configuration with per-signal-type defaults
     and per-symbol overrides.
 
     The TP value defines how many pips / dollars the LAST HIT LIMIT
@@ -53,115 +56,188 @@ class TPConfig(BaseThresholdConfig):
 
     # === Config defaults & validation ===
 
+    @staticmethod
+    def _standard_defaults() -> Dict:
+        return {
+            "forex": {"type": "pips", "value": 5.0, "description": "Standard forex pairs"},
+            "forex_jpy": {"type": "pips", "value": 10.0, "description": "JPY pairs"},
+            "metals": {"type": "dollars", "value": 5.0, "description": "Gold, Silver, etc."},
+            "indices": {"type": "dollars", "value": 20.0, "description": "Stock indices"},
+            "stocks": {"type": "dollars", "value": 1.0, "description": "Individual stocks"},
+            "crypto": {"type": "dollars", "value": 50.0, "description": "Cryptocurrencies"},
+            "oil": {"type": "dollars", "value": 0.5, "description": "Oil commodities"},
+        }
+
+    @staticmethod
+    def _scalp_defaults() -> Dict:
+        return {
+            "forex": {"type": "pips", "value": 3.0, "description": "Scalp - forex"},
+            "forex_jpy": {"type": "pips", "value": 5.0, "description": "Scalp - JPY pairs"},
+            "metals": {"type": "dollars", "value": 2.0, "description": "Scalp - metals"},
+            "indices": {"type": "dollars", "value": 10.0, "description": "Scalp - indices"},
+            "stocks": {"type": "dollars", "value": 0.5, "description": "Scalp - stocks"},
+            "crypto": {"type": "dollars", "value": 20.0, "description": "Scalp - crypto"},
+            "oil": {"type": "dollars", "value": 0.2, "description": "Scalp - oil"},
+        }
+
+    @classmethod
+    def _swing_defaults(cls) -> Dict:
+        # Swing = 3x standard.
+        out = {}
+        for asset_class, cfg in cls._standard_defaults().items():
+            out[asset_class] = {
+                "type": cfg["type"],
+                "value": cfg["value"] * 3,
+                "description": f"Swing - {asset_class}",
+            }
+        return out
+
+    @staticmethod
+    def _one_one_defaults() -> Dict:
+        # $10 from the last hit limit for metals (gold-1-1-rr default).
+        # Other asset classes fall back to standard via the resolution chain.
+        return {
+            "metals": {"type": "dollars", "value": 10.0, "description": "1-1 RR - metals"},
+        }
+
     def _create_default_config(self) -> Dict:
         config = {
-            "defaults": {
-                "forex": {"type": "pips", "value": 10.0, "description": "Standard forex pairs"},
-                "forex_jpy": {
-                    "type": "pips",
-                    "value": 10.0,
-                    "description": "JPY pairs (auto-detected)",
-                },
-                "metals": {"type": "dollars", "value": 5.0, "description": "Gold, Silver, etc."},
-                "indices": {"type": "dollars", "value": 20.0, "description": "Stock indices"},
-                "stocks": {"type": "dollars", "value": 1.0, "description": "Individual stocks"},
-                "crypto": {"type": "dollars", "value": 50.0, "description": "Cryptocurrencies"},
-                "oil": {"type": "dollars", "value": 0.5, "description": "Oil commodities"},
+            "type_defaults": {
+                "standard": self._standard_defaults(),
+                "scalp": self._scalp_defaults(),
+                "swing": self._swing_defaults(),
+                "toll": self._scalp_defaults(),  # initialised from scalp; user-adjustable
+                "pa": self._standard_defaults(),  # initialised from standard; user-adjustable
+                "1-1": self._one_one_defaults(),
             },
-            "scalp_defaults": {
-                "forex": {
-                    "type": "pips",
-                    "value": 3.0,
-                    "description": "Scalp - Standard forex pairs",
-                },
-                "forex_jpy": {
-                    "type": "pips",
-                    "value": 5.0,
-                    "description": "Scalp - JPY pairs (auto-detected)",
-                },
-                "metals": {
-                    "type": "dollars",
-                    "value": 2.0,
-                    "description": "Scalp - Gold, Silver, etc.",
-                },
-                "indices": {
-                    "type": "dollars",
-                    "value": 10.0,
-                    "description": "Scalp - Stock indices",
-                },
-                "stocks": {
-                    "type": "dollars",
-                    "value": 0.5,
-                    "description": "Scalp - Individual stocks",
-                },
-                "crypto": {
-                    "type": "dollars",
-                    "value": 20.0,
-                    "description": "Scalp - Cryptocurrencies",
-                },
-                "oil": {"type": "dollars", "value": 0.2, "description": "Scalp - Oil commodities"},
-            },
-            "overrides": {},
-            "scalp_overrides": {},
+            "type_overrides": {t: {} for t in VALID_SIGNAL_TYPES},
         }
         self._save_config(config)
         return config
 
+    def _post_load(self, raw: Dict) -> Dict:
+        """Migrate legacy {defaults, scalp_defaults, overrides, scalp_overrides} → new shape."""
+        if "type_defaults" in raw and "type_overrides" in raw:
+            return raw
+
+        migrated: Dict = {
+            "type_defaults": {t: {} for t in VALID_SIGNAL_TYPES},
+            "type_overrides": {t: {} for t in VALID_SIGNAL_TYPES},
+        }
+
+        legacy_defaults = raw.get("defaults") or {}
+        legacy_scalp_defaults = raw.get("scalp_defaults") or {}
+        legacy_overrides = raw.get("overrides") or {}
+        legacy_scalp_overrides = raw.get("scalp_overrides") or {}
+
+        if legacy_defaults:
+            migrated["type_defaults"]["standard"] = legacy_defaults
+            migrated["type_defaults"]["pa"] = dict(legacy_defaults)
+            # Swing = 3x standard.
+            swing = {}
+            for ac, cfg in legacy_defaults.items():
+                swing[ac] = {
+                    "type": cfg.get("type", "dollars"),
+                    "value": cfg.get("value", 5.0) * 3,
+                    "description": f"Swing - {ac}",
+                }
+            migrated["type_defaults"]["swing"] = swing
+        else:
+            migrated["type_defaults"]["standard"] = self._standard_defaults()
+            migrated["type_defaults"]["pa"] = self._standard_defaults()
+            migrated["type_defaults"]["swing"] = self._swing_defaults()
+
+        if legacy_scalp_defaults:
+            migrated["type_defaults"]["scalp"] = legacy_scalp_defaults
+            migrated["type_defaults"]["toll"] = dict(legacy_scalp_defaults)
+        else:
+            migrated["type_defaults"]["scalp"] = self._scalp_defaults()
+            migrated["type_defaults"]["toll"] = self._scalp_defaults()
+
+        migrated["type_defaults"]["1-1"] = self._one_one_defaults()
+
+        if legacy_overrides:
+            migrated["type_overrides"]["standard"] = legacy_overrides
+        if legacy_scalp_overrides:
+            migrated["type_overrides"]["scalp"] = legacy_scalp_overrides
+
+        self._save_config(migrated)
+        logger.info("Migrated TP config from legacy scalp shape to per-type shape")
+        return migrated
+
     def _validate_config(self):
-        super()._validate_config()
+        if "type_defaults" not in self.config or "type_overrides" not in self.config:
+            logger.error("TP config missing type_defaults/type_overrides; resetting to defaults")
+            self.config = self._create_default_config()
+            return
 
-        if "scalp_defaults" not in self.config:
-            self.config["scalp_defaults"] = self._create_default_config()["scalp_defaults"]
-        if "scalp_overrides" not in self.config:
-            self.config["scalp_overrides"] = {}
+        # Ensure every valid signal type has its own bucket.
+        for t in VALID_SIGNAL_TYPES:
+            self.config["type_defaults"].setdefault(t, {})
+            self.config["type_overrides"].setdefault(t, {})
 
-        for section in ("defaults", "scalp_defaults"):
-            for asset_class, settings in self.config.get(section, {}).items():
+        # Fill in missing fields on each entry.
+        for type_name, asset_classes in self.config["type_defaults"].items():
+            for asset_class, settings in asset_classes.items():
                 if not isinstance(settings, dict):
-                    logger.error(f"Invalid TP settings for {asset_class} in {section}")
+                    logger.error(f"Invalid TP settings for {type_name}.{asset_class}")
                     continue
-                if "type" not in settings:
-                    settings["type"] = self.ASSET_CLASS_TYPES.get(asset_class, "dollars")
-                if "value" not in settings:
-                    settings["value"] = 5.0
-                if "description" not in settings:
-                    settings["description"] = f"Default for {asset_class}"
+                settings.setdefault("type", self.ASSET_CLASS_TYPES.get(asset_class, "dollars"))
+                settings.setdefault("value", 5.0)
+                settings.setdefault("description", f"{type_name} - {asset_class}")
 
     # === Public API ===
 
-    def _get_config_for_symbol(self, symbol: str, scalp: bool = False) -> Dict:
-        """Return {type, value} for a symbol, respecting overrides and scalp mode."""
+    @staticmethod
+    def _normalize_type(signal_type) -> str:
+        if isinstance(signal_type, bool):  # legacy callers passing scalp bool
+            return "scalp" if signal_type else "standard"
+        if signal_type in VALID_SIGNAL_TYPES:
+            return signal_type
+        return "standard"
+
+    def _get_config_for_symbol(self, symbol: str, signal_type: str = "standard") -> Dict:
+        """Return {type, value} for a symbol given a signal type.
+
+        Resolution order:
+          1. type_overrides[signal_type][SYMBOL]
+          2. type_overrides[standard][SYMBOL]   (per-symbol overrides fall back)
+          3. type_defaults[signal_type][asset_class]
+          4. type_defaults[standard][asset_class]
+          5. hard fallback ($5)
+        """
+        signal_type = self._normalize_type(signal_type)
         s = symbol.upper()
+        asset_class = self.determine_asset_class(s)
 
-        if scalp:
-            if s in self.config.get("scalp_overrides", {}):
-                ov = self.config["scalp_overrides"][s]
-                return {"type": ov["type"], "value": ov["value"]}
-            asset_class = self.determine_asset_class(s)
-            scalp_defaults = self.config.get("scalp_defaults", {})
-            if asset_class in scalp_defaults:
-                d = scalp_defaults[asset_class]
-                return {"type": d["type"], "value": d["value"]}
-
-        if s in self.config["overrides"]:
-            ov = self.config["overrides"][s]
+        per_type_overrides = self.config["type_overrides"].get(signal_type, {})
+        if s in per_type_overrides:
+            ov = per_type_overrides[s]
             return {"type": ov["type"], "value": ov["value"]}
 
-        asset_class = self.determine_asset_class(s)
-        if asset_class in self.config["defaults"]:
-            d = self.config["defaults"][asset_class]
+        standard_overrides = self.config["type_overrides"].get("standard", {})
+        if signal_type != "standard" and s in standard_overrides:
+            ov = standard_overrides[s]
+            return {"type": ov["type"], "value": ov["value"]}
+
+        per_type_defaults = self.config["type_defaults"].get(signal_type, {})
+        if asset_class in per_type_defaults:
+            d = per_type_defaults[asset_class]
             return {"type": d["type"], "value": d["value"]}
 
-        logger.warning(f"No TP config for {s}, using fallback $5")
+        standard_defaults = self.config["type_defaults"].get("standard", {})
+        if asset_class in standard_defaults:
+            d = standard_defaults[asset_class]
+            return {"type": d["type"], "value": d["value"]}
+
+        logger.warning(f"No TP config for {s} (type={signal_type}), using fallback $5")
         return {"type": "dollars", "value": 5.0}
 
-    def get_tp_value(self, symbol: str, scalp: bool = False) -> float:
-        """Return the TP threshold in its native unit (pips or dollars)."""
-        return self._get_config_for_symbol(symbol, scalp=scalp)["value"]
+    def get_tp_value(self, symbol: str, signal_type: str = "standard") -> float:
+        return self._get_config_for_symbol(symbol, signal_type=signal_type)["value"]
 
-    def get_tp_type(self, symbol: str, scalp: bool = False) -> TPType:
-        """Return 'pips' or 'dollars' for the symbol."""
-        return self._get_config_for_symbol(symbol, scalp=scalp)["type"]  # type: ignore
+    def get_tp_type(self, symbol: str, signal_type: str = "standard") -> TPType:
+        return self._get_config_for_symbol(symbol, signal_type=signal_type)["type"]  # type: ignore
 
     def calculate_pnl(
         self,
@@ -169,15 +245,10 @@ class TPConfig(BaseThresholdConfig):
         direction: str,
         entry_price: float,
         current_price: float,
-        scalp: bool = False,
+        signal_type: str = "standard",
     ) -> float:
-        """
-        Calculate P&L for a single limit position in native units.
-
-        For 'pips' instruments: result is in pips (positive = profit).
-        For 'dollars' instruments: result is in dollars per unit (positive = profit).
-        """
-        tp_type = self.get_tp_type(symbol, scalp=scalp)
+        """Calculate P&L for a single limit position in native units."""
+        tp_type = self.get_tp_type(symbol, signal_type=signal_type)
 
         if direction == "long":
             raw_diff = current_price - entry_price
@@ -190,9 +261,15 @@ class TPConfig(BaseThresholdConfig):
         return raw_diff
 
     def set_override(
-        self, symbol: str, value: float, tp_type: TPType, set_by: str = "User", scalp: bool = False
+        self,
+        symbol: str,
+        value: float,
+        tp_type: TPType,
+        set_by: str = "User",
+        signal_type: str = "standard",
     ) -> bool:
-        """Set a per-symbol TP override."""
+        """Set a per-symbol TP override for a given signal type."""
+        signal_type = self._normalize_type(signal_type)
         if tp_type not in ("pips", "dollars"):
             logger.error(f"Invalid TP type: {tp_type}")
             return False
@@ -200,20 +277,15 @@ class TPConfig(BaseThresholdConfig):
             logger.error(f"TP value must be positive, got {value}")
             return False
 
-        section = "scalp_overrides" if scalp else "overrides"
-        if section not in self.config:
-            self.config[section] = {}
-
-        self.config[section][symbol.upper()] = {
+        bucket = self.config["type_overrides"].setdefault(signal_type, {})
+        bucket[symbol.upper()] = {
             "type": tp_type,
             "value": value,
             "set_by": set_by,
             "set_at": datetime.now(timezone.utc).isoformat(),
         }
         self._save_config()
-        logger.info(
-            f"Set {'scalp ' if scalp else ''}TP override: {symbol.upper()} = {value} {tp_type}"
-        )
+        logger.info(f"Set TP override [{signal_type}]: {symbol.upper()} = {value} {tp_type}")
         return True
 
     def set_default(
@@ -222,13 +294,10 @@ class TPConfig(BaseThresholdConfig):
         value: float,
         tp_type: TPType,
         set_by: str = "User",
-        scalp: bool = False,
+        signal_type: str = "standard",
     ) -> bool:
-        """Update the default TP for an asset class."""
-        section = "scalp_defaults" if scalp else "defaults"
-        if asset_class not in self.config.get(section, {}):
-            logger.error(f"Unknown asset class: {asset_class} in {section}")
-            return False
+        """Update the default TP for an asset class within a signal type."""
+        signal_type = self._normalize_type(signal_type)
         if tp_type not in ("pips", "dollars"):
             logger.error(f"Invalid TP type: {tp_type}")
             return False
@@ -236,52 +305,58 @@ class TPConfig(BaseThresholdConfig):
             logger.error(f"TP value must be positive, got {value}")
             return False
 
-        self.config[section][asset_class]["value"] = value
-        self.config[section][asset_class]["type"] = tp_type
+        bucket = self.config["type_defaults"].setdefault(signal_type, {})
+        bucket[asset_class] = {
+            "type": tp_type,
+            "value": value,
+            "description": f"{signal_type} - {asset_class}",
+            "set_by": set_by,
+            "set_at": datetime.now(timezone.utc).isoformat(),
+        }
         self._save_config()
-        logger.info(f"Set {'scalp ' if scalp else ''}TP default: {asset_class} = {value} {tp_type}")
+        logger.info(f"Set TP default [{signal_type}]: {asset_class} = {value} {tp_type}")
         return True
 
-    def remove_override(self, symbol: str, scalp: bool = False) -> bool:
-        """Remove a per-symbol override."""
+    def remove_override(self, symbol: str, signal_type: str = "standard") -> bool:
+        """Remove a per-symbol override for a given signal type."""
+        signal_type = self._normalize_type(signal_type)
         s = symbol.upper()
-        section = "scalp_overrides" if scalp else "overrides"
-        if s in self.config.get(section, {}):
-            del self.config[section][s]
+        bucket = self.config["type_overrides"].get(signal_type, {})
+        if s in bucket:
+            del bucket[s]
             self._save_config()
-            logger.info(f"Removed {'scalp ' if scalp else ''}TP override: {s}")
+            logger.info(f"Removed TP override [{signal_type}]: {s}")
             return True
         return False
 
-    def get_display_info(self, symbol: str = None, scalp: bool = False) -> Dict:
-        """Return formatted config dict for display in Discord."""
+    def get_display_info(self, symbol: str = None, signal_type: str = "standard") -> Dict:
+        """Return formatted config dict for display."""
+        signal_type = self._normalize_type(signal_type)
         if symbol:
             s = symbol.upper()
-            cfg = self._get_config_for_symbol(s, scalp=scalp)
+            cfg = self._get_config_for_symbol(s, signal_type=signal_type)
             asset_class = self.determine_asset_class(s)
-            section = "scalp_overrides" if scalp else "overrides"
-            is_override = s in self.config.get(section, {})
+            bucket = self.config["type_overrides"].get(signal_type, {})
+            is_override = s in bucket
             result = {
                 "symbol": s,
                 "type": cfg["type"],
                 "value": cfg["value"],
                 "asset_class": asset_class,
                 "is_override": is_override,
-                "scalp": scalp,
+                "signal_type": signal_type,
             }
             if is_override:
-                ov = self.config[section][s]
+                ov = bucket[s]
                 result["set_by"] = ov.get("set_by", "Unknown")
                 result["set_at"] = ov.get("set_at", "Unknown")
             return result
 
+        type_overrides = self.config.get("type_overrides", {})
         return {
-            "defaults": self.config["defaults"],
-            "scalp_defaults": self.config.get("scalp_defaults", {}),
-            "overrides": self.config["overrides"],
-            "scalp_overrides": self.config.get("scalp_overrides", {}),
-            "total_overrides": len(self.config["overrides"]),
-            "total_scalp_overrides": len(self.config.get("scalp_overrides", {})),
+            "type_defaults": self.config.get("type_defaults", {}),
+            "type_overrides": type_overrides,
+            "total_overrides_by_type": {t: len(type_overrides.get(t, {})) for t in VALID_SIGNAL_TYPES},
         }
 
     def format_value(self, symbol: str, value: float) -> str:

@@ -244,6 +244,17 @@ class PriceStreamManager:
         self.health_monitor = health_monitor
         logger.info("Health monitor connected to stream manager")
 
+        # Wire the MT5 stream's per-poll callback into the health monitor so
+        # quiet ticks (no bid/ask change) still refresh last_seen.
+        ic_feed = self.feeds.get("icmarkets")
+        if ic_feed is not None:
+            def _mark_icmarkets_seen(mt5_symbol: str):
+                internal = self.symbol_mapper.get_internal_symbol(mt5_symbol, "icmarkets")
+                if internal:
+                    health_monitor.update_last_seen(internal, "icmarkets")
+
+            ic_feed.on_poll = _mark_icmarkets_seen
+
     async def _handle_icmarkets_stream(self):
         """Handle MT5 price stream"""
         feed = self.feeds["icmarkets"]

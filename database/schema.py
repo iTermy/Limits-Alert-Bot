@@ -2,9 +2,26 @@
 Database schema creation and initialization (PostgreSQL / Supabase)
 """
 
+import json
+from pathlib import Path
+
 from utils.logger import get_logger
 
 logger = get_logger("database.schema")
+
+# Inline channel-name → signal-type map for the one-time backfill. Mirrors
+# core.parser.pattern_parsers.CHANNEL_TYPE_MAP — kept here to avoid importing
+# the parser (and its heavy deps) into the DB layer.
+_CHANNEL_NAME_TO_TYPE = {
+    "scalps": "scalp",
+    "swing-trades": "swing",
+    "gold-tolls-map": "toll",
+    "general-tolls": "toll",
+    "oil-tolls": "toll",
+    "gold-pa-signals": "pa",
+    "price-action-trades": "pa",
+    "gold-1-1-rr": "1-1",
+}
 
 
 async def initialize_database(db_manager):
@@ -35,7 +52,7 @@ async def initialize_database(db_manager):
 
                 total_limits INTEGER DEFAULT 0,
                 limits_hit   INTEGER DEFAULT 0,
-                scalp        BOOLEAN DEFAULT FALSE,
+                type         TEXT DEFAULT 'standard',
 
                 created_at TIMESTAMPTZ DEFAULT NOW(),
                 updated_at TIMESTAMPTZ DEFAULT NOW(),
@@ -43,7 +60,9 @@ async def initialize_database(db_manager):
                 CONSTRAINT signals_status_check
                     CHECK (status IN ('active', 'hit', 'profit', 'breakeven', 'stop_loss', 'cancelled')),
                 CONSTRAINT signals_direction_check
-                    CHECK (direction IN ('long', 'short'))
+                    CHECK (direction IN ('long', 'short')),
+                CONSTRAINT signals_type_check
+                    CHECK (type IN ('standard', 'scalp', 'swing', 'toll', 'pa', '1-1'))
             )
         """)
 
@@ -152,15 +171,16 @@ async def _run_migrations(conn):
     Uses IF NOT EXISTS pattern to be idempotent.
     """
     migrations = [
-        # Add scalp column to signals table (stage12_tp_system)
+        # Add type column to signals table — replaces the legacy scalp boolean.
+        # The scalp column is backfilled into type below (in Python) and then dropped.
         """
         DO $$
         BEGIN
             IF NOT EXISTS (
                 SELECT 1 FROM information_schema.columns
-                WHERE table_name = 'signals' AND column_name = 'scalp'
+                WHERE table_name = 'signals' AND column_name = 'type'
             ) THEN
-                ALTER TABLE signals ADD COLUMN scalp BOOLEAN DEFAULT FALSE;
+                ALTER TABLE signals ADD COLUMN type TEXT DEFAULT 'standard';
             END IF;
         END $$;
         """,
@@ -226,3 +246,83 @@ async def _run_migrations(conn):
         await conn.execute(migration)
 
     logger.debug(f"Ran {len(migrations)} database migrations")
+
+    await _migrate_scalp_to_type(conn)
+
+
+async def _migrate_scalp_to_type(conn):
+    """
+    One-shot backfill: derive signals.type from channel_id (via channels.json)
+    and the legacy scalp boolean, then drop the scalp column.
+
+    Idempotent — if the scalp column is already gone, this is a no-op.
+    """
+    scalp_exists = await conn.fetchval(
+        """
+        SELECT EXISTS(
+            SELECT 1 FROM information_schema.columns
+            WHERE table_name = 'signals' AND column_name = 'scalp'
+        )
+        """
+    )
+    if not scalp_exists:
+        return
+
+    try:
+        channels_path = Path(__file__).resolve().parent.parent / "config" / "channels.json"
+        channels = json.loads(channels_path.read_text(encoding="utf-8")).get(
+            "monitored_channels", {}
+        )
+    except Exception as e:
+        logger.warning(f"Could not load channels.json for type backfill: {e}")
+        channels = {}
+
+    # channel_id (str) → type
+    id_to_type = {}
+    for name, cid in channels.items():
+        signal_type = _CHANNEL_NAME_TO_TYPE.get(name.lower())
+        if signal_type:
+            id_to_type[str(cid)] = signal_type
+
+    for cid, signal_type in id_to_type.items():
+        await conn.execute(
+            """
+            UPDATE signals
+            SET type = $1
+            WHERE channel_id = $2
+              AND (type IS NULL OR type = 'standard')
+            """,
+            signal_type,
+            cid,
+        )
+
+    # Fallback: any remaining rows that were marked scalp=true (e.g. text-detected
+    # scalps in channels we don't classify) become type='scalp'.
+    await conn.execute(
+        """
+        UPDATE signals
+        SET type = 'scalp'
+        WHERE scalp = TRUE AND (type IS NULL OR type = 'standard')
+        """
+    )
+
+    # Add CHECK constraint once data is clean.
+    await conn.execute(
+        """
+        DO $$
+        BEGIN
+            IF NOT EXISTS (
+                SELECT 1 FROM information_schema.table_constraints
+                WHERE constraint_name = 'signals_type_check'
+                  AND table_name = 'signals'
+            ) THEN
+                ALTER TABLE signals
+                ADD CONSTRAINT signals_type_check
+                CHECK (type IN ('standard', 'scalp', 'swing', 'toll', 'pa', '1-1'));
+            END IF;
+        END $$;
+        """
+    )
+
+    await conn.execute("ALTER TABLE signals DROP COLUMN scalp")
+    logger.info("Migrated signals.scalp → signals.type and dropped scalp column")

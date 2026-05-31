@@ -7,7 +7,7 @@ import asyncio
 import logging
 from collections.abc import AsyncIterator
 from datetime import datetime
-from typing import Dict, Set, Tuple
+from typing import Callable, Dict, Optional, Set, Tuple
 
 import MetaTrader5 as mt5
 
@@ -33,6 +33,12 @@ class ICMarketsStream:
         # Stream control
         self.streaming = False
         self.stream_task = None
+
+        # Optional callback invoked on every successful MT5 poll, regardless of
+        # whether the price changed. Used by the health monitor to refresh its
+        # last_seen timer so quiet periods (spread widening, illiquid windows)
+        # don't get misread as a stale feed. Argument is the MT5-format symbol.
+        self.on_poll: Optional[Callable[[str], None]] = None
 
         logger.info("ICMarketsStream initialized")
 
@@ -146,6 +152,15 @@ class ICMarketsStream:
 
                     if tick is None:
                         continue
+
+                    # Refresh health-monitor liveness on every successful poll,
+                    # even when bid/ask are unchanged — quiet markets still mean
+                    # the feed is alive.
+                    if self.on_poll is not None:
+                        try:
+                            self.on_poll(symbol)
+                        except Exception as cb_err:
+                            logger.debug(f"on_poll callback error for {symbol}: {cb_err}")
 
                     # Build price data
                     current_price = {

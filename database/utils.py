@@ -24,7 +24,7 @@ async def calculate_sl_pnl(signal_id: int, signal: dict, signal_db, tp_config) -
                 signal["direction"],
                 entry,
                 stop_price,
-                scalp=signal.get("scalp", False),
+                signal_type=signal.get("type", "standard"),
             )
     return combined
 

@@ -9,7 +9,7 @@ from discord.ext import commands
 
 from price_feeds.alert_config import AlertDistanceConfig
 from price_feeds.nm_config import NMConfig
-from price_feeds.tp_config import TPConfig
+from price_feeds.tp_config import VALID_SIGNAL_TYPES, TPConfig
 
 from .._base import BaseCog
 
@@ -17,6 +17,19 @@ ASSET_CLASSES = frozenset(["forex", "forex_jpy", "metals", "indices", "stocks", 
 VALID_TP_TYPES = ["pips", "dollars"]
 VALID_DIST_TYPES = ["pips", "dollars", "percentage"]
 VALID_NM_TYPES = frozenset(["pips", "dollars"])
+SIGNAL_TYPE_SET = frozenset(VALID_SIGNAL_TYPES)
+
+
+def _extract_type_flag(args):
+    """Pop a --type=X argument from args (if present). Returns (signal_type, remaining_args)."""
+    signal_type = None
+    remaining = []
+    for a in args:
+        if isinstance(a, str) and a.lower().startswith("--type="):
+            signal_type = a.split("=", 1)[1].lower()
+        else:
+            remaining.append(a)
+    return signal_type, remaining
 
 
 class ThresholdsCog(BaseCog):
@@ -33,11 +46,14 @@ class ThresholdsCog(BaseCog):
     @commands.command(name="tp")
     async def tp_command(self, ctx: commands.Context, subcommand: str = None, *args):
         """
-        Take-profit configuration.
+        Take-profit configuration (per signal type: standard, scalp, swing, toll, pa, 1-1).
 
-          !tp config [symbol]       — Show TP config (all, or for one symbol)
-          !tp set <target> <value> [pips|dollars]  — Set TP threshold (admin)
-          !tp remove <symbol>       — Remove per-symbol override (admin)
+          !tp config                                   — Show all type defaults
+          !tp config <symbol> [--type=X]               — Show effective config for a symbol
+          !tp config <type>                            — Show one type's full config
+          !tp set <type> <asset_class> <value> [pips|dollars]   — Set type's asset-class default (admin)
+          !tp set <symbol> <value> [pips|dollars] [--type=X]    — Set per-symbol override (admin)
+          !tp remove <symbol> [--type=X]               — Remove per-symbol override (admin)
 
         See !help tp for full details.
         """
@@ -48,162 +64,274 @@ class ThresholdsCog(BaseCog):
             return
 
         sub = subcommand.lower()
+        signal_type, args = _extract_type_flag(args)
 
         if sub == "config":
-            symbol = args[0] if args else None
-            await self._tp_show(ctx, symbol)
+            target = args[0] if args else None
+            await self._tp_show(ctx, target, signal_type)
 
         elif sub == "set":
             if not self.is_admin(ctx.author):
                 await ctx.send("❌ You don't have permission to use this command.")
                 return
-            if len(args) < 2:
-                await ctx.send("❌ Usage: `!tp set <target> <value> [pips|dollars]`")
-                return
-            target, value = args[0], args[1]
-            tp_type = args[2] if len(args) >= 3 else None
-            await self._tp_set(ctx, target, value, tp_type)
+            await self._tp_set(ctx, args, signal_type)
 
         elif sub == "remove":
             if not self.is_admin(ctx.author):
                 await ctx.send("❌ You don't have permission to use this command.")
                 return
             if not args:
-                await ctx.send("❌ Usage: `!tp remove <symbol>`")
+                await ctx.send("❌ Usage: `!tp remove <symbol> [--type=X]`")
                 return
-            await self._tp_remove(ctx, args[0])
+            await self._tp_remove(ctx, args[0], signal_type or "standard")
 
         else:
             await ctx.send(f"❌ Unknown subcommand `{subcommand}`. See `!help tp` for usage.")
 
-    async def _tp_show(self, ctx: commands.Context, symbol: str = None):
+    @staticmethod
+    def _fmt_tp_entry(cfg):
+        return (
+            f"{cfg['value']:.1f} pips"
+            if cfg.get("type") == "pips"
+            else f"${cfg.get('value', 0):.2f}"
+        )
+
+    async def _tp_show(self, ctx: commands.Context, target: str = None, signal_type: str = None):
         try:
-            if symbol:
-                symbol = symbol.upper()
-                info = self.tp_config.get_display_info(symbol)
-                value_str = self.tp_config.format_value(symbol, info["value"])
+            info = self.tp_config.get_display_info()
+            type_defaults = info["type_defaults"]
+            type_overrides = info["type_overrides"]
 
-                embed = discord.Embed(
-                    title=f"TP Config — {info['symbol']}",
-                    color=discord.Color.blue(),
-                )
-                embed.add_field(name="Asset Class", value=info["asset_class"], inline=True)
-                embed.add_field(name="TP Threshold", value=value_str, inline=True)
-                embed.add_field(
-                    name="Source",
-                    value="Override" if info["is_override"] else "Default",
-                    inline=True,
-                )
-
-                if info["is_override"]:
-                    embed.add_field(name="Set By", value=info.get("set_by", "Unknown"), inline=True)
-                    set_at = info.get("set_at", "")
-                    if set_at:
-                        try:
-                            dt = datetime.fromisoformat(set_at.replace("Z", "+00:00"))
-                            embed.add_field(
-                                name="Set At", value=dt.strftime("%Y-%m-%d %H:%M UTC"), inline=True
-                            )
-                        except Exception:
-                            embed.add_field(name="Set At", value=set_at[:19], inline=True)
-
-                embed.set_footer(
-                    text="Auto-TP triggers when last limit hits threshold and earlier limits are combined breakeven"
-                )
-                await ctx.send(embed=embed)
-
-            else:
-                info = self.tp_config.get_display_info()
-
+            # No target → show every type's asset-class defaults.
+            if target is None:
                 embed = discord.Embed(
                     title="Auto Take-Profit Configuration",
                     color=discord.Color.blue(),
+                    description="Per-type defaults. Use `!tp config <type>` for one type's details.",
                 )
-
-                defaults_lines = []
-                for cls, settings in info["defaults"].items():
-                    val_str = (
-                        f"{settings['value']:.1f} pips"
-                        if settings["type"] == "pips"
-                        else f"${settings['value']:.2f}"
+                for t in VALID_SIGNAL_TYPES:
+                    lines = []
+                    for ac, cfg in type_defaults.get(t, {}).items():
+                        lines.append(f"**{ac}**: {self._fmt_tp_entry(cfg)}")
+                    override_count = len(type_overrides.get(t, {}))
+                    suffix = f" · {override_count} override(s)" if override_count else ""
+                    embed.add_field(
+                        name=f"{t}{suffix}",
+                        value="\n".join(lines) if lines else "_inherits standard_",
+                        inline=False,
                     )
-                    defaults_lines.append(f"**{cls}**: {val_str}")
+                embed.set_footer(text="Use !tp set and !tp remove to manage thresholds")
+                await ctx.send(embed=embed)
+                return
 
+            target_lower = target.lower()
+
+            # Target is a signal type → show its full config.
+            if target_lower in SIGNAL_TYPE_SET:
+                embed = discord.Embed(
+                    title=f"TP Config — type: {target_lower}",
+                    color=discord.Color.blue(),
+                )
+                defaults_lines = [
+                    f"**{ac}**: {self._fmt_tp_entry(cfg)}"
+                    for ac, cfg in type_defaults.get(target_lower, {}).items()
+                ]
                 embed.add_field(
-                    name="Defaults",
-                    value="\n".join(defaults_lines) or "None",
+                    name="Asset-Class Defaults",
+                    value="\n".join(defaults_lines) or "_inherits standard_",
                     inline=False,
                 )
-
-                if info["overrides"]:
-                    override_lines = []
-                    for sym, ov in info["overrides"].items():
-                        val_str = (
-                            f"{ov['value']:.1f} pips"
-                            if ov["type"] == "pips"
-                            else f"${ov['value']:.2f}"
-                        )
-                        override_lines.append(
-                            f"**{sym}**: {val_str} _(by {ov.get('set_by', '?')})_"
-                        )
+                overrides = type_overrides.get(target_lower, {})
+                if overrides:
+                    ov_lines = [
+                        f"**{sym}**: {self._fmt_tp_entry(ov)} _(by {ov.get('set_by', '?')})_"
+                        for sym, ov in overrides.items()
+                    ]
                     embed.add_field(
-                        name=f"Per-Symbol Overrides ({info['total_overrides']})",
-                        value="\n".join(override_lines),
+                        name=f"Per-Symbol Overrides ({len(overrides)})",
+                        value="\n".join(ov_lines),
                         inline=False,
                     )
                 else:
                     embed.add_field(name="Per-Symbol Overrides", value="None", inline=False)
-
-                embed.set_footer(text="Use !tp set and !tp remove to manage thresholds")
                 await ctx.send(embed=embed)
+                return
+
+            # Otherwise the target is a symbol.
+            resolved_type = (signal_type or "standard").lower()
+            if resolved_type not in SIGNAL_TYPE_SET:
+                await ctx.send(
+                    f"❌ Unknown signal type `{resolved_type}`. Valid: {', '.join(VALID_SIGNAL_TYPES)}"
+                )
+                return
+
+            symbol = target.upper()
+            sym_info = self.tp_config.get_display_info(symbol, signal_type=resolved_type)
+            value_str = self.tp_config.format_value(symbol, sym_info["value"])
+
+            embed = discord.Embed(
+                title=f"TP Config — {sym_info['symbol']} ({resolved_type})",
+                color=discord.Color.blue(),
+            )
+            embed.add_field(name="Asset Class", value=sym_info["asset_class"], inline=True)
+            embed.add_field(name="TP Threshold", value=value_str, inline=True)
+            embed.add_field(
+                name="Source",
+                value="Override" if sym_info["is_override"] else "Default",
+                inline=True,
+            )
+
+            if sym_info["is_override"]:
+                embed.add_field(
+                    name="Set By", value=sym_info.get("set_by", "Unknown"), inline=True
+                )
+                set_at = sym_info.get("set_at", "")
+                if set_at:
+                    try:
+                        dt = datetime.fromisoformat(set_at.replace("Z", "+00:00"))
+                        embed.add_field(
+                            name="Set At", value=dt.strftime("%Y-%m-%d %H:%M UTC"), inline=True
+                        )
+                    except Exception:
+                        embed.add_field(name="Set At", value=set_at[:19], inline=True)
+
+            embed.set_footer(
+                text="Auto-TP triggers when last limit hits threshold and earlier limits are combined breakeven"
+            )
+            await ctx.send(embed=embed)
 
         except Exception as e:
             self.logger.error(f"Error in tp config: {e}", exc_info=True)
             await ctx.send(f"❌ Error fetching TP config: {e}")
 
-    async def _tp_set(self, ctx: commands.Context, target: str, value: str, tp_type: str = None):
+    async def _tp_set(self, ctx: commands.Context, args, signal_type_flag: str = None):
+        """
+        !tp set <type> <asset_class> <value> [pips|dollars]
+        !tp set <asset_class> <value> [pips|dollars]                  # implies type=standard
+        !tp set <symbol> <value> [pips|dollars] [--type=X]
+        """
         try:
-            try:
-                float_value = float(value)
-            except ValueError:
-                await ctx.send(f"❌ Invalid value `{value}` — must be a number.")
+            if len(args) < 2:
+                await ctx.send(
+                    "❌ Usage: `!tp set <type> <asset_class> <value> [pips|dollars]` "
+                    "or `!tp set <symbol> <value> [pips|dollars] [--type=X]`"
+                )
                 return
 
-            if float_value <= 0:
-                await ctx.send("❌ TP value must be positive.")
-                return
+            first = args[0].lower()
 
-            target_lower = target.lower()
-            target_upper = target.upper()
-
-            if tp_type is not None:
-                tp_type_lower = tp_type.lower()
-                if tp_type_lower not in VALID_TP_TYPES:
+            # First arg is a signal type → type-default form.
+            if first in SIGNAL_TYPE_SET:
+                if len(args) < 3:
                     await ctx.send(
-                        f"❌ Invalid type `{tp_type}`. Valid types: {', '.join(VALID_TP_TYPES)}"
+                        "❌ Usage: `!tp set <type> <asset_class> <value> [pips|dollars]`"
                     )
                     return
-            else:
-                tp_type_lower = self.tp_config.get_tp_type(target_upper)
+                signal_type = first
+                asset_class = args[1].lower()
+                value_arg = args[2]
+                tp_type_arg = args[3] if len(args) >= 4 else None
 
-            if target_lower in ASSET_CLASSES:
+                if asset_class not in ASSET_CLASSES:
+                    await ctx.send(
+                        f"❌ Unknown asset class `{asset_class}`. Valid: {', '.join(sorted(ASSET_CLASSES))}"
+                    )
+                    return
+
+                try:
+                    float_value = float(value_arg)
+                except ValueError:
+                    await ctx.send(f"❌ Invalid value `{value_arg}` — must be a number.")
+                    return
+                if float_value <= 0:
+                    await ctx.send("❌ TP value must be positive.")
+                    return
+
+                tp_type = (tp_type_arg or "").lower() if tp_type_arg else self.tp_config.ASSET_CLASS_TYPES.get(asset_class, "dollars")
+                if tp_type not in VALID_TP_TYPES:
+                    await ctx.send(
+                        f"❌ Invalid type `{tp_type_arg}`. Valid types: {', '.join(VALID_TP_TYPES)}"
+                    )
+                    return
+
                 success = self.tp_config.set_default(
-                    target_lower, float_value, tp_type_lower, set_by=ctx.author.name
+                    asset_class, float_value, tp_type, set_by=ctx.author.name, signal_type=signal_type
                 )
-                label = f"**{target_lower}** (default)"
+                label = f"**{signal_type} / {asset_class}** (default)"
+                val_display = (
+                    f"{float_value:.1f} pips" if tp_type == "pips" else f"${float_value:.2f}"
+                )
+
+            # First arg is an asset class → implies signal_type=standard.
+            elif first in ASSET_CLASSES:
+                value_arg = args[1]
+                tp_type_arg = args[2] if len(args) >= 3 else None
+                try:
+                    float_value = float(value_arg)
+                except ValueError:
+                    await ctx.send(f"❌ Invalid value `{value_arg}` — must be a number.")
+                    return
+                if float_value <= 0:
+                    await ctx.send("❌ TP value must be positive.")
+                    return
+                signal_type = (signal_type_flag or "standard").lower()
+                if signal_type not in SIGNAL_TYPE_SET:
+                    await ctx.send(
+                        f"❌ Unknown signal type `{signal_type}`. Valid: {', '.join(VALID_SIGNAL_TYPES)}"
+                    )
+                    return
+                tp_type = (tp_type_arg or "").lower() if tp_type_arg else self.tp_config.ASSET_CLASS_TYPES.get(first, "dollars")
+                if tp_type not in VALID_TP_TYPES:
+                    await ctx.send(
+                        f"❌ Invalid type `{tp_type_arg}`. Valid types: {', '.join(VALID_TP_TYPES)}"
+                    )
+                    return
+
+                success = self.tp_config.set_default(
+                    first, float_value, tp_type, set_by=ctx.author.name, signal_type=signal_type
+                )
+                label = f"**{signal_type} / {first}** (default)"
+                val_display = (
+                    f"{float_value:.1f} pips" if tp_type == "pips" else f"${float_value:.2f}"
+                )
+
+            # First arg is a symbol → per-symbol override.
             else:
+                symbol = first.upper()
+                value_arg = args[1]
+                tp_type_arg = args[2] if len(args) >= 3 else None
+                try:
+                    float_value = float(value_arg)
+                except ValueError:
+                    await ctx.send(f"❌ Invalid value `{value_arg}` — must be a number.")
+                    return
+                if float_value <= 0:
+                    await ctx.send("❌ TP value must be positive.")
+                    return
+                signal_type = (signal_type_flag or "standard").lower()
+                if signal_type not in SIGNAL_TYPE_SET:
+                    await ctx.send(
+                        f"❌ Unknown signal type `{signal_type}`. Valid: {', '.join(VALID_SIGNAL_TYPES)}"
+                    )
+                    return
+                tp_type = (tp_type_arg or "").lower() if tp_type_arg else self.tp_config.get_tp_type(symbol, signal_type=signal_type)
+                if tp_type not in VALID_TP_TYPES:
+                    await ctx.send(
+                        f"❌ Invalid type `{tp_type_arg}`. Valid types: {', '.join(VALID_TP_TYPES)}"
+                    )
+                    return
+
                 success = self.tp_config.set_override(
-                    target_upper, float_value, tp_type_lower, set_by=ctx.author.name
+                    symbol, float_value, tp_type, set_by=ctx.author.name, signal_type=signal_type
                 )
-                label = f"**{target_upper}** (override)"
+                label = f"**{symbol}** ({signal_type} override)"
+                val_display = (
+                    f"{float_value:.1f} pips" if tp_type == "pips" else f"${float_value:.2f}"
+                )
 
             if not success:
-                await ctx.send(f"❌ Failed to set TP for `{target}`. Check logs for details.")
+                await ctx.send("❌ Failed to set TP. Check logs for details.")
                 return
-
-            val_display = (
-                f"{float_value:.1f} pips" if tp_type_lower == "pips" else f"${float_value:.2f}"
-            )
 
             if self.services.monitor:
                 self.services.tp_config.reload_config()
@@ -219,22 +347,30 @@ class ThresholdsCog(BaseCog):
             self.logger.error(f"Error in tp set: {e}", exc_info=True)
             await ctx.send(f"❌ Error setting TP: {e}")
 
-    async def _tp_remove(self, ctx: commands.Context, symbol: str):
+    async def _tp_remove(self, ctx: commands.Context, symbol: str, signal_type: str = "standard"):
         try:
+            signal_type = signal_type.lower()
+            if signal_type not in SIGNAL_TYPE_SET:
+                await ctx.send(
+                    f"❌ Unknown signal type `{signal_type}`. Valid: {', '.join(VALID_SIGNAL_TYPES)}"
+                )
+                return
+
             symbol_upper = symbol.upper()
-            removed = self.tp_config.remove_override(symbol_upper)
+            removed = self.tp_config.remove_override(symbol_upper, signal_type=signal_type)
 
             if self.services.monitor:
                 self.services.tp_config.reload_config()
                 self.services.tp_monitor.tp_config = self.services.tp_config
 
             if removed:
-                fallback_val = self.tp_config.get_tp_value(symbol_upper)
+                fallback_val = self.tp_config.get_tp_value(symbol_upper, signal_type=signal_type)
                 fallback_display = self.tp_config.format_value(symbol_upper, fallback_val)
                 asset_class = self.tp_config.determine_asset_class(symbol_upper)
 
                 embed = discord.Embed(title="TP Override Removed", color=discord.Color.green())
                 embed.add_field(name="Symbol", value=symbol_upper, inline=True)
+                embed.add_field(name="Type", value=signal_type, inline=True)
                 embed.add_field(
                     name="Now Using",
                     value=f"{asset_class} default: {fallback_display}",
@@ -243,7 +379,7 @@ class ThresholdsCog(BaseCog):
                 await ctx.send(embed=embed)
             else:
                 await ctx.send(
-                    f"No override found for `{symbol_upper}`. It was already using the asset-class default."
+                    f"No `{signal_type}` override found for `{symbol_upper}`. It was already using the default."
                 )
 
         except Exception as e:

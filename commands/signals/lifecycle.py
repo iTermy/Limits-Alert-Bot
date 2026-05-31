@@ -12,7 +12,7 @@ from discord.ext import commands
 
 from price_feeds.alert_config import AlertDistanceConfig
 from price_feeds.tp_config import TPConfig
-from utils.formatting import format_price, get_status_emoji
+from utils.formatting import format_price, format_signal_type, get_status_emoji
 from utils.logger import get_logger
 
 from .._base import BaseCog
@@ -182,7 +182,9 @@ class LifecycleCog(BaseCog):
         embed.add_field(name="Direction", value=signal["direction"].upper(), inline=True)
         embed.add_field(name="Status", value=signal["status"].upper(), inline=True)
         embed.add_field(
-            name="Type", value="⚡ Scalp" if signal.get("scalp") else "📊 Setup", inline=True
+            name="Type",
+            value=format_signal_type(signal.get("type", "standard")),
+            inline=True,
         )
 
         stop_loss_formatted = (
@@ -331,7 +333,7 @@ class LifecycleCog(BaseCog):
 
             # Use the TP threshold from config as the recorded result
             result_pips = self.tp_config.get_tp_value(
-                signal["instrument"], scalp=signal.get("scalp", False)
+                signal["instrument"], signal_type=signal.get("type", "standard")
             )
         elif status == "stop_loss":
             # Sum P&L of all hit limits using stop_loss price as the exit price
@@ -348,7 +350,7 @@ class LifecycleCog(BaseCog):
                                 signal["direction"],
                                 entry,
                                 stop_price,
-                                scalp=signal.get("scalp", False),
+                                signal_type=signal.get("type", "standard"),
                             )
                     result_pips = combined
             except Exception as e:

@@ -126,8 +126,18 @@ HIGH_VALUE_INSTRUMENTS = {
 LONG_KEYWORDS = ["long", "buy"]
 SHORT_KEYWORDS = ["short", "sell"]
 
-# Channels that are always treated as scalps regardless of message content
-SCALP_CHANNELS = {"scalps", "gold-pa-signals", "gold-tolls-map", "general-tolls", "oil-tolls"}
+# Channel-name → signal type mapping. Channels not listed default to "standard"
+# unless the message body itself contains a "swing" or "scalp" keyword.
+CHANNEL_TYPE_MAP = {
+    "scalps": "scalp",
+    "swing-trades": "swing",
+    "gold-tolls-map": "toll",
+    "general-tolls": "toll",
+    "oil-tolls": "toll",
+    "gold-pa-signals": "pa",
+    "price-action-trades": "pa",
+    "gold-1-1-rr": "1-1",
+}
 
 # Expiry patterns
 EXPIRY_PATTERNS = {
@@ -677,19 +687,21 @@ def determine_limits_and_stop(
     return limits, stop_loss
 
 
-def is_scalp(text: str, channel_name: str = None) -> bool:
+def get_signal_type(text: str, channel_name: str = None) -> str:
     """
-    Determine if a signal is a scalp.
+    Determine the signal type from the channel and message body.
 
-    Returns True if:
-    - The channel is in SCALP_CHANNELS, OR
-    - The message text contains the word 'scalp'
+    Channel takes priority — a channel listed in CHANNEL_TYPE_MAP always
+    yields that type regardless of message content. Otherwise we look for
+    'swing' or 'scalp' keywords in the text, then fall back to 'standard'.
     """
-    if channel_name and channel_name.lower() in SCALP_CHANNELS:
-        return True
+    if channel_name and channel_name.lower() in CHANNEL_TYPE_MAP:
+        return CHANNEL_TYPE_MAP[channel_name.lower()]
+    if re.search(r"\bswing\b", text, re.IGNORECASE):
+        return "swing"
     if re.search(r"\bscalp\b", text, re.IGNORECASE):
-        return True
-    return False
+        return "scalp"
+    return "standard"
 
 
 # ============================================================================
@@ -755,7 +767,7 @@ class CorePatternParser:
 
             expiry_type = extract_expiry(cleaned, channel_name, self.channel_config)
             keywords = extract_keywords(cleaned)
-            scalp = is_scalp(message, channel_name)
+            signal_type = get_signal_type(message, channel_name)
 
             signal = ParsedSignal(
                 instrument=instrument,
@@ -767,7 +779,7 @@ class CorePatternParser:
                 parse_method="core",
                 keywords=keywords,
                 channel_name=channel_name,
-                scalp=scalp,
+                type=signal_type,
             )
 
             if validate_signal(signal):
@@ -881,10 +893,8 @@ class StockPatternParser:
             # Extract keywords
             keywords = extract_keywords(cleaned)
 
-            # Determine if this is a scalp
-            scalp = is_scalp(message, channel_name)
+            signal_type = get_signal_type(message, channel_name)
 
-            # Create signal
             signal = ParsedSignal(
                 instrument=instrument,
                 direction=direction,
@@ -895,7 +905,7 @@ class StockPatternParser:
                 parse_method="stock",
                 keywords=keywords,
                 channel_name=channel_name,
-                scalp=scalp,
+                type=signal_type,
             )
 
             # Validate before returning

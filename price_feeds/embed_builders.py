@@ -112,7 +112,7 @@ def _build_signal_embed(
 
     # ── Limits section ───────────────────────────────────────────────────────
     direction = signal.get("direction", "long").lower()
-    is_scalp = bool(signal.get("scalp", False))
+    signal_type = signal.get("type", "standard")
 
     sorted_limits = sorted(limits, key=lambda l: l.get("sequence_number", 0))
     limit_lines = []
@@ -128,7 +128,7 @@ def _build_signal_embed(
                 if entry:
                     try:
                         pnl_val = _tp_config.calculate_pnl(
-                            instrument, direction, entry, current_price, scalp=is_scalp
+                            instrument, direction, entry, current_price, signal_type=signal_type
                         )
                         pnl_str = _tp_config.format_value(instrument, abs(pnl_val))
                         sign = "+" if pnl_val >= 0 else "-"

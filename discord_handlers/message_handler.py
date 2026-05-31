@@ -228,7 +228,7 @@ class MessageHandler:
                                 f"Could not auto-hit limit for signal {signal_id} on profit reply: {_he}"
                             )
                 profit_result_pips = self.tp_config.get_tp_value(
-                    signal["instrument"], scalp=signal.get("scalp", False)
+                    signal["instrument"], signal_type=signal.get("type", "standard")
                 )
                 success = await asyncio.wait_for(
                     self.signal_db.manually_set_signal_status(

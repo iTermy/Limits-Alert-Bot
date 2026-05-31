@@ -130,6 +130,10 @@ class NearMissMonitor:
         if signal_id in self._nm_immune:
             return False
 
+        # Swing signals are not subject to near-miss cancellation.
+        if signal.get("type") == "swing":
+            return False
+
         # Find the first pending limit
         pending_limits = signal.get("pending_limits", [])
         first_limit = next(
