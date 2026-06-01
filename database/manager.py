@@ -90,82 +90,83 @@ class DatabaseManager(BaseConnectionManager):
     async def mark_limit_hit(self, limit_id: int, hit_price: float = None) -> Dict[str, Any]:
         """Mark a limit as hit and update signal status if needed."""
         async with self.get_connection() as conn:
-            limit_data = await conn.fetchrow(
-                """
-                SELECT l.*, s.status as signal_status, s.id as signal_id
-                FROM limits l
-                JOIN signals s ON l.signal_id = s.id
-                WHERE l.id = $1
-            """,
-                limit_id,
-            )
+            async with conn.transaction():
+                limit_data = await conn.fetchrow(
+                    """
+                    SELECT l.*, s.status as signal_status, s.id as signal_id
+                    FROM limits l
+                    JOIN signals s ON l.signal_id = s.id
+                    WHERE l.id = $1
+                """,
+                    limit_id,
+                )
 
-            if not limit_data:
-                logger.error(f"Limit {limit_id} not found")
-                return {"signal_id": None, "status_changed": False}
+                if not limit_data:
+                    logger.error(f"Limit {limit_id} not found")
+                    return {"signal_id": None, "status_changed": False}
 
-            limit_data = dict(limit_data)
-            signal_id = limit_data["signal_id"]
-            now = datetime.now(pytz.UTC)
+                limit_data = dict(limit_data)
+                signal_id = limit_data["signal_id"]
+                now = datetime.now(pytz.UTC)
 
-            await conn.execute(
-                """
-                UPDATE limits
-                SET status = $1, hit_time = $2, hit_price = $3, hit_alert_sent = TRUE
-                WHERE id = $4
-            """,
-                LimitStatus.HIT,
-                now,
-                hit_price or limit_data["price_level"],
-                limit_id,
-            )
+                await conn.execute(
+                    """
+                    UPDATE limits
+                    SET status = $1, hit_time = $2, hit_price = $3, hit_alert_sent = TRUE
+                    WHERE id = $4
+                """,
+                    LimitStatus.HIT,
+                    now,
+                    hit_price or limit_data["price_level"],
+                    limit_id,
+                )
 
-            await conn.execute(
-                """
-                UPDATE signals
-                SET limits_hit = limits_hit + 1, updated_at = $1
-                WHERE id = $2
-            """,
-                now,
-                signal_id,
-            )
-
-            status_changed = False
-            if limit_data["signal_status"] == SignalStatus.ACTIVE:
                 await conn.execute(
                     """
                     UPDATE signals
-                    SET status = $1, first_limit_hit_time = $2, updated_at = $3
-                    WHERE id = $4
+                    SET limits_hit = limits_hit + 1, updated_at = $1
+                    WHERE id = $2
                 """,
-                    SignalStatus.HIT,
-                    now,
                     now,
                     signal_id,
                 )
 
-                await conn.execute(
-                    """
-                    INSERT INTO status_changes (signal_id, old_status, new_status, change_type, reason)
-                    VALUES ($1, $2, $3, $4, $5)
-                """,
-                    signal_id,
-                    SignalStatus.ACTIVE,
-                    SignalStatus.HIT,
-                    ChangeType.AUTOMATIC,
-                    f"Limit {limit_id} hit",
-                )
+                status_changed = False
+                if limit_data["signal_status"] == SignalStatus.ACTIVE:
+                    await conn.execute(
+                        """
+                        UPDATE signals
+                        SET status = $1, first_limit_hit_time = $2, updated_at = $3
+                        WHERE id = $4
+                    """,
+                        SignalStatus.HIT,
+                        now,
+                        now,
+                        signal_id,
+                    )
 
-                status_changed = True
-                logger.info(f"Signal {signal_id} status changed to HIT (first limit hit)")
+                    await conn.execute(
+                        """
+                        INSERT INTO status_changes (signal_id, old_status, new_status, change_type, reason)
+                        VALUES ($1, $2, $3, $4, $5)
+                    """,
+                        signal_id,
+                        SignalStatus.ACTIVE,
+                        SignalStatus.HIT,
+                        ChangeType.AUTOMATIC,
+                        f"Limit {limit_id} hit",
+                    )
 
-            return {
-                "signal_id": signal_id,
-                "status_changed": status_changed,
-                "signal_status": SignalStatus.HIT
-                if status_changed
-                else limit_data["signal_status"],
-            }
+                    status_changed = True
+                    logger.info(f"Signal {signal_id} status changed to HIT (first limit hit)")
+
+                return {
+                    "signal_id": signal_id,
+                    "status_changed": status_changed,
+                    "signal_status": SignalStatus.HIT
+                    if status_changed
+                    else limit_data["signal_status"],
+                }
 
     async def get_active_signals_for_tracking(self) -> List[SignalData]:
         """Get all signals that need price tracking (ACTIVE or HIT status)."""

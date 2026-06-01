@@ -9,6 +9,7 @@ import discord
 import pytz
 
 from database.utils import calculate_sl_pnl
+from models.signal import LimitData
 from utils.config_loader import load_settings
 from utils.logger import get_logger
 
@@ -229,7 +230,28 @@ class StreamingPriceMonitor:
 
             for signal in signals:
                 if signal.get("status") == "hit":
-                    await self.tp_monitor.refresh_hit_limits(signal["signal_id"])
+                    signal_id = signal["signal_id"]
+                    await self.tp_monitor.refresh_hit_limits(signal_id)
+                    # M7: populate hit limits in active_signals so embeds reconstruct
+                    # correctly after restart (pending_limits alone is not enough for HIT signals)
+                    try:
+                        hit_limit_rows = await self.signal_db.get_hit_limits_for_signal(signal_id)
+                        for row in hit_limit_rows:
+                            self.active_signals[signal_id].limits.append(
+                                LimitData(
+                                    id=row["limit_id"],
+                                    signal_id=signal_id,
+                                    price_level=row["price_level"],
+                                    sequence_number=row["sequence_number"],
+                                    status="hit",
+                                    hit_time=row.get("hit_time"),
+                                    hit_price=row.get("hit_price"),
+                                )
+                            )
+                    except Exception as _m7_err:
+                        logger.error(
+                            f"Failed to load hit limits for signal {signal_id}: {_m7_err}"
+                        )
 
             logger.info(
                 f"Loaded {len(signals)} active signals across {len(symbols_needed)} symbols"

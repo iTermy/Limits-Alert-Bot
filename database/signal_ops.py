@@ -32,16 +32,11 @@ class SignalDatabase:
     ) -> Tuple[bool, Optional[int]]:
         """Save a parsed signal to the database."""
         try:
-            existing = await self.get_signal_by_message_id(message_id)
-            if existing:
-                if existing["status"] == SignalStatus.CANCELLED:
-                    logger.info(f"Reactivating cancelled signal for message {message_id}")
-                    await self.reactivate_cancelled_signal(existing["id"], parsed_signal)
-                    return True, existing["id"]
-                logger.warning(f"Signal already exists for message {message_id}")
-                return False, existing["id"]
-
             expiry_time = calculate_expiry(parsed_signal.expiry_type)
+
+            existing_id = None
+            existing_status = None
+            signal_id = None
 
             async with self.db.get_connection() as conn:
                 signal_id = await conn.fetchval(
@@ -51,6 +46,7 @@ class SignalDatabase:
                         stop_loss, expiry_type, expiry_time, total_limits, status, type
                     )
                     VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10)
+                    ON CONFLICT (message_id) DO NOTHING
                     RETURNING id
                     """,
                     message_id,
@@ -65,17 +61,38 @@ class SignalDatabase:
                     getattr(parsed_signal, "type", "standard"),
                 )
 
-                if signal_id and parsed_signal.limits:
-                    await conn.executemany(
-                        """
-                        INSERT INTO limits (signal_id, price_level, sequence_number, status)
-                        VALUES ($1, $2, $3, $4)
-                        """,
-                        [
-                            (signal_id, level, idx + 1, LimitStatus.PENDING)
-                            for idx, level in enumerate(parsed_signal.limits)
-                        ],
+                if signal_id is None:
+                    # Conflict: row already existed. Determine what to do.
+                    row = await conn.fetchrow(
+                        "SELECT id, status FROM signals WHERE message_id = $1", message_id
                     )
+                    if row is not None:
+                        existing_id = row["id"]
+                        existing_status = row["status"]
+                else:
+                    if parsed_signal.limits:
+                        await conn.executemany(
+                            """
+                            INSERT INTO limits (signal_id, price_level, sequence_number, status)
+                            VALUES ($1, $2, $3, $4)
+                            """,
+                            [
+                                (signal_id, level, idx + 1, LimitStatus.PENDING)
+                                for idx, level in enumerate(parsed_signal.limits)
+                            ],
+                        )
+
+            # Handle conflict result after releasing connection
+            if signal_id is None:
+                if existing_id is None:
+                    logger.error(f"Signal not found after conflict on message {message_id}")
+                    return False, None
+                if existing_status == SignalStatus.CANCELLED:
+                    logger.info(f"Reactivating cancelled signal for message {message_id}")
+                    await self.reactivate_cancelled_signal(existing_id, parsed_signal)
+                    return True, existing_id
+                logger.warning(f"Signal already exists for message {message_id} (status={existing_status})")
+                return False, existing_id
 
             logger.info(
                 f"Saved signal {signal_id}: {parsed_signal.instrument} "
@@ -849,7 +866,7 @@ class SignalDatabase:
     async def expire_old_signals(self) -> int:
         """Check and expire signals past their expiry time."""
         query = """
-            SELECT id, status FROM signals
+            SELECT id, status, expiry_type FROM signals
             WHERE status IN ($1, $2)
             AND expiry_time IS NOT NULL
             AND expiry_time < CURRENT_TIMESTAMP
@@ -861,51 +878,84 @@ class SignalDatabase:
             return 0
 
         count = 0
+        rollover_count = 0
 
         # Each signal gets its own transaction so a single failure does not
-        # roll back signals that were already successfully expired.
+        # roll back signals that were already successfully processed.
         for signal in expired:
             signal_id = signal["id"]
             old_status = signal["status"]
 
-            try:
-                async with self.db.get_connection() as conn:
-                    # C3 invariant: cancel limits before updating signal status
-                    await conn.execute(
-                        """
-                        UPDATE limits
-                        SET status = 'cancelled'
-                        WHERE signal_id = $1 AND status = 'pending'
-                    """,
-                        signal_id,
-                    )
-                    await conn.execute(
-                        """
-                        UPDATE signals
-                        SET status = $1, updated_at = CURRENT_TIMESTAMP, closed_at = CURRENT_TIMESTAMP, closed_reason = $2
-                        WHERE id = $3
-                    """,
-                        SignalStatus.CANCELLED,
-                        "expiry",
-                        signal_id,
-                    )
-                    await conn.execute(
-                        """
-                        INSERT INTO status_changes (signal_id, old_status, new_status, change_type, reason)
-                        VALUES ($1, $2, $3, $4, $5)
-                    """,
-                        signal_id,
-                        old_status,
-                        SignalStatus.CANCELLED,
-                        "automatic",
-                        "Expired",
-                    )
-                count += 1
-            except Exception as e:
-                logger.error(f"Error expiring signal {signal_id}: {e}", exc_info=True)
+            if old_status == SignalStatus.HIT:
+                # HIT signals roll over to the next expiry window instead of cancelling.
+                # Re-using calculate_expiry ensures the next occurrence is always in the future.
+                next_expiry = calculate_expiry(signal["expiry_type"])
+                if next_expiry is None:
+                    continue
+                try:
+                    async with self.db.get_connection() as conn:
+                        await conn.execute(
+                            """
+                            UPDATE signals
+                            SET expiry_time = $1, updated_at = CURRENT_TIMESTAMP
+                            WHERE id = $2
+                            """,
+                            _parse_dt(next_expiry),
+                            signal_id,
+                        )
+                        await conn.execute(
+                            """
+                            INSERT INTO status_changes (signal_id, old_status, new_status, change_type, reason)
+                            VALUES ($1, $2, $3, $4, $5)
+                            """,
+                            signal_id,
+                            old_status,
+                            old_status,
+                            "automatic",
+                            "rollover",
+                        )
+                    rollover_count += 1
+                except Exception as e:
+                    logger.error(f"Error rolling over signal {signal_id}: {e}", exc_info=True)
+            else:
+                try:
+                    async with self.db.get_connection() as conn:
+                        # C3 invariant: cancel limits before updating signal status
+                        await conn.execute(
+                            """
+                            UPDATE limits
+                            SET status = 'cancelled'
+                            WHERE signal_id = $1 AND status = 'pending'
+                        """,
+                            signal_id,
+                        )
+                        await conn.execute(
+                            """
+                            UPDATE signals
+                            SET status = $1, updated_at = CURRENT_TIMESTAMP, closed_at = CURRENT_TIMESTAMP, closed_reason = $2
+                            WHERE id = $3
+                        """,
+                            SignalStatus.CANCELLED,
+                            "expiry",
+                            signal_id,
+                        )
+                        await conn.execute(
+                            """
+                            INSERT INTO status_changes (signal_id, old_status, new_status, change_type, reason)
+                            VALUES ($1, $2, $3, $4, $5)
+                        """,
+                            signal_id,
+                            old_status,
+                            SignalStatus.CANCELLED,
+                            "automatic",
+                            "Expired",
+                        )
+                    count += 1
+                except Exception as e:
+                    logger.error(f"Error expiring signal {signal_id}: {e}", exc_info=True)
 
-        if count > 0:
-            logger.info(f"Expired {count} signals")
+        if count > 0 or rollover_count > 0:
+            logger.info(f"Expired {count} signals, rolled over {rollover_count} HIT signals")
 
         return count
 

@@ -1,6 +1,6 @@
 # Pre-Production Hardening — Phased Implementation Plan
 
-> **Status:** Phases 1–5 complete (2026-05-31). Phase 6 is next.
+> **Status:** Phases 1–6 complete (2026-05-31). Phase 7 is next.
 > **Authored:** 2026-05-31 (Opus 4.7, plan mode).
 > **Executor:** Sonnet, one phase at a time.
 
@@ -198,31 +198,31 @@ Covered by 4.1.
 
 ---
 
-### Phase 6 — Lifecycle correctness
+### Phase 6 — Lifecycle correctness ✅ COMPLETE
 
-#### 6.1 H5: HIT signals roll over instead of cancel at expiry
+#### 6.1 H5: HIT signals roll over instead of cancel at expiry ✅
 - **Files:** `TM/database/signal_ops.py:740-800` (`expire_old_signals`), `TM/database/utils.py` (`calculate_expiry`).
 - **Steps:**
   1. In `expire_old_signals`, skip signals with status `hit`. For each, compute the next expiry (e.g. `day_end` → next day's 4:45 PM EST) and `UPDATE signals SET expiry_time = ...`.
   2. Add an audit row in `status_changes` with `change_type='automatic'` and `reason='rollover'`.
 - **Acceptance:** HIT signal at 4:46 PM EST is not cancelled; its `expiry_time` advances; `active` signals still cancel as before.
 
-#### 6.2 M7: TM reloads hit limits on restart
+#### 6.2 M7: TM reloads hit limits on restart ✅
 - **Files:** `TM/price_feeds/streaming_monitor.py:195-235` (active-set loader).
 - **Steps:** when loading active signals on startup, also fetch each signal's hit limits and populate the in-memory limit-state cache so embed reconstruction is correct.
 - **Acceptance:** restart with a HIT signal in-flight → embed shows correct hit-limit highlighting and next-pending-limit logic.
 
-#### 6.3 M8: `save_signal` TOCTOU race
+#### 6.3 M8: `save_signal` TOCTOU race ✅
 - **Files:** `TM/database/signal_ops.py:30-88` (`save_signal`).
 - **Steps:** rewrite the duplicate-check pattern as `INSERT ... ON CONFLICT (message_id) DO NOTHING RETURNING id`. If no row returned, run the cancelled-message reactivation check in the same flow.
 - **Acceptance:** simulated duplicate parse → one row inserted; reactivation path still works.
 
-#### 6.4 M9: atomic limit-hit update
+#### 6.4 M9: atomic limit-hit update ✅
 - **Files:** `TM/database/manager.py` (`mark_limit_hit`).
 - **Steps:** combine the two updates (limit row + signal counters) into a single transaction over the same connection (`BEGIN ... COMMIT`).
 - **Acceptance:** under a forced disconnect mid-flight, neither the limit row nor `limits_hit` is partially updated.
 
-#### 6.5 M10: EX sees `closed_reason`
+#### 6.5 M10: EX sees `closed_reason` ✅
 - **Files:** `EX/bot/db/queries.py:3` and the SELECT projection wherever signals are fetched.
 - **Steps:** add `closed_reason` to the projection; pass through to the force-exit handler so logs distinguish `manual`, `automatic`, `expiry`.
 - **Acceptance:** EX log shows the cause when a signal closes externally.
@@ -266,7 +266,7 @@ The full hardening pass is complete when:
 7. ✅ Stale rollover ticks at the spread-hour boundary do not fire alerts. *(Phase 4.3)*
 8. ✅ `!breakeven` / `!profit` halts trailing within one cycle. *(Phase 5.1)*
 9. ✅ Repeated SL-modify failures DM admin once, not on every cycle. *(Phase 5.2)*
-10. HIT signals at expiry roll over instead of cancelling. *(Phase 6.1)*
+10. ✅ HIT signals at expiry roll over instead of cancelling. *(Phase 6.1)*
 11. License expiry cancels pending, closes filled, and halts polling. *(Phase 7.1)*
 12. Per-instrument `risk_percent` resolves correctly. *(Phase 7.2)*
 
