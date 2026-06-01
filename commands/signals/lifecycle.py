@@ -277,8 +277,10 @@ class LifecycleCog(BaseCog):
         await ctx.send(embed=embed)
 
     @commands.command(name="setstatus", description="Set signal status")
-    async def set_signal_status(self, ctx: commands.Context, signal_id: int, status: str):
-        """Manually set a signal's status"""
+    async def set_signal_status(
+        self, ctx: commands.Context, signal_id: int, status: str, *, rest: str = ""
+    ):
+        """Manually set a signal's status. Append --force to bypass the reactivation guard (admin only)."""
         valid_statuses = [
             "active",
             "hit",
@@ -289,6 +291,7 @@ class LifecycleCog(BaseCog):
             "cancel",
         ]
         status = status.lower()
+        force = "--force" in rest.split()
 
         if status == "cancel":
             status = "cancelled"
@@ -301,6 +304,49 @@ class LifecycleCog(BaseCog):
         if not signal:
             await ctx.send(f"❌ Signal #{signal_id} not found")
             return
+
+        # Reactivation guard: block if current price has passed any pending limits,
+        # unless the admin explicitly requests --force.
+        if status == "active" and signal["status"] == "cancelled":
+            if force:
+                is_admin = (
+                    hasattr(ctx.author, "guild_permissions")
+                    and ctx.author.guild_permissions.administrator
+                )
+                if not is_admin:
+                    await ctx.send("❌ `--force` requires administrator permissions.")
+                    return
+            else:
+                try:
+                    guard = await self.signal_db.check_reactivation_guard(signal_id)
+                except Exception as _ge:
+                    logger.warning(
+                        f"Reactivation guard check failed for signal {signal_id}: {_ge}"
+                    )
+                    guard = None
+
+                if guard and guard["blocked"]:
+                    instrument = guard["instrument"]
+                    cur = format_price(guard["current_price"], instrument)
+                    limit_lines = "\n".join(
+                        f"• Limit #{lim['sequence_number']}: "
+                        f"{format_price(float(lim['price_level']), instrument)}"
+                        for lim in guard["blocked_limits"]
+                    )
+                    embed = discord.Embed(
+                        title="❌ Reactivation Blocked",
+                        description=(
+                            f"Price has already moved past pending limits for signal #{signal_id}.\n"
+                            f"Current price: **{cur}**\n\n"
+                            f"**Limits past:**\n{limit_lines}"
+                        ),
+                        color=0xFF0000,
+                    )
+                    embed.set_footer(
+                        text=f"Use '!setstatus {signal_id} active --force' to override (admin only)"
+                    )
+                    await ctx.send(embed=embed)
+                    return
 
         # Calculate result_pips for profit and stop_loss
         result_pips = None

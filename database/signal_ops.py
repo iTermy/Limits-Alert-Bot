@@ -411,6 +411,108 @@ class SignalDatabase:
             logger.error(f"Error reactivating signal: {e}", exc_info=True)
             return False
 
+    async def get_overlapping_signals(
+        self, instrument: str, min_limit: float, max_limit: float, exclude_signal_id: int
+    ) -> List[Dict[str, Any]]:
+        """
+        Return active/hit signals on the same instrument whose pending-limit price range
+        intersects [min_limit, max_limit].  Used for overlap detection on new signal saves.
+        """
+        query = """
+            SELECT
+                s.id,
+                s.instrument,
+                s.direction,
+                s.message_id,
+                s.channel_id,
+                s.status
+            FROM signals s
+            JOIN (
+                SELECT signal_id,
+                       MIN(price_level) AS min_price,
+                       MAX(price_level) AS max_price
+                FROM limits
+                WHERE status = 'pending'
+                GROUP BY signal_id
+            ) lr ON lr.signal_id = s.id
+            WHERE s.status IN ('active', 'hit')
+              AND UPPER(s.instrument) = $1
+              AND s.id != $2
+              AND lr.min_price <= $4
+              AND lr.max_price >= $3
+        """
+        rows = await self.db.fetch_all(
+            query, (instrument.upper(), exclude_signal_id, float(min_limit), float(max_limit))
+        )
+        return [dict(r) for r in rows]
+
+    async def _get_live_price(self, instrument: str) -> Optional[Dict[str, Any]]:
+        """Fetch current bid/ask from live_prices table."""
+        row = await self.db.fetch_one(
+            "SELECT bid, ask FROM live_prices WHERE symbol = $1",
+            (instrument.upper(),),
+        )
+        return dict(row) if row else None
+
+    async def check_reactivation_guard(self, signal_id: int) -> Optional[Dict[str, Any]]:
+        """
+        Before reactivating a cancelled signal, check whether the current price has
+        already moved to or past any of its would-be-pending limits.
+
+        Returns None if the guard cannot run (missing price data) — caller should
+        allow reactivation in that case.  Otherwise returns a dict:
+          - blocked (bool): True if at least one limit would fire immediately
+          - blocked_limits (list): dicts with id, price_level, sequence_number
+          - current_price (float): mid-price used for comparison
+          - instrument (str)
+          - direction (str)
+        """
+        signal = await self.db.fetch_one(
+            "SELECT id, instrument, direction, status FROM signals WHERE id = $1",
+            (signal_id,),
+        )
+        if not signal or signal["status"] != SignalStatus.CANCELLED:
+            return None
+
+        # These are limits that were pending at cancellation time and will become
+        # pending again on reactivation (currently stored as 'cancelled').
+        pending_limits = await self.db.fetch_all(
+            """SELECT id, price_level, sequence_number
+               FROM limits
+               WHERE signal_id = $1 AND status = 'cancelled'
+               ORDER BY sequence_number""",
+            (signal_id,),
+        )
+        if not pending_limits:
+            return None
+
+        price_data = await self._get_live_price(signal["instrument"])
+        if not price_data or price_data.get("bid") is None or price_data.get("ask") is None:
+            logger.warning(
+                f"No live price for {signal['instrument']} — reactivation guard skipped"
+            )
+            return None
+
+        mid = (float(price_data["bid"]) + float(price_data["ask"])) / 2
+        direction = signal["direction"]
+
+        # A limit is "past" if the hit condition would fire immediately on reactivation:
+        # long hits when price ≤ limit; short hits when price ≥ limit.
+        blocked = [
+            dict(lim)
+            for lim in pending_limits
+            if (direction == "long" and mid <= float(lim["price_level"]))
+            or (direction == "short" and mid >= float(lim["price_level"]))
+        ]
+
+        return {
+            "blocked": len(blocked) > 0,
+            "blocked_limits": blocked,
+            "current_price": mid,
+            "instrument": signal["instrument"],
+            "direction": direction,
+        }
+
     async def manually_set_signal_status(
         self,
         signal_id: int,

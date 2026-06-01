@@ -1,6 +1,6 @@
 # Pre-Production Hardening — Phased Implementation Plan
 
-> **Status:** Phases 1 and 2 complete (2026-05-31). Phase 3 is next.
+> **Status:** Phases 1, 2, and 3 complete (2026-05-31). Phase 4 is next.
 > **Authored:** 2026-05-31 (Opus 4.7, plan mode).
 > **Executor:** Sonnet, one phase at a time.
 
@@ -112,28 +112,21 @@ Core "don't take unintended trades" phase.
 
 ---
 
-### Phase 3 — Reactivation and overlap discipline
+### Phase 3 — Reactivation and overlap discipline ✅ COMPLETE
 
-#### 3.1 C1: overlapping limit-zone risk
-- **Files:** `TM/price_feeds/streaming_monitor.py:284-330`, `EX/bot/core/sync_cycle.py:316-325`, `EX/bot/trading/lot_calculator.py`.
-- **Steps:** pick one approach with the user before coding.
-  - **Option A — EX-side merge:** before placement, group all pending limits per instrument across all active signals; if two limit prices are within a small tolerance (configurable, e.g. 5 pips forex / 0.5% crypto / $1 metals), place one combined order using the more conservative SL of the two and tag the SQLite row with both `signal_id`s. Lot sizing uses the wider of the two SL distances.
-  - **Option B (Recommended) — Hard cap per instrument:** sum proposed lots per instrument; cap at `max_lot_per_instrument` from config; if cap exceeded, partially fill from the most-recent signal's limits. Simpler; matches user intent of bounding risk without entangling per-signal accounting.
-- **Acceptance:** two overlapping signals on GBPUSD with hardcoded limits — total exposure does not exceed `max_lot_per_instrument`; EX log shows which limits were dropped or partially placed.
+#### 3.1 C1: overlapping limit-zone risk ✅
+- **Files:** `TM/discord_handlers/message_handler.py`, `TM/database/signal_ops.py`
+- User-specified approach: on new signal save, query for active/hit signals on the same instrument whose pending-limit price range intersects the new signal's range. If found, post a Discord message with ✅/❌ reactions. ✅ or 30s timeout → cancel old signal(s). ❌ → keep both.
+- Added `get_overlapping_signals()` to `SignalDatabase`; range overlap query uses a subquery join on `MIN/MAX(price_level)`.
+- `process_signal()` runs the check after save and spawns a background task `_handle_overlap_prompt()` so the save path is non-blocking.
+- Prompt restricts reactions to signal author or guild admins; deletes itself after outcome.
 
-#### 3.2 C6: reactivation guard (TM) + placement contract (EX)
-- **TM side — alert-bot guard (explicit user request):**
-  - **Files:** `TM/database/signal_ops.py:343-409` (`reactivate_cancelled_signal`) and the reply-command callers in `TM/commands/signals/lifecycle.py` and `TM/discord_handlers/message_handler.py`.
-  - **Steps:**
-    1. Before reactivating, fetch the current price for the signal's instrument from `live_prices` (or the latest in-memory tick if running).
-    2. For each currently-pending limit, check whether price has already moved past it (long: price > limit; short: price < limit).
-    3. If **any** pending limit is past, block reactivation. Return a structured rejection that includes the offending limit indexes so the reply handler can post a clear embed-reply / DM to the requester.
-    4. Allow override via `!setstatus active --force` (admin only).
-  - **Acceptance:** signal with hit-1/2, cancelled, then price moved past limit 3 → reactivation reply is rejected with a readable message; `--force` succeeds.
-- **EX side — placement contract (verify, no behavior change expected):**
-  - **Files:** `EX/bot/core/sync_cycle.py`, `EX/bot/trading/order_placer.py`.
-  - **Steps:** confirm the existing "new limit detected → place" path treats reactivated limits identically. On reactivation EX should attempt all pending limits; MT5 invalid-price retcodes are acceptable and should log `limit_id`.
-  - **Acceptance:** reactivated signal with limits 3-5 pending (none past) → EX places 3-5 fresh; with one past, that one logs cleanly and the others go through.
+#### 3.2 C6: reactivation guard (TM) + placement contract (EX) ✅
+- **Files:** `TM/database/signal_ops.py`, `TM/discord_handlers/message_handler.py`, `TM/commands/signals/lifecycle.py`
+- Added `check_reactivation_guard(signal_id)` and `_get_live_price(instrument)` to `SignalDatabase`. Guard checks cancelled limits (which will become pending on reactivation) against the current mid-price from `live_prices`. Block condition: `long: mid ≤ limit` / `short: mid ≥ limit` (same as the hit-check condition, so limits that would fire immediately are caught). Returns `None` if no price data — fail-open.
+- Guard applied in: reply-command "reactivate" path in `message_handler.py`; `!setstatus <id> active` in `lifecycle.py`.
+- `!setstatus` signature changed to `(ctx, signal_id, status, *, rest="")` to accept `--force` flag; force bypasses guard but requires administrator permissions.
+- **EX side:** no behavior change needed — existing path treats reactivated limits identically.
 
 ---
 

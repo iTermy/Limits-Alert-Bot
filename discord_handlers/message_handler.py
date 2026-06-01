@@ -11,7 +11,7 @@ import discord
 from database.utils import calculate_sl_pnl
 from price_feeds.embed_builders import _build_signal_embed, _set_archive_footer
 from price_feeds.tp_config import TPConfig
-from utils.formatting import get_channel_name as _get_channel_name
+from utils.formatting import format_price, get_channel_name as _get_channel_name
 from utils.logger import get_logger
 
 logger = get_logger("message_handler")
@@ -312,6 +312,29 @@ class MessageHandler:
                         f"❌ Signal is not cancelled (current status: {signal['status']})"
                     )
                     return
+
+                try:
+                    guard = await self.signal_db.check_reactivation_guard(signal_id)
+                except Exception as _ge:
+                    logger.warning(f"Reactivation guard check failed for signal {signal_id}: {_ge}")
+                    guard = None
+
+                if guard and guard["blocked"]:
+                    instrument = guard["instrument"]
+                    cur = format_price(guard["current_price"], instrument)
+                    limit_lines = "\n".join(
+                        f"• Limit #{lim['sequence_number']}: "
+                        f"{format_price(float(lim['price_level']), instrument)}"
+                        for lim in guard["blocked_limits"]
+                    )
+                    await message.reply(
+                        f"❌ Cannot reactivate — price has already moved past pending limits.\n"
+                        f"Current price: **{cur}**\n"
+                        f"**Limits past:**\n{limit_lines}\n\n"
+                        f"An admin can use `!setstatus {signal_id} active --force` to override."
+                    )
+                    return
+
                 from core.parser import parse_signal
 
                 parsed = None
@@ -526,6 +549,20 @@ class MessageHandler:
                     self.logger.info(
                         f"Signal #{signal_id} processed: {parsed.instrument} {parsed.direction}"
                     )
+
+                    if parsed.limits and signal_id:
+                        min_limit = min(parsed.limits)
+                        max_limit = max(parsed.limits)
+                        try:
+                            overlapping = await self.signal_db.get_overlapping_signals(
+                                parsed.instrument, min_limit, max_limit, signal_id
+                            )
+                            if overlapping:
+                                asyncio.create_task(
+                                    self._handle_overlap_prompt(message, signal_id, overlapping)
+                                )
+                        except Exception as _oe:
+                            self.logger.warning(f"Overlap check failed for signal {signal_id}: {_oe}")
                 else:
                     existing = await self.signal_db.get_signal_by_message_id(str(message.id))
                     if existing and existing["status"] != "cancelled":
@@ -539,6 +576,119 @@ class MessageHandler:
         except Exception as e:
             self.logger.error(f"Error processing signal: {str(e)!r}", exc_info=True)
             await self.safe_add_reaction(message, "⚠️")
+
+    async def _handle_overlap_prompt(
+        self,
+        message: discord.Message,
+        new_signal_id: int,
+        overlapping: list,
+    ):
+        """
+        Post an overlap warning in the same channel, wait 30 s for a reaction,
+        then cancel the old signal(s) (✅ or timeout) or keep both (❌).
+        Deleted the prompt message afterward regardless of outcome.
+        """
+        try:
+            guild_id = message.guild.id if message.guild else None
+            channel = message.channel
+
+            parts = []
+            for sig in overlapping:
+                msg_id = str(sig["message_id"])
+                ch_id = sig["channel_id"]
+                label = f"Signal #{sig['id']} ({sig['instrument']} {sig['direction'].upper()})"
+                if guild_id and not msg_id.startswith("manual_"):
+                    url = f"https://discord.com/channels/{guild_id}/{ch_id}/{msg_id}"
+                    label = f"[{label}]({url})"
+                parts.append(f"• {label}")
+
+            overlap_list = "\n".join(parts)
+            prompt_content = (
+                f"⚠️ **Overlap Detected** — Signal #{new_signal_id} overlaps with:\n"
+                f"{overlap_list}\n\n"
+                f"✅ — Cancel the old signal(s), keep this one\n"
+                f"❌ — Keep both signals active\n"
+                f"*(Auto-cancels old signal(s) in 30 seconds if no reaction)*"
+            )
+
+            prompt_msg = await channel.send(prompt_content)
+            await prompt_msg.add_reaction("✅")
+            await prompt_msg.add_reaction("❌")
+
+            def _check(reaction, user):
+                if user.bot or reaction.message.id != prompt_msg.id:
+                    return False
+                if str(reaction.emoji) not in ("✅", "❌"):
+                    return False
+                is_author = user.id == message.author.id
+                is_admin = (
+                    hasattr(user, "guild_permissions") and user.guild_permissions.administrator
+                )
+                return is_author or is_admin
+
+            cancel_old = True  # default on timeout
+            try:
+                reaction, _ = await self.bot.wait_for(
+                    "reaction_add", timeout=30.0, check=_check
+                )
+                cancel_old = str(reaction.emoji) == "✅"
+            except asyncio.TimeoutError:
+                pass
+
+            if cancel_old:
+                monitor = self.bot.services.monitor if self.bot.services else None
+                alert_system = self.alert_system or (
+                    self.bot.services.alert_system if self.bot.services else None
+                )
+                for sig in overlapping:
+                    old_id = sig["id"]
+                    ok = await self.signal_db.manually_set_signal_status(
+                        old_id,
+                        "cancelled",
+                        f"Cancelled — overlapped by new signal #{new_signal_id}",
+                    )
+                    if not ok:
+                        continue
+
+                    if monitor:
+                        monitor.active_signals.pop(old_id, None)
+                        try:
+                            monitor.nm_monitor.evict_signal(old_id)
+                            monitor.tp_monitor.evict_signal(old_id)
+                        except Exception:
+                            pass
+
+                    try:
+                        from price_feeds.streaming_monitor import react_to_original_signal
+                        await react_to_original_signal(self.bot, sig, "❌")
+                    except Exception:
+                        pass
+
+                    if alert_system:
+                        try:
+                            ping = (
+                                f"❌ **{sig['instrument']}** {sig['direction'].upper()} — "
+                                f"cancelled (overlapped by signal #{new_signal_id})"
+                            )
+                            await alert_system.update_embed_for_signal_id(
+                                old_id, "cancelled", ping_text=ping
+                            )
+                        except Exception as _ue:
+                            self.logger.warning(
+                                f"Could not update embed for overlapping signal {old_id}: {_ue}"
+                            )
+
+                self.logger.info(
+                    f"Cancelled {len(overlapping)} overlapping signal(s) for new signal {new_signal_id}"
+                )
+
+            try:
+                await prompt_msg.delete()
+            except Exception:
+                pass
+
+        except Exception as e:
+            self.logger.error(f"Error in overlap prompt for signal {new_signal_id}: {e}", exc_info=True)
 
     async def safe_add_reaction(self, message: discord.Message, emoji: str):
         """Safely add a reaction to a message, handling common Discord API errors"""
