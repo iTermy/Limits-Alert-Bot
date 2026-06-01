@@ -6,6 +6,13 @@ The bot monitors trading-signal messages in designated Discord channels, parses 
 
 ---
 
+## How To Work In This Repo
+
+- **Commit by default** — after completing changes, commit and push to the current branch without asking. Only ask before committing if the change is destructive or you are unsure about correctness.
+- **Commit style** — one short line, plain English, imperative mood ("Fix X", not "Fixed X"), no version labels ("Stage 19", "V2"), no decision refs, no parenthetical explanations. State *what* changed in as few words as possible. Good: `"Fix SL offset on offset instruments"`. Bad: `"Stage 19 fix: SL offset (decision 12) — adj_sl now includes offset for SPX/NAS/BTC/ETH"`.
+
+---
+
 ## Technology Stack
 
 - **Language**: Python 3.9+ (Windows required for MetaTrader5)
@@ -64,15 +71,21 @@ database/
   signal_ops.py                 SignalDatabase — flattened CRUD + Lifecycle + Analytics in one file;
                                   get_signal_with_limits() returns Optional[SignalData];
                                   save_signal, cancel, reactivate, manually_set_signal_status,
-                                  process_limit_hit, expire_old_signals, get_statistics
+                                  process_limit_hit, expire_old_signals, get_statistics;
+                                  get_overlapping_signals() — range-intersection query used on save;
+                                  check_reactivation_guard() — compares cancelled limits vs live price;
+                                  _get_live_price() — reads bid/ask from live_prices table
   utils.py                      calculate_expiry() (day_end → 4:45 PM EST), _parse_dt(),
                                   calculate_sl_pnl()
 
 price_feeds/
   price_stream_manager.py       Coordinates all three feeds; calculates spread if missing (ask − bid);
+                                  stamps price_data["updated_at"] (UTC) from broker tick time (ICMarkets)
+                                  or wall-clock (OANDA/Binance) before calling subscribers;
                                   routes symbols to feeds via SymbolMapper; notifies all subscribers
   streaming_monitor.py          Per-tick signal evaluation; receives all deps via constructor;
                                   react_to_original_signal() as module-level function;
+                                  _MAX_TICK_AGE_SECONDS = 5 — drops stale ticks before signal evaluation;
                                   check order documented below
   alert_system.py               Persistent embed orchestrator; 4 data dicts; 5-channel routing;
                                   15 s live-refresh background task; delegates embed building and archiving
@@ -95,10 +108,13 @@ price_feeds/
                                   spread hour (17–18 ET) treated as market-closed for forex/metals/indices;
                                   first_stale_time tracks real stall start for accurate recovery downtime;
                                   all knobs are module-level constants (no config file)
-  live_price_writer.py          Writes bid/ask/feed to live_prices table on each tick
+  live_price_writer.py          Writes bid/ask/feed to live_prices table every 5 s (OANDA/Binance);
+                                  also reads ICMarkets last_prices at flush time and writes ic_bid/ic_ask
+                                  in the same UPSERT row (used by EX offset calculator)
   symbol_mapper.py              Internal ↔ feed-specific symbol translation; always returns UPPERCASE
   feeds/
     icmarkets_stream.py         MT5 polling 100 ms/symbol — Windows only;
+                                  tick "timestamp" is UTC-aware (datetime.fromtimestamp(tick.time, tz=utc));
                                   on_poll callback fires on every successful tick fetch (price-change-agnostic)
                                   so the health monitor's last_seen timer doesn't age during quiet markets
     oanda_stream.py             OANDA REST stream; live/practice via OANDA_PRACTICE env var
@@ -106,7 +122,9 @@ price_feeds/
 
 discord_handlers/
   message_handler.py            Handles new/edited/deleted messages; dispatches reply commands for
-                                  both alert embeds (any user) and signal messages (author/admin only)
+                                  both alert embeds (any user) and signal messages (author/admin only);
+                                  _handle_overlap_prompt() — 30 s reaction prompt when new signal overlaps
+                                  an existing one (✅ cancel old / ❌ keep both / timeout = cancel old)
 
 commands/
   __init__.py
@@ -119,7 +137,7 @@ commands/
     license.py                  !activate, !setkeys, !grantkey, !revoke, !licenses + member listeners
   signals/
     __init__.py                 Cog setup: LifecycleCog + ReportsCog + NewsCog
-    lifecycle.py                !active, !info, !setstatus, !profit, !hit,
+    lifecycle.py                !active, !info, !setstatus [--force], !profit, !hit,
                                   !stoploss, !cancel (+ bulk), !setexpiry, !breakeven
     reports.py                  !report (performance statistics generator; partitions into
                                   Regular / PA / Legends by channel name)
@@ -202,6 +220,11 @@ Signal added to streaming_monitor active set (refreshed every 30 s + immediate o
 Every incoming price update calls `streaming_monitor._on_price_update()` → `_check_signal()` for each ACTIVE/HIT signal on that symbol. Exact check order:
 
 ```
+0. Tick-staleness gate (in _on_price_update, before per-signal checks)
+   price_data["updated_at"] set by price_stream_manager (UTC broker timestamp for ICMarkets,
+   wall-clock for OANDA/Binance). Ticks older than _MAX_TICK_AGE_SECONDS (5 s) are dropped
+   silently at DEBUG level. Spread-hour transition tracking still runs on stale ticks.
+
 1. Spread-hour gate
    _is_spread_hour(): America/New_York, 17:00–18:00, weekdays only
    └─ Signal would trigger → send_spread_hour_cancel_alert()
@@ -281,7 +304,10 @@ Audit trail: signal_id FK, old_status, new_status, change_type (`automatic`/`man
 Daily aggregates per instrument (total, profitable, breakeven, stop_loss, cancelled, win_rate). UNIQUE(date, instrument).
 
 ### live_prices
-`symbol TEXT PK`, bid, ask, feed, updated_at. Written on every price tick by `LivePriceWriter`.
+`symbol TEXT PK`, bid, ask, feed, updated_at. `ic_bid DOUBLE PRECISION` / `ic_ask DOUBLE PRECISION` (nullable) — ICMarkets prices written at the same flush as the OANDA/Binance row so the EX offset calculator sees both prices from the same timestamp (no inter-fetch drift). Written every 5 s by `LivePriceWriter`.
+
+### feed_health
+`feed TEXT PRIMARY KEY` (`icmarkets` / `oanda` / `binance`), `status TEXT` (`idle` / `healthy` / `degraded` / `down`), `stale_seconds INTEGER`, `last_seen TIMESTAMPTZ`, `updated_at TIMESTAMPTZ`. Upserted by `FeedHealthMonitor._write_feed_health()` on every status transition. Read by the EX bot each cycle to skip placement on stale feeds.
 
 ### bot_mode_status
 Singleton row (id=1, enforced by CHECK). `news_mode BOOLEAN`, `spread_hour BOOLEAN`. Updated in real-time by streaming_monitor on spread-hour state transitions.
@@ -451,6 +477,18 @@ Auto-TP fires when: **last hit limit's P&L ≥ threshold** AND (if 2+ limits hit
 
 ### react_to_original_signal
 Module-level function in `price_feeds/streaming_monitor.py`. Called from `streaming_monitor`, `expiry_manager`, and `commands/signals/lifecycle.py` to add emoji reactions to original signal messages.
+
+### Overlap detection on signal save
+When a new signal is saved, `signal_ops.get_overlapping_signals()` queries for active/hit signals on the same instrument whose pending-limit price range (`[MIN, MAX]`) intersects the new signal's range. If any are found, `message_handler._handle_overlap_prompt()` is spawned as a background task (non-blocking): it posts a prompt in the same channel, waits up to 30 s for a ✅ (cancel old) or ❌ (keep both) reaction from the signal author or a guild admin. Timeout defaults to cancelling the old signal(s). The prompt is deleted after the outcome.
+
+### Reactivation guard
+Before reactivating a cancelled signal via reply command or `!setstatus active`, `signal_ops.check_reactivation_guard()` fetches the signal's cancelled limits and compares them against the current mid-price from `live_prices`. A limit is "past" when the hit condition would fire immediately on reactivation (`long: mid ≤ limit`, `short: mid ≥ limit`). If any limits are past, reactivation is blocked with a clear message listing which limits are stale. Returns `None` (fail-open) if price data is unavailable. Admin override: `!setstatus <id> active --force` (requires `guild_permissions.administrator`).
+
+### Tick staleness gate
+`streaming_monitor._on_price_update` drops ticks older than `_MAX_TICK_AGE_SECONDS` (5 s) before any signal evaluation. The timestamp comes from `price_data["updated_at"]`, which is stamped by `price_stream_manager._process_price_update`: UTC broker tick time for ICMarkets (from `tick.time`), current wall-clock for OANDA/Binance. Spread-hour transition tracking still runs on stale ticks — only per-signal checks are skipped.
+
+### live_prices ic_bid / ic_ask columns
+`live_prices` has two nullable columns `ic_bid` and `ic_ask`. `LivePriceWriter` reads the ICMarkets `last_prices` cache at flush time and writes them in the same UPSERT row as the OANDA/Binance `bid`/`ask`. Both prices are therefore from the same flush window — the EX offset calculator reads `ic_mid − feed_mid` without a separate MT5 tick fetch, eliminating the 5-second inter-fetch drift. When `ic_bid`/`ic_ask` are NULL (rolling-deploy gap), EX falls back to a live MT5 tick and logs once.
 
 ---
 

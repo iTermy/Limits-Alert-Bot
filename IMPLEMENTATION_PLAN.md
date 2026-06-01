@@ -18,7 +18,7 @@ Shorthand used in this plan: **TM** = TM Bot, **EX** = Execution bot.
 User is about to forward-test both bots in production. Execution mechanics need to be tight enough that P&L isn't moved around by race conditions, missed events, or unsynchronized state between the two systems. **Strategy is out of scope** — only execution / plumbing / integration.
 
 ### 1.3 Integration recap (one-minute version)
-- **Coupling:** Supabase tables `signals`, `limits`, `live_prices`, `bot_mode_status` (shared). EX uses `execution_bot_ro` role (read-only).
+- **Coupling:** Supabase tables `signals`, `limits`, `live_prices`, `bot_mode_status`, `feed_health` (shared). EX uses `execution_bot_ro` role (read-only).
 - **Discovery:** EX polls `signals WHERE status IN ('active','hit') AND limits.status='pending'` on 1s active / 30s idle cycle (`bot/core/sync_cycle.py:115`). Active mode is triggered when there are active orders/positions (`bot/core/engine.py:189-198`).
 - **Local state:** EX owns `orders.db` SQLite — `order_mappings` is the source of truth for MT5 placement.
 - **Invisible to EX:** approaching alerts, embed edits, cancel *reasons*, NM detection, `!tp` edits (TM-local JSON only), TM in-memory state.
@@ -57,7 +57,7 @@ User is about to forward-test both bots in production. Execution mechanics need 
 
 Each phase: concrete scope, file targets, steps, acceptance criteria. **Sonnet executes one phase at a time and stops for review before moving to the next.**
 
-Within a phase, items are mostly independent and can be tackled in any order unless noted. Phase 4.1 is internally ordered (schema → writer → reader).
+Within a phase, items are mostly independent and can be tackled in any order unless noted.
 
 ---
 
@@ -257,13 +257,13 @@ Covered by 4.1.
 
 The full hardening pass is complete when:
 
-1. Two overlapping signals on the same instrument do not stack risk beyond cap. *(Phase 3.1)*
-2. Killing EX mid-placement never produces a duplicate or orphan after restart or after the next sweep. *(Phase 2.1)*
-3. `!cancel` issued within 1s of EX's next poll aborts placement before `order_send`. *(Phase 2.2)*
-4. Reactivation is blocked when price has already moved past pending limits. *(Phase 3.2)*
-5. Offset between `live_prices` and ICMarkets is broker-delta-only over 100 ticks. *(Phase 4.1)*
-6. `!news add` blocks EX placements. *(Phase 4.2)*
-7. Stale rollover ticks at the spread-hour boundary do not fire alerts. *(Phase 4.3)*
+1. ✅ Overlapping signals on the same instrument trigger a Discord prompt; old signal cancelled on ✅ or timeout. *(Phase 3.1)*
+2. ✅ Killing EX mid-placement never produces a duplicate or orphan after restart or after the next sweep. *(Phase 2.1)*
+3. ✅ `!cancel` issued within 1s of EX's next poll aborts placement before `order_send`. *(Phase 2.2)*
+4. ✅ Reactivation is blocked when price has already moved past pending limits. *(Phase 3.2)*
+5. ✅ Offset between `live_prices` and ICMarkets is broker-delta-only over 100 ticks. *(Phase 4.1)*
+6. ✅ `!news add` blocks EX placements. *(Phase 4.2)*
+7. ✅ Stale rollover ticks at the spread-hour boundary do not fire alerts. *(Phase 4.3)*
 8. `!breakeven` / `!profit` halts trailing within one cycle. *(Phase 5.1)*
 9. Repeated SL-modify failures DM admin once, not on every cycle. *(Phase 5.2)*
 10. HIT signals at expiry roll over instead of cancelling. *(Phase 6.1)*
@@ -275,11 +275,11 @@ The full hardening pass is complete when:
 ## 5. Handoff notes for the executor
 
 - **One phase at a time.** After each phase, stop and report acceptance results to the user before starting the next.
-- Within a phase, items are mostly independent. Only **Phase 4.1** is internally ordered (schema → writer → reader).
+- Within a phase, items are mostly independent.
 - Do not run `ruff` after each change — user runs it at the end.
 - Keep the in-flight refactor (`stage19_arch_restructure` branch, Areas 4-8 pending) mentally separate from this hardening work.
 - Coding standards in `TM/CLAUDE.md` § Coding Standards apply: no enhanced/v2/fixed naming, no defensive `hasattr` guards on constructor-owned attrs, no narrative comments, log without emojis.
-- For any scope decision not pinned down here (e.g. exact N for the failure counters in 5.2 / 5.4 / M13, Option A vs B for 3.1, retention shape for `feed_health` rows), surface to the user before implementing rather than guessing.
+- For any scope decision not pinned down here (e.g. exact N for the failure counters in 5.2 / 5.4 / M13), surface to the user before implementing rather than guessing.
 
 ---
 
