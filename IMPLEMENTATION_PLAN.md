@@ -1,6 +1,6 @@
 # Pre-Production Hardening — Phased Implementation Plan
 
-> **Status:** Phases 1–6 complete (2026-05-31). Phase 7 is next.
+> **Status:** Phases 1–7 complete (2026-05-31). All phases done.
 > **Authored:** 2026-05-31 (Opus 4.7, plan mode).
 > **Executor:** Sonnet, one phase at a time.
 
@@ -229,9 +229,9 @@ Covered by 4.1.
 
 ---
 
-### Phase 7 — License teardown + per-instrument risk %
+### Phase 7 — License teardown + per-instrument risk % ✅ COMPLETE
 
-#### 7.1 L5: full teardown on license expiry
+#### 7.1 L5: full teardown on license expiry ✅
 - **Files:** `EX/bot/license/validator.py`, `EX/bot/core/engine.py:128-131`, `EX/bot/core/sync_cycle.py`, `EX/bot/trading/order_placer.py` (close helpers).
 - **Steps:**
   1. New engine state `shutdown_reason ∈ {None, license_expired}`.
@@ -243,7 +243,7 @@ Covered by 4.1.
   4. **Re-activation requires a bot restart** (do not auto-resume).
 - **Acceptance:** revoke license while two orders pending + two positions open → all four are removed from MT5 within one cycle; sync loop stops; DM received.
 
-#### 7.2 Extra: per-instrument `risk_percent`
+#### 7.2 Extra: per-instrument `risk_percent` ✅
 - **Files:** `EX/bot/config/settings.py:18-22` (`LotSizingConfig`), `EX/bot/trading/lot_calculator.py:47-73`.
 - **Steps:**
   1. Change `risk_percent: float = 1.0` to `risk_percent: float | dict[str, float] = 1.0`. Mirror the existing `fixed_lot` shape exactly.
@@ -267,8 +267,8 @@ The full hardening pass is complete when:
 8. ✅ `!breakeven` / `!profit` halts trailing within one cycle. *(Phase 5.1)*
 9. ✅ Repeated SL-modify failures DM admin once, not on every cycle. *(Phase 5.2)*
 10. ✅ HIT signals at expiry roll over instead of cancelling. *(Phase 6.1)*
-11. License expiry cancels pending, closes filled, and halts polling. *(Phase 7.1)*
-12. Per-instrument `risk_percent` resolves correctly. *(Phase 7.2)*
+11. ✅ License expiry cancels pending, closes filled, and halts polling. *(Phase 7.1)*
+12. ✅ Per-instrument `risk_percent` resolves correctly. *(Phase 7.2)*
 
 ---
 
