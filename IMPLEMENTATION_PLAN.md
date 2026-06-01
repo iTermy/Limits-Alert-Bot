@@ -1,6 +1,6 @@
 # Pre-Production Hardening — Phased Implementation Plan
 
-> **Status:** Phases 1–4 complete (2026-05-31). Phase 5 is next.
+> **Status:** Phases 1–5 complete (2026-05-31). Phase 6 is next.
 > **Authored:** 2026-05-31 (Opus 4.7, plan mode).
 > **Executor:** Sonnet, one phase at a time.
 
@@ -156,16 +156,16 @@ Covered by 4.1.
 
 ---
 
-### Phase 5 — SL & TP hygiene
+### Phase 5 — SL & TP hygiene ✅ COMPLETE
 
-#### 5.1 C5: stop trailing on `!breakeven` / `!profit`
+#### 5.1 C5: stop trailing on `!breakeven` / `!profit` ✅
 - **Files:** `TM/database/signal_ops.py:411-530` (status setters), `EX/bot/db/queries.py:88-90` (`is_trailing`), `EX/bot/tp/trailing.py`, `EX/bot/core/sync_cycle.py:534-599`.
 - **Steps:**
   1. EX treats Supabase signal status as authoritative each cycle: if status is `profit` or `breakeven`, immediately set `is_trailing=False` in SQLite for all related positions and run the force-exit path.
   2. Force-exit in the same cycle (no waiting for the next trailing tick).
 - **Acceptance:** `!breakeven` while trailing — within one 1s cycle trailing stops and the position closes at the breakeven price (not at a deeper trailing SL).
 
-#### 5.2 C8: SL change must persist; alert on repeated failures
+#### 5.2 C8: SL change must persist; alert on repeated failures ✅
 - **Files:** `EX/bot/core/sync_cycle.py:455-533` (`_sync_filled_sls`).
 - **Steps:**
   1. Per-ticket SL-failure counter `{ticket: {target_sl: count}}`. Reset on success or target change.
@@ -173,17 +173,17 @@ Covered by 4.1.
   3. **Do not** recompute lot or risk. Operator's SL is the target. Effective risk change is acceptable.
 - **Acceptance:** mocked persistent REQUOTE → DM fires at the Nth attempt; bot keeps trying on the next state change (target SL update); a single transient failure does not DM.
 
-#### 5.3 H9: partial close rounds-up to broker step
+#### 5.3 H9: partial close rounds-up to broker step ✅
 - **Files:** `EX/bot/tp/default_strategy.py:121-126` (V5 fix region).
 - **Steps:** if `raw < volume_step`, close `max(volume_step, volume_min)` instead of trailing the whole position. Optional config knob `partial_min_close_policy ∈ {step, min, skip}` (default: `step`).
 - **Acceptance:** 0.13 lots, 50% partial, step 0.1 → closes 0.1 instead of trailing 0.13.
 
-#### 5.4 M13: force-exit attempt counter + backoff
+#### 5.4 M13: force-exit attempt counter + backoff ✅
 - **Files:** `EX/bot/core/sync_cycle.py:534-599`.
 - **Steps:** per-ticket retry counter for force-exit; DM admin and stop retrying that ticket after N failures (same shape as 5.2). Resume on next state change.
 - **Acceptance:** mocked persistent close failure → DM at the Nth attempt; no spammy retry loop.
 
-#### 5.5 H7: atomic `mark_filled` + ticket update (hedging mode)
+#### 5.5 H7: atomic `mark_filled` + ticket update (hedging mode) ✅
 - **Background:** in hedging mode MT5 issues a separate `position_ticket` for the position formed when an order fills. SQLite is keyed on `mt5_ticket` (= the original order ticket). The current flow at `EX/bot/core/sync_cycle.py:409-414` runs `mark_filled` then `update_ticket` as two separate commits. If the second fails, the row has `status='filled'` but the wrong ticket — all downstream lookups (`pos_by_ticket`, trailing resume) miss the position and it drifts unmanaged.
 - **Files:** `EX/bot/db/sqlite.py` (combine), `EX/bot/core/sync_cycle.py:409-414` (call site).
 - **Steps:**
@@ -191,7 +191,7 @@ Covered by 4.1.
   2. Caller invokes the helper unconditionally — pass `position_ticket=order_ticket` when they match.
 - **Acceptance:** killing aiosqlite mid-flight cannot leave the row in the half-updated state; the row is either fully updated or fully unchanged.
 
-#### 5.6 H8: order-placement readback (easy add)
+#### 5.6 H8: order-placement readback (easy add) ✅
 - **Files:** `EX/bot/trading/order_placer.py` (after successful `order_send`).
 - **Steps:** call `orders_get(ticket=result.ticket)`; compare `sl` and `price_open` against requested values; on mismatch, log a warning and DM admin (one-shot). No retry, no halt.
 - **Acceptance:** broker silent SL adjustment is detected and surfaced.
@@ -264,8 +264,8 @@ The full hardening pass is complete when:
 5. ✅ Offset between `live_prices` and ICMarkets is broker-delta-only over 100 ticks. *(Phase 4.1)*
 6. ✅ `!news add` blocks EX placements. *(Phase 4.2)*
 7. ✅ Stale rollover ticks at the spread-hour boundary do not fire alerts. *(Phase 4.3)*
-8. `!breakeven` / `!profit` halts trailing within one cycle. *(Phase 5.1)*
-9. Repeated SL-modify failures DM admin once, not on every cycle. *(Phase 5.2)*
+8. ✅ `!breakeven` / `!profit` halts trailing within one cycle. *(Phase 5.1)*
+9. ✅ Repeated SL-modify failures DM admin once, not on every cycle. *(Phase 5.2)*
 10. HIT signals at expiry roll over instead of cancelling. *(Phase 6.1)*
 11. License expiry cancels pending, closes filled, and halts polling. *(Phase 7.1)*
 12. Per-instrument `risk_percent` resolves correctly. *(Phase 7.2)*
