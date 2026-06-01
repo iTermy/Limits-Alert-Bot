@@ -17,7 +17,7 @@ from typing import Dict, Optional
 logger = logging.getLogger(__name__)
 
 # Feeds whose prices we want to persist
-TRACKED_FEEDS = {"oanda", "binance"}
+TRACKED_FEEDS = {"oanda", "binance", "exness"}
 
 # How often to flush the buffer to the DB (seconds)
 WRITE_INTERVAL = 5
