@@ -210,7 +210,7 @@ class FeedHealthMonitor:
         stale_threshold = timedelta(seconds=STALE_THRESHOLD_SECONDS)
 
         # Check each feed
-        for feed_name in ["icmarkets", "oanda", "binance"]:
+        for feed_name in ["icmarkets", "oanda", "binance", "exness"]:
             await self._check_feed(feed_name, stale_threshold, now)
 
     async def _check_feed(self, feed_name: str, stale_threshold: timedelta, now: datetime):
@@ -553,7 +553,7 @@ class FeedHealthMonitor:
         now = datetime.now()
 
         feed_details = {}
-        for feed_name in ["icmarkets", "oanda", "binance"]:
+        for feed_name in ["icmarkets", "oanda", "binance", "exness"]:
             feed_symbols = self.last_seen.get(feed_name, {})
 
             if feed_symbols:

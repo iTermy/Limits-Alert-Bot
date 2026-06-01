@@ -287,8 +287,10 @@ class BotManagementCog(BaseCog):
             stream_manager = self.services.stream_manager
             feed_lines = []
 
-            for feed_name in ["icmarkets", "oanda", "binance"]:
-                is_connected = getattr(stream_manager, f"{feed_name}_connected", False)
+            for feed_name in ["icmarkets", "oanda", "binance", "exness"]:
+                if feed_name not in stream_manager.feed_status:
+                    continue
+                is_connected = stream_manager.feed_status.get(feed_name, False)
                 emoji = "🟢" if is_connected else "🔴"
                 line = f"{emoji} **{feed_name.upper()}**"
 
