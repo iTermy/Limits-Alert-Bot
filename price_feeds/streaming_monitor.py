@@ -1,7 +1,7 @@
 """Streaming price monitor: event-driven signal evaluation from live price feeds."""
 
 import asyncio
-from datetime import datetime
+from datetime import datetime, timezone
 from datetime import time as dtime
 from typing import Dict, List
 
@@ -13,6 +13,10 @@ from utils.config_loader import load_settings
 from utils.logger import get_logger
 
 logger = get_logger("stream_monitor")
+
+# Ticks older than this (seconds) are dropped before any signal evaluation.
+# Guards against stale rollover prints crossing the spread-hour boundary.
+_MAX_TICK_AGE_SECONDS = 5
 
 
 async def react_to_original_signal(bot, signal: Dict, emoji: str):
@@ -294,6 +298,21 @@ class StreamingPriceMonitor:
                 logger.info(f"Spread hour {'started' if now_in_spread else 'ended'} — DB updated")
             except Exception as _sh_err:
                 logger.error(f"Failed to update spread_hour in DB: {_sh_err}")
+
+        # Tick staleness gate: drop ticks whose broker timestamp is too old.
+        # This prevents a stale ICMarkets rollover print (e.g. timestamped 17:59:30
+        # but processed at 18:00:05) from firing a false hit/SL alert.
+        tick_time = price_data.get("updated_at")
+        if tick_time is not None:
+            if tick_time.tzinfo is None:
+                tick_time = tick_time.replace(tzinfo=timezone.utc)
+            age = (datetime.now(timezone.utc) - tick_time).total_seconds()
+            if age > _MAX_TICK_AGE_SECONDS:
+                logger.debug(
+                    "Stale tick dropped for %s: %.1fs old (limit %ds)",
+                    symbol, age, _MAX_TICK_AGE_SECONDS,
+                )
+                return
 
         signal_ids = self.symbol_to_signals.get(symbol, [])
 

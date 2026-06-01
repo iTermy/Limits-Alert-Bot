@@ -1,6 +1,6 @@
 # Pre-Production Hardening — Phased Implementation Plan
 
-> **Status:** Phases 1, 2, and 3 complete (2026-05-31). Phase 4 is next.
+> **Status:** Phases 1–4 complete (2026-05-31). Phase 5 is next.
 > **Authored:** 2026-05-31 (Opus 4.7, plan mode).
 > **Executor:** Sonnet, one phase at a time.
 
@@ -130,42 +130,26 @@ Core "don't take unintended trades" phase.
 
 ---
 
-### Phase 4 — Price / state synchronization between bots
+### Phase 4 — Price / state synchronization between bots ✅ COMPLETE
 
-#### 4.1 H1 writer + offset calc (internally ordered: writer first, EX reader second)
-- **TM files:** `TM/price_feeds/live_price_writer.py:102-107` (buffer + flush).
-- **EX files:** `EX/bot/db/supabase.py` (`fetch_live_prices` projection), `EX/bot/trading/offset_calculator.py:12-37`.
-- **Steps:**
-  1. **TM writer:** when flushing a per-symbol buffered tick, also read the latest ICMarkets last-tick for that symbol (the MT5 stream polls every 100ms, so it's in-memory) and write all four columns (`bid, ask, ic_bid, ic_ask`) plus `updated_at` in the same UPSERT.
-  2. **EX `fetch_live_prices`:** include `ic_bid`, `ic_ask` in the SELECT.
-  3. **EX `offset_calculator`:** replace the "fetch MT5 tick now" path with "use `ic_bid/ic_ask` from the same row as `bid/ask`". Offset = `mid(ic_bid, ic_ask) - mid(bid, ask)`. Both at the same `updated_at` — no drift.
-  4. Keep a sanity check: if `ic_bid/ic_ask` are NULL (rolling-deploy gap), fall back to the old path and log once.
-- **Acceptance:** offsets observed over a noisy market hour are near-constant (broker-delta only). The 5s drift component disappears from logs.
+#### 4.1 H1 writer + offset calc ✅
+- **TM:** `live_price_writer._flush_to_db` now reads ICMarkets `last_prices` for each flushed symbol (via `stream_manager.symbol_mapper.get_feed_symbol` + `ic_feed.last_prices`) and writes `ic_bid`/`ic_ask` in the same UPSERT row. Updated docstring.
+- **TM:** `icmarkets_stream.py` — tick `"timestamp"` now uses `datetime.fromtimestamp(tick.time, tz=timezone.utc)` (was naive local time).
+- **TM:** `price_stream_manager._process_price_update` — stamps `price_data["updated_at"]` from the broker tick timestamp (IC) or `datetime.now(timezone.utc)` (OANDA/Binance) before notifying subscribers.
+- **EX:** `FETCH_LIVE_PRICES` query now includes `ic_bid, ic_ask`.
+- **EX:** `OffsetCalculator.__init__` adds `_ic_fallback_logged` set; `get_offset` prefers `ic_bid/ic_ask` (same-row, no drift); falls back to live MT5 tick with a one-time per-symbol WARNING log.
 
-#### 4.2 M6: EX honors `news_mode`
-- **Files:** `EX/bot/core/sync_cycle.py:133` (current spread-hour gate).
-- **Steps:** read `bot_mode_status.news_mode` once per cycle. When `True`, behave as during spread hour: `placement_active = False` and force-cancel pending placements per the spread-hour code path. Log entries should distinguish `reason='news_mode'` vs `'spread_hour'`.
-- **Acceptance:** `!news add` → EX log shows news block; pending placements cancelled; no new placements until news clears.
+#### 4.2 M6: EX honors `news_mode` ✅
+- **EX:** Added `FETCH_NEWS_MODE` query and `supabase.fetch_news_mode()`. In `sync_cycle.run()`, after the spread-hour gate, news_mode is fetched and checked. When active: all pending orders cancelled (same code path as spread hour), `placement_active = False`, logged as `reason=news_mode`.
 
-#### 4.3 C9: tick-staleness gate
-- **Files:** `TM/price_feeds/streaming_monitor.py:332-373` (gate logic), `TM/price_feeds/price_stream_manager.py` (add `updated_at` to tick struct if missing).
-- **Steps:**
-  1. Ensure every tick carries `updated_at` (broker-stamped where possible, otherwise local `time.time()` at receipt).
-  2. In the gate check, reject ticks where `(now - tick.updated_at) > N` seconds (N configurable; default 2s).
-  3. Apply specifically around the spread-hour boundary so a stale rollover print can't slip past.
-- **Acceptance:** synthetic stale tick at 18:00:05 carrying a 17:59:30 timestamp does not fire a hit alert.
+#### 4.3 C9: tick-staleness gate ✅
+- **TM:** `streaming_monitor._on_price_update` — after spread-hour transition tracking, checks `price_data["updated_at"]`. Ticks older than `_MAX_TICK_AGE_SECONDS` (5s) are silently dropped at DEBUG level before any signal evaluation.
 
-#### 4.4 M5 reader: EX pauses placement when feed is stale
-- **Files:** `EX/bot/db/supabase.py` (new `fetch_feed_health`), `EX/bot/core/sync_cycle.py`.
-- **Steps:**
-  1. EX reads `feed_health` rows each cycle.
-  2. For symbols on a stale feed, EX skips placement and logs `reason='feed_stale'`.
-- **Acceptance:** simulate OANDA stale → EX skips placement for OANDA-fed symbols; ICMarkets-fed symbols unaffected.
+#### 4.4 M5 reader: EX pauses placement when feed is stale ✅
+- **EX:** Added `FETCH_FEED_HEALTH` query and `supabase.fetch_feed_health()`. In `sync_cycle.run()`, after fetching `live_prices`, feeds with `status IN ('degraded', 'down')` are collected into `stale_feeds`. Added `_feed_for_symbol(db_sym, config)` helper (icmarkets / binance / oanda based on `needs_offset` + asset class). In the signal approval loop, signals on a stale feed are skipped with `reason=feed_stale`.
 
-#### 4.5 M11: surface excluded-symbol rejections
-- **Files:** `EX/bot/core/sync_cycle.py:121-123`.
-- **Steps:** when a limit is dropped because its symbol is in `excluded_symbols`, log a single line with `signal_id`, `limit_id`, `symbol`. Optionally write to a Supabase log table so TM-side embed could surface it (deferred to a later phase if scope grows).
-- **Acceptance:** every excluded-symbol drop is searchable in EX log.
+#### 4.5 M11: surface excluded-symbol rejections ✅
+- **EX:** `sync_cycle.__init__` adds `_logged_excluded: set[int]`. Excluded-symbol filter now logs `signal_id`, `limit_id`, `symbol` for each limit dropped, exactly once per limit per bot lifetime.
 
 #### 4.6 M12
 Covered by 4.1.

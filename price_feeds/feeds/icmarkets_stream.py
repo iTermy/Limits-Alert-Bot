@@ -6,7 +6,7 @@ Uses continuous tick polling with asyncio for real-time price updates
 import asyncio
 import logging
 from collections.abc import AsyncIterator
-from datetime import datetime
+from datetime import datetime, timezone
 from typing import Callable, Dict, Optional, Set, Tuple
 
 import MetaTrader5 as mt5
@@ -166,7 +166,7 @@ class ICMarketsStream:
                     current_price = {
                         "bid": tick.bid,
                         "ask": tick.ask,
-                        "timestamp": datetime.fromtimestamp(tick.time),
+                        "timestamp": datetime.fromtimestamp(tick.time, tz=timezone.utc),
                         "last": tick.last,
                         "volume": tick.volume,
                     }

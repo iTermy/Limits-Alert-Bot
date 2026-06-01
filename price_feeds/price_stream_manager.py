@@ -3,7 +3,7 @@
 import asyncio
 import logging
 from collections import defaultdict
-from datetime import datetime
+from datetime import datetime, timezone
 from typing import Callable, Dict, List, Optional, Set
 
 from price_feeds.feeds.binance_stream import BinanceStream
@@ -348,6 +348,15 @@ class PriceStreamManager:
         # Update health monitor
         if self.health_monitor:
             self.health_monitor.update_last_seen(symbol, feed)
+
+        # Stamp updated_at: use broker tick time (ICMarkets) or current wall-clock.
+        # downstream staleness gate in streaming_monitor uses this field.
+        if "updated_at" not in price_data:
+            ts = price_data.get("timestamp")
+            if isinstance(ts, datetime) and ts.tzinfo is not None:
+                price_data["updated_at"] = ts
+            else:
+                price_data["updated_at"] = datetime.now(timezone.utc)
 
         # Store latest price
         async with self.price_lock:

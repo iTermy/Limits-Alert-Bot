@@ -2,11 +2,11 @@
 LivePriceWriter - Batches OANDA/Binance price updates and writes to the
 live_prices table in Supabase every WRITE_INTERVAL seconds.
 
-Only OANDA (indices) and Binance (crypto) prices are written.
-ICMarkets prices are intentionally excluded.
-
-The execution bot can then read live_prices to calculate the distance
-between its MT5 prices and the feed prices used by the alert bot.
+Primary prices (bid/ask/feed) come from OANDA or Binance.  For symbols that
+also have an ICMarkets mapping, the corresponding ICMarkets bid/ask is read
+from the in-memory MT5 cache and written as ic_bid/ic_ask in the same row.
+The execution bot uses ic_bid/ic_ask alongside bid/ask to compute the
+broker offset without fetching a separate live MT5 tick.
 """
 
 import asyncio
@@ -123,20 +123,35 @@ class LivePriceWriter:
             snapshot = dict(self._buffer)
             self._buffer.clear()
 
-        rows = [
-            (symbol, data["bid"], data["ask"], data["feed"], data["updated_at"])
-            for symbol, data in snapshot.items()
-        ]
+        # Grab the ICMarkets feed once for the whole batch
+        ic_feed = self._stream.feeds.get("icmarkets")
+
+        rows = []
+        for symbol, data in snapshot.items():
+            ic_bid = None
+            ic_ask = None
+            if ic_feed is not None:
+                mt5_sym = self._stream.symbol_mapper.get_feed_symbol(symbol, "icmarkets")
+                if mt5_sym:
+                    ic_data = ic_feed.last_prices.get(mt5_sym)
+                    if ic_data:
+                        ic_bid = ic_data.get("bid")
+                        ic_ask = ic_data.get("ask")
+            rows.append(
+                (symbol, data["bid"], data["ask"], data["feed"], data["updated_at"], ic_bid, ic_ask)
+            )
 
         query = """
-            INSERT INTO live_prices (symbol, bid, ask, feed, updated_at)
-            VALUES ($1, $2, $3, $4, $5)
+            INSERT INTO live_prices (symbol, bid, ask, feed, updated_at, ic_bid, ic_ask)
+            VALUES ($1, $2, $3, $4, $5, $6, $7)
             ON CONFLICT (symbol)
             DO UPDATE SET
                 bid        = EXCLUDED.bid,
                 ask        = EXCLUDED.ask,
                 feed       = EXCLUDED.feed,
-                updated_at = EXCLUDED.updated_at
+                updated_at = EXCLUDED.updated_at,
+                ic_bid     = EXCLUDED.ic_bid,
+                ic_ask     = EXCLUDED.ic_ask
         """
 
         try:
