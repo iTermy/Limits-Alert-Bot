@@ -41,6 +41,11 @@ class ExnessStream:
             logger.error("EXNESS_MT5_PATH not set")
             return False
 
+        logger.info(
+            "Starting Exness worker: path=%s login=%s server=%s",
+            self.mt5_path, self.login, self.server,
+        )
+
         try:
             self._process = await asyncio.create_subprocess_exec(
                 sys.executable,
@@ -58,12 +63,16 @@ class ExnessStream:
                 self._process.stdout.readline(), timeout=_CONNECT_TIMEOUT
             )
             if not first_line:
-                logger.error("Exness worker exited without output")
+                stderr_out = await self._read_stderr()
+                logger.error(f"Exness worker exited without output. stderr: {stderr_out}")
+                await self._kill_process()
                 return False
 
             msg = json.loads(first_line)
             if "error" in msg:
-                logger.error(f"Exness worker failed: {msg['error']}")
+                stderr_out = await self._read_stderr()
+                logger.error(f"Exness worker failed: {msg['error']}. stderr: {stderr_out}")
+                await self._kill_process()
                 return False
 
             self.connected = True
@@ -131,7 +140,11 @@ class ExnessStream:
                 line = await self._process.stdout.readline()
                 if not line:
                     if self._process.returncode is not None:
-                        logger.error("Exness worker process exited unexpectedly")
+                        stderr_out = await self._read_stderr()
+                        logger.error(
+                            "Exness worker exited (code %s). stderr: %s",
+                            self._process.returncode, stderr_out,
+                        )
                         self.connected = False
                         return
                     continue
@@ -158,6 +171,15 @@ class ExnessStream:
         if self._process and self._process.stdin:
             data = json.dumps(cmd) + "\n"
             self._process.stdin.write(data.encode())
+
+    async def _read_stderr(self) -> str:
+        if not self._process or not self._process.stderr:
+            return "(no stderr)"
+        try:
+            data = await asyncio.wait_for(self._process.stderr.read(4096), timeout=2)
+            return data.decode(errors="replace").strip() or "(empty)"
+        except (asyncio.TimeoutError, Exception):
+            return "(read failed)"
 
     async def _kill_process(self):
         if self._process and self._process.returncode is None:
