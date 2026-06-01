@@ -2,7 +2,7 @@
 
 ## Summary
 
-The bot monitors trading-signal messages in designated Discord channels, parses them into structured position data (instrument, direction, entry limits, stop-loss), stores them in PostgreSQL on Supabase, and streams real-time prices from three feeds (ICMarkets/MT5, OANDA, Binance) to fire approaching/hit/stop-loss/auto-TP/near-miss alerts. All events edit a single persistent Discord embed per signal to keep channels tidy. A command suite (`!cancel`, `!setstatus`, `!tp`, `!news`, etc.) manages signal lifecycle and configuration at runtime without restarts.
+The bot monitors trading-signal messages in designated Discord channels, parses them into structured position data (instrument, direction, entry limits, stop-loss), stores them in PostgreSQL on Supabase, and streams real-time prices from four feeds (ICMarkets/MT5, OANDA, Binance, Exness/MT5) to fire approaching/hit/stop-loss/auto-TP/near-miss alerts. All events edit a single persistent Discord embed per signal to keep channels tidy. A command suite (`!cancel`, `!setstatus`, `!tp`, `!news`, etc.) manages signal lifecycle and configuration at runtime without restarts.
 
 ---
 
@@ -18,7 +18,7 @@ The bot monitors trading-signal messages in designated Discord channels, parses 
 - **Language**: Python 3.9+ (Windows required for MetaTrader5)
 - **Discord**: discord.py 2.3.0+, `commands.Bot` with cog extensions
 - **Database**: PostgreSQL via Supabase; `asyncpg` pool (min 2, max 10 connections, 30 s timeout)
-- **Price Feeds**: ICMarkets/MT5 (polling 100 ms/symbol), OANDA (REST streaming), Binance (WebSocket bookTicker)
+- **Price Feeds**: ICMarkets/MT5 (polling 100 ms/symbol), OANDA (REST streaming), Binance (WebSocket bookTicker), Exness/MT5 (child-process polling for oil)
 - **Models**: Pydantic v2 for domain objects (`SignalData`, `LimitData`, `BotSettings`) with dict-protocol methods for backward compat
 - **AI Fallback Parser**: OpenAI `gpt-4o-mini`; disabled by default (`enable_openai_fallback: false` in `settings.json`)
 - **Config**: `.env` for secrets; JSON files in `config/` for runtime settings; Pydantic validation on load
@@ -79,8 +79,8 @@ database/
                                   calculate_sl_pnl()
 
 price_feeds/
-  price_stream_manager.py       Coordinates all three feeds; calculates spread if missing (ask − bid);
-                                  stamps price_data["updated_at"] (UTC) from broker tick time (ICMarkets)
+  price_stream_manager.py       Coordinates all four feeds; calculates spread if missing (ask − bid);
+                                  stamps price_data["updated_at"] (UTC) from broker tick time (ICMarkets/Exness)
                                   or wall-clock (OANDA/Binance) before calling subscribers;
                                   routes symbols to feeds via SymbolMapper; notifies all subscribers
   streaming_monitor.py          Per-tick signal evaluation; receives all deps via constructor;
@@ -105,10 +105,10 @@ price_feeds/
                                   signal.type == "swing" short-circuits NM (swing is not near-missable)
   feed_health_monitor.py        Stale threshold 300 s; 3 max reconnect attempts; 120 s startup grace;
                                   15 min alert cooldown; DMs health_alert_admin_id from settings.json;
-                                  spread hour (17–18 ET) treated as market-closed for forex/metals/indices;
+                                  spread hour (17–18 ET) treated as market-closed for forex/metals/indices/oil;
                                   first_stale_time tracks real stall start for accurate recovery downtime;
                                   all knobs are module-level constants (no config file)
-  live_price_writer.py          Writes bid/ask/feed to live_prices table every 5 s (OANDA/Binance);
+  live_price_writer.py          Writes bid/ask/feed to live_prices table every 5 s (OANDA/Binance/Exness);
                                   also reads ICMarkets last_prices at flush time and writes ic_bid/ic_ask
                                   in the same UPSERT row (used by EX offset calculator)
   symbol_mapper.py              Internal ↔ feed-specific symbol translation; always returns UPPERCASE
@@ -119,6 +119,11 @@ price_feeds/
                                   so the health monitor's last_seen timer doesn't age during quiet markets
     oanda_stream.py             OANDA REST stream; live/practice via OANDA_PRACTICE env var
     binance_stream.py           WebSocket bookTicker; US (binance.us) or international via BINANCE_USE_INTERNATIONAL
+    exness_stream.py            Spawns exness_worker.py as child process; reads JSON-line stdout;
+                                  same duck-typed interface as other feeds (connect/subscribe/stream_prices)
+    exness_worker.py            Standalone child process; holds its own MT5 connection to Exness terminal;
+                                  polls symbol_info_tick() at 100 ms; writes JSON price lines to stdout;
+                                  reads subscribe/unsubscribe/shutdown commands from stdin
 
 discord_handlers/
   message_handler.py            Handles new/edited/deleted messages; dispatches reply commands for
@@ -221,7 +226,7 @@ Every incoming price update calls `streaming_monitor._on_price_update()` → `_c
 
 ```
 0. Tick-staleness gate (in _on_price_update, before per-signal checks)
-   price_data["updated_at"] set by price_stream_manager (UTC broker timestamp for ICMarkets,
+   price_data["updated_at"] set by price_stream_manager (UTC broker timestamp for ICMarkets/Exness,
    wall-clock for OANDA/Binance). Ticks older than _MAX_TICK_AGE_SECONDS (5 s) are dropped
    silently at DEBUG level. Spread-hour transition tracking still runs on stale ticks.
 
@@ -307,7 +312,7 @@ Daily aggregates per instrument (total, profitable, breakeven, stop_loss, cancel
 `symbol TEXT PK`, bid, ask, feed, updated_at. `ic_bid DOUBLE PRECISION` / `ic_ask DOUBLE PRECISION` (nullable) — ICMarkets prices written at the same flush as the OANDA/Binance row so the EX offset calculator sees both prices from the same timestamp (no inter-fetch drift). Written every 5 s by `LivePriceWriter`.
 
 ### feed_health
-`feed TEXT PRIMARY KEY` (`icmarkets` / `oanda` / `binance`), `status TEXT` (`idle` / `healthy` / `degraded` / `down`), `stale_seconds INTEGER`, `last_seen TIMESTAMPTZ`, `updated_at TIMESTAMPTZ`. Upserted by `FeedHealthMonitor._write_feed_health()` on every status transition. Read by the EX bot each cycle to skip placement on stale feeds.
+`feed TEXT PRIMARY KEY` (`icmarkets` / `oanda` / `binance` / `exness`), `status TEXT` (`idle` / `healthy` / `degraded` / `down`), `stale_seconds INTEGER`, `last_seen TIMESTAMPTZ`, `updated_at TIMESTAMPTZ`. Upserted by `FeedHealthMonitor._write_feed_health()` on every status transition. Read by the EX bot each cycle to skip placement on stale feeds.
 
 ### bot_mode_status
 Singleton row (id=1, enforced by CHECK). `news_mode BOOLEAN`, `spread_hour BOOLEAN`. Updated in real-time by streaming_monitor on spread-hour state transitions.
@@ -435,7 +440,13 @@ self.services.tp_config      # instead of bot.monitor.tp_config
 `nm_monitor.mark_immune(signal_id)` is called whenever a cancelled signal is reactivated (any path: reply command, `!setstatus active`, `!reactivate`). Immune signals skip NM checks permanently for that signal's lifetime and can only close via hit, profit, SL, or manual cancel.
 
 ### Windows-only MT5
-`MetaTrader5` package requires Windows. On Linux/Mac, the ICMarkets feed will be unavailable. The bot handles this gracefully but loses that feed.
+`MetaTrader5` package requires Windows. On Linux/Mac, the ICMarkets and Exness feeds will be unavailable. The bot handles this gracefully but loses those feeds.
+
+### Dual MT5 terminals (ICMarkets + Exness)
+The `MetaTrader5` Python package is process-global — `mt5.initialize()` can only connect to one terminal at a time. The ICMarkets feed runs in the main process; the Exness feed runs in a **child process** (`exness_worker.py`) spawned via `asyncio.create_subprocess_exec`. Communication is via JSON lines over stdin (commands) and stdout (prices). Both terminals must be running on the VPS before the bot starts. The `MT5_PATH` and `EXNESS_MT5_PATH` env vars should both be set to avoid auto-discovery ambiguity.
+
+### Exness oil symbol mapping
+Internal symbol `USOILSPOT` maps to `USOILm` on Exness MT5. The mapping is defined in both `symbol_mappings.json` (`symbol_mappings.exness.specific_mappings`) and the reverse direction (`reverse_mappings.exness`). Both sections are required — without the reverse mapping, prices arrive under `USOILM` instead of `USOILSPOT` and don't match signals.
 
 ### Spread/news cancel behavior
 Spread-hour and news cancels **edit the persistent embed** when one already exists. They only fall back to standalone messages if no embed has been created yet for that signal.
@@ -485,7 +496,7 @@ When a new signal is saved, `signal_ops.get_overlapping_signals()` queries for a
 Before reactivating a cancelled signal via reply command or `!setstatus active`, `signal_ops.check_reactivation_guard()` fetches the signal's cancelled limits and compares them against the current mid-price from `live_prices`. A limit is "past" when the hit condition would fire immediately on reactivation (`long: mid ≤ limit`, `short: mid ≥ limit`). If any limits are past, reactivation is blocked with a clear message listing which limits are stale. Returns `None` (fail-open) if price data is unavailable. Admin override: `!setstatus <id> active --force` (requires `guild_permissions.administrator`).
 
 ### Tick staleness gate
-`streaming_monitor._on_price_update` drops ticks older than `_MAX_TICK_AGE_SECONDS` (5 s) before any signal evaluation. The timestamp comes from `price_data["updated_at"]`, which is stamped by `price_stream_manager._process_price_update`: UTC broker tick time for ICMarkets (from `tick.time`), current wall-clock for OANDA/Binance. Spread-hour transition tracking still runs on stale ticks — only per-signal checks are skipped.
+`streaming_monitor._on_price_update` drops ticks older than `_MAX_TICK_AGE_SECONDS` (5 s) before any signal evaluation. The timestamp comes from `price_data["updated_at"]`, which is stamped by `price_stream_manager._process_price_update`: UTC broker tick time for ICMarkets and Exness (from `tick.time`), current wall-clock for OANDA/Binance. Spread-hour transition tracking still runs on stale ticks — only per-signal checks are skipped.
 
 ### HIT signals roll over at expiry
 `expire_old_signals` in `signal_ops.py` branches on status. **ACTIVE signals** are cancelled (existing behaviour). **HIT signals** are rolled over: `expiry_time` is advanced to the next occurrence of the same `expiry_type` (via `calculate_expiry`) and a `status_changes` row is inserted with `change_type='automatic', reason='rollover'`. The signal status and limits are untouched. This repeats each expiry window until the position closes naturally.
@@ -500,7 +511,7 @@ All updates in `manager.mark_limit_hit` (limit row, signal counter, status→HIT
 `streaming_monitor._load_and_subscribe_signals` fetches hit limits for every HIT-status signal (via `get_hit_limits_for_signal`) and appends them as `LimitData(status="hit")` to `signal.limits`. After restart, `signal.hit_limits` is non-empty so embed builders see the complete limit history without waiting for the next event.
 
 ### live_prices ic_bid / ic_ask columns
-`live_prices` has two nullable columns `ic_bid` and `ic_ask`. `LivePriceWriter` reads the ICMarkets `last_prices` cache at flush time and writes them in the same UPSERT row as the OANDA/Binance `bid`/`ask`. Both prices are therefore from the same flush window — the EX offset calculator reads `ic_mid − feed_mid` without a separate MT5 tick fetch, eliminating the 5-second inter-fetch drift. When `ic_bid`/`ic_ask` are NULL (rolling-deploy gap), EX falls back to a live MT5 tick and logs once.
+`live_prices` has two nullable columns `ic_bid` and `ic_ask`. `LivePriceWriter` reads the ICMarkets `last_prices` cache at flush time and writes them in the same UPSERT row as the OANDA/Binance/Exness `bid`/`ask`. Both prices are therefore from the same flush window — the EX offset calculator reads `ic_mid − feed_mid` without a separate MT5 tick fetch, eliminating the 5-second inter-fetch drift. When `ic_bid`/`ic_ask` are NULL (rolling-deploy gap), EX falls back to a live MT5 tick and logs once.
 
 ---
 
@@ -528,6 +539,10 @@ OANDA_ACCOUNT_ID=...
 OANDA_PRACTICE=false
 OPENAI_API_KEY=...              # optional; AI fallback off by default
 BINANCE_USE_INTERNATIONAL=false # set true if binance.us is blocked
+EXNESS_MT5_PATH=...             # path to Exness terminal64.exe; enables oil feed
+EXNESS_MT5_LOGIN=...            # Exness MT5 account login ID
+EXNESS_MT5_PASSWORD=...         # Exness MT5 account password
+EXNESS_MT5_SERVER=...           # Exness MT5 server (e.g. Exness-MT5Trial11)
 LOG_LEVEL=INFO                  # optional
 ```
 
