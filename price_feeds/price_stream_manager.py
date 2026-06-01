@@ -222,6 +222,12 @@ class PriceStreamManager:
 
             if feed_symbol and feed_name in self.feeds and self.feed_status.get(feed_name):
                 feed_symbols[feed_name].append((symbol, feed_symbol))
+            else:
+                logger.warning(
+                    "Cannot subscribe %s: feed=%s feed_symbol=%s in_feeds=%s status=%s",
+                    symbol, feed_name, feed_symbol,
+                    feed_name in self.feeds, self.feed_status.get(feed_name),
+                )
 
         # Subscribe to each feed
         for feed_name, symbol_pairs in feed_symbols.items():
