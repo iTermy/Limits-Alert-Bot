@@ -14,7 +14,7 @@ class SymbolMapper:
     - ICMarkets: Default for forex, stocks, backup for everything
     - OANDA: Primary for indices, backup for forex
     - Binance: Exclusive for crypto
-    - FXCM: Redirects to ICMarkets for metals (Gold, Silver)
+    - Exness: Oil symbols (USOILSPOT via MT5)
     """
 
     def __init__(self, config_path: str = None):
@@ -140,17 +140,15 @@ class SymbolMapper:
     def get_best_feed(self, symbol: str) -> str:
         """
         Determine the best feed for a given symbol
-        Returns the feed name: 'icmarkets', 'oanda', 'binance', or 'fxcm'
+        Returns the feed name: 'icmarkets', 'oanda', 'binance', or 'exness'
         """
         asset_class = self.determine_asset_class(symbol)
 
-        # Oil: XTIUSD is on ICMarkets; legacy USOILSPOT/UKOILSPOT are unsupported
         if asset_class == "oil":
             symbol_upper = symbol.upper()
             if "XTI" in symbol_upper or symbol_upper == "XTIUSD":
                 return "icmarkets"
-            logger.warning(f"Oil symbol {symbol} is not currently supported")
-            return "icmarkets"  # Default fallback
+            return "exness"
 
         # Get feed priority for this asset class
         feed_priority = self.mappings["feed_priority"].get(asset_class, ["icmarkets"])
@@ -206,9 +204,8 @@ class SymbolMapper:
             return self._map_to_oanda(internal_symbol)
         if feed == "binance":
             return self._map_to_binance(internal_symbol)
-        if feed == "fxcm":
-            # FXCM redirects to ICMarkets for metals
-            return self._map_to_icmarkets(internal_symbol)
+        if feed == "exness":
+            return self._map_to_exness(internal_symbol)
 
         return None
 
@@ -322,6 +319,14 @@ class SymbolMapper:
         # Otherwise, append USDT and lowercase
         return (symbol_upper + "USDT").lower()
 
+    def _map_to_exness(self, symbol: str) -> Optional[str]:
+        """Map symbol to Exness MT5 format"""
+        symbol_upper = symbol.upper()
+        specific = self.mappings["symbol_mappings"].get("exness", {}).get("specific_mappings", {})
+        if symbol_upper in specific:
+            return specific[symbol_upper]
+        return None
+
     def get_internal_symbol(self, feed_symbol: str, feed: str) -> Optional[str]:
         """
         Reverse mapping: Convert feed-specific symbol back to internal format
@@ -392,6 +397,9 @@ class SymbolMapper:
             # Database stores: BTCUSDT, ETHUSDT (with USDT)
             return feed_symbol_upper  # Already uppercase now
 
+        if feed == "exness":
+            return feed_symbol_upper
+
         return feed_symbol.upper()  # ✓ FINAL FALLBACK: ALWAYS UPPERCASE
 
     def get_all_feed_symbols(self, internal_symbol: str) -> Dict[str, Optional[str]]:
@@ -406,7 +414,7 @@ class SymbolMapper:
             "icmarkets": self.get_feed_symbol(internal_symbol, "icmarkets"),
             "oanda": self.get_feed_symbol(internal_symbol, "oanda"),
             "binance": self.get_feed_symbol(internal_symbol, "binance"),
-            "fxcm": self.get_feed_symbol(internal_symbol, "fxcm"),
+            "exness": self.get_feed_symbol(internal_symbol, "exness"),
         }
 
     def validate_symbol(self, symbol: str) -> Tuple[bool, str]:
@@ -420,9 +428,6 @@ class SymbolMapper:
             return False, "Empty symbol"
 
         asset_class = self.determine_asset_class(symbol)
-
-        if asset_class == "oil":
-            return False, f"Oil symbols not currently supported: {symbol}"
 
         best_feed = self.get_best_feed(symbol)
         feed_symbol = self.get_feed_symbol(symbol, best_feed)

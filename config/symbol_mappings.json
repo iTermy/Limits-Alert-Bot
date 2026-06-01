@@ -5,7 +5,7 @@
     "crypto": ["binance"],
     "metals": ["icmarkets"],
     "stocks": ["icmarkets"],
-    "oil": ["fxcm"]
+    "oil": ["exness"]
   },
 
   "asset_class_patterns": {
@@ -143,20 +143,12 @@
       }
     },
 
-    "fxcm": {
+    "exness": {
       "format_rules": {
-        "metals": "Redirect to ICMarkets",
-        "oil": "Not supported currently"
+        "oil": "Exness MT5 symbol names (suffix 'm' for micro)"
       },
       "specific_mappings": {
-        "XAUUSD": "GOLD",
-        "XAGUSD": "SILVER",
-        "GOLD": "GOLD",
-        "SILVER": "SILVER",
-        "USOILSPOT": null,
-        "UKOILSPOT": null,
-        "WTIUSD": null,
-        "BRENTUSD": null
+        "USOILSPOT": "USOILm"
       }
     }
   },
@@ -165,6 +157,9 @@
     "icmarkets": {
       "GOLD": "XAUUSD",
       "SILVER": "XAGUSD"
+    },
+    "exness": {
+      "USOILm": "USOILSPOT"
     },
     "oanda": {
       "SPX500_USD": "spx500usd",

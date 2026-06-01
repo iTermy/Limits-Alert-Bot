@@ -54,6 +54,12 @@ MARKET_HOURS = {
         "close_time": "17:00",
         "timezone": "America/New_York",
     },
+    "oil": {
+        "days": [0, 1, 2, 3, 4, 6],
+        "open_time": "18:00",
+        "close_time": "17:00",
+        "timezone": "America/New_York",
+    },
 }
 
 
@@ -484,7 +490,7 @@ class FeedHealthMonitor:
         # and indices. Liquidity drops and price ticks slow or stop — treating it
         # as "open" would generate false-positive stale-feed alerts. Mirror the
         # weekend skip above and treat it as closed.
-        if asset_class in ("forex", "metals", "indices"):
+        if asset_class in ("forex", "metals", "indices", "oil"):
             if _SPREAD_START <= now.time() < _SPREAD_END:
                 return False
 

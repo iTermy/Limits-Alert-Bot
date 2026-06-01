@@ -115,6 +115,25 @@ class PriceStreamManager:
             logger.error(f"Failed to initialize Binance stream: {e}")
             self.feed_status["binance"] = False
 
+        # Initialize Exness MT5 stream (oil)
+        try:
+            import os
+
+            if os.getenv("EXNESS_MT5_PATH"):
+                from price_feeds.feeds.exness_stream import ExnessStream
+
+                self.feeds["exness"] = ExnessStream()
+                await self.feeds["exness"].connect()
+                self.feed_status["exness"] = True
+
+                asyncio.create_task(self._handle_exness_stream())
+                logger.info("Exness MT5 stream initialized")
+            else:
+                logger.info("Exness MT5 path not configured, skipping")
+        except Exception as e:
+            logger.error(f"Failed to initialize Exness stream: {e}")
+            self.feed_status["exness"] = False
+
         connected = sum(1 for status in self.feed_status.values() if status)
         logger.info(
             f"Stream initialization complete: {connected}/{len(self.feed_status)} feeds connected"
@@ -328,6 +347,29 @@ class PriceStreamManager:
                     self.stats["reconnections"] += 1
                 except Exception as e2:
                     logger.error(f"Binance reconnection failed: {e2}")
+                    await asyncio.sleep(30)
+
+    async def _handle_exness_stream(self):
+        """Handle Exness MT5 price stream (oil symbols)"""
+        feed = self.feeds["exness"]
+
+        while True:
+            try:
+                async for symbol, price_data in feed.stream_prices():
+                    internal_symbol = self.symbol_mapper.get_internal_symbol(symbol, "exness")
+
+                    if internal_symbol:
+                        await self._process_price_update(internal_symbol, price_data, "exness")
+            except Exception as e:
+                logger.error(f"Exness stream error: {e}")
+                self.stats["errors"] += 1
+
+                await asyncio.sleep(5)
+                try:
+                    await feed.reconnect()
+                    self.stats["reconnections"] += 1
+                except Exception as e2:
+                    logger.error(f"Exness reconnection failed: {e2}")
                     await asyncio.sleep(30)
 
     async def _process_price_update(self, symbol: str, price_data: Dict, feed: str):
