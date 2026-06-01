@@ -487,6 +487,18 @@ Before reactivating a cancelled signal via reply command or `!setstatus active`,
 ### Tick staleness gate
 `streaming_monitor._on_price_update` drops ticks older than `_MAX_TICK_AGE_SECONDS` (5 s) before any signal evaluation. The timestamp comes from `price_data["updated_at"]`, which is stamped by `price_stream_manager._process_price_update`: UTC broker tick time for ICMarkets (from `tick.time`), current wall-clock for OANDA/Binance. Spread-hour transition tracking still runs on stale ticks — only per-signal checks are skipped.
 
+### HIT signals roll over at expiry
+`expire_old_signals` in `signal_ops.py` branches on status. **ACTIVE signals** are cancelled (existing behaviour). **HIT signals** are rolled over: `expiry_time` is advanced to the next occurrence of the same `expiry_type` (via `calculate_expiry`) and a `status_changes` row is inserted with `change_type='automatic', reason='rollover'`. The signal status and limits are untouched. This repeats each expiry window until the position closes naturally.
+
+### `save_signal` is TOCTOU-safe
+Uses `INSERT … ON CONFLICT (message_id) DO NOTHING RETURNING id`. If no id is returned (duplicate parse race), the existing row is inspected on the same connection: reactivate if cancelled, reject otherwise. The pre-check `SELECT` is gone.
+
+### `mark_limit_hit` is atomic
+All updates in `manager.mark_limit_hit` (limit row, signal counter, status→HIT, audit row) run inside `async with conn.transaction()`. A mid-flight disconnect cannot leave the row half-updated.
+
+### Hit limits loaded on restart
+`streaming_monitor._load_and_subscribe_signals` fetches hit limits for every HIT-status signal (via `get_hit_limits_for_signal`) and appends them as `LimitData(status="hit")` to `signal.limits`. After restart, `signal.hit_limits` is non-empty so embed builders see the complete limit history without waiting for the next event.
+
 ### live_prices ic_bid / ic_ask columns
 `live_prices` has two nullable columns `ic_bid` and `ic_ask`. `LivePriceWriter` reads the ICMarkets `last_prices` cache at flush time and writes them in the same UPSERT row as the OANDA/Binance `bid`/`ask`. Both prices are therefore from the same flush window — the EX offset calculator reads `ic_mid − feed_mid` without a separate MT5 tick fetch, eliminating the 5-second inter-fetch drift. When `ic_bid`/`ic_ask` are NULL (rolling-deploy gap), EX falls back to a live MT5 tick and logs once.
 
