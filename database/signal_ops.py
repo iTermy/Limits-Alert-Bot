@@ -298,6 +298,17 @@ class SignalDatabase:
                 async with self.db.get_connection() as conn:
                     now = datetime.now(pytz.UTC)
 
+                    # C3 invariant: cancel limits before updating signal status so
+                    # EX's Supabase query (WHERE l.status='pending') stops seeing
+                    # these limits before the signal transitions to 'cancelled'.
+                    await conn.execute(
+                        """
+                        UPDATE limits
+                        SET status = 'cancelled'
+                        WHERE signal_id = $1 AND status = 'pending'
+                    """,
+                        signal["id"],
+                    )
                     await conn.execute(
                         """
                         UPDATE signals
@@ -320,14 +331,6 @@ class SignalDatabase:
                         SignalStatus.CANCELLED,
                         "manual",
                         "User cancelled",
-                    )
-                    await conn.execute(
-                        """
-                        UPDATE limits
-                        SET status = 'cancelled'
-                        WHERE signal_id = $1 AND status = 'pending'
-                    """,
-                        signal["id"],
                     )
                 logger.info(f"Successfully cancelled signal {signal['id']}")
                 return True
@@ -445,6 +448,28 @@ class SignalDatabase:
                 async with self.db.get_connection() as conn:
                     now = datetime.now(pytz.UTC)
 
+                    # C3 invariant: for cancel paths, update limits before signal status
+                    # so EX's Supabase query stops seeing pending limits before the signal
+                    # transitions to a final status.
+                    if SignalStatus.is_final(new_status):
+                        await conn.execute(
+                            """
+                            UPDATE limits
+                            SET status = 'cancelled'
+                            WHERE signal_id = $1 AND status = 'pending'
+                        """,
+                            signal_id,
+                        )
+                    elif new_status == SignalStatus.ACTIVE:
+                        await conn.execute(
+                            """
+                            UPDATE limits
+                            SET status = 'pending'
+                            WHERE signal_id = $1 AND status = 'cancelled'
+                        """,
+                            signal_id,
+                        )
+
                     if SignalStatus.is_final(new_status):
                         if result_pips is not None:
                             await conn.execute(
@@ -497,24 +522,6 @@ class SignalDatabase:
                         effective_closed_reason,
                         reason or "Manual override",
                     )
-                    if SignalStatus.is_final(new_status):
-                        await conn.execute(
-                            """
-                            UPDATE limits
-                            SET status = 'cancelled'
-                            WHERE signal_id = $1 AND status = 'pending'
-                        """,
-                            signal_id,
-                        )
-                    elif new_status == SignalStatus.ACTIVE:
-                        await conn.execute(
-                            """
-                            UPDATE limits
-                            SET status = 'pending'
-                            WHERE signal_id = $1 AND status = 'cancelled'
-                        """,
-                            signal_id,
-                        )
                 logger.info(
                     f"Successfully set signal {signal_id} status: {old_status} -> {new_status}"
                     + (f" (result_pips={result_pips:.4f})" if result_pips is not None else "")
@@ -761,6 +768,15 @@ class SignalDatabase:
 
             try:
                 async with self.db.get_connection() as conn:
+                    # C3 invariant: cancel limits before updating signal status
+                    await conn.execute(
+                        """
+                        UPDATE limits
+                        SET status = 'cancelled'
+                        WHERE signal_id = $1 AND status = 'pending'
+                    """,
+                        signal_id,
+                    )
                     await conn.execute(
                         """
                         UPDATE signals
@@ -781,14 +797,6 @@ class SignalDatabase:
                         SignalStatus.CANCELLED,
                         "automatic",
                         "Expired",
-                    )
-                    await conn.execute(
-                        """
-                        UPDATE limits
-                        SET status = 'cancelled'
-                        WHERE signal_id = $1 AND status = 'pending'
-                    """,
-                        signal_id,
                     )
                 count += 1
             except Exception as e:
