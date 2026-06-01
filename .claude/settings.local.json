@@ -1,4 +1,8 @@
 {
+  "attribution": {
+    "commit": "",
+    "pr": ""
+  },
   "permissions": {
     "allow": [
       "Bash(ruff format *)",
@@ -17,7 +21,13 @@
       "PowerShell(Remove-Item *)",
       "PowerShell(Move-Item *)",
       "Bash(Get-ChildItem -Path \"C:\\\\Python Stuff\\\\TM Bot\" -Exclude \".venv\" -File -Filter \"*.py\" -Recurse)",
-      "Bash(cd *)"
+      "Bash(cd *)",
+      "Bash(git add *)",
+      "Bash(git commit *)",
+      "Bash(git push *)"
+    ],
+    "additionalDirectories": [
+      "C:\\Personal Projects\\MT5-Auto-Execution-Bot"
     ]
   }
 }

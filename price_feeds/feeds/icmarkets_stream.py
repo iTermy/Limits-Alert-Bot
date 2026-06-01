@@ -5,6 +5,7 @@ Uses continuous tick polling with asyncio for real-time price updates
 
 import asyncio
 import logging
+import os
 from collections.abc import AsyncIterator
 from datetime import datetime, timezone
 from typing import Callable, Dict, Optional, Set, Tuple
@@ -46,7 +47,11 @@ class ICMarketsStream:
         """Initialize MT5 connection"""
         try:
             loop = asyncio.get_event_loop()
-            result = await loop.run_in_executor(None, mt5.initialize)
+            mt5_path = os.getenv("MT5_PATH")
+            if mt5_path:
+                result = await loop.run_in_executor(None, lambda: mt5.initialize(mt5_path))
+            else:
+                result = await loop.run_in_executor(None, mt5.initialize)
 
             if result:
                 self.connected = True
