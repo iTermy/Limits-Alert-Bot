@@ -16,7 +16,7 @@ logger = logging.getLogger(__name__)
 # ICMarkets symbols subscribed unconditionally at startup so that last_prices
 # always has reference prices for the execution-bot offset calculation,
 # independent of which signals happen to be active.
-_IC_REFERENCE_SYMBOLS = ["XTIUSD", "US500", "USTEC"]
+_IC_REFERENCE_SYMBOLS = ["XTIUSD", "US500", "USTEC", "US30", "JP225", "DE40", "BTCUSD", "ETHUSD"]
 
 
 class PriceStreamManager:
