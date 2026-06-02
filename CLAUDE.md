@@ -288,6 +288,9 @@ All PKs: `BIGINT GENERATED ALWAYS AS IDENTITY`. Timestamps: `TIMESTAMPTZ`. RLS: 
 | first_limit_hit_time | TIMESTAMPTZ |
 | closed_at / closed_reason | TIMESTAMPTZ / TEXT (`automatic` / `manual` / `expiry`) |
 | tp_price | DOUBLE PRECISION; market price at which auto-TP fired; NULL for manual profit / SL / other closures |
+| alert_message_id | BIGINT (nullable); Discord message ID of the active-channel alert embed. Persisted so restarts can reuse the existing embed instead of orphaning it. Cleared on archive move, live-update NotFound, and approaching-alert retraction. |
+| alert_channel_id | BIGINT (nullable); Discord channel ID where the alert embed lives. Used at hydration to pin the fetch to the same channel even if `channels.json` was reconfigured. Falls back to `_get_alert_channel(signal)` if missing. |
+| ping_message_id | BIGINT (nullable); Discord message ID of the most recent ping reply to the embed. Refetched on restart so the next event can delete it cleanly before sending a new one. |
 | total_limits / limits_hit | INTEGER |
 
 ### limits
@@ -512,6 +515,18 @@ All updates in `manager.mark_limit_hit` (limit row, signal counter, status→HIT
 
 ### live_prices ic_bid / ic_ask columns
 `live_prices` has two nullable columns `ic_bid` and `ic_ask`. `LivePriceWriter` reads the ICMarkets `last_prices` cache at flush time and writes them in the same UPSERT row as the OANDA/Binance/Exness `bid`/`ask`. Both prices are therefore from the same flush window — the EX offset calculator reads `ic_mid − feed_mid` without a separate MT5 tick fetch, eliminating the 5-second inter-fetch drift. When `ic_bid`/`ic_ask` are NULL (rolling-deploy gap), EX falls back to a live MT5 tick and logs once.
+
+### Alert embed recovery on restart
+The alert embed message reference is persisted on `signals` (`alert_message_id`, `alert_channel_id`, `ping_message_id`) every time `_upsert_signal_message` creates a new embed or sends a new ping. On startup, `AlertSystem.hydrate_from_db` runs from `streaming_monitor._load_and_subscribe_signals` AFTER hit-limits are loaded and BEFORE `bulk_subscribe` — this ordering matters: if the price stream started first, the next tick could fire `send_approaching_alert` / `send_limit_hit_alert` and post a duplicate embed alongside the orphaned one. Per-signal decision:
+- **Persisted ID + Discord fetch succeeds** → re-populate `signal_messages` / `signal_ping_messages` / `alert_messages` and register for live updates. Same embed continues live-refreshing on the 15 s loop.
+- **Persisted ID + NotFound, status=ACTIVE** → clear persisted IDs, `UPDATE limits SET approaching_alert_sent = FALSE WHERE signal_id=$1 AND status='pending'`, mutate in-memory limit copies. The approaching alert re-fires on the next price tick with a fresh embed.
+- **Persisted ID + NotFound, status=HIT** → clear persisted IDs and call `reactivate_embed(signal, ping_text=None)` to rebuild the embed immediately so live updates and future events have a target.
+- **No persisted ID** (pre-feature signals, first deploy) → same fallback as above: ACTIVE resets `approaching_alert_sent`; HIT rebuilds. One-time cosmetic churn on first restart after deploy.
+
+IDs are cleared in `_clear_persisted_alert_ids` on live-update NotFound (`alert_system._refresh_live_embeds`), in `archive_manager._move_after_delay` after the embed is moved out of the alert channel, and during retraction.
+
+### Approaching alert retraction
+Once `limits.approaching_alert_sent=TRUE`, the embed used to linger until hit, SL, NM, expiry, or manual cancel. A new check in `streaming_monitor._check_limit` gated on `signal.status=='active' AND limit.sequence_number==1 AND limit.approaching_alert_sent` retracts the embed when `abs(distance) > _APPROACHING_RETRACTION_MULTIPLIER × alert_distance` (default `2.0`, module-level constant in `streaming_monitor.py`). `_retract_approaching_alert` calls `alert_system.retract_approaching_embed` (deletes embed + ping, removes from all dicts, clears persisted IDs), resets `approaching_alert_sent=FALSE` on the limit, evicts `nm_monitor` tracking state. Next time price re-enters the alert distance the approaching alert fires fresh. Applies to all signal types (no swing carve-out — retraction is cosmetic, not a cancel). NM tracking starts cleanly on re-approach because `nm_monitor.update` bails when `approaching_alert_sent` is False (`nm_monitor.py:151`).
 
 ---
 
