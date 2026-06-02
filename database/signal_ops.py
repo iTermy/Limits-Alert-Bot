@@ -563,6 +563,23 @@ class SignalDatabase:
 
             effective_closed_reason = closed_reason if closed_reason is not None else "manual"
 
+            # Record the market price at the time of a manual profit so the DB always
+            # captures the close price (auto-TP supplies its own; manual paths fall here).
+            if new_status == SignalStatus.PROFIT and tp_price is None:
+                price_data = await self._get_live_price(signal["instrument"])
+                if price_data and price_data.get("bid") is not None and price_data.get("ask") is not None:
+                    direction = (signal["direction"] or "").lower()
+                    tp_price = (
+                        float(price_data["bid"])
+                        if direction == "long"
+                        else float(price_data["ask"])
+                    )
+                else:
+                    logger.warning(
+                        f"No live price for {signal['instrument']} — tp_price will be NULL "
+                        f"for manual profit on signal {signal_id}"
+                    )
+
             try:
                 async with self.db.get_connection() as conn:
                     now = datetime.now(pytz.UTC)

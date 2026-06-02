@@ -283,7 +283,7 @@ def _build_profit_archive_embed(
     if sig_data.get("stop_loss"):
         embed.add_field(name="Stop Loss", value=_fmt(sig_data["stop_loss"]), inline=True)
 
-    if tp_price is not None:
+    if is_auto_tp and tp_price is not None:
         embed.add_field(name="TP Price", value=f"**{_fmt(float(tp_price))}**", inline=True)
 
     msg_id = sig_data.get("message_id")
