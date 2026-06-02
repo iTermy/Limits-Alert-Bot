@@ -18,6 +18,10 @@ logger = get_logger("stream_monitor")
 # Guards against stale rollover prints crossing the spread-hour boundary.
 _MAX_TICK_AGE_SECONDS = 5
 
+# After an approaching alert has fired, retract the embed once price drifts
+# past N × the alert distance away from the first pending limit.
+_APPROACHING_RETRACTION_MULTIPLIER = 2.0
+
 
 async def react_to_original_signal(bot, signal: Dict, emoji: str):
     """
@@ -225,14 +229,12 @@ class StreamingPriceMonitor:
 
                 symbols_needed.add(symbol)
 
-            await self.stream_manager.bulk_subscribe(list(symbols_needed))
-
             for signal in signals:
                 if signal.get("status") == "hit":
                     signal_id = signal["signal_id"]
                     await self.tp_monitor.refresh_hit_limits(signal_id)
-                    # M7: populate hit limits in active_signals so embeds reconstruct
-                    # correctly after restart (pending_limits alone is not enough for HIT signals)
+                    # Populate hit limits so embeds reconstruct with the full
+                    # limit history (pending_limits alone is not enough for HIT).
                     try:
                         hit_limit_rows = await self.signal_db.get_hit_limits_for_signal(signal_id)
                         for row in hit_limit_rows:
@@ -247,10 +249,17 @@ class StreamingPriceMonitor:
                                     hit_price=row.get("hit_price"),
                                 )
                             )
-                    except Exception as _m7_err:
+                    except Exception as _hit_err:
                         logger.error(
-                            f"Failed to load hit limits for signal {signal_id}: {_m7_err}"
+                            f"Failed to load hit limits for signal {signal_id}: {_hit_err}"
                         )
+
+            # Hydrate alert embed references BEFORE the price stream starts —
+            # otherwise the first tick could fire send_*_alert and post a
+            # duplicate embed alongside the orphaned one.
+            await self.alert_system.hydrate_from_db(list(self.active_signals.values()))
+
+            await self.stream_manager.bulk_subscribe(list(symbols_needed))
 
             logger.info(
                 f"Loaded {len(signals)} active signals across {len(symbols_needed)} symbols"
@@ -533,6 +542,50 @@ class StreamingPriceMonitor:
                     if sent:
                         await self._mark_approaching_sent(limit["id"])
                         limit["approaching_alert_sent"] = True
+
+        # Retraction: price has drifted past N x the alert threshold —
+        # delete the embed and reset the flag so it can re-fire later.
+        elif (
+            not is_hit
+            and limit.get("approaching_alert_sent", False)
+            and limit["sequence_number"] == 1
+            and signal.get("status") in ("active", None)
+        ):
+            try:
+                approaching_distance = self.alert_config.get_approaching_distance(
+                    symbol, current_price=current_price
+                )
+            except Exception as e:
+                logger.error(f"Error getting approaching distance for {symbol}: {e}")
+                return
+
+            if abs(distance) > approaching_distance * _APPROACHING_RETRACTION_MULTIPLIER:
+                await self._retract_approaching_alert(signal, limit, abs(distance))
+
+    async def _retract_approaching_alert(
+        self, signal: Dict, limit: Dict, distance: float
+    ) -> None:
+        """Drop the approaching embed + reset the flag after a long drift."""
+        signal_id = signal["signal_id"]
+        await self.alert_system.retract_approaching_embed(signal_id)
+        await self._reset_approaching_sent(limit["id"])
+        limit["approaching_alert_sent"] = False
+        self.nm_monitor.evict_signal(signal_id)
+        logger.info(
+            f"Retracted approaching alert for signal {signal_id} "
+            f"({signal['instrument']}) — distance {distance:.5f} exceeded "
+            f"{_APPROACHING_RETRACTION_MULTIPLIER}x threshold"
+        )
+
+    async def _reset_approaching_sent(self, limit_id: int) -> None:
+        try:
+            async with self.db.get_connection() as conn:
+                await conn.execute(
+                    "UPDATE limits SET approaching_alert_sent = FALSE WHERE id = $1",
+                    limit_id,
+                )
+        except Exception as e:
+            logger.error(f"Failed to reset approaching_alert_sent for limit {limit_id}: {e}")
 
     async def _check_stop_loss(
         self, signal: Dict, current_price: float, direction: str, is_spread_hour: bool

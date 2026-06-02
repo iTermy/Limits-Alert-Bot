@@ -284,6 +284,17 @@ async def _run_migrations(conn):
             END IF;
         END $$;
         """,
+        # Persist Discord alert embed + ping references so restarts can reuse
+        # the existing messages instead of orphaning them.
+        """
+        ALTER TABLE signals ADD COLUMN IF NOT EXISTS alert_message_id BIGINT;
+        """,
+        """
+        ALTER TABLE signals ADD COLUMN IF NOT EXISTS alert_channel_id BIGINT;
+        """,
+        """
+        ALTER TABLE signals ADD COLUMN IF NOT EXISTS ping_message_id BIGINT;
+        """,
     ]
 
     for migration in migrations:

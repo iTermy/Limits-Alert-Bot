@@ -66,6 +66,9 @@ class SignalData(BaseModel):
     tp_price: Optional[float] = None
     total_limits: int = 0
     limits_hit: int = 0
+    alert_message_id: Optional[int] = None
+    alert_channel_id: Optional[int] = None
+    ping_message_id: Optional[int] = None
     created_at: Optional[datetime] = None
     updated_at: Optional[datetime] = None
 

@@ -271,6 +271,20 @@ class ArchiveManager:
                 self.alert_messages.pop(str(embed_msg.id), None)
             self._deletion_tasks.pop(signal_id, None)
 
+            if self.bot and self.bot.signal_db:
+                try:
+                    async with self.bot.signal_db.db.get_connection() as conn:
+                        await conn.execute(
+                            "UPDATE signals "
+                            "SET alert_message_id = NULL, alert_channel_id = NULL, ping_message_id = NULL "
+                            "WHERE id = $1",
+                            int(signal_id),
+                        )
+                except Exception as e:
+                    logger.warning(
+                        f"Could not clear persisted alert IDs after archive for signal {signal_id}: {e}"
+                    )
+
             try:
                 if self.bot and self.bot.signal_db:
                     sig_data = await self.bot.signal_db.get_signal_with_limits(signal_id)

@@ -217,6 +217,7 @@ class AlertSystem:
                     logger.warning(f"Live update: embed for signal {signal_id} not found, removing")
                     self._live_embeds.pop(signal_id, None)
                     self.signal_messages.pop(signal_id, None)
+                    await self._clear_persisted_alert_ids(signal_id)
                 except discord.HTTPException as e:
                     if e.status == 429:
                         logger.warning(
@@ -366,6 +367,202 @@ class AlertSystem:
     def get_signal_from_alert(self, message_id: str) -> Optional[int]:
         return self.alert_messages.get(str(message_id))
 
+    # ── Persisted message-ID helpers (for restart hydration) ─────────────────
+
+    async def _persist_alert_message(
+        self, signal_id: int, message_id: int, channel_id: int
+    ) -> None:
+        if not self.bot or not self.bot.signal_db:
+            return
+        try:
+            async with self.bot.signal_db.db.get_connection() as conn:
+                await conn.execute(
+                    "UPDATE signals SET alert_message_id = $1, alert_channel_id = $2 WHERE id = $3",
+                    int(message_id),
+                    int(channel_id),
+                    int(signal_id),
+                )
+        except Exception as e:
+            logger.error(f"Failed to persist alert message ID for signal {signal_id}: {e}")
+
+    async def _persist_ping_message(self, signal_id: int, ping_id: int) -> None:
+        if not self.bot or not self.bot.signal_db:
+            return
+        try:
+            async with self.bot.signal_db.db.get_connection() as conn:
+                await conn.execute(
+                    "UPDATE signals SET ping_message_id = $1 WHERE id = $2",
+                    int(ping_id),
+                    int(signal_id),
+                )
+        except Exception as e:
+            logger.error(f"Failed to persist ping message ID for signal {signal_id}: {e}")
+
+    async def _clear_persisted_alert_ids(self, signal_id: int) -> None:
+        if not self.bot or not self.bot.signal_db:
+            return
+        try:
+            async with self.bot.signal_db.db.get_connection() as conn:
+                await conn.execute(
+                    "UPDATE signals "
+                    "SET alert_message_id = NULL, alert_channel_id = NULL, ping_message_id = NULL "
+                    "WHERE id = $1",
+                    int(signal_id),
+                )
+        except Exception as e:
+            logger.error(f"Failed to clear persisted alert IDs for signal {signal_id}: {e}")
+
+    async def _reset_approaching_alert_sent(self, signal_id: int) -> None:
+        """Clear approaching_alert_sent on all pending limits so the alert can re-fire."""
+        if not self.bot or not self.bot.signal_db:
+            return
+        try:
+            async with self.bot.signal_db.db.get_connection() as conn:
+                await conn.execute(
+                    "UPDATE limits SET approaching_alert_sent = FALSE "
+                    "WHERE signal_id = $1 AND status = 'pending'",
+                    int(signal_id),
+                )
+        except Exception as e:
+            logger.error(f"Failed to reset approaching_alert_sent for signal {signal_id}: {e}")
+
+    # ── Approaching-alert retraction ─────────────────────────────────────────
+
+    async def retract_approaching_embed(self, signal_id: int) -> None:
+        """
+        Delete the persistent embed and ping for a signal whose price has drifted
+        away. Signal stays active; on re-approach a fresh embed is created.
+        """
+        ping_msg = self.signal_ping_messages.pop(signal_id, None)
+        if ping_msg:
+            try:
+                await ping_msg.delete()
+            except discord.NotFound:
+                pass
+            except Exception as e:
+                logger.warning(f"Could not delete ping during retraction for signal {signal_id}: {e}")
+
+        embed_msg = self.signal_messages.pop(signal_id, None)
+        if embed_msg:
+            self.alert_messages.pop(str(embed_msg.id), None)
+            try:
+                await embed_msg.delete()
+                logger.info(
+                    f"Retracted approaching embed for signal {signal_id} (msg {embed_msg.id})"
+                )
+            except discord.NotFound:
+                pass
+            except Exception as e:
+                logger.warning(
+                    f"Could not delete embed during retraction for signal {signal_id}: {e}"
+                )
+
+        self._unregister_live_embed(signal_id)
+        await self._clear_persisted_alert_ids(signal_id)
+
+    # ── Restart hydration ────────────────────────────────────────────────────
+
+    async def hydrate_from_db(self, signals: List[Dict]) -> None:
+        """
+        On startup, recover alert embed references for each loaded signal.
+
+        Found on Discord: reuse the existing embed (re-populate dicts + register
+        for live updates). Missing: ACTIVE signals reset approaching_alert_sent
+        so the alert can re-fire on the next tick; HIT signals rebuild a fresh
+        embed immediately so live updates and future events have a target.
+        """
+        for signal in signals:
+            try:
+                await self._hydrate_signal(signal)
+            except Exception as e:
+                logger.error(
+                    f"Hydration failed for signal {signal.get('signal_id')}: {e}",
+                    exc_info=True,
+                )
+
+    async def _hydrate_signal(self, signal: Dict) -> None:
+        signal_id = signal["signal_id"]
+        status = signal.get("status")
+        alert_message_id = signal.get("alert_message_id")
+        alert_channel_id = signal.get("alert_channel_id")
+        ping_message_id = signal.get("ping_message_id")
+
+        if alert_message_id:
+            channel = self._resolve_channel(signal, alert_channel_id)
+            if channel:
+                try:
+                    embed_msg = await channel.fetch_message(int(alert_message_id))
+                    self.signal_messages[signal_id] = embed_msg
+                    self.track_alert_message(embed_msg.id, signal_id)
+
+                    if ping_message_id:
+                        try:
+                            ping_msg = await channel.fetch_message(int(ping_message_id))
+                            self.signal_ping_messages[signal_id] = ping_msg
+                        except discord.NotFound:
+                            pass
+                        except Exception as e:
+                            logger.debug(
+                                f"Could not refetch ping {ping_message_id} for signal {signal_id}: {e}"
+                            )
+
+                    event = "hit" if status == "hit" else "approaching"
+                    self._register_live_embed(signal, event, spread_buffer_enabled=True)
+                    logger.info(
+                        f"Hydrated alert embed for signal {signal_id} "
+                        f"(channel={channel.id}, msg={embed_msg.id}, event={event})"
+                    )
+                    return
+                except discord.NotFound:
+                    logger.info(
+                        f"Persisted alert embed for signal {signal_id} no longer exists "
+                        f"(msg={alert_message_id}) — falling back"
+                    )
+                except Exception as e:
+                    logger.warning(
+                        f"Could not fetch persisted alert embed for signal {signal_id}: {e}"
+                    )
+
+            await self._clear_persisted_alert_ids(signal_id)
+
+        await self._hydrate_fallback(signal)
+
+    def _resolve_channel(
+        self, signal: Dict, persisted_channel_id: Optional[int]
+    ) -> Optional[discord.TextChannel]:
+        if persisted_channel_id and self.bot:
+            channel = self.bot.get_channel(int(persisted_channel_id))
+            if channel:
+                return channel
+        return self._get_alert_channel(signal)
+
+    async def _hydrate_fallback(self, signal: Dict) -> None:
+        """
+        Embed reference is gone. For HIT signals rebuild immediately; for ACTIVE
+        signals reset approaching_alert_sent so the alert re-fires naturally.
+        """
+        signal_id = signal["signal_id"]
+        status = signal.get("status")
+
+        if status == "hit":
+            rebuilt = await self.reactivate_embed(signal, ping_text=None)
+            if rebuilt:
+                logger.info(f"Rebuilt missing embed for HIT signal {signal_id} on startup")
+            else:
+                logger.warning(f"Could not rebuild embed for HIT signal {signal_id} on startup")
+            return
+
+        limits = signal.get("limits") or []
+        if any(l.get("approaching_alert_sent") for l in limits):
+            await self._reset_approaching_alert_sent(signal_id)
+            for limit in limits:
+                if limit.get("status", "pending") == "pending":
+                    limit["approaching_alert_sent"] = False
+            logger.info(
+                f"Reset approaching_alert_sent for ACTIVE signal {signal_id} "
+                f"after losing embed reference"
+            )
+
     # ── Limit fetcher ────────────────────────────────────────────────────────
 
     async def _fetch_limits(self, signal: Dict) -> List[Dict]:
@@ -453,6 +650,7 @@ class AlertSystem:
                 embed_msg = await target_channel.send(content=self.role_mention, embed=embed)
                 self.signal_messages[signal_id] = embed_msg
                 self.track_alert_message(embed_msg.id, signal_id)
+                await self._persist_alert_message(signal_id, embed_msg.id, target_channel.id)
                 logger.info(f"Created persistent message for signal {signal_id} (event={event})")
             except Exception as e:
                 logger.error(f"Failed to send new persistent message for signal {signal_id}: {e}")
@@ -471,6 +669,7 @@ class AlertSystem:
             try:
                 new_ping = await embed_msg.reply(f"{self.role_mention} {ping_text}")
                 self.signal_ping_messages[signal_id] = new_ping
+                await self._persist_ping_message(signal_id, new_ping.id)
             except Exception as e:
                 logger.error(f"Failed to send ping for signal {signal_id}: {e}")
 

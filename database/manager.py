@@ -182,6 +182,9 @@ class DatabaseManager(BaseConnectionManager):
                 s.limits_hit,
                 s.total_limits,
                 s.type,
+                s.alert_message_id,
+                s.alert_channel_id,
+                s.ping_message_id,
                 l.id as limit_id,
                 l.price_level,
                 l.sequence_number,
@@ -211,6 +214,9 @@ class DatabaseManager(BaseConnectionManager):
                     "limits_hit": row["limits_hit"],
                     "total_limits": row["total_limits"],
                     "type": row["type"] or "standard",
+                    "alert_message_id": row["alert_message_id"],
+                    "alert_channel_id": row["alert_channel_id"],
+                    "ping_message_id": row["ping_message_id"],
                     "limits": [],
                 }
             if row["limit_id"]:
