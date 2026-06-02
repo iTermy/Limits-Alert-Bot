@@ -75,8 +75,7 @@ database/
                                   get_overlapping_signals() — range-intersection query used on save;
                                   check_reactivation_guard() — compares cancelled limits vs live price;
                                   _get_live_price() — reads bid/ask from live_prices table
-  utils.py                      calculate_expiry() (day_end → 4:45 PM EST), _parse_dt(),
-                                  calculate_sl_pnl()
+  utils.py                      calculate_expiry() (day_end → 4:45 PM EST), _parse_dt()
 
 price_feeds/
   price_stream_manager.py       Coordinates all four feeds; calculates spread if missing (ask − bid);
