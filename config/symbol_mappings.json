@@ -1,11 +1,11 @@
 {
   "feed_priority": {
-    "forex": ["icmarkets", "oanda"],
-    "indices": ["oanda", "icmarkets"],
+    "forex": ["icmarkets", "exness"],
+    "indices": ["oanda"],
     "crypto": ["binance"],
     "metals": ["icmarkets"],
     "stocks": ["icmarkets"],
-    "oil": ["fxcm"]
+    "oil": ["exness"]
   },
 
   "asset_class_patterns": {
@@ -24,9 +24,9 @@
       "examples": ["BTCUSDT", "ETHUSDT", "DOGEUSDT"]
     },
     "metals": {
-      "keywords": ["xau", "xag", "gold", "silver"],
-      "patterns": ["^XA[UG]USD$", "^GOLD$", "^SILVER$"],
-      "examples": ["XAUUSD", "XAGUSD", "GOLD", "SILVER"]
+      "keywords": ["xau", "xag", "gold", "silver", "gcq"],
+      "patterns": ["^XA[UG]USD$", "^GOLD$", "^SILVER$", "^GCQ\\d+$"],
+      "examples": ["XAUUSD", "XAGUSD", "GOLD", "SILVER", "GCQ26"]
     },
     "stocks": {
       "patterns": ["\\.(NAS|NYSE)$"],
@@ -50,7 +50,10 @@
       "specific_mappings": {
         "GOLD": "XAUUSD",
         "SILVER": "XAGUSD",
-        "XTIUSD": "XTIUSD"
+        "XTIUSD": "XTIUSD",
+        "USOILSPOT": "XTIUSD",
+        "SPX500USD": "US500",
+        "NAS100USD": "USTEC"
       }
     },
 
@@ -143,20 +146,12 @@
       }
     },
 
-    "fxcm": {
+    "exness": {
       "format_rules": {
-        "metals": "Redirect to ICMarkets",
-        "oil": "Not supported currently"
+        "oil": "Exness MT5 symbol names (suffix 'm' for micro)"
       },
       "specific_mappings": {
-        "XAUUSD": "GOLD",
-        "XAGUSD": "SILVER",
-        "GOLD": "GOLD",
-        "SILVER": "SILVER",
-        "USOILSPOT": null,
-        "UKOILSPOT": null,
-        "WTIUSD": null,
-        "BRENTUSD": null
+        "USOILSPOT": "USOILm"
       }
     }
   },
@@ -165,6 +160,9 @@
     "icmarkets": {
       "GOLD": "XAUUSD",
       "SILVER": "XAGUSD"
+    },
+    "exness": {
+      "USOILm": "USOILSPOT"
     },
     "oanda": {
       "SPX500_USD": "spx500usd",

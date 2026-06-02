@@ -22,19 +22,19 @@ from __future__ import annotations
 
 import asyncio
 import json
-import logging
 import re
 from dataclasses import dataclass, field
 from datetime import datetime, timedelta
 from pathlib import Path
 from typing import Dict, List, Optional, Set, Tuple
+
 import pytz
 
 from utils.logger import get_logger
 
-logger = get_logger('news_manager')
+logger = get_logger("news_manager")
 
-EST = pytz.timezone('America/New_York')
+EST = pytz.timezone("America/New_York")
 
 # ---------------------------------------------------------------------------
 # Timezone alias map — maps short names to pytz zone names
@@ -42,41 +42,41 @@ EST = pytz.timezone('America/New_York')
 
 TIMEZONE_ALIASES: Dict[str, str] = {
     # Eastern
-    'EST': 'America/New_York',
-    'EDT': 'America/New_York',
-    'ET':  'America/New_York',
+    "EST": "America/New_York",
+    "EDT": "America/New_York",
+    "ET": "America/New_York",
     # Central
-    'CST': 'America/Chicago',
-    'CDT': 'America/Chicago',
-    'CT':  'America/Chicago',
+    "CST": "America/Chicago",
+    "CDT": "America/Chicago",
+    "CT": "America/Chicago",
     # Mountain
-    'MST': 'America/Denver',
-    'MDT': 'America/Denver',
-    'MT':  'America/Denver',
+    "MST": "America/Denver",
+    "MDT": "America/Denver",
+    "MT": "America/Denver",
     # Pacific
-    'PST': 'America/Los_Angeles',
-    'PDT': 'America/Los_Angeles',
-    'PT':  'America/Los_Angeles',
+    "PST": "America/Los_Angeles",
+    "PDT": "America/Los_Angeles",
+    "PT": "America/Los_Angeles",
     # UTC / GMT
-    'UTC': 'UTC',
-    'GMT': 'UTC',
+    "UTC": "UTC",
+    "GMT": "UTC",
     # European
-    'LONDON': 'Europe/London',
-    'BST':    'Europe/London',
-    'CET':    'Europe/Paris',
-    'CEST':   'Europe/Paris',
-    'PARIS':  'Europe/Paris',
-    'BERLIN': 'Europe/Berlin',
+    "LONDON": "Europe/London",
+    "BST": "Europe/London",
+    "CET": "Europe/Paris",
+    "CEST": "Europe/Paris",
+    "PARIS": "Europe/Paris",
+    "BERLIN": "Europe/Berlin",
     # Asian
-    'JST':   'Asia/Tokyo',
-    'TOKYO': 'Asia/Tokyo',
-    'HKT':   'Asia/Hong_Kong',
-    'SGT':   'Asia/Singapore',
-    'IST':   'Asia/Kolkata',
+    "JST": "Asia/Tokyo",
+    "TOKYO": "Asia/Tokyo",
+    "HKT": "Asia/Hong_Kong",
+    "SGT": "Asia/Singapore",
+    "IST": "Asia/Kolkata",
     # Australian
-    'AEST':   'Australia/Sydney',
-    'AEDT':   'Australia/Sydney',
-    'SYDNEY': 'Australia/Sydney',
+    "AEST": "Australia/Sydney",
+    "AEDT": "Australia/Sydney",
+    "SYDNEY": "Australia/Sydney",
 }
 
 
@@ -98,41 +98,59 @@ def resolve_timezone(tz_str: str) -> pytz.BaseTzInfo:
             f"Use a short code like EST, UTC, GMT, CET, JST, or a full pytz name."
         )
 
+
 # ---------------------------------------------------------------------------
 # Currency / category → instrument matching rules
 # ---------------------------------------------------------------------------
 
 # All forex currency codes we recognise
 FOREX_CURRENCIES: Set[str] = {
-    'EUR', 'USD', 'GBP', 'JPY', 'AUD', 'NZD', 'CAD', 'CHF',
-    'SEK', 'NOK', 'DKK', 'PLN', 'HUF', 'CZK', 'MXN', 'SGD',
-    'HKD', 'ZAR', 'TRY',
+    "EUR",
+    "USD",
+    "GBP",
+    "JPY",
+    "AUD",
+    "NZD",
+    "CAD",
+    "CHF",
+    "SEK",
+    "NOK",
+    "DKK",
+    "PLN",
+    "HUF",
+    "CZK",
+    "MXN",
+    "SGD",
+    "HKD",
+    "ZAR",
+    "TRY",
 }
 
 # Special named categories that map to specific instruments or patterns
 NAMED_CATEGORIES: Dict[str, Set[str]] = {
-    'GOLD': {'XAUUSD', 'GOLD'},
-    'XAU':  {'XAUUSD', 'GOLD'},
-    'OIL':  {'USOILSPOT', 'USOIL', 'WTIUSD', 'OIL'},
-    'BTC':  {'BTCUSDT', 'BTCUSD'},
-    'ETH':  {'ETHUSDT', 'ETHUSD'},
-    'CRYPTO': None,   # None = special logic: crypto asset class
+    "GOLD": {"XAUUSD", "GOLD"},
+    "XAU": {"XAUUSD", "GOLD"},
+    "OIL": {"USOILSPOT", "USOIL", "WTIUSD", "OIL"},
+    "BTC": {"BTCUSDT", "BTCUSD"},
+    "ETH": {"ETHUSDT", "ETHUSD"},
+    "CRYPTO": None,  # None = special logic: crypto asset class
 }
 
 
 @dataclass
 class NewsEvent:
     """A single news event window."""
-    category: str           # raw category string (e.g. "USD", "gold", "all")
-    news_time: datetime     # centre of the window (timezone-aware, UTC internally)
-    window_minutes: int     # half the window on each side, so total = 2× this
-    created_by: str         # Discord username who set the event
+
+    category: str  # raw category string (e.g. "USD", "gold", "all")
+    news_time: datetime  # centre of the window (timezone-aware, UTC internally)
+    window_minutes: int  # half the window on each side, so total = 2× this
+    created_by: str  # Discord username who set the event
     created_at: datetime = field(default_factory=lambda: datetime.now(pytz.utc))
     event_id: int = field(default=0)
     # When True the window has no fixed end_time — stays open until manually deactivated
     is_now_mode: bool = field(default=False)
     # Original timezone label for display (e.g. "EST", "UTC")
-    display_tz: str = field(default='EST')
+    display_tz: str = field(default="EST")
     # Optional explicit end time for timed "now" events (e.g. !news now gold 5 minutes)
     end_time_override: Optional[datetime] = field(default=None)
 
@@ -167,7 +185,7 @@ class NewsEvent:
         instr = instrument.upper()
 
         # "all" catches everything
-        if cat == 'ALL':
+        if cat == "ALL":
             return True
 
         # Named categories (gold, oil, btc, …)
@@ -182,12 +200,12 @@ class NewsEvent:
         if cat in FOREX_CURRENCIES:
             # Match any 6-char forex pair that contains this currency on either side
             # but exclude metal/commodity pairs (XAU, XAG, XPT, XPD prefix)
-            METAL_PREFIXES = {'XAU', 'XAG', 'XPT', 'XPD', 'BCO', 'WTI'}
+            METAL_PREFIXES = {"XAU", "XAG", "XPT", "XPD", "BCO", "WTI"}
             if len(instr) == 6:
                 prefix3 = instr[:3]
                 suffix3 = instr[3:]
                 if prefix3 in METAL_PREFIXES:
-                    return False   # e.g. XAUUSD — not a forex pair
+                    return False  # e.g. XAUUSD — not a forex pair
                 return prefix3 == cat or suffix3 == cat
             return False
 
@@ -211,10 +229,10 @@ class NewsEvent:
 def _is_crypto(symbol: str) -> bool:
     """Rough check: symbol ends with USDT, USDC, or BTC."""
     return (
-        symbol.endswith('USDT')
-        or symbol.endswith('USDC')
-        or symbol.endswith('BTC')
-        or symbol.endswith('USD') and len(symbol) > 6
+        symbol.endswith("USDT")
+        or symbol.endswith("USDC")
+        or symbol.endswith("BTC")
+        or (symbol.endswith("USD") and len(symbol) > 6)
     )
 
 
@@ -235,6 +253,7 @@ def _load_optional_dt(value) -> Optional[datetime]:
 # Manager
 # ---------------------------------------------------------------------------
 
+
 class NewsManager:
     """
     Singleton-style manager attached to the bot.
@@ -242,13 +261,12 @@ class NewsManager:
     Stores upcoming / active NewsEvent objects and provides fast lookup
     methods used by the streaming monitor.
 
-    Events are persisted to config/news_events.json so they survive bot
+    Events are persisted to data/news_events.json so they survive bot
     restarts.  The file is written synchronously on every mutation (events
     are infrequent so this is fine).
     """
 
-    # Path relative to this file: project_root/config/news_events.json
-    _CONFIG_PATH = Path(__file__).resolve().parent.parent / 'config' / 'news_events.json'
+    _CONFIG_PATH = Path(__file__).resolve().parent.parent / "data" / "news_events.json"
 
     def __init__(self):
         self._events: List[NewsEvent] = []
@@ -271,26 +289,28 @@ class NewsManager:
             "next_id": self._next_id,
             "events": [
                 {
-                    "event_id":          e.event_id,
-                    "category":          e.category,
-                    "news_time":         e.news_time.isoformat(),
-                    "window_minutes":    e.window_minutes,
-                    "created_by":        e.created_by,
-                    "created_at":        e.created_at.isoformat(),
-                    "is_now_mode":       e.is_now_mode,
-                    "display_tz":        e.display_tz,
-                    "end_time_override": e.end_time_override.isoformat() if e.end_time_override else None,
+                    "event_id": e.event_id,
+                    "category": e.category,
+                    "news_time": e.news_time.isoformat(),
+                    "window_minutes": e.window_minutes,
+                    "created_by": e.created_by,
+                    "created_at": e.created_at.isoformat(),
+                    "is_now_mode": e.is_now_mode,
+                    "display_tz": e.display_tz,
+                    "end_time_override": e.end_time_override.isoformat()
+                    if e.end_time_override
+                    else None,
                 }
                 for e in self._events
-                if not e.is_expired(now)   # don't bother saving already-expired events
+                if not e.is_expired(now)  # don't bother saving already-expired events
             ],
         }
         try:
             self._CONFIG_PATH.parent.mkdir(parents=True, exist_ok=True)
-            self._CONFIG_PATH.write_text(
-                json.dumps(data, indent=2), encoding='utf-8'
+            self._CONFIG_PATH.write_text(json.dumps(data, indent=2), encoding="utf-8")
+            logger.debug(
+                f"News events saved to {self._CONFIG_PATH} ({len(data['events'])} event(s))"
             )
-            logger.debug(f"News events saved to {self._CONFIG_PATH} ({len(data['events'])} event(s))")
         except Exception as e:
             logger.error(f"Failed to save news events to disk: {e}")
 
@@ -305,7 +325,7 @@ class NewsManager:
             return 0
 
         try:
-            raw = json.loads(self._CONFIG_PATH.read_text(encoding='utf-8'))
+            raw = json.loads(self._CONFIG_PATH.read_text(encoding="utf-8"))
         except Exception as e:
             logger.error(f"Failed to read news_events.json: {e}")
             return 0
@@ -360,7 +380,7 @@ class NewsManager:
         window_minutes: int,
         created_by: str,
         is_now_mode: bool = False,
-        display_tz: str = 'EST',
+        display_tz: str = "EST",
         end_time_override: Optional[datetime] = None,
     ) -> NewsEvent:
         """Register a new news event, persist to disk, and return it."""
@@ -429,6 +449,7 @@ class NewsManager:
         - Every 30 s: fires a 'news ended' alert + schedules deletion for expired windows
         - Every 5 min: purges expired events from memory and disk
         """
+
         async def _run():
             # Track which events have already had their activation / ended alert sent
             alerted_ids: set = set()
@@ -441,10 +462,7 @@ class NewsManager:
                 if alert_system is not None:
                     for event in list(self._events):
                         # Fire activation alerts for windows that are now open
-                        if (
-                            event.event_id not in alerted_ids
-                            and event.is_active(now)
-                        ):
+                        if event.event_id not in alerted_ids and event.is_active(now):
                             alerted_ids.add(event.event_id)
                             try:
                                 await alert_system.send_news_activated_alert(event)
@@ -474,7 +492,8 @@ class NewsManager:
                             if self._db is not None:
                                 try:
                                     still_active = any(
-                                        e.is_active(now) for e in self._events
+                                        e.is_active(now)
+                                        for e in self._events
                                         if e.event_id != event.event_id
                                     )
                                     await self._db.set_news_mode(still_active)
@@ -482,7 +501,7 @@ class NewsManager:
                                     logger.error(f"Failed to set news_mode in DB: {e}")
 
                 # Purge expired events (every ~5 min: 10 × 30 s)
-                if not hasattr(_run, '_purge_counter'):
+                if not hasattr(_run, "_purge_counter"):
                     _run._purge_counter = 0
                 _run._purge_counter += 1
                 if _run._purge_counter >= 10:
@@ -510,6 +529,7 @@ class NewsManager:
 # Parsing helpers
 # ---------------------------------------------------------------------------
 
+
 def parse_news_command(args_str: str) -> Tuple[str, datetime, int, str]:
     """
     Parse the argument string from !news and return
@@ -531,15 +551,13 @@ def parse_news_command(args_str: str) -> Tuple[str, datetime, int, str]:
     """
     tokens = args_str.strip().split()
     if len(tokens) < 2:
-        raise ValueError(
-            "Usage: `!news <category> <time> [window] [tz:<timezone>] [date:<date>]`"
-        )
+        raise ValueError("Usage: `!news <category> <time> [window] [tz:<timezone>] [date:<date>]`")
 
     category = tokens[0].upper()
 
     # Validate / warn about category
     is_valid = (
-        category == 'ALL'
+        category == "ALL"
         or category in FOREX_CURRENCIES
         or category in NAMED_CATEGORIES
         or category in {k.upper() for k in NAMED_CATEGORIES}
@@ -549,7 +567,7 @@ def parse_news_command(args_str: str) -> Tuple[str, datetime, int, str]:
 
     # ---- Extract tags from remaining tokens ----
     remaining = tokens[1:]
-    tz_label: str = 'EST'
+    tz_label: str = "EST"
     tz_zone: pytz.BaseTzInfo = EST
     date_override: Optional[datetime] = None
     window_minutes: int = 10
@@ -558,11 +576,11 @@ def parse_news_command(args_str: str) -> Tuple[str, datetime, int, str]:
     non_tag_tokens = []
     for tok in remaining:
         lower = tok.lower()
-        if lower.startswith('tz:'):
+        if lower.startswith("tz:"):
             tz_str = tok[3:]
-            tz_zone = resolve_timezone(tz_str)           # raises ValueError if bad
+            tz_zone = resolve_timezone(tz_str)  # raises ValueError if bad
             tz_label = tz_str.upper()
-        elif lower.startswith('date:'):
+        elif lower.startswith("date:"):
             date_val = tok[5:]
             date_override = _parse_date(date_val, tz_zone)  # raises ValueError if bad
         else:
@@ -614,20 +632,20 @@ def _parse_date(date_str: str, tz_zone: pytz.BaseTzInfo) -> datetime:
     now_local = datetime.now(tz_zone)
     lower = date_str.lower().strip()
 
-    if lower == 'today':
+    if lower == "today":
         return now_local.replace(hour=0, minute=0, second=0, microsecond=0)
-    if lower == 'tomorrow':
+    if lower == "tomorrow":
         return (now_local + timedelta(days=1)).replace(hour=0, minute=0, second=0, microsecond=0)
 
     # YYYY-MM-DD
-    m = re.fullmatch(r'(\d{4})-(\d{1,2})-(\d{1,2})', date_str)
+    m = re.fullmatch(r"(\d{4})-(\d{1,2})-(\d{1,2})", date_str)
     if m:
         year, month, day = int(m.group(1)), int(m.group(2)), int(m.group(3))
         naive = datetime(year, month, day, 0, 0, 0)
         return tz_zone.localize(naive)
 
     # MM/DD or MM-DD
-    m = re.fullmatch(r'(\d{1,2})[/-](\d{1,2})', date_str)
+    m = re.fullmatch(r"(\d{1,2})[/-](\d{1,2})", date_str)
     if m:
         month, day = int(m.group(1)), int(m.group(2))
         year = now_local.year
@@ -635,8 +653,7 @@ def _parse_date(date_str: str, tz_zone: pytz.BaseTzInfo) -> datetime:
         return tz_zone.localize(naive)
 
     raise ValueError(
-        f"Cannot parse date '{date_str}'. "
-        "Use YYYY-MM-DD, MM/DD, 'today', or 'tomorrow'."
+        f"Cannot parse date '{date_str}'. Use YYYY-MM-DD, MM/DD, 'today', or 'tomorrow'."
     )
 
 
@@ -658,11 +675,11 @@ def _parse_time(
     time_str = time_str.strip()
 
     formats = [
-        '%I:%M%p',   # 12:30pm / 12:30PM
-        '%I:%M %p',  # 12:30 pm / 12:30 PM
-        '%H:%M',     # 14:00
-        '%H%M',      # 1430
-        '%I%p',      # 2pm / 2PM
+        "%I:%M%p",  # 12:30pm / 12:30PM
+        "%I:%M %p",  # 12:30 pm / 12:30 PM
+        "%H:%M",  # 14:00
+        "%H%M",  # 1430
+        "%I%p",  # 2pm / 2PM
     ]
 
     parsed = None
@@ -675,8 +692,7 @@ def _parse_time(
 
     if parsed is None:
         raise ValueError(
-            f"Cannot parse time '{time_str}'. "
-            "Use formats like: 12:30pm, 14:00, 8:30am"
+            f"Cannot parse time '{time_str}'. Use formats like: 12:30pm, 14:00, 8:30am"
         )
 
     result = base.replace(

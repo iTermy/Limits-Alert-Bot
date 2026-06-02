@@ -18,27 +18,28 @@ window.
 """
 
 import asyncio
-import discord
 from datetime import datetime, timedelta, timezone
+
+import discord
 from discord.ext import tasks
+
 from utils.logger import get_logger
 
-
 # ── tuneable constants ────────────────────────────────────────────────────────
-PURGE_WEEKDAY   = 4        # 0=Mon … 4=Fri
-PURGE_HOUR      = 18       # 18:00 local time
-PURGE_MINUTE    = 0
-PURGE_TOLERANCE = 1        # minutes either side that still counts as "on time"
-MESSAGE_AGE_DAYS = 7       # delete messages younger than this
+PURGE_WEEKDAY = 4  # 0=Mon … 4=Fri
+PURGE_HOUR = 18  # 18:00 local time
+PURGE_MINUTE = 0
+PURGE_TOLERANCE = 1  # minutes either side that still counts as "on time"
+MESSAGE_AGE_DAYS = 7  # delete messages younger than this
 
 
 class ChannelCleaner:
     """Purges alert channels every Friday at 18:00."""
 
     def __init__(self, bot):
-        self.bot  = bot
+        self.bot = bot
         self.logger = get_logger("channel_cleaner")
-        self._last_purge_date = None   # date of the most-recent successful purge
+        self._last_purge_date = None  # date of the most-recent successful purge
 
         self._check_loop.start()
 
@@ -47,7 +48,7 @@ class ChannelCleaner:
     @tasks.loop(minutes=1)
     async def _check_loop(self):
         try:
-            now = datetime.now()   # local time (server timezone)
+            now = datetime.now()  # local time (server timezone)
 
             # Only act on Friday
             if now.weekday() != PURGE_WEEKDAY:
@@ -60,8 +61,7 @@ class ChannelCleaner:
                 return
 
             # Check we are inside the target minute window
-            target = now.replace(hour=PURGE_HOUR, minute=PURGE_MINUTE,
-                                 second=0, microsecond=0)
+            target = now.replace(hour=PURGE_HOUR, minute=PURGE_MINUTE, second=0, microsecond=0)
             delta_minutes = abs((now - target).total_seconds() / 60)
             if delta_minutes > PURGE_TOLERANCE:
                 return
@@ -119,7 +119,7 @@ class ChannelCleaner:
         """Bulk-delete messages newer than *cutoff* in *channel*."""
         channel_name = getattr(channel, "name", str(channel.id))
         total_deleted = 0
-        total_skipped = 0   # messages older than 14 days (Discord API limit)
+        total_skipped = 0  # messages older than 14 days (Discord API limit)
 
         try:
             # collect messages to delete (Discord bulk-delete cap: 14 days old)
@@ -144,11 +144,10 @@ class ChannelCleaner:
                 try:
                     await channel.delete_messages(chunk)
                     total_deleted += len(chunk)
-                    await asyncio.sleep(1)   # small pause between bulk-delete calls
+                    await asyncio.sleep(1)  # small pause between bulk-delete calls
                 except discord.HTTPException as exc:
                     self.logger.error(
-                        f"#{channel_name}: bulk delete failed for chunk "
-                        f"{i}–{i+len(chunk)}: {exc}"
+                        f"#{channel_name}: bulk delete failed for chunk {i}–{i + len(chunk)}: {exc}"
                     )
 
             self.logger.info(
@@ -159,8 +158,7 @@ class ChannelCleaner:
 
         except discord.Forbidden:
             self.logger.error(
-                f"#{channel_name}: missing 'Manage Messages' permission — "
-                f"cannot purge this channel"
+                f"#{channel_name}: missing 'Manage Messages' permission — cannot purge this channel"
             )
         except Exception as exc:
             self.logger.error(

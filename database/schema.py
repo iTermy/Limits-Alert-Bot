@@ -1,9 +1,27 @@
 """
 Database schema creation and initialization (PostgreSQL / Supabase)
 """
+
+import json
+from pathlib import Path
+
 from utils.logger import get_logger
 
 logger = get_logger("database.schema")
+
+# Inline channel-name → signal-type map for the one-time backfill. Mirrors
+# core.parser.pattern_parsers.CHANNEL_TYPE_MAP — kept here to avoid importing
+# the parser (and its heavy deps) into the DB layer.
+_CHANNEL_NAME_TO_TYPE = {
+    "scalps": "scalp",
+    "swing-trades": "swing",
+    "gold-tolls-map": "toll",
+    "general-tolls": "toll",
+    "oil-tolls": "toll",
+    "gold-pa-signals": "pa",
+    "price-action-trades": "pa",
+    "gold-1-1-rr": "1-1",
+}
 
 
 async def initialize_database(db_manager):
@@ -14,7 +32,6 @@ async def initialize_database(db_manager):
         db_manager: DatabaseManager instance
     """
     async with db_manager.get_connection() as conn:
-
         # Create signals table
         await conn.execute("""
             CREATE TABLE IF NOT EXISTS signals (
@@ -31,11 +48,11 @@ async def initialize_database(db_manager):
                 first_limit_hit_time TIMESTAMPTZ,
                 closed_at            TIMESTAMPTZ,
                 closed_reason        TEXT,
-                result_pips          DOUBLE PRECISION,
+                tp_price             DOUBLE PRECISION,
 
                 total_limits INTEGER DEFAULT 0,
                 limits_hit   INTEGER DEFAULT 0,
-                scalp        BOOLEAN DEFAULT FALSE,
+                type         TEXT DEFAULT 'standard',
 
                 created_at TIMESTAMPTZ DEFAULT NOW(),
                 updated_at TIMESTAMPTZ DEFAULT NOW(),
@@ -43,7 +60,9 @@ async def initialize_database(db_manager):
                 CONSTRAINT signals_status_check
                     CHECK (status IN ('active', 'hit', 'profit', 'breakeven', 'stop_loss', 'cancelled')),
                 CONSTRAINT signals_direction_check
-                    CHECK (direction IN ('long', 'short'))
+                    CHECK (direction IN ('long', 'short')),
+                CONSTRAINT signals_type_check
+                    CHECK (type IN ('standard', 'scalp', 'swing', 'toll', 'pa', '1-1'))
             )
         """)
 
@@ -108,6 +127,8 @@ async def initialize_database(db_manager):
                 bid        DOUBLE PRECISION NOT NULL,
                 ask        DOUBLE PRECISION NOT NULL,
                 feed       TEXT NOT NULL,
+                ic_bid     DOUBLE PRECISION,
+                ic_ask     DOUBLE PRECISION,
                 updated_at TIMESTAMPTZ NOT NULL DEFAULT NOW()
             )
         """)
@@ -152,19 +173,19 @@ async def _run_migrations(conn):
     Uses IF NOT EXISTS pattern to be idempotent.
     """
     migrations = [
-        # Add scalp column to signals table (stage12_tp_system)
+        # Add type column to signals table — replaces the legacy scalp boolean.
+        # The scalp column is backfilled into type below (in Python) and then dropped.
         """
         DO $$
         BEGIN
             IF NOT EXISTS (
                 SELECT 1 FROM information_schema.columns
-                WHERE table_name = 'signals' AND column_name = 'scalp'
+                WHERE table_name = 'signals' AND column_name = 'type'
             ) THEN
-                ALTER TABLE signals ADD COLUMN scalp BOOLEAN DEFAULT FALSE;
+                ALTER TABLE signals ADD COLUMN type TEXT DEFAULT 'standard';
             END IF;
         END $$;
         """,
-
         # License system — per-user key allowance table
         """
         CREATE TABLE IF NOT EXISTS license_allowances (
@@ -172,7 +193,6 @@ async def _run_migrations(conn):
             max_keys    INTEGER NOT NULL DEFAULT 1
         );
         """,
-
         # License system — one row per issued license key
         # mt5_account is globally unique: one license per MT5 account
         """
@@ -189,7 +209,6 @@ async def _run_migrations(conn):
             CONSTRAINT licenses_status_check  CHECK (status IN ('active', 'revoked'))
         );
         """,
-
         # Bot mode status — single-row table tracking whether news mode / spread hour is active.
         # Updated in real-time as modes activate/deactivate.
         """
@@ -201,14 +220,12 @@ async def _run_migrations(conn):
             CONSTRAINT bot_mode_status_singleton CHECK (id = 1)
         );
         """,
-
         # Seed the single status row if it does not exist yet
         """
         INSERT INTO bot_mode_status (id, news_mode, spread_hour)
         VALUES (1, FALSE, FALSE)
         ON CONFLICT (id) DO NOTHING;
         """,
-
         # Add revoked_reason to licenses table (stage18 — auto-revoke tracking)
         """
         DO $$
@@ -221,10 +238,62 @@ async def _run_migrations(conn):
             END IF;
         END $$;
         """,
-
         # Index for fast lookups (optional — single row, mostly a hint)
         """
         CREATE INDEX IF NOT EXISTS idx_bot_mode_status_updated ON bot_mode_status(updated_at);
+        """,
+        # H1: ICMarkets mid-price columns on live_prices — allows EX to compute
+        # feed offset from two prices at the same updated_at, eliminating drift.
+        """
+        ALTER TABLE live_prices ADD COLUMN IF NOT EXISTS ic_bid DOUBLE PRECISION;
+        """,
+        """
+        ALTER TABLE live_prices ADD COLUMN IF NOT EXISTS ic_ask DOUBLE PRECISION;
+        """,
+        # M5: feed health table — written by FeedHealthMonitor each health check.
+        # EX reads this in Phase 4.4 to skip placement on stale feeds.
+        """
+        CREATE TABLE IF NOT EXISTS feed_health (
+            feed          TEXT PRIMARY KEY,
+            status        TEXT NOT NULL,
+            stale_seconds INTEGER,
+            last_seen     TIMESTAMPTZ,
+            updated_at    TIMESTAMPTZ NOT NULL DEFAULT NOW()
+        );
+        """,
+        # Replace result_pips (P&L value) with tp_price (market price at auto-TP trigger).
+        """
+        DO $$
+        BEGIN
+            IF NOT EXISTS (
+                SELECT 1 FROM information_schema.columns
+                WHERE table_name = 'signals' AND column_name = 'tp_price'
+            ) THEN
+                ALTER TABLE signals ADD COLUMN tp_price DOUBLE PRECISION;
+            END IF;
+        END $$;
+        """,
+        """
+        DO $$
+        BEGIN
+            IF EXISTS (
+                SELECT 1 FROM information_schema.columns
+                WHERE table_name = 'signals' AND column_name = 'result_pips'
+            ) THEN
+                ALTER TABLE signals DROP COLUMN result_pips;
+            END IF;
+        END $$;
+        """,
+        # Persist Discord alert embed + ping references so restarts can reuse
+        # the existing messages instead of orphaning them.
+        """
+        ALTER TABLE signals ADD COLUMN IF NOT EXISTS alert_message_id BIGINT;
+        """,
+        """
+        ALTER TABLE signals ADD COLUMN IF NOT EXISTS alert_channel_id BIGINT;
+        """,
+        """
+        ALTER TABLE signals ADD COLUMN IF NOT EXISTS ping_message_id BIGINT;
         """,
     ]
 
@@ -232,3 +301,83 @@ async def _run_migrations(conn):
         await conn.execute(migration)
 
     logger.debug(f"Ran {len(migrations)} database migrations")
+
+    await _migrate_scalp_to_type(conn)
+
+
+async def _migrate_scalp_to_type(conn):
+    """
+    One-shot backfill: derive signals.type from channel_id (via channels.json)
+    and the legacy scalp boolean, then drop the scalp column.
+
+    Idempotent — if the scalp column is already gone, this is a no-op.
+    """
+    scalp_exists = await conn.fetchval(
+        """
+        SELECT EXISTS(
+            SELECT 1 FROM information_schema.columns
+            WHERE table_name = 'signals' AND column_name = 'scalp'
+        )
+        """
+    )
+    if not scalp_exists:
+        return
+
+    try:
+        channels_path = Path(__file__).resolve().parent.parent / "config" / "channels.json"
+        channels = json.loads(channels_path.read_text(encoding="utf-8")).get(
+            "monitored_channels", {}
+        )
+    except Exception as e:
+        logger.warning(f"Could not load channels.json for type backfill: {e}")
+        channels = {}
+
+    # channel_id (str) → type
+    id_to_type = {}
+    for name, cid in channels.items():
+        signal_type = _CHANNEL_NAME_TO_TYPE.get(name.lower())
+        if signal_type:
+            id_to_type[str(cid)] = signal_type
+
+    for cid, signal_type in id_to_type.items():
+        await conn.execute(
+            """
+            UPDATE signals
+            SET type = $1
+            WHERE channel_id = $2
+              AND (type IS NULL OR type = 'standard')
+            """,
+            signal_type,
+            cid,
+        )
+
+    # Fallback: any remaining rows that were marked scalp=true (e.g. text-detected
+    # scalps in channels we don't classify) become type='scalp'.
+    await conn.execute(
+        """
+        UPDATE signals
+        SET type = 'scalp'
+        WHERE scalp = TRUE AND (type IS NULL OR type = 'standard')
+        """
+    )
+
+    # Add CHECK constraint once data is clean.
+    await conn.execute(
+        """
+        DO $$
+        BEGIN
+            IF NOT EXISTS (
+                SELECT 1 FROM information_schema.table_constraints
+                WHERE constraint_name = 'signals_type_check'
+                  AND table_name = 'signals'
+            ) THEN
+                ALTER TABLE signals
+                ADD CONSTRAINT signals_type_check
+                CHECK (type IN ('standard', 'scalp', 'swing', 'toll', 'pa', '1-1'));
+            END IF;
+        END $$;
+        """
+    )
+
+    await conn.execute("ALTER TABLE signals DROP COLUMN scalp")
+    logger.info("Migrated signals.scalp → signals.type and dropped scalp column")

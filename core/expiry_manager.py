@@ -1,5 +1,6 @@
-import asyncio
+import discord
 from discord.ext import tasks
+
 from utils.logger import get_logger
 
 
@@ -17,22 +18,17 @@ class ExpiryManager:
     async def check_expiry(self):
         """Check and expire signals past expiry_time."""
         try:
-            alert_system = (
-                self.bot.monitor.alert_system
-                if hasattr(self.bot, 'monitor') and self.bot.monitor else None
-            )
-            monitor = (
-                self.bot.monitor
-                if hasattr(self.bot, 'monitor') and self.bot.monitor else None
-            )
+            monitor = self.bot.services.monitor
+            alert_system = self.bot.services.alert_system
 
             # ── 1. Query which signals are about to be expired BEFORE expiring ──
             # We need their IDs so we can do per-signal work afterward.
             about_to_expire = []
             if alert_system:
                 try:
-                    from database.models import SignalStatus
-                    pre_expire_rows = await self.bot.signal_db.db.fetch_all(
+                    from models.enums import SignalStatus
+
+                    pre_expire_rows = await self.bot.services.signal_db.db.fetch_all(
                         """
                         SELECT id, message_id, channel_id
                         FROM signals
@@ -47,19 +43,17 @@ class ExpiryManager:
                     self.logger.warning(f"Could not pre-fetch expiring signals: {_pre}")
 
             # ── 2. Run the DB expiry (sets status=cancelled, closed_reason='expiry') ──
-            count = await self.bot.signal_db.expire_old_signals()
+            count = await self.bot.services.signal_db.expire_old_signals()
             if count > 0:
                 self.logger.info(f"Expired {count} signals")
 
             # ── 3. Per-signal post-expiry cleanup ────────────────────────────
             for row in about_to_expire:
-                sig_id = row['id']
+                sig_id = row["id"]
                 try:
                     await self._handle_expired_signal(sig_id, row, alert_system, monitor)
                 except Exception as _e:
-                    self.logger.warning(
-                        f"Post-expiry cleanup failed for signal {sig_id}: {_e}"
-                    )
+                    self.logger.warning(f"Post-expiry cleanup failed for signal {sig_id}: {_e}")
 
         except Exception as e:
             self.logger.error(f"Error in expiry loop: {e}", exc_info=True)
@@ -73,15 +67,10 @@ class ExpiryManager:
           • Delete the original message for gold-toll signals with no embed
         """
         # Fetch the fresh signal data (status is now 'cancelled', closed_reason='expiry')
-        signal = await self.bot.signal_db.get_signal_with_limits(sig_id)
+        signal = await self.bot.services.signal_db.get_signal_with_limits(sig_id)
         if not signal:
             self.logger.warning(f"Could not fetch signal {sig_id} after expiry")
             return
-
-        # Normalise key so alert_system methods work
-        if "signal_id" not in signal:
-            signal = dict(signal)
-            signal["signal_id"] = signal.get("id", sig_id)
 
         # ── 3a. Update the persistent embed (approaching alert or hit embed) ──
         if alert_system and sig_id in alert_system.signal_messages:
@@ -120,7 +109,9 @@ class ExpiryManager:
         # ── 3b. Add ❌ reaction to the original signal message ────────────────
         if monitor:
             try:
-                await monitor._react_to_original_signal(signal, "❌")
+                from price_feeds.streaming_monitor import react_to_original_signal
+
+                await react_to_original_signal(self.bot, signal, "❌")
             except Exception as _re:
                 self.logger.warning(
                     f"Could not react to original message for expired signal {sig_id}: {_re}"
@@ -129,7 +120,6 @@ class ExpiryManager:
     async def _delete_original_message(self, channel_id: str, message_id: str, sig_id: int):
         """Delete the original signal message (used for gold-toll signals with no embed)."""
         try:
-            import discord
             channel = self.bot.get_channel(int(channel_id))
             if channel:
                 try:

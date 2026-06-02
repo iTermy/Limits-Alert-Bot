@@ -1,17 +1,15 @@
-"""
-Binance WebSocket Streaming Feed
-Uses Binance's WebSocket API for real-time crypto price updates
-FIXED: Added SSL certificate support for Windows VPS
-"""
+"""Binance WebSocket streaming feed for real-time crypto price updates."""
 
 import asyncio
-import aiohttp
-import logging
 import json
+import logging
 import ssl
-import certifi
-from typing import Dict, Set, AsyncIterator, Tuple
+from collections.abc import AsyncIterator
 from datetime import datetime
+from typing import Dict, Set, Tuple
+
+import aiohttp
+import certifi
 
 logger = logging.getLogger(__name__)
 
@@ -28,8 +26,9 @@ class BinanceStream:
         """Initialize Binance stream"""
         import os
 
-        self.use_international = use_international or \
-                                 os.getenv('BINANCE_USE_INTERNATIONAL', 'false').lower() == 'true'
+        self.use_international = (
+            use_international or os.getenv("BINANCE_USE_INTERNATIONAL", "false").lower() == "true"
+        )
 
         # WebSocket URLs
         if use_testnet:
@@ -39,7 +38,6 @@ class BinanceStream:
         else:
             self.ws_url = "wss://stream.binance.us:9443/stream"
 
-        # FIXED: Create SSL context for Windows VPS
         try:
             self.ssl_context = ssl.create_default_context(cafile=certifi.where())
             logger.info("SSL context created with certifi certificates")
@@ -60,12 +58,13 @@ class BinanceStream:
         self.streaming = False
         self.stream_id = 1
 
-        logger.info(f"BinanceStream initialized ({'international' if self.use_international else 'US'} API)")
+        logger.info(
+            f"BinanceStream initialized ({'international' if self.use_international else 'US'} API)"
+        )
 
     async def connect(self) -> bool:
         """Initialize Binance WebSocket session with SSL support"""
         try:
-            # FIXED: Create connector with SSL context
             connector = aiohttp.TCPConnector(ssl=self.ssl_context)
 
             # Create session with SSL-configured connector
@@ -142,11 +141,7 @@ class BinanceStream:
         # Convert symbols to stream names (lowercase + @bookTicker)
         streams = [f"{symbol.lower()}@bookTicker" for symbol in symbols]
 
-        message = {
-            "method": "SUBSCRIBE",
-            "params": streams,
-            "id": self.stream_id
-        }
+        message = {"method": "SUBSCRIBE", "params": streams, "id": self.stream_id}
         self.stream_id += 1
 
         try:
@@ -159,11 +154,7 @@ class BinanceStream:
         """Send WebSocket unsubscribe message"""
         streams = [f"{symbol.lower()}@bookTicker" for symbol in symbols]
 
-        message = {
-            "method": "UNSUBSCRIBE",
-            "params": streams,
-            "id": self.stream_id
-        }
+        message = {"method": "UNSUBSCRIBE", "params": streams, "id": self.stream_id}
         self.stream_id += 1
 
         try:
@@ -208,27 +199,27 @@ class BinanceStream:
                                 data = json.loads(msg.data)
 
                                 # Check if it's a price update (has 'stream' field)
-                                if 'stream' in data and 'data' in data:
-                                    ticker_data = data['data']
+                                if "stream" in data and "data" in data:
+                                    ticker_data = data["data"]
 
                                     # Extract symbol and prices
-                                    symbol = ticker_data['s']  # e.g., BTCUSDT
-                                    bid = float(ticker_data['b'])
-                                    ask = float(ticker_data['a'])
+                                    symbol = ticker_data["s"]  # e.g., BTCUSDT
+                                    bid = float(ticker_data["b"])
+                                    ask = float(ticker_data["a"])
 
                                     price_data = {
-                                        'bid': bid,
-                                        'ask': ask,
-                                        'timestamp': datetime.now(),  # Binance doesn't include timestamp in bookTicker
-                                        'bid_qty': float(ticker_data.get('B', 0)),
-                                        'ask_qty': float(ticker_data.get('A', 0))
+                                        "bid": bid,
+                                        "ask": ask,
+                                        "timestamp": datetime.now(),  # Binance doesn't include timestamp in bookTicker
+                                        "bid_qty": float(ticker_data.get("B", 0)),
+                                        "ask_qty": float(ticker_data.get("A", 0)),
                                     }
 
                                     yield symbol, price_data
 
                                 # Handle subscription confirmations
-                                elif 'result' in data:
-                                    if data['result'] is None:
+                                elif "result" in data:
+                                    if data["result"] is None:
                                         logger.debug(f"Subscription confirmed: {data.get('id')}")
                                     else:
                                         logger.warning(f"Subscription response: {data}")

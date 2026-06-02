@@ -5,8 +5,11 @@ Uses continuous tick polling with asyncio for real-time price updates
 
 import asyncio
 import logging
-from typing import Dict, Set, AsyncIterator, Tuple
-from datetime import datetime
+import os
+from collections.abc import AsyncIterator
+from datetime import datetime, timezone
+from typing import Callable, Dict, Optional, Set, Tuple
+
 import MetaTrader5 as mt5
 
 logger = logging.getLogger(__name__)
@@ -32,13 +35,23 @@ class ICMarketsStream:
         self.streaming = False
         self.stream_task = None
 
+        # Optional callback invoked on every successful MT5 poll, regardless of
+        # whether the price changed. Used by the health monitor to refresh its
+        # last_seen timer so quiet periods (spread widening, illiquid windows)
+        # don't get misread as a stale feed. Argument is the MT5-format symbol.
+        self.on_poll: Optional[Callable[[str], None]] = None
+
         logger.info("ICMarketsStream initialized")
 
     async def connect(self) -> bool:
         """Initialize MT5 connection"""
         try:
             loop = asyncio.get_event_loop()
-            result = await loop.run_in_executor(None, mt5.initialize)
+            mt5_path = os.getenv("MT5_PATH")
+            if mt5_path:
+                result = await loop.run_in_executor(None, lambda: mt5.initialize(mt5_path))
+            else:
+                result = await loop.run_in_executor(None, mt5.initialize)
 
             if result:
                 self.connected = True
@@ -48,10 +61,9 @@ class ICMarketsStream:
                     logger.info(f"Connected to MT5 - {terminal_info.name}")
 
                 return True
-            else:
-                error = mt5.last_error()
-                logger.error(f"MT5 initialization failed: {error}")
-                return False
+            error = mt5.last_error()
+            logger.error(f"MT5 initialization failed: {error}")
+            return False
 
         except Exception as e:
             logger.error(f"Error connecting to MT5: {e}")
@@ -146,13 +158,22 @@ class ICMarketsStream:
                     if tick is None:
                         continue
 
+                    # Refresh health-monitor liveness on every successful poll,
+                    # even when bid/ask are unchanged — quiet markets still mean
+                    # the feed is alive.
+                    if self.on_poll is not None:
+                        try:
+                            self.on_poll(symbol)
+                        except Exception as cb_err:
+                            logger.debug(f"on_poll callback error for {symbol}: {cb_err}")
+
                     # Build price data
                     current_price = {
-                        'bid': tick.bid,
-                        'ask': tick.ask,
-                        'timestamp': datetime.fromtimestamp(tick.time),
-                        'last': tick.last,
-                        'volume': tick.volume
+                        "bid": tick.bid,
+                        "ask": tick.ask,
+                        "timestamp": datetime.fromtimestamp(tick.time, tz=timezone.utc),
+                        "last": tick.last,
+                        "volume": tick.volume,
                     }
 
                     # Check if price changed
@@ -163,7 +184,10 @@ class ICMarketsStream:
                     else:
                         # Check if bid or ask changed
                         last = self.last_prices[symbol]
-                        if last['bid'] != current_price['bid'] or last['ask'] != current_price['ask']:
+                        if (
+                            last["bid"] != current_price["bid"]
+                            or last["ask"] != current_price["ask"]
+                        ):
                             self.last_prices[symbol] = current_price
                             yield symbol, current_price
 

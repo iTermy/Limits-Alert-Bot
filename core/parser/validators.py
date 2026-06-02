@@ -2,19 +2,52 @@
 validators.py
 Signal validation and channel detection for the trading signal parser
 """
+
 import re
-from typing import Optional, List, Tuple
+from typing import List
+
 from utils.logger import get_logger
 
 logger = get_logger("parser.validators")
 
 # ============================================================================
+# CONSTANTS
+# ============================================================================
+
+INDEX_SYMBOL_BLACKLIST = [
+    "spx500usd",
+    "nas100usd",
+    "us30usd",
+    "us2000usd",
+    "jp225",
+    "nas100",
+    "us30",
+    "spx500",
+    "sp500",
+    "us2000",
+    "de30",
+    "dax30",
+    "ger30",
+    "china50",
+    "russel2000",
+    "aus200",
+    "f40",
+    "cac40",
+    "ftse100",
+    "hk50",
+    "asx200",
+    "gcq26",
+]
+
+# ============================================================================
 # MAIN VALIDATION FUNCTIONS (for __init__.py)
 # ============================================================================
 
+
 # Step 1: Check if message is a signal
-def is_potential_signal(message: str, trading_keywords: List[str],
-                        instrument_mappings: dict, channel_name: str = None) -> bool:
+def is_potential_signal(
+    message: str, trading_keywords: List[str], instrument_mappings: dict, channel_name: str = None
+) -> bool:
     """
     Check if message could be a trading signal
 
@@ -34,7 +67,7 @@ def is_potential_signal(message: str, trading_keywords: List[str],
     numbers = _extract_numbers(text)
 
     # Check if this is the tolls channel
-    is_tolls_channel = channel_name and 'toll' in channel_name.lower()
+    is_tolls_channel = channel_name and "toll" in channel_name.lower()
 
     # For tolls channel, allow single number (just a limit)
     # For regular channels, require at least 2 numbers (limits + stop)
@@ -67,7 +100,7 @@ def should_exclude(message: str, exclusion_keywords: List[str]) -> bool:
     text_lower = message.lower()
 
     for keyword in exclusion_keywords:
-        if re.search(r'\b' + keyword + r'\b', text_lower):
+        if re.search(r"\b" + keyword + r"\b", text_lower):
             logger.debug(f"Excluding message due to keyword: {keyword}")
             return True
 
@@ -90,8 +123,7 @@ def validate_signal(signal) -> bool:
         return False
 
     # Must have all required fields
-    if not all([signal.instrument, signal.direction, signal.limits,
-                signal.stop_loss is not None]):
+    if not all([signal.instrument, signal.direction, signal.limits, signal.stop_loss is not None]):
         logger.debug("Missing required fields in signal")
         return False
 
@@ -119,7 +151,7 @@ def validate_instrument(instrument: str, forbidden_instruments: set = None) -> b
     if not instrument:
         return False
 
-    forbidden = forbidden_instruments or {'DXY', 'NQ', 'ES', 'YM', 'RTY', 'VIX'}
+    forbidden = forbidden_instruments or {"DXY", "NQ", "ES", "YM", "RTY", "VIX"}
 
     if instrument.upper() in forbidden:
         logger.debug(f"Rejecting forbidden instrument: {instrument}")
@@ -139,80 +171,30 @@ def detect_channel_type(channel_name: str) -> str:
         'stock', 'crypto', or 'core' (default)
     """
     if not channel_name:
-        return 'core'
+        return "core"
 
     channel_lower = channel_name.lower()
 
-    if 'stock' in channel_lower or 'equity' in channel_lower or 'shares' in channel_lower:
-        return 'stock'
+    if "stock" in channel_lower or "equity" in channel_lower or "shares" in channel_lower:
+        return "stock"
 
-    if 'crypto' in channel_lower:
-        return 'crypto'
+    if "crypto" in channel_lower:
+        return "crypto"
 
-    return 'core'
-
-
-def is_stock_channel(channel_name: str) -> bool:
-    """Check if channel is for stocks"""
-    return detect_channel_type(channel_name) == 'stock'
-
-
-def is_crypto_channel(channel_name: str) -> bool:
-    """Check if channel is for crypto"""
-    return detect_channel_type(channel_name) == 'crypto'
+    return "core"
 
 
 def _remove_index_symbols(text: str) -> str:
     """Remove index symbols to prevent number extraction from them"""
-    blacklist = [
-        "spx500usd", "nas100usd", "us30usd", "us2000usd",
-        "jp225", "nas100", "us30", "spx500", "sp500", "us2000",
-        "de30", "dax30", "ger30", "china50", "russel2000",
-        "aus200", "f40", "cac40", "ftse100", "hk50", "asx200"
-    ]
-
-    for symbol in blacklist:
+    for symbol in INDEX_SYMBOL_BLACKLIST:
         text = re.sub(re.escape(symbol), "", text, flags=re.IGNORECASE)
-
     return text
 
 
 def _extract_numbers(text: str) -> List[float]:
     """Extract all numbers from text"""
     try:
-        numbers_str = re.findall(r'\d+\.?\d*', text)
+        numbers_str = re.findall(r"\d+\.?\d*", text)
         return [float(n) for n in numbers_str]
     except ValueError:
         return []
-
-
-def _extract_direction_quick(text_lower: str) -> Optional[str]:
-    """Quick direction extraction for validation"""
-    if re.search(r'\b(long|buy)\b', text_lower):
-        return 'long'
-    if re.search(r'\b(short|sell)\b', text_lower):
-        return 'short'
-    return None
-
-
-def _separate_limits_and_stop(numbers: List[float], direction: str) -> Tuple[List[float], Optional[float]]:
-    """
-    Separate limit prices from stop loss
-
-    For long: stop is lowest number (limits > stop)
-    For short: stop is highest number (limits < stop)
-
-    Args:
-        numbers: All extracted numbers
-        direction: Trade direction
-
-    Returns:
-        Tuple of (limits, stop_loss)
-    """
-    if not numbers or len(numbers) < 2:
-        return numbers, None
-
-    stop_loss = numbers[-1]
-    limits = numbers[:-1]
-
-    return limits, stop_loss

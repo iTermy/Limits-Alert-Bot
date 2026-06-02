@@ -1,0 +1,235 @@
+# TM Bot — Refactoring Plan
+
+## Executive Summary
+
+The biggest wins are concentrated in **two places**: the message-arrival channel-gate (`bot.on_message` + `MessageHandler._get_allowed_channels`) which rebuilds the same set twice per message, and the **reply-command handler** in `message_handler.py` (~560 lines, two near-duplicate flows for "reply to alert" vs "reply to signal"). Both can be cut substantially without behavior change.
+
+Other high-value, low-risk wins: drop dead code in `core/parser/__init__.py` (`initialize_parser`, `cleanup_parser`, `_separate_limits_and_stop`, `_extract_direction_quick`, `is_stock_channel`, `is_crypto_channel`), drop the unused `EmbedFactory` and its two dead imports, collapse the three identical `_parse_dt` / `_to_dt` helpers into one shared util, and remove the unused `check_stop_loss_hit` / `mark_hit_alert_sent` / `mark_approaching_alert_sent` DB methods (the streaming monitor has its own inline path).
+
+The `signal['id']` vs `signal['signal_id']` key mismatch is currently papered over with `dict(sig); sig['signal_id'] = sig.get('id', signal_id)` patterns scattered across 4+ call sites — one normalisation point (in `get_signal_with_limits`) removes all of them.
+
+Total scope is meaningful but bounded — most proposals are local cleanups, not architectural changes. I count roughly **1500–2000 lines that can be removed or consolidated** without changing behavior.
+
+After completing an area, mark the section as finished and briefly state what you did in 3 sections: Location, Done, Adjacent fixes (optional), Notes (optional) 
+
+---
+
+## Area 1: Hot path — `on_message` → channel gate
+
+### ✅ 1.1 Consolidate allowed-channels into a single bot attribute
+- **Location**: `core/bot.py` (`on_message`, `load_config`, `__init__`), `discord_handlers/message_handler.py` (`_get_allowed_channels`, `is_allowed_channel`)
+- **Done**: Added `bot.allowed_channel_ids: set[int]` built once at the end of `load_config()`. `on_message` now does a single set-membership check. `MessageHandler._get_allowed_channels` deleted; `is_allowed_channel` reads `bot.allowed_channel_ids` directly.
+- **Adjacent fix applied**: Removed the redundant `is_allowed_channel` guard inside `handle_new_message` (caller already gates).
+
+### ✅ 1.2 Remove the early-return defensive duplication in `on_message`
+- **Location**: `core/bot.py` (`on_message`)
+- **Done**: Removed outer `try/except` catch-all. Body dedented one level. Two inner try/except blocks kept unchanged.
+- **Adjacent fix applied**: Removed the `if self.message_handler:` guard (always set after `setup_hook`).
+
+---
+
+## Area 2: Parser package (`core/parser/`)
+
+### ✅ 2.1 Drop dead exports / dead helpers
+- **Location**: `core/parser/__init__.py` and `core/parser/validators.py`
+- **Done**: Deleted `initialize_parser()`, `cleanup_parser()`, `validators._separate_limits_and_stop`, `validators._extract_direction_quick`, `validators.is_stock_channel`, `validators.is_crypto_channel`. Trimmed `__all__` accordingly. Removed `Tuple` from typing imports in validators.py.
+
+### ✅ 2.2 Collapse `_load_channel_config` redundancy
+- **Location**: `core/parser/__init__.py`
+- **Done**: Replaced 2-branch if/else with single flow — acquire module-level config singleton when no `config_loader` passed, then one shared try/except for the load call.
+
+### ✅ 2.3 De-duplicate the "is general-tolls auto-SL" detection
+- **Location**: `core/parser/pattern_parsers.py`
+- **Done**: Added module-level `_SL_KEYWORD_RE` and `_general_tolls_auto_sl(channel_name, text) -> bool` helper. All three call sites (CorePatternParser.parse, StockPatternParser.parse, determine_limits_and_stop) now use the helper instead of local compiled regex copies.
+
+### ✅ 2.4 Delete `CryptoPatternParser`
+- **Location**: `core/parser/pattern_parsers.py`
+- **Done**: Deleted `CryptoPatternParser` (34 lines). Removed `_internal_call` parameter and all 6 guards from `CorePatternParser.parse`. `SignalParser._parse_with_crypto_parser` now uses `self._core_parser` directly and sets `result.parse_method = "crypto"` after a successful parse.
+
+### ✅ 2.5 Remove the duplicate `_remove_index_symbols` blacklist
+- **Location**: `core/parser/validators.py`, `core/parser/pattern_parsers.py`
+- **Done**: `INDEX_SYMBOL_BLACKLIST` defined once in `validators.py` as a module-level constant. `pattern_parsers.py` imports and uses it; inline duplicate removed.
+
+---
+
+## Area 3: DB layer (`database/`, `database/signal_operations/`)
+
+### ✅ 3.1 Single shared `_parse_dt` helper
+- **Location**: `database/base_operations.py`, `database/database_manager.py`, `database/signal_operations/crud.py` (was `_to_dt`), `database/signal_operations/lifecycle.py`
+- **Done**: Canonical `_parse_dt` added to `database/signal_operations/utils.py`. All four local copies removed and replaced with an import from there. `database_manager.py`'s `__import__("pytz")` smell is gone. `crud.py`'s inner `_parse_dt_local` function inside `save_signal` also removed; the inline `from datetime import datetime` / `import pytz` / `from database.models import LimitStatus, SignalStatus` duplicate imports inside `save_signal` removed. `calculate_expiry` import in `crud.py` moved to module level.
+
+### ✅ 3.2 Drop unused DB methods
+- **Location**: `database/base_operations.py`, `database/database_manager.py`, `database/signal_operations/lifecycle.py`
+- **Done**: Deleted `check_stop_loss_hit`, `mark_approaching_alert_sent`, `mark_hit_alert_sent` from `base_operations.py` and their delegate wrappers from `database_manager.py`. Deleted `check_and_update_stop_loss` from `lifecycle.py`. `_mark_approaching_sent` stays inline in `streaming_monitor` (single 1-line UPDATE, correct path).
+
+### ✅ 3.3 Drop the unused `insert_signal` / `insert_limits` two-step path
+- **Location**: `database/base_operations.py`, `database/database_manager.py`
+- **Done**: Deleted both methods and their delegate wrappers. Active path remains `crud.save_signal` (atomic transaction).
+
+### ✅ 3.4 Collapse `get_active_signals_detailed` and `get_active_signals_detailed_sorted`
+- **Location**: `database/signal_operations/crud.py`, `database/signal_operations/__init__.py`, `commands/trading_commands.py`
+- **Done**: Deleted `get_active_signals_detailed` (~80 lines) and its `SignalDatabase` delegate. Removed `first_pending_limit` from the SELECT in `get_active_signals_detailed_sorted`. Updated the one external caller in `trading_commands.py` to use `get_active_signals_detailed_sorted`. Inline `from .utils import get_status_emoji` imports inside the loop moved to module-level import.
+
+### ✅ 3.5 Normalise `signal['id']` → `signal['signal_id']` once at the DB layer
+- **Location**: `database/signal_operations/crud.py`, call sites in `discord_handlers/message_handler.py`, `core/expiry_manager.py`, `price_feeds/alert_system.py`
+- **Done**: `get_signal_with_limits` and `get_signal_by_message_id` now both set `signal["signal_id"] = signal["id"]` before returning. Removed all 8 call-site normalization patches (dict copies + conditional key assignment). CLAUDE.md "gotcha" section removed.
+
+### 3.6 Inline or rename `SignalDatabase` wrappers
+- **Location**: `database/signal_operations/__init__.py` (the entire `SignalDatabase` class, ~270 lines)
+- **Current state**: `SignalDatabase` is a coordinator that holds three sub-managers (`_crud`, `_lifecycle`, `_analytics`) and exposes ~25 methods, **every one** of which is a one-line `return await self._x.method(...)` delegate. The sub-managers also each take `db_manager` separately, and `lifecycle` methods often take `signal_db` and `db_manager` as separate arguments to work around the circular split.
+- **Proposed change**: Either (a) flatten everything onto `SignalDatabase` directly (delete the three sub-files, keep the code organised by `# region` comments) or (b) keep the sub-modules but stop the delegate layer — callers can do `signal_db._crud.save_signal(...)`. (a) is cleaner if the file size is manageable (~600 LOC combined for crud + lifecycle).
+- **Rationale**: Goal 2/3 (abstraction wrapping one caller). The delegate-only `SignalDatabase` class is pure plumbing.
+- **Risk**: Medium — many call sites in commands, message_handler, expiry_manager. Touches no SQL or transactional logic, but it's a wide-blast-radius rename. Recommend doing it after the easier wins.
+- **Behavior-preserving?**: Yes.
+
+### 3.7 Lifecycle methods that take both `db_manager` and `signal_db` as args
+- **Location**: `database/signal_operations/lifecycle.py:44, 110, 175, 285, 398, 427, 475`
+- **Current state**: `LifecycleManager` already has `self.db = db_manager` from `__init__`, yet most methods take a second `db_manager` parameter and a `signal_db` parameter from the caller. This is the residue of an earlier split that's no longer needed — the parameters are always the same object as `self.db` / the matching coordinator.
+- **Proposed change**: Drop the extra params. Use `self.db` and look up the CRUD operations via a back-reference set in `__init__`.
+- **Rationale**: Goal 2 (parameters never passed differently) + Goal 4 (residue of stale refactor).
+- **Risk**: Medium — same blast radius as 3.6. Best done together.
+- **Behavior-preserving?**: Yes.
+
+### ✅ 3.8 Drop unused `format_time_remaining` / `calculate_pip_difference` / `get_status_emoji` duplicates (partial)
+- **Location**: `database/signal_operations/utils.py`
+- **Done**: Deleted `format_time_remaining` (~44 lines) and `calculate_pip_difference` (~20 lines).
+- **Skipped**: `get_status_emoji` consolidation — the two copies (`database/signal_operations/utils.py` and `utils/formatting.py`) have different emoji values for `profit` ("✅" vs "💰") and the `utils/formatting.py` version checks for `"stoploss"` which doesn't match the DB value `"stop_loss"`. Consolidating requires a deliberate choice about which emoji set to use; skipped to avoid a silent visual regression.
+
+---
+
+## Area 4: Streaming monitor (price-tick hot path)
+
+### ✅ 4.1 Cache the spread-hour check on the tick path
+- **Location**: `price_feeds/streaming_monitor.py`
+- **Done**: `now_in_spread` (already computed at top of `_on_price_update` for the transition check) is now passed as a parameter through `_check_signal` → `_check_limit` / `_check_stop_loss`. The two inner `_is_spread_hour()` calls removed.
+
+### ✅ 4.2 Drop `test_signal_monitoring`
+- **Location**: `price_feeds/streaming_monitor.py`
+- **Done**: Deleted (was never called).
+
+### ✅ 4.3 Inline `_reload_spread_buffer_setting` + the cache machinery
+- **Location**: `price_feeds/streaming_monitor.py`
+- **Done**: Deleted `_reload_spread_buffer_setting()` and `_is_spread_buffer_enabled()`. The 30s cache logic is now inlined at the top of `_on_price_update` (before the per-signal loop). `_settings_cache_duration` instance var removed; `_spread_buffer_enabled` and `_last_settings_load` kept for the cache. `spread_buffer_enabled` is computed once per tick and passed down through `_check_signal` → `_check_limit`.
+- **Adjacent fix**: `alert_system.py` live-update path had two bugs: the stale `_reload_spread_buffer_setting` call (now removed) and a wrong attribute name (`spread_buffer_enabled` vs `_spread_buffer_enabled`) that always fell back to `False`. Both fixed.
+
+### ✅ 4.4 Cancel-on-spread-hour and cancel-on-news share a guard scaffold
+- **Location**: `price_feeds/streaming_monitor.py`
+- **Done**: Extracted `_cancel_signal_during_guard(signal, current_price, reason, news_event=None)`. Eviction-before-await ordering preserved exactly. Used from both guards in `_check_limit` and the SL spread-hour guard in `_check_stop_loss`. The SL path now also benefits from the `not in active_signals` early-return guard (preventing duplicate cancels if a concurrent limit check fires first).
+
+### ✅ 4.5 The `signal['guild_id'] = self.bot.guilds[0].id` on every tick
+- **Location**: `price_feeds/streaming_monitor.py`
+- **Done**: `guild_id` is set once when signals are added to `active_signals` in both `_load_and_subscribe_signals` and `_periodic_signal_refresh`. Removed the per-tick `hasattr(self.bot, "guilds")` patch from `_check_signal`.
+
+---
+
+## Area 5: Alert system
+
+### ✅ 5.1 Remove the dead `EmbedFactory` import + the entire `utils/embed_factory.py`
+- **Location**: `utils/embed_factory.py`
+- **Done**: Deleted `utils/embed_factory.py` (371 lines). The imports had already been removed from both `message_handler.py` and `alert_system.py` in prior work.
+
+### ✅ 5.2 Consolidate the toll-channel/PA-channel/legends-channel JSON re-reads
+- **Location**: `price_feeds/alert_system.py`
+- **Done**: Merged `_load_pa_channels()` + `_load_toll_channels()` into a single `_load_channels_config()` that reads `channels.json` once. Added cached `self._finished_channel_id` and `self._profit_channel_id`. Simplified `_get_finished_channel()` and `_get_profit_channel_sync()` to use cached IDs (no disk I/O). Deleted `_get_profit_channel()` async variant (never called). Added `reload_channels()` public method called by `!reload` in `bot_commands.py`.
+- **Adjacent fix**: Added `alert_system.reload_channels()` call to `reload_config` command in `bot_commands.py`.
+
+### ✅ 5.3 Hardcoded role-mention constant `<@&1334203997107650662>`
+- **Location**: `price_feeds/alert_system.py`, `discord_handlers/message_handler.py`, `config/channels.json`
+- **Done**: Added `"alert_role_id": "1334203997107650662"` to `channels.json`. `_load_channels_config()` reads it and sets `self.role_mention`. Replaced all 5 occurrences in `alert_system.py` with `self.role_mention` and the 1 occurrence in `message_handler.py` with `self.alert_system.role_mention`. Fallback to the hardcoded ID if key absent from config.
+
+### ✅ 5.4 Extract archive-footer helper
+- **Location**: `price_feeds/alert_system.py`, `discord_handlers/message_handler.py`
+- **Done**: Extracted module-level `_set_archive_footer(embed, label="📁 Archived")` helper. Applied at all 4 call sites (two in `_move_after_delay`, one in `_move_standalone_after_delay`, one in `message_handler.py`). The full `_move_to_archive_channel` coroutine merge was not attempted (Medium risk, closure complexity).
+
+### ✅ 5.5 Move `TPConfig`/`NMConfig` imports to module level
+- **Location**: `price_feeds/alert_system.py`
+- **Done**: `TPConfig` and `NMConfig` now imported at module top. Module-level `_tp_config` singleton instantiated once (no more per-call JSON read). Inline `from price_feeds.tp_config import TPConfig` removed from `_build_signal_embed` and `_build_profit_archive_embed`. Inline `from price_feeds.nm_config import NMConfig` (with stale "avoid circular imports" comment) removed from `send_near_miss_cancel_alert`.
+- **Adjacent fix**: Moved inline `import json` / `from pathlib import Path` to module level in `alert_system.py` (were in 5 inline sites).
+
+### 5.6 The status_map → cancel_type → reason_text branching
+- **Skipped**: Medium risk — the `if/elif` chain covers event-specific edge cases (news currency suffix, `cancel_type == "automatic"` vs `"expiry"` distinction). A dispatch table that handles all cases correctly is larger than the original and harder to audit for regressions. Leaving as-is.
+
+### ✅ 5.7 `alert_messages` bounded eviction
+- **Location**: `price_feeds/alert_system.py`
+- **Done**: Changed `self.alert_messages` from `dict` to `collections.OrderedDict`. Eviction loop replaced with `while len > 1000: popitem(last=False)`.
+
+### Adjacent fixes (Area 5 session)
+- `discord_handlers/message_handler.py`: Moved `_build_signal_embed` import to module top (was inline). Added `_set_archive_footer` to the same import. Removed redundant inline `from price_feeds.alert_system import _build_signal_embed`.
+- `price_feeds/alert_system.py`: Stripped "REDESIGNED:" from module docstring (8.1).
+
+---
+
+## Area 6: Reply-command handler
+
+### ✅ 6.1 Collapse `check_alert_management_reply` and `check_signal_management_reply`
+- **Location**: `discord_handlers/message_handler.py`
+- **Done**: Extracted `_handle_reply_command(message, referenced, signal, signal_id, from_signal_reply=False)`. Both `check_alert_management_reply` and `check_signal_management_reply` are now thin wrappers (~20 lines each) that handle path-specific lookup and auth, then delegate. The unified handler processes all commands (cancel, profit, tp, breakeven, sl, hit, reactivate) exactly once. The cancel-without-embed toll-channel branch is conditional on `from_signal_reply`. Re-add-to-monitor logic for cancelled→hit transition is shared. `hasattr(self.bot, "monitor")` guards simplified to `if self.bot.monitor:` throughout.
+- **Notes**: Signal path reactivate previously had no NM-immunity call (bug); the unified handler calls `nm_monitor.mark_immune` in both paths. Signal path previously used `cancel_signal_by_message` (bypasses transition validation) while alert path used `manually_set_signal_status`; unified uses the latter consistently. Signal path previously took the full content as command (e.g. "profit 40" wouldn't match "profit"); unified splits on whitespace like the alert path.
+
+### ✅ 6.2 Extract the "compute SL result_pips from hit limits" helper
+- **Location**: `database/signal_operations/utils.py` (new `calculate_sl_pnl`), `discord_handlers/message_handler.py`, `price_feeds/streaming_monitor.py`
+- **Done**: Added `async def calculate_sl_pnl(signal_id, signal, signal_db, tp_config) -> Optional[float]` to `utils.py`. All three call sites replaced. `scalp` kwarg is now consistently applied (streaming_monitor previously omitted it, defaulting to False — behavior unchanged for non-scalp signals; now correct for scalp signals too).
+
+### ✅ 6.3 Local `import asyncio` inside the loop
+- **Location**: `discord_handlers/message_handler.py`
+- **Done**: Moved `import asyncio` to module top; two inline occurrences removed.
+
+### ✅ 6.4 The `send_profit_alert` method and `get_pip_unit_name`
+- **Location**: `discord_handlers/message_handler.py`
+- **Done**: Deleted both (~135 lines).
+
+### ✅ 6.5 The bare `except: pass` for `remove_reaction`
+- **Location**: `discord_handlers/message_handler.py`
+- **Done**: Extracted `_safe_remove_reaction(message, emoji)` instance method. All five bare-except call sites replaced.
+
+---
+
+## Area 7: Commands (broad cleanup)
+
+### ✅ 7.1 Fix the broken `load_channels_config` import
+- **Location**: `commands/bot_commands.py`, `utils/config_loader.py`
+- **Done**: Added `load_channels_config()` to `config_loader.py` (`return config.load("channels.json")`). Moved the import to module level in `bot_commands.py`. The fallback branch now works correctly.
+
+### ✅ 7.2 `commands/trading_commands.py` extraction
+- **Location**: `commands/trading_commands.py`, `commands/views.py` (new), `commands/config_commands.py` (new), `core/bot.py`
+- **Done**: Created `commands/views.py` with `ActiveSignalsView` class (~142 lines). Created `commands/config_commands.py` with `ConfigCommands(BaseCog)` cog containing `!tp`, `!alertdist`, `!nmconfig` and all their helpers (~787 lines). Removed these from `trading_commands.py` (now 1656 lines, down from 2594). Added `"commands.config_commands"` to `bot.py` extensions list. Module-level constants `ASSET_CLASSES`, `VALID_TP_TYPES`, `VALID_DIST_TYPES`, `VALID_NM_TYPES` defined in `config_commands.py`; removed from `trading_commands.py`. `AlertDistanceConfig` and `NMConfig` removed from `TradingCommands.__init__`; `TPConfig` kept (still used in `set_signal_status`).
+- **Adjacent fixes**: Removed duplicate `EST = pytz.timezone(...)` redefinition; added `import json` and `from pathlib import Path` to module-level imports (removed 4 inline occurrences); removed redundant inline `from price_feeds.alert_config import AlertDistanceConfig` in `active_signals`; removed 2 redundant inline `from datetime import datetime` in `signal_info`; fixed `set_expiry` (was calling nonexistent `signal_db.set_signal_expiry` via stale inline import — now uses `self.signal_db.manually_set_signal_expiry`); added admin check to `!alertdist set` in `config_commands.py` (was missing in original).
+
+### ✅ 7.3 The `!goldtollssl` retroactive-update branch
+- **Location**: `commands/bot_commands.py`, `database/signal_operations/lifecycle.py`, `database/signal_operations/__init__.py`
+- **Done**: Added `bulk_update_toll_sl(offset, channel_ids) -> tuple[list, int, int]` to `LifecycleManager`; uses `= ANY($1)` instead of hand-built `IN (...)` placeholder string. Delegate added to `SignalDatabase`. `!goldtollssl` command simplified: calls `self.signal_db.bulk_update_toll_sl(...)`, then loops over returned `updated_list` to patch in-memory monitor state and update embeds. ~85 lines removed from the command.
+---
+
+## Area 8: Misc / cross-cutting
+
+### ✅ 8.1 Top-of-file docstring noise (`Stage 2 Enhanced`, `REDESIGNED`, `ENHANCED`, `FIXED`)
+- **Location**: `main.py`, `price_feeds/price_stream_manager.py`, `price_feeds/feeds/binance_stream.py`, `price_feeds/streaming_monitor.py`, `price_feeds/symbol_mapper.py`
+- **Done**: Stripped historical preamble lines from module docstrings (Stage 2 Enhanced, FIXED, ENHANCED, Replaces polling…). Condensed verbose multi-line docstrings to one-liners where the content was only labelling. Removed `# ENHANCED:` / `# FIXED:` / `# NEW:` inline comment prefixes that described what (not why) across streaming_monitor.py, binance_stream.py, price_stream_manager.py, and symbol_mapper.py.
+
+### ✅ 8.2 `enhanced_X` / `improved_X` / `EnhancedSignalParser` / `Enhanced DatabaseManager`
+- **Location**: `core/parser/__init__.py`, `database/database_manager.py`
+- **Done**: Renamed `EnhancedSignalParser` → `SignalParser` (class, type annotations, log message). Stripped "Enhanced" from both `DatabaseManager` docstrings.
+
+### ✅ 8.3 Inline `import json` / `from pathlib import Path` inside methods
+- **Location**: `price_feeds/alert_system.py`, `price_feeds/streaming_monitor.py`, `discord_handlers/message_handler.py`
+- **Done**: All listed inline imports had already been moved to module level in Areas 5, 6, 7. Moved inline `import discord` in `core/expiry_manager.py` to module level (adjacent fix).
+
+### ✅ 8.4 Loosen the `if hasattr(...)` defensive walls
+- **Location**: `price_feeds/streaming_monitor.py`, `price_feeds/alert_system.py`, `core/expiry_manager.py`, `commands/bot_commands.py`, `commands/trading_commands.py`, `commands/config_commands.py`
+- **Done**: Removed all `hasattr(self.bot, "monitor")`, `hasattr(self.bot, "news_manager")`, `hasattr(self.bot, "channel_cleaner")`, `hasattr(self.bot, "signal_db")`, `hasattr(self.bot.monitor, "stream_manager")`, `hasattr(self.bot.monitor, "alert_config")`, `hasattr(self.bot.monitor, "tp_config")`, `hasattr(self.bot.monitor, "nm_config")`, `hasattr(self.bot.monitor, "nm_monitor")`, `hasattr(self.bot.monitor, "tp_monitor")`, `hasattr(monitor, "alert_config")` guards — all these attributes are always declared (as None or an object) before any command handler can run. Replaced double-if patterns with single truthiness check on `self.bot.monitor`. Kept `hasattr(self.bot, "start_time")` (genuinely optional attribute). Also removed `hasattr(monitor, "nm_monitor")` and `hasattr(monitor, "tp_monitor")` in bulk-cancel helper (always set in StreamingPriceMonitor.__init__). In health_check, collapsed `if monitor: if stream_manager:` into `if monitor:` and simplified color assignment to a ternary.
+- **Adjacent fix**: Moved inline `import discord` in `core/expiry_manager.py` to module level.
+
+---
+
+## Out of scope / not recommended
+
+- **Adding tests across the codebase** — the prompt explicitly excludes this. Untested code stays untested.
+- **Splitting `trading_commands.py` fully into N files** — Goal 3 calls out "sprawling functions that should be split," but the file's bulk is from having many commands, not from any single sprawling function. The cohesion penalty of more files would outweigh the readability gain. (Partial extraction of `ActiveSignalsView` and the config commands is on the table; full split is not.)
+- **Replacing `discord.py` 2.x with anything else** — out of scope.
+- **Switching from `asyncpg` raw SQL to an ORM** — out of scope; performance-critical writes in the hot path benefit from raw SQL.
+- **Schema changes (e.g. renaming `signals.id` to `signals.signal_id` to avoid the gotcha entirely)** — prompt explicitly excludes DB schema changes. The Python-side normalisation (3.5) covers it.
+- **Replacing `threading`-related code** — there isn't any; the codebase is asyncio-native.
+- **Pre-emptive type hints across the codebase** — explicitly excluded.
+- **Replacing per-tick `pytz.timezone('America/New_York')` with a module-level constant** — this is one of those changes I considered but the cost (~1 line saved, minor allocator pressure) doesn't clear the bar. `pytz.timezone(name)` is itself cached internally. Skipped.
+- **Async file I/O for `channels.json` / `settings.json` reads** — currently sync `open(...)`. Each read is microseconds. Not worth the asyncio overhead.
+- **Replacing the `_live_update_task` 15s polling with event-driven updates from price ticks** — this *would* be a real efficiency improvement, but it's a behaviour change (price-tick rate is much higher than 15s, would hit Discord rate limits) and requires a different rate-limiter, so it's a redesign rather than a simplification. Out of scope.

@@ -4,50 +4,87 @@ Monitors all feeds (ICMarkets, OANDA, Binance) for stale data and connection iss
 """
 
 import asyncio
-import logging
-from typing import Dict, Optional, Set
-from datetime import datetime, timedelta
-from pathlib import Path
-import json
-import pytz
 from collections import defaultdict
+from datetime import datetime, timedelta
+from datetime import time as dtime
+from typing import Dict
+
+import pytz
 
 from price_feeds.symbol_mapper import SymbolMapper
 from utils.logger import get_logger
 
-logger = get_logger('feed_health')
+logger = get_logger("feed_health")
+
+# Monitoring knobs — not user-configurable
+CHECK_INTERVAL_SECONDS = 60
+STALE_THRESHOLD_SECONDS = 300
+MAX_RECONNECT_ATTEMPTS = 3
+RECONNECT_DELAY_SECONDS = 10
+ALERT_COOLDOWN_MINUTES = 15
+STARTUP_GRACE_PERIOD_SECONDS = 120
+
+# Spread hour: 5–6 PM EST weekdays (matches streaming_monitor._is_spread_hour)
+_SPREAD_START = dtime(17, 0)
+_SPREAD_END = dtime(18, 0)
+
+MARKET_HOURS = {
+    "crypto": {"always_open": True},
+    "stocks": {
+        "days": [1, 2, 3, 4, 5],
+        "open_time": "09:30",
+        "close_time": "17:00",
+        "timezone": "America/New_York",
+    },
+    "forex": {
+        "days": [0, 1, 2, 3, 4, 6],
+        "open_time": "18:00",
+        "close_time": "17:00",
+        "timezone": "America/New_York",
+    },
+    "metals": {
+        "days": [0, 1, 2, 3, 4, 6],
+        "open_time": "18:00",
+        "close_time": "17:00",
+        "timezone": "America/New_York",
+    },
+    "indices": {
+        "days": [0, 1, 2, 3, 4, 6],
+        "open_time": "18:00",
+        "close_time": "17:00",
+        "timezone": "America/New_York",
+    },
+    "oil": {
+        "days": [0, 1, 2, 3, 4, 6],
+        "open_time": "18:00",
+        "close_time": "17:00",
+        "timezone": "America/New_York",
+    },
+}
 
 
 class FeedHealthMonitor:
     """
-    Monitors price feed health and handles failures
+    Monitors price feed health and handles failures.
 
-    Features:
-    - Tracks last update time per feed per symbol
-    - Detects stale feeds (>5 min no updates during market hours)
-    - Respects market hours (no alerts on weekends/holidays)
-    - Handles spread hour (5-6 PM EST daily)
-    - Automatic reconnection with retry logic
-    - Admin DM alerts for persistent failures
-    - Alert cooldown to prevent spam
+    Detects stale feeds (>5 min during market hours), attempts reconnection,
+    and DMs the configured admin on persistent failures.
     """
 
-    def __init__(self, stream_manager, bot, admin_user_id: int = None):
-        """
-        Initialize feed health monitor
-
-        Args:
-            stream_manager: PriceStreamManager instance
-            bot: Discord bot instance
-            admin_user_id: Discord user ID for alerts (can be set later)
-        """
+    def __init__(
+        self,
+        stream_manager,
+        bot,
+        admin_user_id: int = None,
+        us_market_holidays: list = None,
+        db=None,
+    ):
         self.stream_manager = stream_manager
         self.bot = bot
         self.admin_user_id = admin_user_id
+        self.us_market_holidays = us_market_holidays or []
+        self.db = db
         self.symbol_mapper = SymbolMapper()
-
-        # Load configuration
-        self.config = self._load_config()
 
         # Monitoring state
         self.running = False
@@ -61,67 +98,27 @@ class FeedHealthMonitor:
         self.feed_status: Dict[str, str] = {}  # 'healthy', 'degraded', 'down'
         self.last_alert_time: Dict[str, datetime] = {}
         self.reconnect_attempts: Dict[str, int] = defaultdict(int)
+        # Earliest stale-symbol last_update timestamp captured when the feed first
+        # crossed the down threshold. Used to report accurate downtime on recovery.
+        self.first_stale_time: Dict[str, datetime] = {}
 
         # Track alert history to prevent spam
         self.alert_history: Dict[str, datetime] = {}
 
         # Statistics
         self.stats = {
-            'checks_performed': 0,
-            'stale_detections': 0,
-            'reconnections_attempted': 0,
-            'reconnections_successful': 0,
-            'alerts_sent': 0,
-            'false_positives_avoided': 0
+            "checks_performed": 0,
+            "stale_detections": 0,
+            "reconnections_attempted": 0,
+            "reconnections_successful": 0,
+            "alerts_sent": 0,
+            "false_positives_avoided": 0,
         }
 
         # Timezone for market hours
-        self.est = pytz.timezone('America/New_York')
+        self.est = pytz.timezone("America/New_York")
 
         logger.info(f"FeedHealthMonitor initialized (admin: {admin_user_id})")
-
-    def _load_config(self) -> Dict:
-        """Load health monitoring configuration"""
-        config_path = Path(__file__).resolve().parent.parent / 'config' / 'health_config.json'
-
-        try:
-            with open(config_path, 'r') as f:
-                return json.load(f)
-        except FileNotFoundError:
-            logger.warning(f"Config file not found: {config_path}, using defaults")
-            return self._get_default_config()
-        except json.JSONDecodeError as e:
-            logger.error(f"Invalid JSON in config: {e}, using defaults")
-            return self._get_default_config()
-
-    def _get_default_config(self) -> Dict:
-        """Get default configuration"""
-        return {
-            "check_interval_seconds": 60,
-            "stale_threshold_seconds": 300,
-            "max_reconnect_attempts": 3,
-            "reconnect_delay_seconds": 10,
-            "admin_user_id": None,
-            "alert_cooldown_minutes": 15,
-            "startup_grace_period_seconds": 120,
-            "market_hours": {
-                "crypto": {"always_open": True},
-                "stocks": {
-                    "days": [1, 2, 3, 4, 5],
-                    "open_time": "09:30",
-                    "close_time": "17:00",
-                    "timezone": "America/New_York"
-                },
-                "forex": {
-                    "days": [0, 1, 2, 3, 4, 5],
-                    "open_time": "18:00",
-                    "close_time": "17:00",
-                    "timezone": "America/New_York",
-                    "spread_hour_start": "17:00",
-                    "spread_hour_end": "18:00"
-                }
-            }
-        }
 
     def set_admin_user(self, user_id: int):
         """Set admin user ID for alerts"""
@@ -157,16 +154,14 @@ class FeedHealthMonitor:
 
     async def _monitoring_loop(self):
         """Main monitoring loop"""
-        check_interval = self.config.get('check_interval_seconds', 60)
-
         while self.running:
             try:
                 await self.check_feed_health()
-                self.stats['checks_performed'] += 1
+                self.stats["checks_performed"] += 1
             except Exception as e:
                 logger.error(f"Error in health check: {e}", exc_info=True)
 
-            await asyncio.sleep(check_interval)
+            await asyncio.sleep(CHECK_INTERVAL_SECONDS)
 
     def update_last_seen(self, symbol: str, feed: str):
         """
@@ -200,7 +195,7 @@ class FeedHealthMonitor:
         now = datetime.now()
 
         # Skip checks during startup grace period
-        if (now - self.startup_time).total_seconds() < self.config.get('startup_grace_period_seconds', 120):
+        if (now - self.startup_time).total_seconds() < STARTUP_GRACE_PERIOD_SECONDS:
             logger.debug("Within startup grace period, skipping health checks")
             return
 
@@ -212,10 +207,10 @@ class FeedHealthMonitor:
             logger.debug("Weekend — skipping feed health alerts (markets closed)")
             return
 
-        stale_threshold = timedelta(seconds=self.config.get('stale_threshold_seconds', 300))
+        stale_threshold = timedelta(seconds=STALE_THRESHOLD_SECONDS)
 
         # Check each feed
-        for feed_name in ['icmarkets', 'oanda', 'binance']:
+        for feed_name in ["icmarkets", "oanda", "binance", "exness"]:
             await self._check_feed(feed_name, stale_threshold, now)
 
     async def _check_feed(self, feed_name: str, stale_threshold: timedelta, now: datetime):
@@ -223,17 +218,15 @@ class FeedHealthMonitor:
         # Only check symbols that are currently actively subscribed.
         # self.last_seen retains entries forever, so filtering by active subscriptions
         # prevents ghost alerts for symbols whose signals have been cleared from the DB.
-        active_symbols = getattr(self.stream_manager, 'subscribed_symbols', set())
+        active_symbols = getattr(self.stream_manager, "subscribed_symbols", set())
 
         feed_last_seen = self.last_seen.get(feed_name, {})
-        feed_symbols = {
-            sym: ts for sym, ts in feed_last_seen.items()
-            if sym in active_symbols
-        }
+        feed_symbols = {sym: ts for sym, ts in feed_last_seen.items() if sym in active_symbols}
 
         if not feed_symbols:
             # No active subscriptions for this feed
-            self.feed_status[feed_name] = 'idle'
+            self.feed_status[feed_name] = "idle"
+            await self._write_feed_health(feed_name, "idle", None, None)
             return
 
         # Check each actively subscribed symbol
@@ -247,35 +240,52 @@ class FeedHealthMonitor:
                 asset_class = self.symbol_mapper.determine_asset_class(symbol)
 
                 if self.is_market_open(asset_class):
-                    stale_symbols.append({
-                        'symbol': symbol,
-                        'last_update': last_update,
-                        'time_since': time_since_update
-                    })
+                    stale_symbols.append(
+                        {
+                            "symbol": symbol,
+                            "last_update": last_update,
+                            "time_since": time_since_update,
+                        }
+                    )
 
         # Determine feed health
+        newest_seen = max(feed_symbols.values()) if feed_symbols else None
+
         if not stale_symbols:
             # All symbols healthy
-            if self.feed_status.get(feed_name) in ['degraded', 'down']:
+            if self.feed_status.get(feed_name) in ["degraded", "down"]:
                 # Feed recovered!
                 await self._handle_feed_recovery(feed_name)
 
-            self.feed_status[feed_name] = 'healthy'
+            self.feed_status[feed_name] = "healthy"
             self.reconnect_attempts[feed_name] = 0
+            self.first_stale_time.pop(feed_name, None)
+            await self._write_feed_health(feed_name, "healthy", 0, newest_seen)
 
         elif len(stale_symbols) < len(feed_symbols) * 0.5:
             # Less than 50% stale - degraded
-            if self.feed_status.get(feed_name) != 'degraded':
-                self.feed_status[feed_name] = 'degraded'
-                logger.warning(f"{feed_name} feed degraded: {len(stale_symbols)}/{len(feed_symbols)} symbols stale")
-                self.stats['false_positives_avoided'] += 1  # Might be temporary
+            if self.feed_status.get(feed_name) != "degraded":
+                self.feed_status[feed_name] = "degraded"
+                logger.warning(
+                    f"{feed_name} feed degraded: {len(stale_symbols)}/{len(feed_symbols)} symbols stale"
+                )
+                self.stats["false_positives_avoided"] += 1  # Might be temporary
+            max_stale_secs = int(max(s["time_since"].total_seconds() for s in stale_symbols))
+            await self._write_feed_health(feed_name, "degraded", max_stale_secs, newest_seen)
 
         else:
             # 50%+ stale - feed is down
-            if self.feed_status.get(feed_name) != 'down':
-                self.stats['stale_detections'] += 1
+            if self.feed_status.get(feed_name) != "down":
+                self.stats["stale_detections"] += 1
+                # Capture the earliest last_update among stale symbols as the
+                # real "stall began" timestamp for downtime reporting.
+                self.first_stale_time[feed_name] = min(
+                    s["last_update"] for s in stale_symbols
+                )
 
-            self.feed_status[feed_name] = 'down'
+            self.feed_status[feed_name] = "down"
+            max_stale_secs = int(max(s["time_since"].total_seconds() for s in stale_symbols))
+            await self._write_feed_health(feed_name, "down", max_stale_secs, newest_seen)
             await self._handle_feed_failure(feed_name, stale_symbols)
 
     async def _handle_feed_failure(self, feed_name: str, stale_symbols: list):
@@ -291,16 +301,16 @@ class FeedHealthMonitor:
             return
 
         # Attempt reconnection
-        max_attempts = self.config.get('max_reconnect_attempts', 3)
-
-        if self.reconnect_attempts[feed_name] < max_attempts:
+        if self.reconnect_attempts[feed_name] < MAX_RECONNECT_ATTEMPTS:
             success = await self.attempt_reconnection(feed_name)
 
             if success:
                 logger.info(f"{feed_name} reconnection successful")
                 return  # Don't alert if reconnection worked
         else:
-            logger.error(f"{feed_name} max reconnection attempts reached")
+            logger.error(
+                f"{feed_name} max reconnection attempts reached ({MAX_RECONNECT_ATTEMPTS})"
+            )
 
         # Send admin alert
         await self._send_feed_failure_alert(feed_name, stale_symbols)
@@ -330,25 +340,24 @@ class FeedHealthMonitor:
             True if reconnection successful, False otherwise
         """
         self.reconnect_attempts[feed_name] += 1
-        self.stats['reconnections_attempted'] += 1
+        self.stats["reconnections_attempted"] += 1
 
-        logger.info(f"Attempting reconnection for {feed_name} (attempt {self.reconnect_attempts[feed_name]})")
+        logger.info(
+            f"Attempting reconnection for {feed_name} (attempt {self.reconnect_attempts[feed_name]})"
+        )
 
         try:
-            # Wait before reconnection attempt
-            delay = self.config.get('reconnect_delay_seconds', 10)
-            await asyncio.sleep(delay)
+            await asyncio.sleep(RECONNECT_DELAY_SECONDS)
 
             # Attempt reconnection through stream manager
             result = await self.stream_manager.reconnect_all()
 
             if result.get(feed_name):
-                self.stats['reconnections_successful'] += 1
+                self.stats["reconnections_successful"] += 1
                 logger.info(f"{feed_name} reconnection successful")
                 return True
-            else:
-                logger.warning(f"{feed_name} reconnection failed")
-                return False
+            logger.warning(f"{feed_name} reconnection failed")
+            return False
 
         except Exception as e:
             logger.error(f"Error reconnecting {feed_name}: {e}")
@@ -356,8 +365,7 @@ class FeedHealthMonitor:
 
     def _should_send_alert(self, feed_name: str) -> bool:
         """Check if we should send an alert (respects cooldown)"""
-        cooldown_minutes = self.config.get('alert_cooldown_minutes', 15)
-        cooldown = timedelta(minutes=cooldown_minutes)
+        cooldown = timedelta(minutes=ALERT_COOLDOWN_MINUTES)
 
         last_alert = self.last_alert_time.get(feed_name)
 
@@ -376,10 +384,12 @@ class FeedHealthMonitor:
             admin_user = await self.bot.fetch_user(self.admin_user_id)
 
             # Build alert message
-            stale_list = '\n'.join([
-                f"• {s['symbol']}: {self._format_duration(s['time_since'])} ago"
-                for s in stale_symbols[:10]  # Limit to 10 symbols
-            ])
+            stale_list = "\n".join(
+                [
+                    f"• {s['symbol']}: {self._format_duration(s['time_since'])} ago"
+                    for s in stale_symbols[:10]  # Limit to 10 symbols
+                ]
+            )
 
             if len(stale_symbols) > 10:
                 stale_list += f"\n• ... and {len(stale_symbols) - 10} more"
@@ -388,15 +398,15 @@ class FeedHealthMonitor:
                 f"⚠️ **{feed_name.upper()} Feed Down**\n\n"
                 f"**Affected Symbols:** {len(stale_symbols)}\n"
                 f"{stale_list}\n\n"
-                f"**Reconnection Attempts:** {self.reconnect_attempts[feed_name]}/{self.config.get('max_reconnect_attempts', 3)}\n"
-                f"**Status:** {'Failed' if self.reconnect_attempts[feed_name] >= self.config.get('max_reconnect_attempts', 3) else 'Retrying'}\n\n"
-                f"{'⚠️ Manual intervention may be required' if self.reconnect_attempts[feed_name] >= self.config.get('max_reconnect_attempts', 3) else '🔄 Automatic reconnection in progress'}"
+                f"**Reconnection Attempts:** {self.reconnect_attempts[feed_name]}/{MAX_RECONNECT_ATTEMPTS}\n"
+                f"**Status:** {'Failed' if self.reconnect_attempts[feed_name] >= MAX_RECONNECT_ATTEMPTS else 'Retrying'}\n\n"
+                f"{'⚠️ Manual intervention may be required' if self.reconnect_attempts[feed_name] >= MAX_RECONNECT_ATTEMPTS else '🔄 Automatic reconnection in progress'}"
             )
 
             await admin_user.send(message)
 
             self.last_alert_time[feed_name] = datetime.now()
-            self.stats['alerts_sent'] += 1
+            self.stats["alerts_sent"] += 1
 
             logger.info(f"Sent failure alert to admin for {feed_name}")
 
@@ -411,12 +421,13 @@ class FeedHealthMonitor:
         try:
             admin_user = await self.bot.fetch_user(self.admin_user_id)
 
-            # Calculate downtime
-            last_alert = self.last_alert_time.get(feed_name)
+            # Downtime is measured from when the feed actually went stale (the
+            # oldest stale-symbol last_update captured at down-detection time),
+            # not from when the alert was sent.
             downtime = ""
-
-            if last_alert:
-                duration = datetime.now() - last_alert
+            stall_started = self.first_stale_time.get(feed_name)
+            if stall_started:
+                duration = datetime.now() - stall_started
                 downtime = f"\n**Downtime:** {self._format_duration(duration)}"
 
             message = (
@@ -452,62 +463,43 @@ class FeedHealthMonitor:
             logger.error(f"Failed to send custom alert: {e}")
 
     def is_market_open(self, asset_class: str) -> bool:
-        """
-        Check if market is open for a given asset class
-
-        Args:
-            asset_class: Asset class (forex, stocks, crypto, metals, indices)
-
-        Returns:
-            True if market should be open, False otherwise
-        """
+        """Return True if the market is expected to be open (used to avoid false stale alerts)."""
         now = datetime.now(self.est)
 
-        # Normalize asset class
-        if asset_class == 'forex_jpy':
-            asset_class = 'forex'
+        if asset_class == "forex_jpy":
+            asset_class = "forex"
 
-        market_config = self.config['market_hours'].get(asset_class)
+        market_config = MARKET_HOURS.get(asset_class)
 
         if not market_config:
-            # Unknown asset class, assume open to avoid false alerts
             logger.warning(f"Unknown asset class: {asset_class}, assuming market open")
             return True
 
-        # Crypto is always open
-        if market_config.get('always_open'):
+        if market_config.get("always_open"):
             return True
 
-        # Check day of week (0 = Monday, 6 = Sunday)
-        if now.weekday() not in market_config.get('days', []):
+        if now.weekday() not in market_config.get("days", []):
             return False
 
-        # Check if it's a holiday (for stocks)
-        if asset_class == 'stocks':
-            today_str = now.strftime('%Y-%m-%d')
-            if today_str in self.config.get('us_market_holidays_2025', []):
+        if asset_class == "stocks":
+            today_str = now.strftime("%Y-%m-%d")
+            if today_str in self.us_market_holidays:
                 return False
 
-        # Check spread hour (for forex/metals/indices)
-        if 'spread_hour_start' in market_config:
-            spread_start = datetime.strptime(market_config['spread_hour_start'], '%H:%M').time()
-            spread_end = datetime.strptime(market_config['spread_hour_end'], '%H:%M').time()
+        # Spread hour (5–6 PM EST) is an expected-quiet window for forex, metals,
+        # and indices. Liquidity drops and price ticks slow or stop — treating it
+        # as "open" would generate false-positive stale-feed alerts. Mirror the
+        # weekend skip above and treat it as closed.
+        if asset_class in ("forex", "metals", "indices", "oil"):
+            if _SPREAD_START <= now.time() < _SPREAD_END:
+                return False
 
-            if spread_start <= now.time() < spread_end:
-                # During spread hour - expect less frequent updates but not a failure
-                return True  # Don't alert during spread hour
+        open_time = datetime.strptime(market_config["open_time"], "%H:%M").time()
+        close_time = datetime.strptime(market_config["close_time"], "%H:%M").time()
 
-        # Check market hours
-        open_time = datetime.strptime(market_config['open_time'], '%H:%M').time()
-        close_time = datetime.strptime(market_config['close_time'], '%H:%M').time()
-
-        # Handle markets that close next day (forex: Sun 6PM - Fri 5PM)
         if close_time < open_time:
-            # Market is open from open_time to midnight, and midnight to close_time
             return now.time() >= open_time or now.time() < close_time
-        else:
-            # Normal market hours (stocks: 9:30 AM - 5:00 PM)
-            return open_time <= now.time() < close_time
+        return open_time <= now.time() < close_time
 
     def _format_duration(self, duration: timedelta) -> str:
         """Format duration in human-readable form"""
@@ -530,6 +522,27 @@ class FeedHealthMonitor:
         remaining_hours = hours % 24
         return f"{days} days, {remaining_hours} hours"
 
+    async def _write_feed_health(
+        self, feed_name: str, status: str, stale_seconds, last_seen_ts
+    ) -> None:
+        if self.db is None:
+            return
+        try:
+            await self.db.execute(
+                """
+                INSERT INTO feed_health (feed, status, stale_seconds, last_seen, updated_at)
+                VALUES ($1, $2, $3, $4, NOW())
+                ON CONFLICT (feed) DO UPDATE SET
+                    status        = EXCLUDED.status,
+                    stale_seconds = EXCLUDED.stale_seconds,
+                    last_seen     = EXCLUDED.last_seen,
+                    updated_at    = EXCLUDED.updated_at
+                """,
+                (feed_name, status, stale_seconds, last_seen_ts),
+            )
+        except Exception as e:
+            logger.error("Failed to write feed_health for %s: %s", feed_name, e)
+
     def get_health_stats(self) -> Dict:
         """
         Get health monitoring statistics
@@ -540,7 +553,7 @@ class FeedHealthMonitor:
         now = datetime.now()
 
         feed_details = {}
-        for feed_name in ['icmarkets', 'oanda', 'binance']:
+        for feed_name in ["icmarkets", "oanda", "binance", "exness"]:
             feed_symbols = self.last_seen.get(feed_name, {})
 
             if feed_symbols:
@@ -548,56 +561,52 @@ class FeedHealthMonitor:
                 newest_update = max(feed_symbols.values())
 
                 feed_details[feed_name] = {
-                    'status': self.feed_status.get(feed_name, 'unknown'),
-                    'symbols_monitored': len(feed_symbols),
-                    'oldest_update': self._format_duration(now - oldest_update),
-                    'newest_update': self._format_duration(now - newest_update),
-                    'reconnect_attempts': self.reconnect_attempts.get(feed_name, 0)
+                    "status": self.feed_status.get(feed_name, "unknown"),
+                    "symbols_monitored": len(feed_symbols),
+                    "oldest_update": self._format_duration(now - oldest_update),
+                    "newest_update": self._format_duration(now - newest_update),
+                    "reconnect_attempts": self.reconnect_attempts.get(feed_name, 0),
                 }
             else:
-                feed_details[feed_name] = {
-                    'status': 'idle',
-                    'symbols_monitored': 0
-                }
+                feed_details[feed_name] = {"status": "idle", "symbols_monitored": 0}
 
         return {
-            'overall_stats': self.stats,
-            'feed_details': feed_details,
-            'monitoring_running': self.running,
-            'uptime': self._format_duration(now - self.startup_time),
-            'admin_configured': self.admin_user_id is not None
+            "overall_stats": self.stats,
+            "feed_details": feed_details,
+            "monitoring_running": self.running,
+            "uptime": self._format_duration(now - self.startup_time),
+            "admin_configured": self.admin_user_id is not None,
         }
 
     def get_feed_status_summary(self) -> str:
         """Get a formatted summary of feed status"""
         stats = self.get_health_stats()
 
-        lines = [
-            "**Feed Health Status**",
-            ""
-        ]
+        lines = ["**Feed Health Status**", ""]
 
-        for feed_name, details in stats['feed_details'].items():
+        for feed_name, details in stats["feed_details"].items():
             status_emoji = {
-                'healthy': '✅',
-                'degraded': '⚠️',
-                'down': '❌',
-                'idle': '⏸️',
-                'unknown': '❓'
-            }.get(details['status'], '❓')
+                "healthy": "✅",
+                "degraded": "⚠️",
+                "down": "❌",
+                "idle": "⏸️",
+                "unknown": "❓",
+            }.get(details["status"], "❓")
 
             lines.append(f"{status_emoji} **{feed_name.upper()}**: {details['status']}")
 
-            if details['symbols_monitored'] > 0:
+            if details["symbols_monitored"] > 0:
                 lines.append(f"   • Symbols: {details['symbols_monitored']}")
                 lines.append(f"   • Last update: {details['newest_update']} ago")
 
-                if details['reconnect_attempts'] > 0:
+                if details["reconnect_attempts"] > 0:
                     lines.append(f"   • Reconnect attempts: {details['reconnect_attempts']}")
 
             lines.append("")
 
-        lines.append(f"**Monitoring Status:** {'Running' if stats['monitoring_running'] else 'Stopped'}")
+        lines.append(
+            f"**Monitoring Status:** {'Running' if stats['monitoring_running'] else 'Stopped'}"
+        )
         lines.append(f"**Uptime:** {stats['uptime']}")
 
-        return '\n'.join(lines)
+        return "\n".join(lines)

@@ -120,9 +120,11 @@ class AutoTPMonitor:
             logger.warning(f"Signal {signal_id}: last limit has no entry price, skipping TP check")
             return False
 
-        scalp = signal.get('scalp', False)
-        last_pnl = self.tp_config.calculate_pnl(instrument, direction, last_entry, close_price, scalp=scalp)
-        tp_threshold = self.tp_config.get_tp_value(instrument, scalp=scalp)
+        signal_type = signal.get("type", "standard")
+        last_pnl = self.tp_config.calculate_pnl(
+            instrument, direction, last_entry, close_price, signal_type=signal_type
+        )
+        tp_threshold = self.tp_config.get_tp_value(instrument, signal_type=signal_type)
 
         # Tiny epsilon to guard against floating-point rounding errors
         EPSILON = 1e-9
@@ -137,10 +139,10 @@ class AutoTPMonitor:
             for lim in earlier_limits:
                 entry = lim.get("hit_price") or lim.get("price_level")
                 if entry is None:
-                    logger.warning(f"Signal {signal_id}: limit {lim.get('limit_id')} has no entry price")
+                    logger.warning(f"Signal {signal_id}: limit {lim.get('id')} has no entry price")
                     continue
                 combined_earlier_pnl += self.tp_config.calculate_pnl(
-                    instrument, direction, entry, close_price, scalp=scalp
+                    instrument, direction, entry, close_price, signal_type=signal_type
                 )
 
             if combined_earlier_pnl < -EPSILON:
@@ -153,29 +155,36 @@ class AutoTPMonitor:
                 entry = lim.get("hit_price") or lim.get("price_level")
                 if entry is not None:
                     cumulative_pnl += self.tp_config.calculate_pnl(
-                        instrument, direction, entry, close_price, scalp=scalp
+                        instrument, direction, entry, close_price, signal_type=signal_type
                     )
 
-        success = await self._trigger_auto_profit(signal, hit_limits, last_pnl, num_hit, cumulative_pnl, close_price)
+        success = await self._trigger_auto_profit(
+            signal, hit_limits, last_pnl, num_hit, cumulative_pnl, close_price
+        )
         return success
 
-    async def _trigger_auto_profit(self, signal: Dict, hit_limits: list,
-                                    last_pnl: float, limits_hit: int,
-                                    cumulative_pnl: float = None,
-                                    close_price: float = None) -> bool:
+    async def _trigger_auto_profit(
+        self,
+        signal: Dict,
+        hit_limits: list,
+        last_pnl: float,
+        limits_hit: int,
+        cumulative_pnl: float = None,
+        close_price: float = None,
+    ) -> bool:
         """
         Mark signal as profit, send alerts, and clean up.
 
         cumulative_pnl: total P&L across all hit limits at the TP price.
-                        Used for display only; DB stores last_pnl as result_pips.
-        close_price:    the market price at TP trigger, used to calculate per-limit pnl.
+                        Used for display only; DB stores close_price as tp_price.
+        close_price:    the market price at TP trigger, stored as tp_price and used to calculate per-limit pnl.
 
         Returns True if successfully marked as profit, False on any failure.
         """
         signal_id = signal["signal_id"]
         instrument = signal["instrument"]
         direction = signal["direction"].lower()
-        scalp = signal.get("scalp", False)
+        signal_type = signal.get("type", "standard")
 
         display_pnl = cumulative_pnl if cumulative_pnl is not None else last_pnl
         pnl_display = self.tp_config.format_value(instrument, display_pnl)
@@ -188,7 +197,9 @@ class AutoTPMonitor:
                 seq = lim.get("sequence_number")
                 entry = lim.get("hit_price") or lim.get("price_level")
                 if seq is not None and entry is not None:
-                    pnl = self.tp_config.calculate_pnl(instrument, direction, entry, close_price, scalp=scalp)
+                    pnl = self.tp_config.calculate_pnl(
+                        instrument, direction, entry, close_price, signal_type=signal_type
+                    )
                     limit_pnl_map[seq] = self.tp_config.format_value(instrument, pnl)
 
         logger.info(f"Signal {signal_id} ({instrument}): auto-TP triggered — {reason}")
@@ -199,7 +210,7 @@ class AutoTPMonitor:
                     signal_id,
                     "profit",
                     reason,
-                    result_pips=last_pnl,
+                    tp_price=close_price,
                     closed_reason="automatic",
                 ),
                 timeout=5.0,
@@ -212,7 +223,9 @@ class AutoTPMonitor:
             return False
 
         if not success:
-            logger.error(f"Signal {signal_id}: manually_set_signal_status returned False for auto-TP")
+            logger.error(
+                f"Signal {signal_id}: manually_set_signal_status returned False for auto-TP"
+            )
             return False
 
         self.evict_signal(signal_id)
@@ -230,6 +243,8 @@ class AutoTPMonitor:
                     limit_pnl_map=limit_pnl_map,
                 )
             except Exception as e:
-                logger.error(f"Signal {signal_id}: failed to send auto-TP alert: {e}", exc_info=True)
+                logger.error(
+                    f"Signal {signal_id}: failed to send auto-TP alert: {e}", exc_info=True
+                )
 
         return True

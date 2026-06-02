@@ -1,59 +1,66 @@
 """
 Trading Bot Core - Main bot class
 """
+
+from typing import Optional, Set
+
 import discord
 from discord.ext import commands, tasks
-from typing import Optional, Set
-from utils.logger import get_logger
-from utils.config_loader import config
-from database import db
-from database import initialize_signal_db
 
-logger = get_logger('bot')
+from core.services import ServiceRegistry
+from database import db, initialize_signal_db
+from utils.config_loader import config, load_settings
+from utils.logger import get_logger
+
+logger = get_logger("bot")
 
 
 class TradingBot(commands.Bot):
     """Main Discord bot class with modular architecture"""
 
     def __init__(self):
-        # Bot configuration
-        settings = config.load("settings.json")
-
         # Set up intents
         intents = discord.Intents.default()
         intents.message_content = True
         intents.messages = True
         intents.guilds = True
         intents.reactions = True
-        intents.members = True  # Required for on_member_update / on_member_remove (license auto-management)
+        intents.members = (
+            True  # Required for on_member_update / on_member_remove (license auto-management)
+        )
 
         super().__init__(
-            command_prefix=settings.get("bot_prefix", "!"),
+            command_prefix="!",
             intents=intents,
-            help_command=None  # We have a custom help command
+            help_command=None,  # We have a custom help command
         )
 
         # Initialize attributes
         self.logger = get_logger("bot")
-        self.settings = settings
         self.channels_config = None
         self.monitored_channels: Set[int] = set()
+        self.allowed_channel_ids: Set[int] = set()
         self.alert_channel_id: Optional[int] = None
         self.command_channel_id: Optional[int] = None
         self.signal_db = None
         self.message_handler = None
         self.expiry_manager = None
-        self.monitor = None  # Changed from price_monitor to monitor for consistency
+        self.monitor = None
         self.channel_cleaner = None
+
+        # Flat service registry — populated during setup_hook, injected into cogs/handlers
+        self.services = ServiceRegistry()
 
         # News mode manager — tracks active news windows
         from core.news_manager import NewsManager
+
         self.news_manager = NewsManager()
         self.news_manager.load_from_file()
         self.news_manager.start_cleanup_task()
 
-        # Admin user IDs
-        self.admin_ids = [582358569542877184]  # Replace with actual admin IDs
+        # Admin user IDs from settings.json
+        bot_settings = load_settings()
+        self.admin_ids = bot_settings.admin_ids
 
     async def setup_hook(self):
         """Called when bot is getting ready"""
@@ -63,6 +70,10 @@ class TradingBot(commands.Bot):
         await db.initialize()
         self.signal_db = initialize_signal_db(db)
 
+        # Populate service registry with DB layer
+        self.services.db = db
+        self.services.signal_db = self.signal_db
+
         # Give NewsManager a reference to the DB so it can persist mode status
         self.news_manager.set_db(db)
 
@@ -70,10 +81,22 @@ class TradingBot(commands.Bot):
         await self.load_config()
 
         from discord_handlers.message_handler import MessageHandler
+
         self.message_handler = MessageHandler(self)
         self.logger.info("Message handler initialized")
 
         await self.initialize_price_monitor()
+
+        # Populate service registry with monitor subsystems
+        if self.monitor:
+            self.services.monitor = self.monitor
+            self.services.alert_system = self.monitor.alert_system
+            self.services.stream_manager = self.monitor.stream_manager
+            self.services.tp_config = self.monitor.tp_config
+            self.services.tp_monitor = self.monitor.tp_monitor
+            self.services.nm_config = self.monitor.nm_config
+            self.services.nm_monitor = self.monitor.nm_monitor
+            self.services.alert_config = self.monitor.alert_config
 
         # Connect alert system to message handler
         if self.monitor and self.message_handler:
@@ -84,9 +107,11 @@ class TradingBot(commands.Bot):
 
         # Start expiry manager
         from core.expiry_manager import ExpiryManager
+
         self.expiry_manager = ExpiryManager(self)
 
         from core.channel_cleaner import ChannelCleaner
+
         self.channel_cleaner = ChannelCleaner(self)
 
         await self.load_extensions()
@@ -119,11 +144,28 @@ class TradingBot(commands.Bot):
             self.command_channel_id = int(command_id)
             self.logger.info(f"Command channel set: {command_id}")
 
+        # Build allowed_channel_ids once — read by on_message and MessageHandler
+        self.allowed_channel_ids = set(self.monitored_channels)
+        for key in (
+            "alert_channel",
+            "command_channel",
+            "pa-alert-channel",
+            "toll-alert-channel",
+            "general-tolls-alert",
+            "legends-trade-alert",
+            "finished_signals",
+            "profit_channel",
+        ):
+            val = self.channels_config.get(key)
+            if val:
+                self.allowed_channel_ids.add(int(val))
+
     async def load_extensions(self):
         """Load all command cogs"""
         extensions = [
-            'commands.bot_commands',
-            'commands.trading_commands',
+            "commands.admin",
+            "commands.signals",
+            "commands.config",
         ]
 
         for extension in extensions:
@@ -152,73 +194,34 @@ class TradingBot(commands.Bot):
         # Set bot status
         await self.change_presence(
             activity=discord.Activity(
-                type=discord.ActivityType.watching,
-                name="for trading signals"
+                type=discord.ActivityType.watching, name="for trading signals"
             )
         )
 
     async def on_message(self, message: discord.Message):
-        """Handle new messages with error resilience"""
+        """Handle new messages"""
+        # Only process messages in allowed channels
+        if message.channel.id not in self.allowed_channel_ids:
+            return
+
+        # Let message handler process it first
         try:
-            # Check if message is in an allowed channel
-            allowed_channels = set()
-
-            # Add monitored channels
-            allowed_channels.update(self.monitored_channels)
-
-            # Add alert channel
-            if hasattr(self, 'alert_channel_id') and self.alert_channel_id:
-                allowed_channels.add(self.alert_channel_id)
-
-            # Add command channel
-            if hasattr(self, 'command_channel_id') and self.command_channel_id:
-                allowed_channels.add(self.command_channel_id)
-
-            # Try to get from channels_config if not set
-            if hasattr(self, 'channels_config'):
-                if 'alert_channel' in self.channels_config:
-                    allowed_channels.add(int(self.channels_config['alert_channel']))
-                if 'command_channel' in self.channels_config:
-                    allowed_channels.add(int(self.channels_config['command_channel']))
-                if 'pa-alert-channel' in self.channels_config:
-                    allowed_channels.add(int(self.channels_config['pa-alert-channel']))
-                if 'toll-alert-channel' in self.channels_config:
-                    allowed_channels.add(int(self.channels_config['toll-alert-channel']))
-                if 'general-tolls-alert' in self.channels_config and self.channels_config['general-tolls-alert']:
-                    allowed_channels.add(int(self.channels_config['general-tolls-alert']))
-                if 'legends-trade-alert' in self.channels_config and self.channels_config['legends-trade-alert']:
-                    allowed_channels.add(int(self.channels_config['legends-trade-alert']))
-                if 'finished_signals' in self.channels_config and self.channels_config['finished_signals']:
-                    allowed_channels.add(int(self.channels_config['finished_signals']))
-                if 'profit_channel' in self.channels_config and self.channels_config['profit_channel']:
-                    allowed_channels.add(int(self.channels_config['profit_channel']))
-
-            # Only process messages in allowed channels
-            if message.channel.id not in allowed_channels:
-                return  # Silently ignore messages in non-trading channels
-
-            # Let message handler process it first
-            if self.message_handler:
-                try:
-                    await self.message_handler.handle_new_message(message)
-                except discord.NotFound:
-                    # Message was deleted while processing
-                    self.logger.debug(f"Message {message.id} was deleted during processing")
-                except Exception as e:
-                    # Log error but don't crash - allow bot to continue
-                    self.logger.error(f"Error in message handler for message {message.id}: {repr(str(e))}",
-                                      exc_info=True)
-
-            # Then process commands (only in allowed channels)
-            try:
-                await self.process_commands(message)
-            except Exception as e:
-                # Log error but don't crash
-                self.logger.error(f"Error processing commands for message {message.id}: {repr(str(e))}", exc_info=True)
-
+            await self.message_handler.handle_new_message(message)
+        except discord.NotFound:
+            self.logger.debug(f"Message {message.id} was deleted during processing")
         except Exception as e:
-            # Final catch-all to prevent any crashes
-            self.logger.error(f"Critical error in on_message: {repr(str(e))}", exc_info=True)
+            self.logger.error(
+                f"Error in message handler for message {message.id}: {str(e)!r}",
+                exc_info=True,
+            )
+
+        # Then process commands (only in allowed channels)
+        try:
+            await self.process_commands(message)
+        except Exception as e:
+            self.logger.error(
+                f"Error processing commands for message {message.id}: {str(e)!r}", exc_info=True
+            )
 
     async def on_message_edit(self, before: discord.Message, after: discord.Message):
         """Handle message edits"""
@@ -247,23 +250,76 @@ class TradingBot(commands.Bot):
 
         # Send generic error message
         embed = discord.Embed(
-            title="❌ Command Error",
-            description=str(error),
-            color=discord.Color.red()
+            title="❌ Command Error", description=str(error), color=discord.Color.red()
         )
         await ctx.send(embed=embed)
 
     async def initialize_price_monitor(self):
-        """Initialize the price monitoring system"""
+        """Initialize the price monitoring system — creates all subsystems and injects them."""
         self.logger.info("Starting price monitor initialization...")
         try:
-            from price_feeds.streaming_monitor import StreamingPriceMonitor as PriceMonitor
+            from price_feeds.alert_config import AlertDistanceConfig
+            from price_feeds.alert_system import AlertSystem
+            from price_feeds.feed_health_monitor import FeedHealthMonitor
+            from price_feeds.live_price_writer import LivePriceWriter
+            from price_feeds.nm_config import NMConfig
+            from price_feeds.nm_monitor import NearMissMonitor
+            from price_feeds.price_stream_manager import PriceStreamManager
+            from price_feeds.streaming_monitor import StreamingPriceMonitor
+            from price_feeds.tp_config import TPConfig
+            from price_feeds.tp_monitor import AutoTPMonitor
 
-            # Create monitor instance - use self.monitor not self.price_monitor
-            self.monitor = PriceMonitor(
+            # Create subsystems
+            alert_config = AlertDistanceConfig()
+            stream_manager = PriceStreamManager()
+            alert_system = AlertSystem(
+                bot=self, stream_manager=stream_manager, alert_config=alert_config
+            )
+            tp_config = TPConfig()
+            tp_monitor = AutoTPMonitor(
+                tp_config=tp_config,
+                signal_db=self.signal_db,
+                db=db,
+                alert_system=alert_system,
+            )
+            nm_config = NMConfig()
+            nm_monitor = NearMissMonitor(
+                nm_config=nm_config,
+                signal_db=self.signal_db,
+                db=db,
+                alert_system=alert_system,
+            )
+            live_price_writer = LivePriceWriter(
+                db_manager=db,
+                stream_manager=stream_manager,
+            )
+
+            bot_settings = load_settings()
+            health_monitor = FeedHealthMonitor(
+                stream_manager=stream_manager,
+                bot=self,
+                admin_user_id=bot_settings.health_alert_admin_id,
+                us_market_holidays=bot_settings.us_market_holidays,
+                db=db,
+            )
+
+            # Wire alert channels before creating the monitor
+            await self._setup_alert_channels(alert_system)
+
+            # Create monitor with all dependencies injected
+            self.monitor = StreamingPriceMonitor(
                 bot=self,
                 signal_db=self.signal_db,
-                db=db
+                db=db,
+                alert_system=alert_system,
+                stream_manager=stream_manager,
+                alert_config=alert_config,
+                tp_config=tp_config,
+                tp_monitor=tp_monitor,
+                nm_config=nm_config,
+                nm_monitor=nm_monitor,
+                live_price_writer=live_price_writer,
+                health_monitor=health_monitor,
             )
 
             # Initialize and start monitoring
@@ -271,15 +327,38 @@ class TradingBot(commands.Bot):
             await self.monitor.start()
 
             # Re-start the news manager cleanup task now that we have an alert system
-            self.news_manager.start_cleanup_task(alert_system=self.monitor.alert_system)
+            self.news_manager.start_cleanup_task(alert_system=alert_system)
 
             self.logger.info("Price monitoring system initialized and started")
-            self.logger.info(f"Alert system created with {len(self.monitor.alert_system.alert_messages)} tracked messages")
+            self.logger.info(
+                f"Alert system created with {len(alert_system.alert_messages)} tracked messages"
+            )
 
         except Exception as e:
             self.logger.error(f"Failed to initialize price monitor: {e}", exc_info=True)
             # Don't fail bot startup if monitor fails
             self.monitor = None
+
+    async def _setup_alert_channels(self, alert_system):
+        """Fetch Discord channels and wire them into the alert system."""
+        channel_setters = {
+            "alert_channel": alert_system.set_channel,
+            "pa-alert-channel": alert_system.set_pa_channel,
+            "toll-alert-channel": alert_system.set_toll_channel,
+            "general-tolls-alert": alert_system.set_general_toll_channel,
+            "legends-trade-alert": alert_system.set_legends_channel,
+        }
+        for key, setter in channel_setters.items():
+            channel_id = self.channels_config.get(key)
+            if channel_id:
+                try:
+                    channel = await self.fetch_channel(int(channel_id))
+                    setter(channel)
+                    self.logger.info(f"{key} channel set: #{channel.name}")
+                except Exception as e:
+                    self.logger.error(f"Failed to set {key} channel: {e}")
+            else:
+                self.logger.warning(f"No {key} configured in channels.json")
 
     @tasks.loop(seconds=30)
     async def heartbeat(self):

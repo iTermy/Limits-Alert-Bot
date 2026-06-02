@@ -2,15 +2,17 @@
 ai_fallback.py
 AI-based fallback parser using OpenAI for complex/edge case signals
 """
+
+import json
 import os
 import re
-import json
 from typing import Optional
+
 from utils.logger import get_logger
 
 # Import from parent package
 from . import ParsedSignal
-from .pattern_parsers import is_scalp
+from .pattern_parsers import get_signal_type
 from .validators import validate_signal
 
 logger = get_logger("parser.ai_fallback")
@@ -30,8 +32,8 @@ class AIFallbackParser:
 
     def __init__(self, channel_config: dict = None):
         self.channel_config = channel_config or {}
-        self.api_key = os.getenv('OPENAI_API_KEY')
-        self.model = os.getenv('OPENAI_MODEL', 'gpt-4o-mini')
+        self.api_key = os.getenv("OPENAI_API_KEY")
+        self.model = os.getenv("OPENAI_MODEL", "gpt-4o-mini")
         self.enabled = bool(self.api_key)
 
         if not self.enabled:
@@ -68,15 +70,15 @@ class AIFallbackParser:
                 "messages": [
                     {
                         "role": "system",
-                        "content": "You are a trading signal parser fallback. Extract trading information from messages."
+                        "content": "You are a trading signal parser fallback. Extract trading information from messages.",
                     },
-                    {"role": "user", "content": prompt}
+                    {"role": "user", "content": prompt},
                 ],
-                "temperature": 0.1
+                "temperature": 0.1,
             }
 
             # Use appropriate token parameter based on model
-            if self.model.startswith(('gpt-4o', 'gpt-4-turbo', 'gpt-3.5-turbo-0125')):
+            if self.model.startswith(("gpt-4o", "gpt-4-turbo", "gpt-3.5-turbo-0125")):
                 request_params["max_completion_tokens"] = 500
             else:
                 request_params["max_tokens"] = 500
@@ -107,7 +109,7 @@ Your job is to parse and correct issues **when confident**.
 If you cannot confidently correct an issue, return `null`.
 
 Message: "{message}"
-Channel: {channel_name or 'unknown'}
+Channel: {channel_name or "unknown"}
 {channel_context}
 
 Extract:
@@ -130,7 +132,7 @@ Guidelines for Robust Parsing:
 - Only return null when:
   * Symbol, direction, and both limits & stop loss cannot be confidently determined after reasonable corrections.
   * Multiple conflicting possibilities remain after trying to resolve.
-- **DO NOT PARSE IF IT'S A FUTURES SIGNAL. RETURN NULL**
+- **DO NOT PARSE IF IT'S A FUTURES SIGNAL, UNLESS IT IS GOLD FUTURES. Gold futures should use instrument GCQ26. RETURN NULL FOR ALL OTHER FUTURES.**
 - **"vth" in text means week_end**
 
 Stock-specific rules:
@@ -177,39 +179,39 @@ If unable to confidently parse even after correction attempts, return null.
                 )
 
         # Fallback to name-based detection
-        if 'gold' in channel_lower:
+        if "gold" in channel_lower:
             return (
                 "This is from the gold channel - default instrument is XAUUSD if not specified. "
                 "Default expiry for this channel is week_end."
             )
-        elif 'oil' in channel_lower:
+        if "oil" in channel_lower:
             return (
                 "This is from the oil channel - default is USOILSPOT (or XTIUSD if 'IC' mentioned). "
                 "Default expiry for this channel is week_end."
             )
-        elif 'exotic' in channel_lower:
+        if "exotic" in channel_lower:
             return (
                 "This is from a forex exotics channel - look for currency pairs. "
                 "Default expiry for this channel is week_end."
             )
-        elif 'crypto' in channel_lower:
+        if "crypto" in channel_lower:
             return (
                 "This is from a crypto channel - symbols end with USDT. "
                 "Default expiry for this channel is week_end."
             )
-        elif 'indices' in channel_lower or 'index' in channel_lower:
+        if "indices" in channel_lower or "index" in channel_lower:
             return (
                 "This is from an indices channel - look for index symbols. "
                 "Default expiry for this channel is week_end."
             )
-        elif 'stock' in channel_lower:
+        if "stock" in channel_lower:
             return (
                 "This is from a stock channel - symbols end with .NYSE or .NAS. "
                 "Default expiry for this channel is month_end."
             )
-        elif 'ot-trade' in channel_lower:
+        if "ot-trade" in channel_lower:
             return "Default expiry for this channel is day_end."
-        elif 'alt' in channel_lower:
+        if "alt" in channel_lower:
             return (
                 "This is from a crypto alts channel - symbols end with USDT. "
                 "Default expiry for this channel is month_end."
@@ -217,14 +219,15 @@ If unable to confidently parse even after correction attempts, return null.
 
         return ""
 
-    def _parse_ai_response(self, ai_text: str, original_message: str,
-                           channel_name: str) -> Optional[ParsedSignal]:
+    def _parse_ai_response(
+        self, ai_text: str, original_message: str, channel_name: str
+    ) -> Optional[ParsedSignal]:
         """Parse the AI response into a ParsedSignal"""
         logger.debug(f"AI Raw Response:\n{ai_text}")
 
         try:
             # Extract JSON from response
-            json_match = re.search(r'\{.*\}', ai_text, re.DOTALL)
+            json_match = re.search(r"\{.*\}", ai_text, re.DOTALL)
             if not json_match:
                 logger.debug("No JSON found in AI response")
                 return None
@@ -237,16 +240,16 @@ If unable to confidently parse even after correction attempts, return null.
 
             # Create signal
             signal = ParsedSignal(
-                instrument=data.get('instrument'),
-                direction=data.get('direction'),
-                limits=data.get('limits', []),
-                stop_loss=data.get('stop_loss'),
-                expiry_type=data.get('expiry', 'day_end'),
+                instrument=data.get("instrument"),
+                direction=data.get("direction"),
+                limits=data.get("limits", []),
+                stop_loss=data.get("stop_loss"),
+                expiry_type=data.get("expiry", "day_end"),
                 raw_text=original_message,
-                parse_method='ai',
-                keywords=data.get('keywords', []),
+                parse_method="ai",
+                keywords=data.get("keywords", []),
                 channel_name=channel_name,
-                scalp=is_scalp(original_message, channel_name)
+                type=get_signal_type(original_message, channel_name),
             )
 
             # Validate before returning

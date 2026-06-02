@@ -2,17 +2,14 @@
 __init__.py
 Main entry point for the signal parser with channel-aware routing
 """
-from typing import Optional
+
 from dataclasses import dataclass, field
+from typing import Optional
+
 from utils.logger import get_logger
 
 # Import validation functions
-from .validators import (
-    detect_channel_type,
-    is_potential_signal,
-    should_exclude,
-    validate_signal
-)
+from .validators import detect_channel_type, is_potential_signal, should_exclude, validate_signal
 
 logger = get_logger("parser")
 
@@ -21,9 +18,11 @@ logger = get_logger("parser")
 # DATA STRUCTURES
 # ============================================================================
 
+
 @dataclass
 class ParsedSignal:
     """Represents a parsed trading signal"""
+
     instrument: str
     direction: str  # long/short
     limits: list[float]
@@ -33,7 +32,7 @@ class ParsedSignal:
     parse_method: str  # high_confidence/stock/ai
     keywords: list[str] = field(default_factory=list)
     channel_name: str = None
-    scalp: bool = False
+    type: str = "standard"  # standard, scalp, swing, toll, pa, 1-1
 
 
 class RejectedSignal:
@@ -44,6 +43,7 @@ class RejectedSignal:
     Distinct from None (which means "not a signal at all") so that callers
     can react with ❌ to prompt the user to fix and re-edit the message.
     """
+
     def __init__(self, reason: str = ""):
         self.reason = reason
 
@@ -53,7 +53,6 @@ class RejectedSignal:
 
 class LimitsOrderError(Exception):
     """Raised by pattern parsers when limit prices are out of the expected order."""
-    pass
 
 
 # ============================================================================
@@ -61,56 +60,117 @@ class LimitsOrderError(Exception):
 # ============================================================================
 
 # Trading keywords for signal detection
-TRADING_KEYWORDS = ['stop', 'sl', 'long', 'short', 'buy', 'sell', 'stops']
+TRADING_KEYWORDS = ["stop", "sl", "long", "short", "buy", "sell", "stops"]
 
 # Exclusion keywords
 EXCLUSION_KEYWORDS = [
-    'futures', 'future', 'dxy', 'nq', 'es', 'ym', 'rty', 'vix',
-    'gc', 'gc1', 'gc1!', 'gcz'
+    "dxy",
+    "nq",
+    "es",
+    "ym",
+    "rty",
+    "vix",
 ]
 
 # Instrument mappings
 INSTRUMENT_MAPPINGS = {
     # Forex abbreviations
-    'eu': 'EURUSD', 'gu': 'GBPUSD', 'uj': 'USDJPY', 'uchf': 'USDCHF',
-    'au': 'AUDUSD', 'ucad': 'USDCAD', 'nu': 'NZDUSD', 'nzd': 'NZDUSD',
-    'eg': 'EURGBP', 'ej': 'EURJPY', 'gj': 'GBPJPY',
-    'aj': 'AUDJPY', 'nj': 'NZDJPY', 'ea': 'EURAUD',
-
+    "eu": "EURUSD",
+    "gu": "GBPUSD",
+    "uj": "USDJPY",
+    "uchf": "USDCHF",
+    "au": "AUDUSD",
+    "ucad": "USDCAD",
+    "nu": "NZDUSD",
+    "nzd": "NZDUSD",
+    "eg": "EURGBP",
+    "ej": "EURJPY",
+    "gj": "GBPJPY",
+    "aj": "AUDJPY",
+    "nj": "NZDJPY",
+    "ea": "EURAUD",
     # Full pairs
-    'eurusd': 'EURUSD', 'gbpusd': 'GBPUSD', 'usdjpy': 'USDJPY',
-    'usdchf': 'USDCHF', 'audusd': 'AUDUSD', 'usdcad': 'USDCAD',
-    'nzdusd': 'NZDUSD', 'eurgbp': 'EURGBP', 'eurjpy': 'EURJPY',
-    'gbpjpy': 'GBPJPY', 'audjpy': 'AUDJPY', 'nzdjpy': 'NZDJPY',
-    'euraud': 'EURAUD', 'eurnzd': 'EURNZD', 'gbpaud': 'GBPAUD',
-    'gbpnzd': 'GBPNZD', 'eurchf': 'EURCHF', 'audcad': 'AUDCAD',
-    'audnzd': 'AUDNZD', 'cadchf': 'CADCHF', 'cadjpy': 'CADJPY',
-    'chfjpy': 'CHFJPY', 'eurcad': 'EURCAD', 'gbpcad': 'GBPCAD',
-    'gbpchf': 'GBPCHF', 'nzdcad': 'NZDCAD', 'nzdchf': 'NZDCHF',
-    'audchf': 'AUDCHF',
-
+    "eurusd": "EURUSD",
+    "gbpusd": "GBPUSD",
+    "usdjpy": "USDJPY",
+    "usdchf": "USDCHF",
+    "audusd": "AUDUSD",
+    "usdcad": "USDCAD",
+    "nzdusd": "NZDUSD",
+    "eurgbp": "EURGBP",
+    "eurjpy": "EURJPY",
+    "gbpjpy": "GBPJPY",
+    "audjpy": "AUDJPY",
+    "nzdjpy": "NZDJPY",
+    "euraud": "EURAUD",
+    "eurnzd": "EURNZD",
+    "gbpaud": "GBPAUD",
+    "gbpnzd": "GBPNZD",
+    "eurchf": "EURCHF",
+    "audcad": "AUDCAD",
+    "audnzd": "AUDNZD",
+    "cadchf": "CADCHF",
+    "cadjpy": "CADJPY",
+    "chfjpy": "CHFJPY",
+    "eurcad": "EURCAD",
+    "gbpcad": "GBPCAD",
+    "gbpchf": "GBPCHF",
+    "nzdcad": "NZDCAD",
+    "nzdchf": "NZDCHF",
+    "audchf": "AUDCHF",
     # Commodities
-    'gold': 'XAUUSD', 'xauusd': 'XAUUSD', 'xau': 'XAUUSD',
-    'silver': 'XAGUSD', 'xagusd': 'XAGUSD', 'xag': 'XAGUSD',
-    'oil': 'USOILSPOT', 'wti': 'USOILSPOT', 'crude': 'USOILSPOT',
-    'usoil': 'USOILSPOT', 'brent': 'UKOIL', 'ukoil': 'UKOIL',
-
+    "gold": "XAUUSD",
+    "xauusd": "XAUUSD",
+    "xau": "XAUUSD",
+    "gc": "GCQ26",
+    "gcq26": "GCQ26",
+    "silver": "XAGUSD",
+    "xagusd": "XAGUSD",
+    "xag": "XAGUSD",
+    "oil": "USOILSPOT",
+    "wti": "USOILSPOT",
+    "crude": "USOILSPOT",
+    "usoil": "USOILSPOT",
+    "brent": "UKOIL",
+    "ukoil": "UKOIL",
     # Indices
-    'spx': 'SPX500USD', 'sp500': 'SPX500USD', 's&p': 'SPX500USD',
-    'spx500': 'SPX500USD', 'nas': 'NAS100USD', 'nasdaq': 'NAS100USD',
-    'nas100': 'NAS100USD', 'ndx': 'NAS100USD', 'dow': 'US30USD',
-    'us30': 'US30USD', 'djia': 'US30USD', 'jp225': 'JP225',
-    'nikkei': 'JP225', 'dax': 'DE30EUR', 'dax30': 'DE30EUR',
-    'de30': 'DE30EUR', 'russell': 'US2000USD', 'us2000': 'US2000USD',
-    'rut': 'US2000USD', 'aus200': 'AUS2000', 'asx': 'AUS2000',
-    'f40': 'F40', 'cac': 'F40',
-
+    "spx": "SPX500USD",
+    "sp500": "SPX500USD",
+    "s&p": "SPX500USD",
+    "spx500": "SPX500USD",
+    "nas": "NAS100USD",
+    "nasdaq": "NAS100USD",
+    "nas100": "NAS100USD",
+    "ndx": "NAS100USD",
+    "dow": "US30USD",
+    "us30": "US30USD",
+    "djia": "US30USD",
+    "jp225": "JP225",
+    "nikkei": "JP225",
+    "dax": "DE30EUR",
+    "dax30": "DE30EUR",
+    "de30": "DE30EUR",
+    "russell": "US2000USD",
+    "us2000": "US2000USD",
+    "rut": "US2000USD",
+    "aus200": "AUS2000",
+    "asx": "AUS2000",
+    "f40": "F40",
+    "cac": "F40",
     # Crypto (keep main ones, alt coins handled by auto-append)
-    'btc': 'BTCUSDT', 'bitcoin': 'BTCUSDT', 'btcusdt': 'BTCUSDT',
-    'eth': 'ETHUSDT', 'ethereum': 'ETHUSDT', 'ethusdt': 'ETHUSDT',
-    'sol': 'SOLUSDT', 'solana': 'SOLUSDT',
-    'bnb': 'BNBUSDT', 'ada': 'ADAUSDT', 'xrp': 'XRPUSDT',
-    'dot': 'DOTUSDT', 'doge': 'DOGEUSDT',
+    "btc": "BTCUSDT",
+    "bitcoin": "BTCUSDT",
+    "btcusdt": "BTCUSDT",
+    "eth": "ETHUSDT",
+    "ethereum": "ETHUSDT",
+    "ethusdt": "ETHUSDT",
+    "sol": "SOLUSDT",
+    "solana": "SOLUSDT",
+    "bnb": "BNBUSDT",
+    "ada": "ADAUSDT",
+    "xrp": "XRPUSDT",
+    "dot": "DOTUSDT",
+    "doge": "DOGEUSDT",
 }
 
 
@@ -118,7 +178,8 @@ INSTRUMENT_MAPPINGS = {
 # MAIN PARSER CLASS
 # ============================================================================
 
-class EnhancedSignalParser:
+
+class SignalParser:
     """
     Main parser that orchestrates channel-aware parsing
 
@@ -130,45 +191,33 @@ class EnhancedSignalParser:
     """
 
     def __init__(self, config_loader=None):
-        """
-        Initialize the parser with configuration
-
-        Args:
-            config_loader: Configuration loader instance
-        """
-        # Load channel configuration
         self.channel_config = self._load_channel_config(config_loader)
 
         # Lazy-load parsers (imported when needed)
         self._core_parser = None
         self._stock_parser = None
-        self._crypto_parser = None
         self._ai_parser = None
 
-        logger.info("Initialized EnhancedSignalParser")
+        logger.info("Initialized SignalParser")
 
     def _load_channel_config(self, config_loader) -> dict:
         """Load channel configuration from JSON"""
-        channel_config = {}
-
-        if config_loader:
-            try:
-                channels_data = config_loader.load("channels.json")
-                channel_config = channels_data.get("channel_settings", {})
-                logger.info(f"Loaded channel config for {len(channel_config)} channels")
-            except Exception as e:
-                logger.warning(f"Could not load channel configuration: {e}")
-        else:
-            # Try to load directly
+        if not config_loader:
             try:
                 from utils.config_loader import config
-                channels_data = config.load("channels.json")
-                channel_config = channels_data.get("channel_settings", {})
-                logger.info(f"Loaded channel config for {len(channel_config)} channels")
+
+                config_loader = config
             except Exception as e:
                 logger.warning(f"Could not load channel configuration: {e}")
-
-        return channel_config
+                return {}
+        try:
+            channels_data = config_loader.load("channels.json")
+            channel_config = channels_data.get("channel_settings", {})
+            logger.info(f"Loaded channel config for {len(channel_config)} channels")
+            return channel_config
+        except Exception as e:
+            logger.warning(f"Could not load channel configuration: {e}")
+            return {}
 
     def parse(self, message: str, channel_name: str = None) -> Optional[ParsedSignal]:
         """
@@ -209,11 +258,11 @@ class EnhancedSignalParser:
 
         # Try channel-specific parser first
         try:
-            if channel_type == 'stock':
+            if channel_type == "stock":
                 logger.debug("→ Routing to StockPatternParser")
                 result = self._parse_with_stock_parser(message, channel_name)
-            elif channel_type == 'crypto':
-                logger.debug("→ Routing to CryptoPatternParser")
+            elif channel_type == "crypto":
+                logger.debug("→ Routing to crypto parser (CorePatternParser)")
                 result = self._parse_with_crypto_parser(message, channel_name)
             else:  # core
                 logger.debug("→ Routing to CorePatternParser")
@@ -229,54 +278,55 @@ class EnhancedSignalParser:
 
         if result:
             logger.info(
-                f"Parse success ({result.parse_method}): "
-                f"{result.instrument} {result.direction}"
+                f"Parse success ({result.parse_method}): {result.instrument} {result.direction}"
             )
         else:
             logger.debug(f"Failed to parse: {message[:100]}...")
 
         return result
 
-    def _parse_with_core_parser(self, message: str,
-                                channel_name: str) -> Optional[ParsedSignal]:
+    def _parse_with_core_parser(self, message: str, channel_name: str) -> Optional[ParsedSignal]:
         """Parse using core pattern parser (forex, gold, indices)"""
         if self._core_parser is None:
             from .pattern_parsers import CorePatternParser
+
             self._core_parser = CorePatternParser(self.channel_config)
 
         return self._core_parser.parse(message, channel_name)
 
-    def _parse_with_stock_parser(self, message: str,
-                                 channel_name: str) -> Optional[ParsedSignal]:
+    def _parse_with_stock_parser(self, message: str, channel_name: str) -> Optional[ParsedSignal]:
         """Parse using stock-specific parser"""
         if self._stock_parser is None:
             from .pattern_parsers import StockPatternParser
+
             self._stock_parser = StockPatternParser(self.channel_config)
 
         return self._stock_parser.parse(message, channel_name)
 
-    def _parse_with_crypto_parser(self, message: str,
-                                  channel_name: str) -> Optional[ParsedSignal]:
-        """Parse using crypto-specific parser"""
-        if self._crypto_parser is None:
-            from .pattern_parsers import CryptoPatternParser
-            self._crypto_parser = CryptoPatternParser(self.channel_config)
+    def _parse_with_crypto_parser(self, message: str, channel_name: str) -> Optional[ParsedSignal]:
+        """Parse crypto signals using the core parser with crypto parse_method label"""
+        if self._core_parser is None:
+            from .pattern_parsers import CorePatternParser
 
-        return self._crypto_parser.parse(message, channel_name)
+            self._core_parser = CorePatternParser(self.channel_config)
 
+        result = self._core_parser.parse(message, channel_name)
+        if result:
+            result.parse_method = "crypto"
+        return result
 
-    def _parse_with_ai(self, message: str,
-                      channel_name: str) -> Optional[ParsedSignal]:
+    def _parse_with_ai(self, message: str, channel_name: str) -> Optional[ParsedSignal]:
         """Parse using AI fallback"""
         if self._ai_parser is None:
             from .ai_fallback import AIFallbackParser
+
             self._ai_parser = AIFallbackParser(self.channel_config)
 
         return self._ai_parser.parse(message, channel_name)
 
     def cleanup(self):
         """Cleanup resources (e.g., MT5 connections)"""
-        if self._stock_parser and hasattr(self._stock_parser, 'cleanup'):
+        if self._stock_parser and hasattr(self._stock_parser, "cleanup"):
             try:
                 self._stock_parser.cleanup()
             except Exception as e:
@@ -287,46 +337,20 @@ class EnhancedSignalParser:
 # GLOBAL PARSER INSTANCE
 # ============================================================================
 
-_parser_instance: Optional[EnhancedSignalParser] = None
+_parser_instance: Optional[SignalParser] = None
 
 
-def get_parser() -> EnhancedSignalParser:
+def get_parser() -> SignalParser:
     """Get or create the global parser instance"""
     global _parser_instance
     if _parser_instance is None:
-        _parser_instance = initialize_parser()
-    return _parser_instance
-
-
-def initialize_parser(config_loader=None) -> EnhancedSignalParser:
-    """
-    Initialize the parser with configuration
-
-    Args:
-        config_loader: Optional configuration loader
-
-    Returns:
-        Initialized parser instance
-    """
-    global _parser_instance
-
-    if config_loader:
-        _parser_instance = EnhancedSignalParser(config_loader)
-    else:
-        try:
-            from utils.config_loader import config
-            _parser_instance = EnhancedSignalParser(config)
-        except:
-            _parser_instance = EnhancedSignalParser()
-
+        _parser_instance = SignalParser()
     return _parser_instance
 
 
 def parse_signal(message: str, channel_name: str = None) -> Optional[ParsedSignal]:
     """
-    Parse a trading signal with channel awareness
-
-    This is the main entry point for signal parsing.
+    Main entry point for signal parsing.
 
     Args:
         message: Raw message text
@@ -335,26 +359,14 @@ def parse_signal(message: str, channel_name: str = None) -> Optional[ParsedSigna
     Returns:
         ParsedSignal object or None
     """
-    parser = get_parser()
-    return parser.parse(message, channel_name)
-
-
-def cleanup_parser():
-    """Cleanup parser resources"""
-    global _parser_instance
-    if _parser_instance:
-        _parser_instance.cleanup()
-        _parser_instance = None
+    return get_parser().parse(message, channel_name)
 
 
 # Export main components
 __all__ = [
-    'ParsedSignal',
-    'RejectedSignal',
-    'LimitsOrderError',
-    'EnhancedSignalParser',
-    'parse_signal',
-    'initialize_parser',
-    'cleanup_parser',
-    'get_parser'
+    "LimitsOrderError",
+    "ParsedSignal",
+    "RejectedSignal",
+    "get_parser",
+    "parse_signal",
 ]

@@ -1,22 +1,22 @@
-"""
-Price Stream Manager - Coordinates streaming price feeds
-Replaces polling + caching with real-time WebSocket/streaming connections
-FIXED: Added OANDA practice account support
-ENHANCED: Added spread calculation in _process_price_update
-"""
+"""Price Stream Manager — coordinates streaming price feeds."""
 
 import asyncio
 import logging
-from typing import Dict, Set, Callable, Optional, List
-from datetime import datetime
 from collections import defaultdict
+from datetime import datetime, timezone
+from typing import Callable, Dict, List, Optional, Set
 
-from price_feeds.symbol_mapper import SymbolMapper
+from price_feeds.feeds.binance_stream import BinanceStream
 from price_feeds.feeds.icmarkets_stream import ICMarketsStream
 from price_feeds.feeds.oanda_stream import OANDAStream
-from price_feeds.feeds.binance_stream import BinanceStream
+from price_feeds.symbol_mapper import SymbolMapper
 
 logger = logging.getLogger(__name__)
+
+# ICMarkets symbols subscribed unconditionally at startup so that last_prices
+# always has reference prices for the execution-bot offset calculation,
+# independent of which signals happen to be active.
+_IC_REFERENCE_SYMBOLS = ["XTIUSD", "US500", "USTEC"]
 
 
 class PriceStreamManager:
@@ -55,10 +55,10 @@ class PriceStreamManager:
 
         # Statistics
         self.stats = {
-            'updates_received': 0,
-            'updates_distributed': 0,
-            'reconnections': 0,
-            'errors': 0
+            "updates_received": 0,
+            "updates_distributed": 0,
+            "reconnections": 0,
+            "errors": 0,
         }
 
         logger.info("PriceStreamManager initialized")
@@ -69,31 +69,38 @@ class PriceStreamManager:
 
         # Initialize MT5 stream
         try:
-            self.feeds['icmarkets'] = ICMarketsStream()
-            await self.feeds['icmarkets'].connect()
-            self.feed_status['icmarkets'] = True
+            self.feeds["icmarkets"] = ICMarketsStream()
+            await self.feeds["icmarkets"].connect()
+            self.feed_status["icmarkets"] = True
+
+            # Subscribe reference symbols needed for execution-bot offset calc.
+            for sym in _IC_REFERENCE_SYMBOLS:
+                try:
+                    await self.feeds["icmarkets"].subscribe(sym)
+                except Exception as e:
+                    logger.warning("Could not subscribe IC reference symbol %s: %s", sym, e)
 
             # Start MT5 stream handler
             asyncio.create_task(self._handle_icmarkets_stream())
             logger.info("✓ ICMarkets stream initialized")
         except Exception as e:
             logger.error(f"Failed to initialize ICMarkets stream: {e}")
-            self.feed_status['icmarkets'] = False
+            self.feed_status["icmarkets"] = False
 
         # Initialize OANDA stream
-        # FIXED: Added practice account support
         try:
             import os
-            if os.getenv('OANDA_API_KEY') and os.getenv('OANDA_ACCOUNT_ID'):
+
+            if os.getenv("OANDA_API_KEY") and os.getenv("OANDA_ACCOUNT_ID"):
                 # Check if using practice account
-                practice = os.getenv('OANDA_PRACTICE', 'false').lower() == 'true'
+                practice = os.getenv("OANDA_PRACTICE", "false").lower() == "true"
 
                 logger.debug(f"Initializing OANDA with practice={practice}")
 
                 # Initialize with practice flag
-                self.feeds['oanda'] = OANDAStream(practice=practice)
-                await self.feeds['oanda'].connect()
-                self.feed_status['oanda'] = True
+                self.feeds["oanda"] = OANDAStream(practice=practice)
+                await self.feeds["oanda"].connect()
+                self.feed_status["oanda"] = True
 
                 # Start OANDA stream handler
                 asyncio.create_task(self._handle_oanda_stream())
@@ -105,23 +112,44 @@ class PriceStreamManager:
                 logger.info("OANDA credentials not configured, skipping")
         except Exception as e:
             logger.error(f"Failed to initialize OANDA stream: {e}")
-            self.feed_status['oanda'] = False
+            self.feed_status["oanda"] = False
 
         # Initialize Binance WebSocket
         try:
-            self.feeds['binance'] = BinanceStream()
-            await self.feeds['binance'].connect()
-            self.feed_status['binance'] = True
+            self.feeds["binance"] = BinanceStream()
+            await self.feeds["binance"].connect()
+            self.feed_status["binance"] = True
 
             # Start Binance stream handler
             asyncio.create_task(self._handle_binance_stream())
             logger.info("✓ Binance WebSocket initialized")
         except Exception as e:
             logger.error(f"Failed to initialize Binance stream: {e}")
-            self.feed_status['binance'] = False
+            self.feed_status["binance"] = False
+
+        # Initialize Exness MT5 stream (oil)
+        try:
+            import os
+
+            if os.getenv("EXNESS_MT5_PATH"):
+                from price_feeds.feeds.exness_stream import ExnessStream
+
+                self.feeds["exness"] = ExnessStream()
+                await self.feeds["exness"].connect()
+                self.feed_status["exness"] = True
+
+                asyncio.create_task(self._handle_exness_stream())
+                logger.info("Exness MT5 stream initialized")
+            else:
+                logger.info("Exness MT5 path not configured, skipping")
+        except Exception as e:
+            logger.error(f"Failed to initialize Exness stream: {e}")
+            self.feed_status["exness"] = False
 
         connected = sum(1 for status in self.feed_status.values() if status)
-        logger.info(f"Stream initialization complete: {connected}/{len(self.feed_status)} feeds connected")
+        logger.info(
+            f"Stream initialization complete: {connected}/{len(self.feed_status)} feeds connected"
+        )
 
     async def subscribe_symbol(self, symbol: str):
         """
@@ -206,6 +234,12 @@ class PriceStreamManager:
 
             if feed_symbol and feed_name in self.feeds and self.feed_status.get(feed_name):
                 feed_symbols[feed_name].append((symbol, feed_symbol))
+            else:
+                logger.warning(
+                    "Cannot subscribe %s: feed=%s feed_symbol=%s in_feeds=%s status=%s",
+                    symbol, feed_name, feed_symbol,
+                    feed_name in self.feeds, self.feed_status.get(feed_name),
+                )
 
         # Subscribe to each feed
         for feed_name, symbol_pairs in feed_symbols.items():
@@ -247,123 +281,154 @@ class PriceStreamManager:
         self.health_monitor = health_monitor
         logger.info("Health monitor connected to stream manager")
 
+        # Wire the MT5 stream's per-poll callback into the health monitor so
+        # quiet ticks (no bid/ask change) still refresh last_seen.
+        ic_feed = self.feeds.get("icmarkets")
+        if ic_feed is not None:
+            def _mark_icmarkets_seen(mt5_symbol: str):
+                internal = self.symbol_mapper.get_internal_symbol(mt5_symbol, "icmarkets")
+                if internal:
+                    health_monitor.update_last_seen(internal, "icmarkets")
+
+            ic_feed.on_poll = _mark_icmarkets_seen
+
     async def _handle_icmarkets_stream(self):
         """Handle MT5 price stream"""
-        feed = self.feeds['icmarkets']
+        feed = self.feeds["icmarkets"]
 
         while True:
             try:
                 async for symbol, price_data in feed.stream_prices():
                     # Convert feed symbol back to internal format
-                    internal_symbol = self.symbol_mapper.get_internal_symbol(symbol, 'icmarkets')
+                    internal_symbol = self.symbol_mapper.get_internal_symbol(symbol, "icmarkets")
 
                     if internal_symbol:
-                        await self._process_price_update(internal_symbol, price_data, 'icmarkets')
+                        await self._process_price_update(internal_symbol, price_data, "icmarkets")
             except Exception as e:
                 logger.error(f"ICMarkets stream error: {e}")
-                self.stats['errors'] += 1
+                self.stats["errors"] += 1
 
                 # Reconnect
                 await asyncio.sleep(5)
                 try:
                     await feed.reconnect()
-                    self.stats['reconnections'] += 1
+                    self.stats["reconnections"] += 1
                 except Exception as e2:
                     logger.error(f"ICMarkets reconnection failed: {e2}")
                     await asyncio.sleep(30)
 
     async def _handle_oanda_stream(self):
         """Handle OANDA price stream"""
-        feed = self.feeds['oanda']
+        feed = self.feeds["oanda"]
 
         while True:
             try:
                 async for symbol, price_data in feed.stream_prices():
                     # Convert feed symbol back to internal format
-                    internal_symbol = self.symbol_mapper.get_internal_symbol(symbol, 'oanda')
+                    internal_symbol = self.symbol_mapper.get_internal_symbol(symbol, "oanda")
 
                     if internal_symbol:
-                        await self._process_price_update(internal_symbol, price_data, 'oanda')
+                        await self._process_price_update(internal_symbol, price_data, "oanda")
             except Exception as e:
                 logger.error(f"OANDA stream error: {e}")
-                self.stats['errors'] += 1
+                self.stats["errors"] += 1
 
                 # Reconnect
                 await asyncio.sleep(5)
                 try:
                     await feed.reconnect()
-                    self.stats['reconnections'] += 1
+                    self.stats["reconnections"] += 1
                 except Exception as e2:
                     logger.error(f"OANDA reconnection failed: {e2}")
                     await asyncio.sleep(30)
 
     async def _handle_binance_stream(self):
         """Handle Binance WebSocket stream"""
-        feed = self.feeds['binance']
+        feed = self.feeds["binance"]
 
         while True:
             try:
                 async for symbol, price_data in feed.stream_prices():
                     # Convert feed symbol back to internal format
-                    internal_symbol = self.symbol_mapper.get_internal_symbol(symbol, 'binance')
+                    internal_symbol = self.symbol_mapper.get_internal_symbol(symbol, "binance")
 
                     if internal_symbol:
-                        await self._process_price_update(internal_symbol, price_data, 'binance')
+                        await self._process_price_update(internal_symbol, price_data, "binance")
             except Exception as e:
                 logger.error(f"Binance stream error: {e}")
-                self.stats['errors'] += 1
+                self.stats["errors"] += 1
 
                 # Reconnect
                 await asyncio.sleep(5)
                 try:
                     await feed.reconnect()
-                    self.stats['reconnections'] += 1
+                    self.stats["reconnections"] += 1
                 except Exception as e2:
                     logger.error(f"Binance reconnection failed: {e2}")
                     await asyncio.sleep(30)
 
-    async def _process_price_update(self, symbol: str, price_data: Dict, feed: str):
-        """
-        Process a price update and notify subscribers
-        ENHANCED: Automatically calculates spread if not present
+    async def _handle_exness_stream(self):
+        """Handle Exness MT5 price stream (oil symbols)"""
+        feed = self.feeds["exness"]
 
-        Args:
-            symbol: Internal format symbol
-            price_data: Price dictionary with bid, ask, timestamp
-            feed: Feed name
-        """
-        # Calculate spread if not already present
-        if 'spread' not in price_data and 'bid' in price_data and 'ask' in price_data:
+        while True:
             try:
-                spread = price_data['ask'] - price_data['bid']
+                async for symbol, price_data in feed.stream_prices():
+                    internal_symbol = self.symbol_mapper.get_internal_symbol(symbol, "exness")
+
+                    if internal_symbol:
+                        await self._process_price_update(internal_symbol, price_data, "exness")
+            except Exception as e:
+                logger.error(f"Exness stream error: {e}")
+                self.stats["errors"] += 1
+
+                await asyncio.sleep(5)
+                try:
+                    await feed.reconnect()
+                    self.stats["reconnections"] += 1
+                except Exception as e2:
+                    logger.error(f"Exness reconnection failed: {e2}")
+                    await asyncio.sleep(30)
+
+    async def _process_price_update(self, symbol: str, price_data: Dict, feed: str):
+        """Process a price update, compute spread if absent, and notify subscribers."""
+        # Calculate spread if not already present
+        if "spread" not in price_data and "bid" in price_data and "ask" in price_data:
+            try:
+                spread = price_data["ask"] - price_data["bid"]
                 # Validate spread is non-negative
                 if spread < 0:
                     logger.warning(f"Negative spread detected for {symbol}: {spread}, using 0")
                     spread = 0.0
-                price_data['spread'] = spread
+                price_data["spread"] = spread
             except (TypeError, KeyError) as e:
                 logger.warning(f"Could not calculate spread for {symbol}: {e}, using 0")
-                price_data['spread'] = 0.0
+                price_data["spread"] = 0.0
 
         # Update health monitor
         if self.health_monitor:
             self.health_monitor.update_last_seen(symbol, feed)
 
+        # Stamp updated_at: use broker tick time (ICMarkets) or current wall-clock.
+        # downstream staleness gate in streaming_monitor uses this field.
+        if "updated_at" not in price_data:
+            ts = price_data.get("timestamp")
+            if isinstance(ts, datetime) and ts.tzinfo is not None:
+                price_data["updated_at"] = ts
+            else:
+                price_data["updated_at"] = datetime.now(timezone.utc)
+
         # Store latest price
         async with self.price_lock:
-            self.latest_prices[symbol] = {
-                **price_data,
-                'feed': feed,
-                'received_at': datetime.now()
-            }
+            self.latest_prices[symbol] = {**price_data, "feed": feed, "received_at": datetime.now()}
 
-        self.stats['updates_received'] += 1
+        self.stats["updates_received"] += 1
 
         # Notify all subscribers
         for subscriber in self.subscribers:
             try:
                 await subscriber(symbol, price_data)
-                self.stats['updates_distributed'] += 1
+                self.stats["updates_distributed"] += 1
             except Exception as e:
                 logger.error(f"Subscriber {subscriber.__name__} failed: {e}")
 
@@ -431,7 +496,7 @@ class PriceStreamManager:
                 await feed.reconnect()
                 self.feed_status[feed_name] = feed.connected
                 reconnect_results[feed_name] = True
-                self.stats['reconnections'] += 1
+                self.stats["reconnections"] += 1
                 logger.info(f"✓ {feed_name} reconnected")
             except Exception as e:
                 logger.error(f"Failed to reconnect {feed_name}: {e}")
@@ -439,7 +504,9 @@ class PriceStreamManager:
                 reconnect_results[feed_name] = False
 
         connected_count = sum(1 for success in reconnect_results.values() if success)
-        logger.info(f"Reconnection complete: {connected_count}/{len(reconnect_results)} feeds connected")
+        logger.info(
+            f"Reconnection complete: {connected_count}/{len(reconnect_results)} feeds connected"
+        )
 
         return reconnect_results
 
@@ -447,8 +514,8 @@ class PriceStreamManager:
         """Get streaming statistics"""
         return {
             **self.stats,
-            'subscribed_symbols': len(self.subscribed_symbols),
-            'connected_feeds': sum(1 for status in self.feed_status.values() if status),
-            'total_feeds': len(self.feed_status),
-            'subscribers': len(self.subscribers)
+            "subscribed_symbols": len(self.subscribed_symbols),
+            "connected_feeds": sum(1 for status in self.feed_status.values() if status),
+            "total_feeds": len(self.feed_status),
+            "subscribers": len(self.subscribers),
         }

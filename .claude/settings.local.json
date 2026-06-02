@@ -1,0 +1,33 @@
+{
+  "attribution": {
+    "commit": "",
+    "pr": ""
+  },
+  "permissions": {
+    "allow": [
+      "Bash(ruff format *)",
+      "Bash(Remove-Item *)",
+      "Bash(python -c \"import ast; ast.parse\\(open\\('database/signal_operations/utils.py', encoding='utf-8'\\).read\\(\\)\\); print\\('OK'\\)\")",
+      "Bash(python -c \"import ast; ast.parse\\(open\\('price_feeds/streaming_monitor.py', encoding='utf-8'\\).read\\(\\)\\); print\\('OK'\\)\")",
+      "Bash(python -c \"import ast; ast.parse\\(open\\('discord_handlers/message_handler.py', encoding='utf-8'\\).read\\(\\)\\); print\\('OK'\\)\")",
+      "Bash(python -c ' *)",
+      "Bash(python *)",
+      "Bash(Get-ChildItem -Recurse price_feeds -Filter \"*.py\")",
+      "Bash(Select-Object -ExpandProperty FullName)",
+      "Bash(Get-ChildItem -Path \"C:\\\\Python Stuff\\\\TM Bot\" -Recurse -Filter \"*.py\")",
+      "Bash(Select-Object -First 50 FullName)",
+      "Bash(Sort-Object FullName)",
+      "Bash(pip show *)",
+      "PowerShell(Remove-Item *)",
+      "PowerShell(Move-Item *)",
+      "Bash(Get-ChildItem -Path \"C:\\\\Python Stuff\\\\TM Bot\" -Exclude \".venv\" -File -Filter \"*.py\" -Recurse)",
+      "Bash(cd *)",
+      "Bash(git add *)",
+      "Bash(git commit *)",
+      "Bash(git push *)"
+    ],
+    "additionalDirectories": [
+      "C:\\Personal Projects\\MT5-Auto-Execution-Bot"
+    ]
+  }
+}
