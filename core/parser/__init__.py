@@ -64,18 +64,12 @@ TRADING_KEYWORDS = ["stop", "sl", "long", "short", "buy", "sell", "stops"]
 
 # Exclusion keywords
 EXCLUSION_KEYWORDS = [
-    "futures",
-    "future",
     "dxy",
     "nq",
     "es",
     "ym",
     "rty",
     "vix",
-    "gc",
-    "gc1",
-    "gc1!",
-    "gcz",
 ]
 
 # Instrument mappings
@@ -128,6 +122,8 @@ INSTRUMENT_MAPPINGS = {
     "gold": "XAUUSD",
     "xauusd": "XAUUSD",
     "xau": "XAUUSD",
+    "gc": "GCQ26",
+    "gcq26": "GCQ26",
     "silver": "XAGUSD",
     "xagusd": "XAGUSD",
     "xag": "XAGUSD",

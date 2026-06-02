@@ -160,6 +160,8 @@ EXPIRY_PATTERNS = {
 SPECIAL_KEYWORDS = ["hot", "semi-swing", "swing", "scalp", "swing-trade", "intraday", "position"]
 
 _SL_KEYWORD_RE = re.compile(r"\b(sl|stop|stops)\b", re.IGNORECASE)
+_FUTURES_RE = re.compile(r"\b(?:future|futures)\b", re.IGNORECASE)
+_GOLD_KW_RE = re.compile(r"\b(?:gold|xau|xauusd)\b", re.IGNORECASE)
 
 
 def _general_tolls_auto_sl(channel_name: str, text: str) -> bool:
@@ -258,6 +260,12 @@ def validate_limits_and_stop(limits: List[float], stop_loss: float, direction: s
 def extract_instrument(text: str, channel_name: str, channel_config: dict) -> Optional[str]:
     """Extract trading instrument with channel awareness"""
     text_lower = text.lower()
+
+    # Gold futures: gold keyword + "future"/"futures", or gold channel + "future"/"futures"
+    if _FUTURES_RE.search(text_lower):
+        is_gold_channel = channel_name and "gold" in channel_name.lower()
+        if is_gold_channel or _GOLD_KW_RE.search(text_lower):
+            return "GCQ26"
 
     # Check if this is a crypto-alt channel (has both "crypto" and "alt")
     is_crypto_alt = False
