@@ -13,6 +13,11 @@ from price_feeds.symbol_mapper import SymbolMapper
 
 logger = logging.getLogger(__name__)
 
+# ICMarkets symbols subscribed unconditionally at startup so that last_prices
+# always has reference prices for the execution-bot offset calculation,
+# independent of which signals happen to be active.
+_IC_REFERENCE_SYMBOLS = ["XTIUSD", "US500", "USTEC"]
+
 
 class PriceStreamManager:
     """
@@ -67,6 +72,13 @@ class PriceStreamManager:
             self.feeds["icmarkets"] = ICMarketsStream()
             await self.feeds["icmarkets"].connect()
             self.feed_status["icmarkets"] = True
+
+            # Subscribe reference symbols needed for execution-bot offset calc.
+            for sym in _IC_REFERENCE_SYMBOLS:
+                try:
+                    await self.feeds["icmarkets"].subscribe(sym)
+                except Exception as e:
+                    logger.warning("Could not subscribe IC reference symbol %s: %s", sym, e)
 
             # Start MT5 stream handler
             asyncio.create_task(self._handle_icmarkets_stream())

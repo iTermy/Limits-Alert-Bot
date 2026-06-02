@@ -1,7 +1,7 @@
 {
   "feed_priority": {
-    "forex": ["icmarkets", "oanda"],
-    "indices": ["oanda", "icmarkets"],
+    "forex": ["icmarkets", "exness"],
+    "indices": ["oanda"],
     "crypto": ["binance"],
     "metals": ["icmarkets"],
     "stocks": ["icmarkets"],
@@ -50,7 +50,10 @@
       "specific_mappings": {
         "GOLD": "XAUUSD",
         "SILVER": "XAGUSD",
-        "XTIUSD": "XTIUSD"
+        "XTIUSD": "XTIUSD",
+        "USOILSPOT": "XTIUSD",
+        "SPX500USD": "US500",
+        "NAS100USD": "USTEC"
       }
     },
 
