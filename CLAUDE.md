@@ -286,7 +286,7 @@ All PKs: `BIGINT GENERATED ALWAYS AS IDENTITY`. Timestamps: `TIMESTAMPTZ`. RLS: 
 | type | TEXT DEFAULT 'standard'; CHECK (standard, scalp, swing, toll, pa, 1-1) |
 | first_limit_hit_time | TIMESTAMPTZ |
 | closed_at / closed_reason | TIMESTAMPTZ / TEXT (`automatic` / `manual` / `expiry`) |
-| tp_price | DOUBLE PRECISION; market price at which auto-TP fired; NULL for manual profit / SL / other closures |
+| tp_price | DOUBLE PRECISION; market close price recorded on profit (auto-TP price for automatic; live bid/ask at command time for manual profit — bid if long, ask if short). NULL for SL / cancel / breakeven / other closures, and for manual profit when `live_prices` has no row for the instrument. Backend-only — not shown in the profit-archive embed for manual profit. |
 | alert_message_id | BIGINT (nullable); Discord message ID of the active-channel alert embed. Persisted so restarts can reuse the existing embed instead of orphaning it. Cleared on archive move, live-update NotFound, and approaching-alert retraction. |
 | alert_channel_id | BIGINT (nullable); Discord channel ID where the alert embed lives. Used at hydration to pin the fetch to the same channel even if `channels.json` was reconfigured. Falls back to `_get_alert_channel(signal)` if missing. |
 | ping_message_id | BIGINT (nullable); Discord message ID of the most recent ping reply to the embed. Refetched on restart so the next event can delete it cleanly before sending a new one. |
