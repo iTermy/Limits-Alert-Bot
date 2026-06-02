@@ -8,7 +8,6 @@ from typing import Dict, List
 import discord
 import pytz
 
-from database.utils import calculate_sl_pnl
 from models.signal import LimitData
 from utils.config_loader import load_settings
 from utils.logger import get_logger
@@ -615,20 +614,9 @@ class StreamingPriceMonitor:
     async def _process_stop_loss_hit(self, signal: Dict):
         """Process stop loss hit"""
         try:
-            sl_result_pips = None
-            try:
-                sl_result_pips = await calculate_sl_pnl(
-                    signal["signal_id"], signal, self.signal_db, self.tp_config
-                )
-            except Exception as e:
-                logger.warning(
-                    f"Could not calculate SL result_pips for signal {signal['signal_id']}: {e}"
-                )
-
             success = await self.signal_db.manually_set_signal_status(
                 signal["signal_id"],
                 "stop_loss",
-                result_pips=sl_result_pips,
                 closed_reason="automatic",
             )
 

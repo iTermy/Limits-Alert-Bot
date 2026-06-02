@@ -535,7 +535,7 @@ class SignalDatabase:
         signal_id: int,
         new_status: str,
         reason: str = None,
-        result_pips: float = None,
+        tp_price: float = None,
         closed_reason: str = None,
     ) -> bool:
         """
@@ -590,19 +590,19 @@ class SignalDatabase:
                         )
 
                     if SignalStatus.is_final(new_status):
-                        if result_pips is not None:
+                        if tp_price is not None:
                             await conn.execute(
                                 """
                                 UPDATE signals
                                 SET status = $1, updated_at = $2, closed_at = $3,
-                                    closed_reason = $4, result_pips = $5
+                                    closed_reason = $4, tp_price = $5
                                 WHERE id = $6
                             """,
                                 new_status,
                                 now,
                                 now,
                                 effective_closed_reason,
-                                result_pips,
+                                tp_price,
                                 signal_id,
                             )
                         else:
@@ -623,7 +623,7 @@ class SignalDatabase:
                             """
                             UPDATE signals
                             SET status = $1, updated_at = $2, closed_at = NULL,
-                                closed_reason = NULL, result_pips = NULL
+                                closed_reason = NULL, tp_price = NULL
                             WHERE id = $3
                         """,
                             new_status,
@@ -643,7 +643,7 @@ class SignalDatabase:
                     )
                 logger.info(
                     f"Successfully set signal {signal_id} status: {old_status} -> {new_status}"
-                    + (f" (result_pips={result_pips:.4f})" if result_pips is not None else "")
+                    + (f" (tp_price={tp_price:.5f})" if tp_price is not None else "")
                 )
                 return True
 
@@ -684,7 +684,7 @@ class SignalDatabase:
                         """
                         UPDATE signals
                         SET status = $1, updated_at = $2,
-                            closed_at = NULL, closed_reason = NULL, result_pips = NULL
+                            closed_at = NULL, closed_reason = NULL, tp_price = NULL
                         WHERE id = $3
                     """,
                         SignalStatus.ACTIVE,

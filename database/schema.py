@@ -48,7 +48,7 @@ async def initialize_database(db_manager):
                 first_limit_hit_time TIMESTAMPTZ,
                 closed_at            TIMESTAMPTZ,
                 closed_reason        TEXT,
-                result_pips          DOUBLE PRECISION,
+                tp_price             DOUBLE PRECISION,
 
                 total_limits INTEGER DEFAULT 0,
                 limits_hit   INTEGER DEFAULT 0,
@@ -260,6 +260,29 @@ async def _run_migrations(conn):
             last_seen     TIMESTAMPTZ,
             updated_at    TIMESTAMPTZ NOT NULL DEFAULT NOW()
         );
+        """,
+        # Replace result_pips (P&L value) with tp_price (market price at auto-TP trigger).
+        """
+        DO $$
+        BEGIN
+            IF NOT EXISTS (
+                SELECT 1 FROM information_schema.columns
+                WHERE table_name = 'signals' AND column_name = 'tp_price'
+            ) THEN
+                ALTER TABLE signals ADD COLUMN tp_price DOUBLE PRECISION;
+            END IF;
+        END $$;
+        """,
+        """
+        DO $$
+        BEGIN
+            IF EXISTS (
+                SELECT 1 FROM information_schema.columns
+                WHERE table_name = 'signals' AND column_name = 'result_pips'
+            ) THEN
+                ALTER TABLE signals DROP COLUMN result_pips;
+            END IF;
+        END $$;
         """,
     ]
 

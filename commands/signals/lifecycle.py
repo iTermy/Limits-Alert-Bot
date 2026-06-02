@@ -348,8 +348,6 @@ class LifecycleCog(BaseCog):
                     await ctx.send(embed=embed)
                     return
 
-        # Calculate result_pips for profit and stop_loss
-        result_pips = None
         if status == "profit":
             # If signal is approaching (no limits hit yet), mirror !hit behaviour:
             # mark the first pending limit as hit before setting status to profit.
@@ -357,7 +355,6 @@ class LifecycleCog(BaseCog):
             if current_hit_count == 0:
                 pending_limits = signal.get("pending_limits") or []
                 if pending_limits:
-                    # Sort by sequence_number and hit the first one
                     sorted_pending = sorted(
                         pending_limits, key=lambda l: l.get("sequence_number", 999)
                     )
@@ -370,43 +367,15 @@ class LifecycleCog(BaseCog):
                             f"Auto-hit limit #{first_limit.get('sequence_number')} "
                             f"for signal {signal_id} as part of manual profit (approaching→profit)"
                         )
-                        # Refresh signal so hit_limits count is correct for result_pips calc
-                        signal = await self.signal_db.get_signal_with_limits(signal_id) or signal
                     except Exception as _hit_err:
                         logger.warning(
                             f"Could not auto-hit limit for signal {signal_id} on profit: {_hit_err}"
                         )
 
-            # Use the TP threshold from config as the recorded result
-            result_pips = self.tp_config.get_tp_value(
-                signal["instrument"], signal_type=signal.get("type", "standard")
-            )
-        elif status == "stop_loss":
-            # Sum P&L of all hit limits using stop_loss price as the exit price
-            try:
-                hit_limits = await self.signal_db.get_hit_limits_for_signal(signal_id)
-                stop_price = signal.get("stop_loss")
-                if hit_limits and stop_price:
-                    combined = 0.0
-                    for lim in hit_limits:
-                        entry = lim.get("hit_price") or lim.get("price_level")
-                        if entry is not None:
-                            combined += self.tp_config.calculate_pnl(
-                                signal["instrument"],
-                                signal["direction"],
-                                entry,
-                                stop_price,
-                                signal_type=signal.get("type", "standard"),
-                            )
-                    result_pips = combined
-            except Exception as e:
-                logger.warning(f"Could not calculate SL result_pips for signal {signal_id}: {e}")
-
         success = await self.signal_db.manually_set_signal_status(
             signal_id,
             status,
             f"Manual override by {ctx.author.name}",
-            result_pips=result_pips,
         )
 
         if success:

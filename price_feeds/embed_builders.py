@@ -250,7 +250,7 @@ def _build_profit_archive_embed(
     sid = sig_data.get("signal_id") or sig_data.get("id", signal_id)
     closed_reason = sig_data.get("closed_reason") or ""
     is_auto_tp = closed_reason == "automatic"
-    result_pips = sig_data.get("result_pips")
+    tp_price = sig_data.get("tp_price")
 
     all_limits = sorted(sig_data.get("limits", []), key=lambda l: l.get("sequence_number", 0))
     hit_limits = [l for l in all_limits if l.get("status") == "hit" or l.get("hit_alert_sent")]
@@ -283,13 +283,8 @@ def _build_profit_archive_embed(
     if sig_data.get("stop_loss"):
         embed.add_field(name="Stop Loss", value=_fmt(sig_data["stop_loss"]), inline=True)
 
-    if result_pips is not None:
-        try:
-            pnl_str = _tp_config.format_value(instrument, abs(float(result_pips)))
-            sign = "+" if float(result_pips) >= 0 else "-"
-            embed.add_field(name="P&L", value=f"**{sign}{pnl_str}**", inline=True)
-        except Exception:
-            embed.add_field(name="P&L", value=f"**+{result_pips:.1f}**", inline=True)
+    if tp_price is not None:
+        embed.add_field(name="TP Price", value=f"**{_fmt(float(tp_price))}**", inline=True)
 
     msg_id = sig_data.get("message_id")
     ch_id = sig_data.get("channel_id")

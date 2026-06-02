@@ -63,7 +63,7 @@ class SignalData(BaseModel):
     first_limit_hit_time: Optional[datetime] = None
     closed_at: Optional[datetime] = None
     closed_reason: Optional[str] = None
-    result_pips: Optional[float] = None
+    tp_price: Optional[float] = None
     total_limits: int = 0
     limits_hit: int = 0
     created_at: Optional[datetime] = None

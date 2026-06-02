@@ -287,7 +287,7 @@ All PKs: `BIGINT GENERATED ALWAYS AS IDENTITY`. Timestamps: `TIMESTAMPTZ`. RLS: 
 | type | TEXT DEFAULT 'standard'; CHECK (standard, scalp, swing, toll, pa, 1-1) |
 | first_limit_hit_time | TIMESTAMPTZ |
 | closed_at / closed_reason | TIMESTAMPTZ / TEXT (`automatic` / `manual` / `expiry`) |
-| result_pips | DOUBLE PRECISION |
+| tp_price | DOUBLE PRECISION; market price at which auto-TP fired; NULL for manual profit / SL / other closures |
 | total_limits / limits_hit | INTEGER |
 
 ### limits

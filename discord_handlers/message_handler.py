@@ -8,7 +8,6 @@ from typing import Optional
 
 import discord
 
-from database.utils import calculate_sl_pnl
 from price_feeds.embed_builders import _build_signal_embed, _set_archive_footer
 from price_feeds.tp_config import TPConfig
 from utils.formatting import format_price, get_channel_name as _get_channel_name
@@ -227,15 +226,11 @@ class MessageHandler:
                             logger.warning(
                                 f"Could not auto-hit limit for signal {signal_id} on profit reply: {_he}"
                             )
-                profit_result_pips = self.tp_config.get_tp_value(
-                    signal["instrument"], signal_type=signal.get("type", "standard")
-                )
                 success = await asyncio.wait_for(
                     self.signal_db.manually_set_signal_status(
                         signal_id,
                         "profit",
                         f"Set via {path} reply by {message.author.name}",
-                        result_pips=profit_result_pips,
                     ),
                     timeout=5.0,
                 )
@@ -286,21 +281,11 @@ class MessageHandler:
                 action_taken = "marked as BREAKEVEN"
 
             elif command in ("sl", "stop", "stoploss"):
-                sl_result_pips = None
-                try:
-                    sl_result_pips = await calculate_sl_pnl(
-                        signal_id, signal, self.signal_db, self.tp_config
-                    )
-                except Exception as e:
-                    logger.warning(
-                        f"Could not calculate SL result_pips for signal {signal_id}: {e}"
-                    )
                 success = await asyncio.wait_for(
                     self.signal_db.manually_set_signal_status(
                         signal_id,
                         "stop_loss",
                         f"Set via {path} reply by {message.author.name}",
-                        result_pips=sl_result_pips,
                     ),
                     timeout=5.0,
                 )

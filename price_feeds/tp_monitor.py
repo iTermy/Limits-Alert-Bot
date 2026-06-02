@@ -176,8 +176,8 @@ class AutoTPMonitor:
         Mark signal as profit, send alerts, and clean up.
 
         cumulative_pnl: total P&L across all hit limits at the TP price.
-                        Used for display only; DB stores last_pnl as result_pips.
-        close_price:    the market price at TP trigger, used to calculate per-limit pnl.
+                        Used for display only; DB stores close_price as tp_price.
+        close_price:    the market price at TP trigger, stored as tp_price and used to calculate per-limit pnl.
 
         Returns True if successfully marked as profit, False on any failure.
         """
@@ -210,7 +210,7 @@ class AutoTPMonitor:
                     signal_id,
                     "profit",
                     reason,
-                    result_pips=last_pnl,
+                    tp_price=close_price,
                     closed_reason="automatic",
                 ),
                 timeout=5.0,
