@@ -141,7 +141,7 @@ class AlertSystem:
         stream_manager = self.stream_manager
 
         signal_ids = list(self._live_embeds.keys())
-        logger.debug(f"Refreshing {len(signal_ids)} live embed(s)")
+        logger.debug("Refreshing %d live embed(s)", len(signal_ids))
 
         for i, signal_id in enumerate(signal_ids):
             if i > 0:
@@ -165,14 +165,18 @@ class AlertSystem:
                 current_price = price_data["ask"] if direction == "long" else price_data["bid"]
                 spread = price_data.get("spread", 0.0)
 
-                limits = await self._fetch_limits(signal)
+                # In-memory limits are kept in lockstep with DB writes by
+                # streaming_monitor mutations + the sync helpers called from
+                # every command path. The live-refresh path therefore no longer
+                # round-trips to Postgres on every 15 s cycle.
+                limits = signal.get("limits") or []
 
                 distance_formatted = None
                 if event in ("approaching", "hit"):
                     pending_limits = [
                         l
                         for l in limits
-                        if l.get("status") != "hit" and not l.get("hit_alert_sent")
+                        if l.get("status") == "pending" and not l.get("hit_alert_sent")
                     ]
                     if pending_limits:
                         nearest = min(
@@ -212,7 +216,7 @@ class AlertSystem:
 
                 try:
                     await existing_msg.edit(embed=embed)
-                    logger.debug(f"Live-updated embed for signal {signal_id} @ {current_price}")
+                    logger.debug("Live-updated embed for signal %s @ %s", signal_id, current_price)
                 except discord.NotFound:
                     logger.warning(f"Live update: embed for signal {signal_id} not found, removing")
                     self._live_embeds.pop(signal_id, None)

@@ -365,6 +365,10 @@ class LifecycleCog(BaseCog):
                         from database import db as _db
 
                         await _db.mark_limit_hit(first_limit["id"], first_limit["price_level"])
+                        if self.services.monitor:
+                            self.services.monitor._mutate_limit_hit_in_memory(
+                                signal_id, first_limit["id"], first_limit["price_level"]
+                            )
                         logger.info(
                             f"Auto-hit limit #{first_limit.get('sequence_number')} "
                             f"for signal {signal_id} as part of manual profit (approaching→profit)"
@@ -381,6 +385,8 @@ class LifecycleCog(BaseCog):
         )
 
         if success:
+            if self.services.monitor:
+                self.services.monitor.sync_signal_status_in_memory(signal_id, status)
             status_emoji = get_status_emoji(status)
 
             embed = discord.Embed(
@@ -454,6 +460,7 @@ class LifecycleCog(BaseCog):
                 await self.services.tp_monitor.refresh_hit_limits(signal_id)
                 if signal_id in self.services.monitor.active_signals:
                     self.services.monitor.active_signals[signal_id]["status"] = "hit"
+                    self.services.monitor.mark_first_pending_limit_hit_in_memory(signal_id)
             await ctx.send(f"✅ Signal {signal_id} marked as HIT (limit 1 hit, auto-TP active)")
 
             # Update the persistent alert embed
@@ -635,6 +642,7 @@ class LifecycleCog(BaseCog):
 
             # 1. Evict from streaming monitor so price-checking stops immediately
             if monitor:
+                monitor.sync_signal_status_in_memory(sid, "cancelled")
                 monitor.active_signals.pop(sid, None)
                 monitor.nm_monitor.evict_signal(sid)
                 monitor.tp_monitor.evict_signal(sid)

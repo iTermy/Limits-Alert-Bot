@@ -6,12 +6,16 @@ Primary prices (bid/ask/feed) come from OANDA or Binance.  For symbols that
 also have an ICMarkets mapping, the corresponding ICMarkets bid/ask is read
 from the in-memory MT5 cache and written as ic_bid/ic_ask in the same row.
 The execution bot uses ic_bid/ic_ask alongside bid/ask to compute the
-broker offset without fetching a separate live MT5 tick.
+broker offset; that offset drifts slowly, so ic_bid/ic_ask is refreshed
+every IC_STAMP_INTERVAL seconds instead of every 5-second tick flush.
+The upsert uses COALESCE so a NULL ic_bid/ic_ask on a non-stamp cycle
+preserves the prior value.
 """
 
 import asyncio
 import logging
 from datetime import datetime, timezone
+from time import monotonic
 from typing import Dict, Optional
 
 logger = logging.getLogger(__name__)
@@ -21,6 +25,9 @@ TRACKED_FEEDS = {"oanda", "binance", "exness"}
 
 # How often to flush the buffer to the DB (seconds)
 WRITE_INTERVAL = 5
+
+# How often to refresh ic_bid/ic_ask (broker offset rarely drifts second-to-second).
+IC_STAMP_INTERVAL = 15 * 60  # 15 minutes
 
 
 class LivePriceWriter:
@@ -46,6 +53,9 @@ class LivePriceWriter:
 
         self._task: Optional[asyncio.Task] = None
         self._running = False
+
+        # Stamp ic_bid/ic_ask on first flush, then every IC_STAMP_INTERVAL.
+        self._last_ic_stamp_mono: float = 0.0
 
         logger.info("LivePriceWriter initialised")
 
@@ -116,15 +126,22 @@ class LivePriceWriter:
                 logger.error("LivePriceWriter flush error: %s", e)
 
     async def _flush_to_db(self):
-        """Upsert all buffered prices to live_prices in a single executemany call."""
+        """Upsert all buffered prices to live_prices in a single executemany call.
+
+        ic_bid/ic_ask is only stamped on cycles where >= IC_STAMP_INTERVAL has
+        passed since the last stamp; on other cycles NULL is passed and
+        COALESCE keeps the prior column value intact.
+        """
         async with self._buffer_lock:
             if not self._buffer:
                 return
             snapshot = dict(self._buffer)
             self._buffer.clear()
 
-        # Grab the ICMarkets feed once for the whole batch
-        ic_feed = self._stream.feeds.get("icmarkets")
+        # Only refresh ic_bid/ic_ask once every IC_STAMP_INTERVAL seconds.
+        now_mono = monotonic()
+        stamp_ic = (now_mono - self._last_ic_stamp_mono) >= IC_STAMP_INTERVAL
+        ic_feed = self._stream.feeds.get("icmarkets") if stamp_ic else None
 
         rows = []
         for symbol, data in snapshot.items():
@@ -141,6 +158,8 @@ class LivePriceWriter:
                 (symbol, data["bid"], data["ask"], data["feed"], data["updated_at"], ic_bid, ic_ask)
             )
 
+        # COALESCE on the IC columns so a NULL incoming row preserves the
+        # prior stamped value on non-stamp cycles.
         query = """
             INSERT INTO live_prices (symbol, bid, ask, feed, updated_at, ic_bid, ic_ask)
             VALUES ($1, $2, $3, $4, $5, $6, $7)
@@ -150,12 +169,18 @@ class LivePriceWriter:
                 ask        = EXCLUDED.ask,
                 feed       = EXCLUDED.feed,
                 updated_at = EXCLUDED.updated_at,
-                ic_bid     = EXCLUDED.ic_bid,
-                ic_ask     = EXCLUDED.ic_ask
+                ic_bid     = COALESCE(EXCLUDED.ic_bid, live_prices.ic_bid),
+                ic_ask     = COALESCE(EXCLUDED.ic_ask, live_prices.ic_ask)
         """
 
         try:
             await self._db.execute_many(query, rows)
-            logger.debug("LivePriceWriter flushed %d symbols to DB", len(rows))
+            if stamp_ic:
+                self._last_ic_stamp_mono = now_mono
+                logger.debug(
+                    "LivePriceWriter flushed %d symbols (ic_bid/ic_ask refreshed)", len(rows)
+                )
+            else:
+                logger.debug("LivePriceWriter flushed %d symbols", len(rows))
         except Exception as e:
             logger.error("LivePriceWriter DB write failed: %s", e)

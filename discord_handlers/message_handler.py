@@ -205,6 +205,8 @@ class MessageHandler:
                     ),
                     timeout=5.0,
                 )
+                if success and self.bot.services.monitor:
+                    self.bot.services.monitor.sync_signal_status_in_memory(signal_id, "cancelled")
                 action_taken = "cancelled"
 
             elif command in ("profit", "win", "tp"):
@@ -219,6 +221,10 @@ class MessageHandler:
                             from database import db as _db
 
                             await _db.mark_limit_hit(pending[0]["id"], pending[0]["price_level"])
+                            if self.bot.services.monitor:
+                                self.bot.services.monitor._mutate_limit_hit_in_memory(
+                                    signal_id, pending[0]["id"], pending[0]["price_level"]
+                                )
                             signal = (
                                 await self.signal_db.get_signal_with_limits(signal_id) or signal
                             )
@@ -234,6 +240,8 @@ class MessageHandler:
                     ),
                     timeout=5.0,
                 )
+                if success and self.bot.services.monitor:
+                    self.bot.services.monitor.sync_signal_status_in_memory(signal_id, "profit")
                 action_taken = "marked as PROFIT"
 
             elif command in ("hit",):
@@ -250,6 +258,7 @@ class MessageHandler:
                         await self.bot.services.tp_monitor.refresh_hit_limits(signal_id)
                         if signal_id in monitor.active_signals:
                             monitor.active_signals[signal_id]["status"] = "hit"
+                            monitor.mark_first_pending_limit_hit_in_memory(signal_id)
                         elif was_cancelled:
                             reloaded = await self.signal_db.get_signal_with_limits(signal_id)
                             if reloaded:
@@ -257,6 +266,7 @@ class MessageHandler:
                                 reloaded_for_monitor["signal_id"] = signal_id
                                 reloaded_for_monitor["status"] = "hit"
                                 monitor.active_signals[signal_id] = reloaded_for_monitor
+                                monitor._annotate_asset_class(reloaded_for_monitor)
                                 sym = signal.get("instrument")
                                 if sym:
                                     monitor.symbol_to_signals.setdefault(sym, [])
@@ -278,6 +288,8 @@ class MessageHandler:
                     ),
                     timeout=5.0,
                 )
+                if success and self.bot.services.monitor:
+                    self.bot.services.monitor.sync_signal_status_in_memory(signal_id, "breakeven")
                 action_taken = "marked as BREAKEVEN"
 
             elif command in ("sl", "stop", "stoploss"):
@@ -289,6 +301,8 @@ class MessageHandler:
                     ),
                     timeout=5.0,
                 )
+                if success and self.bot.services.monitor:
+                    self.bot.services.monitor.sync_signal_status_in_memory(signal_id, "stop_loss")
                 action_taken = "marked as STOP LOSS"
 
             elif command in ("reactivate", "reopen", "active"):
@@ -636,6 +650,7 @@ class MessageHandler:
                         continue
 
                     if monitor:
+                        monitor.sync_signal_status_in_memory(old_id, "cancelled")
                         monitor.active_signals.pop(old_id, None)
                         try:
                             monitor.nm_monitor.evict_signal(old_id)

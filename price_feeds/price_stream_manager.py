@@ -74,9 +74,11 @@ class PriceStreamManager:
             self.feed_status["icmarkets"] = True
 
             # Subscribe reference symbols needed for execution-bot offset calc.
+            # These are polled at a 15-minute cadence by ICMarketsStream since
+            # the offset they feed only drifts on minute timescales.
             for sym in _IC_REFERENCE_SYMBOLS:
                 try:
-                    await self.feeds["icmarkets"].subscribe(sym)
+                    await self.feeds["icmarkets"].subscribe_reference(sym)
                 except Exception as e:
                     logger.warning("Could not subscribe IC reference symbol %s: %s", sym, e)
 
