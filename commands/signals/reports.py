@@ -112,6 +112,7 @@ class ReportsCog(BaseCog):
                     # Merge the status and other info from period query
                     full_signal["status"] = signal["status"]
                     full_signal["channel_id"] = signal["channel_id"]
+                    full_signal["type"] = signal.get("type") or full_signal.get("type") or "standard"
                     enriched_signals.append(full_signal)
 
             signals = enriched_signals
@@ -129,134 +130,95 @@ class ReportsCog(BaseCog):
                 monitored_channels = {}
                 channels_data = {}
 
-            # Create reverse mapping: channel_id -> channel_name
-            channel_id_to_name = {
-                str(channel_id): name for name, channel_id in monitored_channels.items()
+            # Legends are still channel-driven (the Legends channel can host signals
+            # of any type), so collect its channel IDs from channels.json.
+            legends_channel_ids = {
+                str(channel_id)
+                for name, channel_id in monitored_channels.items()
+                if "legends" in name.lower()
             }
 
-            # Partition signals into legends / PA / regular. Order matters:
-            # legends wins over PA wins over regular when channel names overlap.
-            legends_signals = []
-            pa_signals = []
+            # Partition into 5 groups: Legends wins by channel; the rest map by type.
+            # standard / scalp / swing all fall under Regular.
             regular_signals = []
+            tolls_signals = []
+            pa_signals = []
+            legends_signals = []
+            one_to_one_signals = []
 
             for signal in signals:
                 channel_id = str(signal.get("channel_id", ""))
-                channel_name = channel_id_to_name.get(channel_id, "").lower()
+                signal_type = (signal.get("type") or "standard").lower()
 
-                if "legends" in channel_name:
+                if channel_id in legends_channel_ids:
                     legends_signals.append(signal)
-                elif any(x in channel_name for x in ["pa", "price-action"]):
+                elif signal_type == "toll":
+                    tolls_signals.append(signal)
+                elif signal_type == "pa":
                     pa_signals.append(signal)
+                elif signal_type == "1-1":
+                    one_to_one_signals.append(signal)
                 else:
                     regular_signals.append(signal)
 
-            # Process regular signals
-            regular_profit = [s for s in regular_signals if s.get("status", "").lower() == "profit"]
-            regular_stoploss = [
-                s
-                for s in regular_signals
-                if s.get("status", "").lower() in ["stoploss", "stop_loss"]
+            def split_profit_sl(group_signals):
+                profit = [
+                    s for s in group_signals if s.get("status", "").lower() == "profit"
+                ]
+                sl = [
+                    s
+                    for s in group_signals
+                    if s.get("status", "").lower() in ("stoploss", "stop_loss")
+                ]
+                if filter_normalized == "stoploss":
+                    profit = []
+                elif filter_normalized == "profit":
+                    sl = []
+                return profit, sl
+
+            groups = [
+                ("Regular", regular_signals),
+                ("Tolls", tolls_signals),
+                ("PA", pa_signals),
+                ("Legends", legends_signals),
+                ("1-1", one_to_one_signals),
             ]
 
-            # Process PA signals
-            pa_profit = [s for s in pa_signals if s.get("status", "").lower() == "profit"]
-            pa_stoploss = [
-                s for s in pa_signals if s.get("status", "").lower() in ["stoploss", "stop_loss"]
-            ]
+            # Per-group stats: { label: {"profit": [...], "sl": [...], "total": N, "win_rate": x} }
+            group_stats = {}
+            for label, group_signals in groups:
+                profit, sl = split_profit_sl(group_signals)
+                total = len(profit) + len(sl)
+                win_rate = (len(profit) / total * 100) if total > 0 else 0
+                group_stats[label] = {
+                    "profit": profit,
+                    "sl": sl,
+                    "total": total,
+                    "win_rate": win_rate,
+                }
 
-            # Process legends signals
-            legends_profit = [
-                s for s in legends_signals if s.get("status", "").lower() == "profit"
-            ]
-            legends_stoploss = [
-                s
-                for s in legends_signals
-                if s.get("status", "").lower() in ["stoploss", "stop_loss"]
-            ]
-
-            # Apply filter if specified
-            if filter_normalized == "stoploss":
-                regular_profit = []
-                pa_profit = []
-                legends_profit = []
-            elif filter_normalized == "profit":
-                regular_stoploss = []
-                pa_stoploss = []
-                legends_stoploss = []
+            total_signals = sum(g["total"] for g in group_stats.values())
+            total_profit = sum(len(g["profit"]) for g in group_stats.values())
 
             # Check if filter resulted in no signals
-            if filter_normalized:
-                filtered_count = (
-                    len(regular_profit)
-                    + len(regular_stoploss)
-                    + len(pa_profit)
-                    + len(pa_stoploss)
-                    + len(legends_profit)
-                    + len(legends_stoploss)
+            if filter_normalized and total_signals == 0:
+                filter_label = "stop loss" if filter_normalized == "stoploss" else "profit"
+                embed = discord.Embed(
+                    title=f"📊 {period.title()} Trading Report - {filter_label.title()} Only",
+                    description=f"No {filter_label} signals found for the current {period}",
+                    color=0xFFA500,
                 )
-                if filtered_count == 0:
-                    filter_label = "stop loss" if filter_normalized == "stoploss" else "profit"
-                    embed = discord.Embed(
-                        title=f"📊 {period.title()} Trading Report - {filter_label.title()} Only",
-                        description=f"No {filter_label} signals found for the current {period}",
-                        color=0xFFA500,
-                    )
-                    await loading_msg.edit(content=None, embed=embed)
-                    return
+                await loading_msg.edit(content=None, embed=embed)
+                return
 
-            # Calculate overall statistics
-            total_regular = len(
-                [
-                    s
-                    for s in regular_signals
-                    if s.get("status", "").lower() in ["profit", "stoploss", "stop_loss"]
-                ]
-            )
-            total_pa = len(
-                [
-                    s
-                    for s in pa_signals
-                    if s.get("status", "").lower() in ["profit", "stoploss", "stop_loss"]
-                ]
-            )
-            total_legends = len(
-                [
-                    s
-                    for s in legends_signals
-                    if s.get("status", "").lower() in ["profit", "stoploss", "stop_loss"]
-                ]
-            )
-            total_signals = total_regular + total_pa + total_legends
-
-            regular_profit_count = len(regular_profit)
-            regular_sl_count = len(regular_stoploss)
-            pa_profit_count = len(pa_profit)
-            pa_sl_count = len(pa_stoploss)
-            legends_profit_count = len(legends_profit)
-            legends_sl_count = len(legends_stoploss)
-
-            total_profit = regular_profit_count + pa_profit_count + legends_profit_count
-
-            # Calculate win rates
-            regular_win_rate = (
-                (regular_profit_count / total_regular * 100) if total_regular > 0 else 0
-            )
-            pa_win_rate = (pa_profit_count / total_pa * 100) if total_pa > 0 else 0
-            legends_win_rate = (
-                (legends_profit_count / total_legends * 100) if total_legends > 0 else 0
-            )
             overall_win_rate = (total_profit / total_signals * 100) if total_signals > 0 else 0
 
             # Create embed
             title_suffix = ""
-            description_suffix = ""
             if filter_normalized == "stoploss":
                 title_suffix = " - Stop Losses Only"
-                description_suffix = " (stop loss signals only)"
             elif filter_normalized == "profit":
                 title_suffix = " - Profits Only"
-                description_suffix = " (profit signals only)"
 
             embed = discord.Embed(
                 title=f"📊 {period.title()} Trading Report{title_suffix}",
@@ -264,138 +226,58 @@ class ReportsCog(BaseCog):
                 color=0x00FF00 if overall_win_rate >= 50 else 0xFF0000,
             )
 
-            # Regular Signals Section
-            if total_regular > 0:
+            # Per-group summary fields
+            for label, _ in groups:
+                stats = group_stats[label]
+                if stats["total"] == 0:
+                    continue
                 embed.add_field(
-                    name="Regular Signals",
-                    value=f"Total: {total_regular} | Win Rate: {regular_win_rate:.1f}%\n"
-                    f"Profit: {regular_profit_count} | Stop Loss: {regular_sl_count}",
+                    name=f"{label} Signals",
+                    value=(
+                        f"Total: {stats['total']} | Win Rate: {stats['win_rate']:.1f}%\n"
+                        f"Profit: {len(stats['profit'])} | Stop Loss: {len(stats['sl'])}"
+                    ),
                     inline=True,
                 )
 
-            # PA Signals Section
-            if total_pa > 0:
-                embed.add_field(
-                    name="PA Signals",
-                    value=f"Total: {total_pa} | Win Rate: {pa_win_rate:.1f}%\n"
-                    f"Profit: {pa_profit_count} | Stop Loss: {pa_sl_count}",
-                    inline=True,
+            def trade_line(signal):
+                limits = signal.get("limits", [])
+                if limits:
+                    first_limit = format_price(limits[0]["price_level"], signal["instrument"])
+                    limit_display = (
+                        f"{first_limit}, +{len(limits) - 1} more"
+                        if len(limits) > 1
+                        else first_limit
+                    )
+                else:
+                    limit_display = "N/A"
+                return (
+                    f"#{signal['signal_id']} | {signal['instrument']} | "
+                    f"{limit_display} | {signal['direction'].upper()} 🟢"
                 )
 
-            # Legends Signals Section
-            if total_legends > 0:
-                embed.add_field(
-                    name="Legends Signals",
-                    value=f"Total: {total_legends} | Win Rate: {legends_win_rate:.1f}%\n"
-                    f"Profit: {legends_profit_count} | Stop Loss: {legends_sl_count}",
-                    inline=True,
+            def sl_line(signal):
+                sl_value = (
+                    format_price(signal.get("stop_loss"), signal["instrument"])
+                    if signal.get("stop_loss")
+                    else "N/A"
+                )
+                return (
+                    f"#{signal['signal_id']} | {signal['instrument']} | "
+                    f"SL: {sl_value} | {signal['direction'].upper()} 🛑"
                 )
 
-            # Build REGULAR TRADES section (profit first, then stop loss)
-            if total_regular > 0:
-                trade_lines = []
-
-                for signal in regular_profit:
-                    limits = signal.get("limits", [])
-                    if limits:
-                        first_limit = format_price(limits[0]["price_level"], signal["instrument"])
-                        limit_display = (
-                            f"{first_limit}, +{len(limits) - 1} more"
-                            if len(limits) > 1
-                            else first_limit
-                        )
-                    else:
-                        limit_display = "N/A"
-                    trade_lines.append(
-                        f"#{signal['signal_id']} | {signal['instrument']} | {limit_display} | {signal['direction'].upper()} 🟢"
-                    )
-
-                for signal in regular_stoploss:
-                    sl_value = (
-                        format_price(signal.get("stop_loss"), signal["instrument"])
-                        if signal.get("stop_loss")
-                        else "N/A"
-                    )
-                    trade_lines.append(
-                        f"#{signal['signal_id']} | {signal['instrument']} | SL: {sl_value} | {signal['direction'].upper()} 🛑"
-                    )
-
-                if trade_lines:
+            # Per-group trade detail sections (profit first, then SL)
+            for label, _ in groups:
+                stats = group_stats[label]
+                if stats["total"] == 0:
+                    continue
+                lines = [trade_line(s) for s in stats["profit"]]
+                lines.extend(sl_line(s) for s in stats["sl"])
+                if lines:
                     embed.add_field(
-                        name=f"Regular Trades ({total_regular})",
-                        value=cap_field_value(trade_lines),
-                        inline=False,
-                    )
-
-            # Build PA TRADES section (profit first, then stop loss)
-            if total_pa > 0:
-                pa_trade_lines = []
-
-                for signal in pa_profit:
-                    limits = signal.get("limits", [])
-                    if limits:
-                        first_limit = format_price(limits[0]["price_level"], signal["instrument"])
-                        limit_display = (
-                            f"{first_limit}, +{len(limits) - 1} more"
-                            if len(limits) > 1
-                            else first_limit
-                        )
-                    else:
-                        limit_display = "N/A"
-                    pa_trade_lines.append(
-                        f"#{signal['signal_id']} | {signal['instrument']} | {limit_display} | {signal['direction'].upper()} 🟢"
-                    )
-
-                for signal in pa_stoploss:
-                    sl_value = (
-                        format_price(signal.get("stop_loss"), signal["instrument"])
-                        if signal.get("stop_loss")
-                        else "N/A"
-                    )
-                    pa_trade_lines.append(
-                        f"#{signal['signal_id']} | {signal['instrument']} | SL: {sl_value} | {signal['direction'].upper()} 🛑"
-                    )
-
-                if pa_trade_lines:
-                    embed.add_field(
-                        name=f"PA Trades ({total_pa})",
-                        value=cap_field_value(pa_trade_lines),
-                        inline=False,
-                    )
-
-            # Build LEGENDS TRADES section
-            if total_legends > 0:
-                legends_trade_lines = []
-
-                for signal in legends_profit:
-                    limits = signal.get("limits", [])
-                    if limits:
-                        first_limit = format_price(limits[0]["price_level"], signal["instrument"])
-                        limit_display = (
-                            f"{first_limit}, +{len(limits) - 1} more"
-                            if len(limits) > 1
-                            else first_limit
-                        )
-                    else:
-                        limit_display = "N/A"
-                    legends_trade_lines.append(
-                        f"#{signal['signal_id']} | {signal['instrument']} | {limit_display} | {signal['direction'].upper()} 🟢"
-                    )
-
-                for signal in legends_stoploss:
-                    sl_value = (
-                        format_price(signal.get("stop_loss"), signal["instrument"])
-                        if signal.get("stop_loss")
-                        else "N/A"
-                    )
-                    legends_trade_lines.append(
-                        f"#{signal['signal_id']} | {signal['instrument']} | SL: {sl_value} | {signal['direction'].upper()} 🛑"
-                    )
-
-                if legends_trade_lines:
-                    embed.add_field(
-                        name=f"Legends Trades ({total_legends})",
-                        value=cap_field_value(legends_trade_lines),
+                        name=f"{label} Trades ({stats['total']})",
+                        value=cap_field_value(lines),
                         inline=False,
                     )
 

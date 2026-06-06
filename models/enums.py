@@ -68,7 +68,7 @@ class StatusTransitions:
         SignalStatus.CANCELLED: [SignalStatus.HIT, SignalStatus.ACTIVE],
         SignalStatus.PROFIT: [SignalStatus.CANCELLED],
         SignalStatus.BREAKEVEN: [SignalStatus.CANCELLED],
-        SignalStatus.STOP_LOSS: [SignalStatus.CANCELLED],
+        SignalStatus.STOP_LOSS: [SignalStatus.ACTIVE, SignalStatus.HIT, SignalStatus.CANCELLED],
     }
 
     @classmethod

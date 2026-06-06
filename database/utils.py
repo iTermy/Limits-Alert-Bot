@@ -2,10 +2,23 @@
 Utility functions for signal operations
 """
 
-from datetime import datetime, timedelta
+from datetime import datetime, time as dtime, timedelta
 from typing import Optional
 
 import pytz
+
+
+def is_weekend_window(now_est: Optional[datetime] = None) -> bool:
+    """True if EST now is Friday at/after 4:45 PM, Saturday, or Sunday — i.e. heading
+    into or sitting in the weekend gap when traditional markets are closed."""
+    if now_est is None:
+        now_est = datetime.now(pytz.timezone("America/New_York"))
+    wd = now_est.weekday()
+    if wd >= 5:
+        return True
+    if wd == 4 and now_est.time() >= dtime(16, 45):
+        return True
+    return False
 
 
 def _parse_dt(value) -> Optional[datetime]:

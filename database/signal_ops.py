@@ -14,9 +14,19 @@ from utils.logger import get_logger
 from models.enums import LimitStatus, SignalStatus
 from utils.formatting import get_status_emoji
 
-from .utils import _parse_dt, calculate_expiry
+from .utils import _parse_dt, calculate_expiry, is_weekend_window
 
 logger = get_logger("signal_db")
+
+
+def _is_crypto_symbol(symbol: str) -> bool:
+    """Lightweight crypto detector for DB-layer use (avoids importing the live mapper)."""
+    if not symbol:
+        return False
+    s = symbol.upper()
+    if any(c in s for c in ("BTC", "ETH", "BNB", "XRP", "ADA", "DOGE", "SOL", "DOT")):
+        return True
+    return s.endswith("USDT") or s.endswith("USDC")
 
 
 class SignalDatabase:
@@ -363,7 +373,7 @@ class SignalDatabase:
     async def reactivate_cancelled_signal(
         self, signal_id: int, parsed_signal: ParsedSignal
     ) -> bool:
-        """Reactivate a cancelled signal (e.g., when message is undeleted or edited)."""
+        """Reactivate a cancelled or stopped-out signal as if the close never happened."""
         try:
             logger.debug(f"Attempting to reactivate signal {signal_id}")
 
@@ -374,10 +384,14 @@ class SignalDatabase:
                 logger.error(f"Signal {signal_id} not found")
                 return False
 
-            if signal["status"] != SignalStatus.CANCELLED:
-                logger.warning(f"Signal {signal_id} is not cancelled, status: {signal['status']}")
+            reactivatable = (SignalStatus.CANCELLED, SignalStatus.STOP_LOSS)
+            if signal["status"] not in reactivatable:
+                logger.warning(
+                    f"Signal {signal_id} is not reactivatable, status: {signal['status']}"
+                )
                 return False
 
+            old_status = signal["status"]
             new_status = (
                 SignalStatus.HIT if signal.get("limits_hit", 0) > 0 else SignalStatus.ACTIVE
             )
@@ -402,7 +416,7 @@ class SignalDatabase:
                         VALUES ($1, $2, $3, $4, $5)
                     """,
                         signal_id,
-                        SignalStatus.CANCELLED,
+                        old_status,
                         new_status,
                         "manual",
                         "Signal reactivated",
@@ -488,11 +502,14 @@ class SignalDatabase:
             "SELECT id, instrument, direction, status FROM signals WHERE id = $1",
             (signal_id,),
         )
-        if not signal or signal["status"] != SignalStatus.CANCELLED:
+        if not signal or signal["status"] not in (
+            SignalStatus.CANCELLED,
+            SignalStatus.STOP_LOSS,
+        ):
             return None
 
-        # These are limits that were pending at cancellation time and will become
-        # pending again on reactivation (currently stored as 'cancelled').
+        # These are limits that were pending at cancellation/stop-loss time and will
+        # become pending again on reactivation (currently stored as 'cancelled').
         pending_limits = await self.db.fetch_all(
             """SELECT id, price_level, sequence_number
                FROM limits
@@ -596,7 +613,10 @@ class SignalDatabase:
                         """,
                             signal_id,
                         )
-                    elif new_status == SignalStatus.ACTIVE:
+                    elif new_status in (SignalStatus.ACTIVE, SignalStatus.HIT):
+                        # Restore limits that were cancelled by a prior final-status
+                        # transition (e.g. stop_loss or manual cancel) so reactivation
+                        # picks them back up as pending.
                         await conn.execute(
                             """
                             UPDATE limits
@@ -883,7 +903,7 @@ class SignalDatabase:
     async def expire_old_signals(self) -> int:
         """Check and expire signals past their expiry time."""
         query = """
-            SELECT id, status, expiry_type FROM signals
+            SELECT id, status, expiry_type, instrument FROM signals
             WHERE status IN ($1, $2)
             AND expiry_time IS NOT NULL
             AND expiry_time < CURRENT_TIMESTAMP
@@ -902,10 +922,18 @@ class SignalDatabase:
         for signal in expired:
             signal_id = signal["id"]
             old_status = signal["status"]
+            instrument = signal.get("instrument") or ""
 
-            if old_status == SignalStatus.HIT:
-                # HIT signals roll over to the next expiry window instead of cancelling.
-                # Re-using calculate_expiry ensures the next occurrence is always in the future.
+            # HIT signals normally roll over to the next expiry window. Non-crypto
+            # HIT signals heading into the weekend gap (Fri ≥ 4:45 PM or Sat/Sun)
+            # are cancelled instead — markets are closed and the next rollover
+            # would land on Saturday. Crypto runs 24/7 so weekend rollover is fine.
+            should_rollover = (
+                old_status == SignalStatus.HIT
+                and not (is_weekend_window() and not _is_crypto_symbol(instrument))
+            )
+
+            if should_rollover:
                 next_expiry = calculate_expiry(signal["expiry_type"])
                 if next_expiry is None:
                     continue
@@ -1130,6 +1158,7 @@ class SignalDatabase:
                 s.instrument,
                 s.direction,
                 s.status,
+                s.type,
                 s.limits_hit,
                 s.total_limits,
                 s.created_at,

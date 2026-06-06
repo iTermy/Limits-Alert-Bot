@@ -81,6 +81,7 @@ class LifecycleCog(BaseCog):
 
         # Add asset type flags and calculate distances
         mapper = self.services.stream_manager.symbol_mapper
+        dollar_distance_classes = {"crypto", "indices", "metals", "oil"}
         for signal in signals:
             asset_class = mapper.determine_asset_class(signal["instrument"])
             signal["is_crypto"] = asset_class == "crypto"
@@ -107,8 +108,9 @@ class LifecycleCog(BaseCog):
                         else:
                             distance = limit_price - current_price
 
-                        # Format based on asset type
-                        if signal["is_crypto"] or signal["is_index"]:
+                        # Format based on asset type. Metals/oil display in dollars
+                        # (same as crypto/indices) so the sort key is the visible number.
+                        if asset_class in dollar_distance_classes:
                             distance_value = abs(distance)
                             formatted = f"${distance_value:.2f} away"
                         else:
@@ -307,7 +309,7 @@ class LifecycleCog(BaseCog):
 
         # Reactivation guard: block if current price has passed any pending limits,
         # unless the admin explicitly requests --force.
-        if status == "active" and signal["status"] == "cancelled":
+        if status == "active" and signal["status"] in ("cancelled", "stop_loss"):
             if force:
                 is_admin = (
                     hasattr(ctx.author, "guild_permissions")

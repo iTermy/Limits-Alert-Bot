@@ -292,9 +292,9 @@ class MessageHandler:
                 action_taken = "marked as STOP LOSS"
 
             elif command in ("reactivate", "reopen", "active"):
-                if signal["status"] != "cancelled":
+                if signal["status"] not in ("cancelled", "stop_loss"):
                     await message.reply(
-                        f"❌ Signal is not cancelled (current status: {signal['status']})"
+                        f"❌ Signal is not reactivatable (current status: {signal['status']})"
                     )
                     return
 

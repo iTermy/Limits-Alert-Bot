@@ -172,6 +172,16 @@ class StreamingPriceMonitor:
 
         return spread_start <= now_est.time() < spread_end
 
+    def _is_crypto_signal(self, signal: Dict) -> bool:
+        """Crypto signals run 24/7 and are exempt from spread-hour cancellation."""
+        try:
+            asset_class = self.stream_manager.symbol_mapper.determine_asset_class(
+                signal["instrument"]
+            )
+            return asset_class == "crypto"
+        except Exception:
+            return False
+
     async def start(self):
         """Start the streaming monitor"""
         if self.running:
@@ -486,7 +496,7 @@ class StreamingPriceMonitor:
                 await self._cancel_signal_during_guard(signal, current_price, "news", news_event)
                 return
 
-            if is_spread_hour:
+            if is_spread_hour and not self._is_crypto_signal(signal):
                 logger.info(
                     f"Spread hour: suppressing limit hit for signal "
                     f"{signal['signal_id']} limit #{limit['sequence_number']} "
@@ -602,7 +612,7 @@ class StreamingPriceMonitor:
             is_hit = current_price >= stop_loss
 
         if is_hit:
-            if is_spread_hour:
+            if is_spread_hour and not self._is_crypto_signal(signal):
                 logger.info(
                     f"Spread hour: suppressing stop loss hit for signal "
                     f"{signal['signal_id']} ({signal['instrument']} @ {current_price:.5f})"
