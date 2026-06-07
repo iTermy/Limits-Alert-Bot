@@ -85,7 +85,7 @@ class AlertSystem:
             signal_ping_messages=self.signal_ping_messages,
             signal_finished_messages=self.signal_finished_messages,
             alert_messages=self.alert_messages,
-            toll_channel_ids=self.toll_channel_ids,
+            auto_purge_channel_ids=self.auto_purge_channel_ids,
             role_mention=self.role_mention,
             track_alert_message_fn=self.track_alert_message,
             finished_channel_id=self._finished_channel_id,
@@ -300,6 +300,15 @@ class AlertSystem:
             elif "toll" in name_lower:
                 self.toll_channel_ids.add(str(channel_id))
 
+        # Channels whose original signal messages are auto-deleted on end-state
+        # (matches toll-style cleanup). PA channel is exempt to preserve analysis history.
+        AUTO_PURGE_EXEMPT_NAMES = {"price-action-trades"}
+        self.auto_purge_channel_ids = {
+            str(cid)
+            for name, cid in monitored.items()
+            if cid and name.lower() not in AUTO_PURGE_EXEMPT_NAMES
+        }
+
         self._finished_channel_id = cfg.get("finished_signals")
         self._profit_channel_id = cfg.get("profit_channel")
 
@@ -311,7 +320,8 @@ class AlertSystem:
             f"{len(self.toll_channel_ids)} toll "
             f"(incl. {len(self.oil_toll_channel_ids)} oil-toll), "
             f"{len(self.general_toll_channel_ids)} general-toll, "
-            f"{len(self.legends_channel_ids)} legends"
+            f"{len(self.legends_channel_ids)} legends, "
+            f"{len(self.auto_purge_channel_ids)} auto-purge"
         )
 
     def reload_channels(self):
@@ -332,6 +342,9 @@ class AlertSystem:
 
     def is_legends_signal(self, signal: Dict) -> bool:
         return str(signal.get("channel_id", "")) in self.legends_channel_ids
+
+    def is_auto_purge_channel(self, channel_id) -> bool:
+        return str(channel_id) in self.auto_purge_channel_ids
 
     def _get_alert_channel(self, signal: Dict) -> Optional[discord.TextChannel]:
         if self.is_general_toll_signal(signal) or self.is_oil_toll_signal(signal):
@@ -357,8 +370,8 @@ class AlertSystem:
     def _get_finished_channel(self):
         return self._archive_manager._get_finished_channel()
 
-    async def _maybe_delete_toll_original(self, signal: Dict, signal_id: int) -> None:
-        await self._archive_manager.maybe_delete_toll_original(signal, signal_id)
+    async def _maybe_delete_original_message(self, signal: Dict, signal_id: int) -> None:
+        await self._archive_manager.maybe_delete_original_message(signal, signal_id)
 
     # ── Tracking ─────────────────────────────────────────────────────────────
 
@@ -1071,7 +1084,7 @@ class AlertSystem:
             logger.debug(
                 f"Spread hour cancel for signal {signal_id}: no persistent embed, skipping alert"
             )
-            await self._archive_manager.maybe_delete_toll_original(signal, signal_id)
+            await self._archive_manager.maybe_delete_original_message(signal, signal_id)
             return True
         try:
             await self.update_signal_message(

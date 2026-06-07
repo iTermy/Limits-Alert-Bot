@@ -3,7 +3,7 @@ Archive manager for the alert system.
 
 Handles end-state embed lifecycle: scheduling moves to finished-signals or
 profit channels after a delay, cancelling pending moves on reactivation,
-and cleaning up toll-channel original messages.
+and cleaning up original signal messages in auto-purge channels.
 """
 
 import asyncio
@@ -50,7 +50,7 @@ class ArchiveManager:
         signal_ping_messages: Dict[int, discord.Message],
         signal_finished_messages: Dict[int, discord.Message],
         alert_messages: dict,
-        toll_channel_ids: set,
+        auto_purge_channel_ids: set,
         role_mention: str,
         track_alert_message_fn,
         finished_channel_id,
@@ -61,7 +61,7 @@ class ArchiveManager:
         self.signal_ping_messages = signal_ping_messages
         self.signal_finished_messages = signal_finished_messages
         self.alert_messages = alert_messages
-        self.toll_channel_ids = toll_channel_ids
+        self.auto_purge_channel_ids = auto_purge_channel_ids
         self.role_mention = role_mention
         self._track_alert_message = track_alert_message_fn
         self._finished_channel_id = finished_channel_id
@@ -93,15 +93,15 @@ class ArchiveManager:
             return None
         return self.bot.get_channel(int(self._profit_channel_id))
 
-    async def maybe_delete_toll_original(self, signal: Dict, signal_id: int) -> None:
+    async def maybe_delete_original_message(self, signal: Dict, signal_id: int) -> None:
         """
-        Delete the original signal message for gold-toll signals (channel is in toll_channel_ids).
-        Safe to call on any signal — silently skips non-toll and manual signals.
+        Delete the original signal message if its channel is in auto_purge_channel_ids.
+        Safe to call on any signal — silently skips exempt channels and manual signals.
         """
         src_channel_id = str(signal.get("channel_id", ""))
         src_message_id = str(signal.get("message_id", ""))
         if (
-            src_channel_id not in self.toll_channel_ids
+            src_channel_id not in self.auto_purge_channel_ids
             or not src_message_id
             or src_message_id.startswith("manual_")
         ):
@@ -114,18 +114,18 @@ class ArchiveManager:
                 src_msg = await src_channel.fetch_message(int(src_message_id))
                 await src_msg.delete()
                 logger.info(
-                    f"Deleted gold-tolls original message {src_message_id} for signal {signal_id}"
+                    f"Deleted original signal message {src_message_id} for signal {signal_id}"
                 )
             except discord.NotFound:
                 pass
             except discord.Forbidden:
                 logger.warning(
-                    f"No permission to delete gold-tolls message {src_message_id} for signal {signal_id}"
+                    f"No permission to delete original signal message {src_message_id} for signal {signal_id}"
                 )
             except Exception as e:
-                logger.warning(f"Could not delete gold-tolls message {src_message_id}: {e}")
+                logger.warning(f"Could not delete original signal message {src_message_id}: {e}")
         except Exception as e:
-            logger.warning(f"Gold-toll original message cleanup failed for signal {signal_id}: {e}")
+            logger.warning(f"Original signal message cleanup failed for signal {signal_id}: {e}")
 
     def schedule_end_state_move(self, signal_id: int, event: str = ""):
         """
@@ -289,10 +289,10 @@ class ArchiveManager:
                 if self.bot and self.bot.signal_db:
                     sig_data = await self.bot.signal_db.get_signal_with_limits(signal_id)
                     if sig_data:
-                        await self.maybe_delete_toll_original(sig_data, signal_id)
+                        await self.maybe_delete_original_message(sig_data, signal_id)
             except Exception as e:
                 logger.warning(
-                    f"Gold-tolls original message cleanup failed for signal {signal_id}: {e}"
+                    f"Original signal message cleanup failed for signal {signal_id}: {e}"
                 )
 
         task = asyncio.ensure_future(_move_after_delay())
@@ -332,4 +332,4 @@ class ArchiveManager:
         except Exception:
             pass
 
-        await self.maybe_delete_toll_original(signal, signal_id)
+        await self.maybe_delete_original_message(signal, signal_id)

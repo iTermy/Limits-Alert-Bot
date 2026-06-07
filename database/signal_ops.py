@@ -294,6 +294,17 @@ class SignalDatabase:
         """Return all hit limits for a signal with hit_price for P&L calculations."""
         return await self.db.get_hit_limits_for_signal(signal_id)
 
+    async def get_active_message_ids_for_channel(self, channel_id: int) -> set:
+        """Discord message_ids of ACTIVE+HIT signals in the given channel.
+        Excludes manual_* ids (no Discord message exists)."""
+        rows = await self.db.fetch_all(
+            "SELECT message_id FROM signals "
+            "WHERE channel_id = $1 AND status IN ('active', 'hit') "
+            "AND message_id NOT LIKE 'manual_%'",
+            (str(channel_id),),
+        )
+        return {row["message_id"] for row in rows}
+
     # === Lifecycle ===
 
     async def cancel_signal_by_message(self, message_id: str) -> bool:

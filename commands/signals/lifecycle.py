@@ -670,14 +670,14 @@ class LifecycleCog(BaseCog):
                     embed_existed = await alert_system.update_embed_for_signal_id(
                         sid, "cancelled", ping_text=ping_text
                     )
-                    # For toll signals with no persistent embed, delete the original
-                    # signal message immediately (nothing to archive).
+                    # For signals with no persistent embed in auto-purge channels,
+                    # delete the original signal message immediately (nothing to archive).
                     if not embed_existed and signal_dict:
                         try:
-                            await alert_system._maybe_delete_toll_original(signal_dict, sid)
+                            await alert_system._maybe_delete_original_message(signal_dict, sid)
                         except Exception as _td:
                             logger.warning(
-                                f"Could not delete toll original for signal {sid} (no embed): {_td}"
+                                f"Could not delete original message for signal {sid} (no embed): {_td}"
                             )
                 except Exception as _ue:
                     logger.warning(

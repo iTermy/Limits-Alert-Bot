@@ -330,14 +330,16 @@ class BotManagementCog(BaseCog):
     @commands.command(name="cleanalerts", aliases=["clearalerts", "purgealerts"])
     @commands.check(lambda ctx: ctx.cog.is_admin(ctx.author))
     async def clean_alert_channels(self, ctx: commands.Context):
-        """Delete messages from the past 7 days in all alert channels (Admin only)"""
+        """Run the full Friday cleanup: purge alert channels + monitored channels (Admin only)"""
         if not self.bot.channel_cleaner:
             await ctx.send("❌ Channel cleaner not available")
             return
 
         confirm_msg = await ctx.send(
-            "⚠️ **WARNING**: Delete all messages from the past **7 days** in all alert channels?\n"
-            "Channels: `alert`, `pa-alert`, `toll-alert`, `general-tolls-alert`\n"
+            "⚠️ **WARNING**: Run the full weekly purge for the past **7 days**?\n"
+            "• Alert channels: `alert`, `pa-alert`, `toll-alert`, `general-tolls-alert`, `legends-trade-alert` "
+            "(all messages deleted)\n"
+            "• Monitored channels (except `price-action-trades`): orphans + non-active signal messages deleted\n"
             "React with ✅ to confirm or ❌ to cancel (30s timeout)"
         )
 
@@ -355,18 +357,19 @@ class BotManagementCog(BaseCog):
             reaction, _ = await self.bot.wait_for("reaction_add", timeout=30.0, check=check)
 
             if str(reaction.emoji) == "✅":
-                await confirm_msg.edit(content="🧹 Purging alert channels… this may take a moment.")
+                await confirm_msg.edit(content="🧹 Running weekly purge… this may take a moment.")
                 await confirm_msg.clear_reactions()
 
                 try:
                     await self.bot.channel_cleaner._purge_alert_channels()
+                    await self.bot.channel_cleaner._purge_monitored_channels()
                     await confirm_msg.edit(
-                        content=f"✅ Alert channels purged (past 7 days) — triggered by {ctx.author.name}"
+                        content=f"✅ Weekly purge complete (past 7 days) — triggered by {ctx.author.name}"
                     )
-                    self.logger.info(f"Alert channels manually purged by {ctx.author.name}")
+                    self.logger.info(f"Weekly purge manually triggered by {ctx.author.name}")
                 except Exception as e:
                     await confirm_msg.edit(content=f"❌ Purge failed: {e!s}")
-                    self.logger.error(f"Manual alert purge error: {e}", exc_info=True)
+                    self.logger.error(f"Manual weekly purge error: {e}", exc_info=True)
             else:
                 await confirm_msg.edit(content="❌ Purge cancelled")
                 await confirm_msg.clear_reactions()

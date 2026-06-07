@@ -96,11 +96,11 @@ class ExpiryManager:
                 )
         elif alert_system:
             # No embed exists (signal expired before approaching alert was sent).
-            # Still handle gold-toll original message deletion directly.
+            # Delete the original message in auto-purge channels.
             src_channel_id = str(signal.get("channel_id", ""))
             src_message_id = str(signal.get("message_id", ""))
             if (
-                src_channel_id in alert_system.toll_channel_ids
+                alert_system.is_auto_purge_channel(src_channel_id)
                 and src_message_id
                 and not src_message_id.startswith("manual_")
             ):
@@ -118,7 +118,7 @@ class ExpiryManager:
                 )
 
     async def _delete_original_message(self, channel_id: str, message_id: str, sig_id: int):
-        """Delete the original signal message (used for gold-toll signals with no embed)."""
+        """Delete the original signal message (auto-purge channels with no embed)."""
         try:
             channel = self.bot.get_channel(int(channel_id))
             if channel:

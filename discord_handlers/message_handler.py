@@ -397,11 +397,11 @@ class MessageHandler:
                 sig_id = signal["signal_id"]
                 has_embed = self.alert_system and sig_id in self.alert_system.signal_messages
                 if not has_embed:
-                    is_toll = (
+                    is_purge_channel = (
                         self.alert_system
-                        and str(referenced.channel.id) in self.alert_system.toll_channel_ids
+                        and self.alert_system.is_auto_purge_channel(referenced.channel.id)
                     )
-                    if is_toll:
+                    if is_purge_channel:
                         try:
                             await referenced.delete()
                             logger.info(
@@ -412,7 +412,7 @@ class MessageHandler:
                             logger.warning(
                                 f"Could not delete original signal message {referenced.id}: {_de}"
                             )
-                    if is_toll and self.alert_system:
+                    if is_purge_channel and self.alert_system:
                         try:
                             finished_channel = self.alert_system._get_finished_channel()
                             if finished_channel:
