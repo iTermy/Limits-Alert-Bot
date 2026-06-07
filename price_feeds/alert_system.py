@@ -85,7 +85,7 @@ class AlertSystem:
             signal_ping_messages=self.signal_ping_messages,
             signal_finished_messages=self.signal_finished_messages,
             alert_messages=self.alert_messages,
-            toll_channel_ids=self.toll_channel_ids,
+            auto_purge_channel_ids=self.auto_purge_channel_ids,
             role_mention=self.role_mention,
             track_alert_message_fn=self.track_alert_message,
             finished_channel_id=self._finished_channel_id,
@@ -141,7 +141,7 @@ class AlertSystem:
         stream_manager = self.stream_manager
 
         signal_ids = list(self._live_embeds.keys())
-        logger.debug(f"Refreshing {len(signal_ids)} live embed(s)")
+        logger.debug("Refreshing %d live embed(s)", len(signal_ids))
 
         for i, signal_id in enumerate(signal_ids):
             if i > 0:
@@ -165,14 +165,18 @@ class AlertSystem:
                 current_price = price_data["ask"] if direction == "long" else price_data["bid"]
                 spread = price_data.get("spread", 0.0)
 
-                limits = await self._fetch_limits(signal)
+                # In-memory limits are kept in lockstep with DB writes by
+                # streaming_monitor mutations + the sync helpers called from
+                # every command path. The live-refresh path therefore no longer
+                # round-trips to Postgres on every 15 s cycle.
+                limits = signal.get("limits") or []
 
                 distance_formatted = None
                 if event in ("approaching", "hit"):
                     pending_limits = [
                         l
                         for l in limits
-                        if l.get("status") != "hit" and not l.get("hit_alert_sent")
+                        if l.get("status") == "pending" and not l.get("hit_alert_sent")
                     ]
                     if pending_limits:
                         nearest = min(
@@ -212,7 +216,7 @@ class AlertSystem:
 
                 try:
                     await existing_msg.edit(embed=embed)
-                    logger.debug(f"Live-updated embed for signal {signal_id} @ {current_price}")
+                    logger.debug("Live-updated embed for signal %s @ %s", signal_id, current_price)
                 except discord.NotFound:
                     logger.warning(f"Live update: embed for signal {signal_id} not found, removing")
                     self._live_embeds.pop(signal_id, None)
@@ -296,6 +300,15 @@ class AlertSystem:
             elif "toll" in name_lower:
                 self.toll_channel_ids.add(str(channel_id))
 
+        # Channels whose original signal messages are auto-deleted on end-state
+        # (matches toll-style cleanup). PA channel is exempt to preserve analysis history.
+        AUTO_PURGE_EXEMPT_NAMES = {"price-action-trades"}
+        self.auto_purge_channel_ids = {
+            str(cid)
+            for name, cid in monitored.items()
+            if cid and name.lower() not in AUTO_PURGE_EXEMPT_NAMES
+        }
+
         self._finished_channel_id = cfg.get("finished_signals")
         self._profit_channel_id = cfg.get("profit_channel")
 
@@ -307,7 +320,8 @@ class AlertSystem:
             f"{len(self.toll_channel_ids)} toll "
             f"(incl. {len(self.oil_toll_channel_ids)} oil-toll), "
             f"{len(self.general_toll_channel_ids)} general-toll, "
-            f"{len(self.legends_channel_ids)} legends"
+            f"{len(self.legends_channel_ids)} legends, "
+            f"{len(self.auto_purge_channel_ids)} auto-purge"
         )
 
     def reload_channels(self):
@@ -328,6 +342,9 @@ class AlertSystem:
 
     def is_legends_signal(self, signal: Dict) -> bool:
         return str(signal.get("channel_id", "")) in self.legends_channel_ids
+
+    def is_auto_purge_channel(self, channel_id) -> bool:
+        return str(channel_id) in self.auto_purge_channel_ids
 
     def _get_alert_channel(self, signal: Dict) -> Optional[discord.TextChannel]:
         if self.is_general_toll_signal(signal) or self.is_oil_toll_signal(signal):
@@ -353,8 +370,8 @@ class AlertSystem:
     def _get_finished_channel(self):
         return self._archive_manager._get_finished_channel()
 
-    async def _maybe_delete_toll_original(self, signal: Dict, signal_id: int) -> None:
-        await self._archive_manager.maybe_delete_toll_original(signal, signal_id)
+    async def _maybe_delete_original_message(self, signal: Dict, signal_id: int) -> None:
+        await self._archive_manager.maybe_delete_original_message(signal, signal_id)
 
     # ── Tracking ─────────────────────────────────────────────────────────────
 
@@ -479,6 +496,130 @@ class AlertSystem:
                     f"Hydration failed for signal {signal.get('signal_id')}: {e}",
                     exc_info=True,
                 )
+
+    async def recover_pending_archives(self) -> None:
+        """
+        End-state signals whose alert embed was not archived before the bot
+        restarted (the 15-min in-memory countdown is lost on shutdown) get
+        re-scheduled here, so the embed + auto-purge original message are
+        cleaned up instead of lingering forever.
+        """
+        if not self.bot or not self.bot.signal_db:
+            return
+        try:
+            rows = await self.bot.signal_db.db.fetch_all(
+                """
+                SELECT id, status, channel_id, message_id,
+                       alert_message_id, alert_channel_id, ping_message_id
+                FROM signals
+                WHERE alert_message_id IS NOT NULL
+                  AND status IN ('profit', 'stop_loss', 'cancelled', 'breakeven')
+                """,
+                (),
+            )
+        except Exception as e:
+            logger.error(f"recover_pending_archives query failed: {e}")
+            return
+
+        if not rows:
+            return
+
+        recovered = 0
+        for row in rows:
+            signal_id = row["id"]
+            status = row["status"]
+            try:
+                channel = None
+                if row["alert_channel_id"]:
+                    channel = self.bot.get_channel(int(row["alert_channel_id"]))
+                if channel is None:
+                    # Channel cache miss — fall back to status-based routing.
+                    channel = self._get_alert_channel({"channel_id": row["channel_id"]})
+                if channel is None:
+                    logger.warning(
+                        f"Cannot resolve alert channel for orphaned signal {signal_id}; clearing IDs"
+                    )
+                    await self._clear_persisted_alert_ids(signal_id)
+                    continue
+
+                try:
+                    embed_msg = await channel.fetch_message(int(row["alert_message_id"]))
+                except discord.NotFound:
+                    await self._clear_persisted_alert_ids(signal_id)
+                    continue
+
+                self.signal_messages[signal_id] = embed_msg
+                self.track_alert_message(embed_msg.id, signal_id)
+
+                if row["ping_message_id"]:
+                    try:
+                        ping_msg = await channel.fetch_message(int(row["ping_message_id"]))
+                        self.signal_ping_messages[signal_id] = ping_msg
+                    except discord.NotFound:
+                        pass
+                    except Exception as e:
+                        logger.debug(
+                            f"Could not refetch ping {row['ping_message_id']} for signal {signal_id}: {e}"
+                        )
+
+                self._archive_manager.schedule_end_state_move(signal_id, event=status)
+                recovered += 1
+            except Exception as e:
+                logger.warning(
+                    f"Could not recover pending archive for signal {signal_id}: {e}",
+                    exc_info=True,
+                )
+
+        if recovered:
+            logger.info(f"Re-scheduled archive move for {recovered} orphaned end-state signal(s)")
+
+    async def recover_finished_embeds(self) -> None:
+        """
+        Re-register finished-channel embeds at startup so reply commands against
+        them (e.g. `reactivate`) work after a restart. Uses ``PartialMessage`` —
+        no Discord API calls, just local channel-cache lookups, so startup cost
+        is O(N) regardless of how many signals are recovered.
+        """
+        if not self.bot or not self.bot.signal_db:
+            return
+        try:
+            rows = await self.bot.signal_db.db.fetch_all(
+                """
+                SELECT id, finished_message_id, finished_channel_id
+                FROM signals
+                WHERE finished_message_id IS NOT NULL
+                  AND finished_channel_id IS NOT NULL
+                  AND status IN ('profit', 'stop_loss', 'cancelled', 'breakeven')
+                  AND (closed_at IS NULL OR closed_at > NOW() - INTERVAL '14 days')
+                """,
+                (),
+            )
+        except Exception as e:
+            logger.error(f"recover_finished_embeds query failed: {e}")
+            return
+
+        if not rows:
+            return
+
+        recovered = 0
+        for row in rows:
+            signal_id = row["id"]
+            channel = self.bot.get_channel(int(row["finished_channel_id"]))
+            if channel is None:
+                continue
+            try:
+                partial = channel.get_partial_message(int(row["finished_message_id"]))
+            except Exception as e:
+                logger.warning(
+                    f"Could not build partial message for signal {signal_id}: {e}"
+                )
+                continue
+            self.signal_finished_messages[signal_id] = partial
+            self.track_alert_message(partial.id, signal_id)
+            recovered += 1
+
+        if recovered:
+            logger.info(f"Re-registered {recovered} finished-channel embed(s) for reply lookup")
 
     async def _hydrate_signal(self, signal: Dict) -> None:
         signal_id = signal["signal_id"]
@@ -901,6 +1042,20 @@ class AlertSystem:
                     f"Could not delete finished-channel embed for signal {signal_id}: {e}"
                 )
 
+        if self.bot and self.bot.signal_db:
+            try:
+                async with self.bot.signal_db.db.get_connection() as conn:
+                    await conn.execute(
+                        "UPDATE signals "
+                        "SET finished_message_id = NULL, finished_channel_id = NULL "
+                        "WHERE id = $1",
+                        int(signal_id),
+                    )
+            except Exception as e:
+                logger.warning(
+                    f"Could not clear persisted finished IDs for signal {signal_id}: {e}"
+                )
+
         limits = await self._fetch_limits(signal)
 
         hit_count = sum(1 for l in limits if l.get("status") == "hit" or l.get("hit_alert_sent"))
@@ -1067,7 +1222,7 @@ class AlertSystem:
             logger.debug(
                 f"Spread hour cancel for signal {signal_id}: no persistent embed, skipping alert"
             )
-            await self._archive_manager.maybe_delete_toll_original(signal, signal_id)
+            await self._archive_manager.maybe_delete_original_message(signal, signal_id)
             return True
         try:
             await self.update_signal_message(

@@ -81,6 +81,7 @@ class LifecycleCog(BaseCog):
 
         # Add asset type flags and calculate distances
         mapper = self.services.stream_manager.symbol_mapper
+        dollar_distance_classes = {"crypto", "indices", "metals", "oil"}
         for signal in signals:
             asset_class = mapper.determine_asset_class(signal["instrument"])
             signal["is_crypto"] = asset_class == "crypto"
@@ -107,8 +108,9 @@ class LifecycleCog(BaseCog):
                         else:
                             distance = limit_price - current_price
 
-                        # Format based on asset type
-                        if signal["is_crypto"] or signal["is_index"]:
+                        # Format based on asset type. Metals/oil display in dollars
+                        # (same as crypto/indices) so the sort key is the visible number.
+                        if asset_class in dollar_distance_classes:
                             distance_value = abs(distance)
                             formatted = f"${distance_value:.2f} away"
                         else:
@@ -307,7 +309,7 @@ class LifecycleCog(BaseCog):
 
         # Reactivation guard: block if current price has passed any pending limits,
         # unless the admin explicitly requests --force.
-        if status == "active" and signal["status"] == "cancelled":
+        if status == "active" and signal["status"] in ("cancelled", "stop_loss"):
             if force:
                 is_admin = (
                     hasattr(ctx.author, "guild_permissions")
@@ -363,6 +365,10 @@ class LifecycleCog(BaseCog):
                         from database import db as _db
 
                         await _db.mark_limit_hit(first_limit["id"], first_limit["price_level"])
+                        if self.services.monitor:
+                            self.services.monitor._mutate_limit_hit_in_memory(
+                                signal_id, first_limit["id"], first_limit["price_level"]
+                            )
                         logger.info(
                             f"Auto-hit limit #{first_limit.get('sequence_number')} "
                             f"for signal {signal_id} as part of manual profit (approaching→profit)"
@@ -379,6 +385,8 @@ class LifecycleCog(BaseCog):
         )
 
         if success:
+            if self.services.monitor:
+                self.services.monitor.sync_signal_status_in_memory(signal_id, status)
             status_emoji = get_status_emoji(status)
 
             embed = discord.Embed(
@@ -452,6 +460,7 @@ class LifecycleCog(BaseCog):
                 await self.services.tp_monitor.refresh_hit_limits(signal_id)
                 if signal_id in self.services.monitor.active_signals:
                     self.services.monitor.active_signals[signal_id]["status"] = "hit"
+                    self.services.monitor.mark_first_pending_limit_hit_in_memory(signal_id)
             await ctx.send(f"✅ Signal {signal_id} marked as HIT (limit 1 hit, auto-TP active)")
 
             # Update the persistent alert embed
@@ -633,6 +642,7 @@ class LifecycleCog(BaseCog):
 
             # 1. Evict from streaming monitor so price-checking stops immediately
             if monitor:
+                monitor.sync_signal_status_in_memory(sid, "cancelled")
                 monitor.active_signals.pop(sid, None)
                 monitor.nm_monitor.evict_signal(sid)
                 monitor.tp_monitor.evict_signal(sid)
@@ -660,14 +670,14 @@ class LifecycleCog(BaseCog):
                     embed_existed = await alert_system.update_embed_for_signal_id(
                         sid, "cancelled", ping_text=ping_text
                     )
-                    # For toll signals with no persistent embed, delete the original
-                    # signal message immediately (nothing to archive).
+                    # For signals with no persistent embed in auto-purge channels,
+                    # delete the original signal message immediately (nothing to archive).
                     if not embed_existed and signal_dict:
                         try:
-                            await alert_system._maybe_delete_toll_original(signal_dict, sid)
+                            await alert_system._maybe_delete_original_message(signal_dict, sid)
                         except Exception as _td:
                             logger.warning(
-                                f"Could not delete toll original for signal {sid} (no embed): {_td}"
+                                f"Could not delete original message for signal {sid} (no embed): {_td}"
                             )
                 except Exception as _ue:
                     logger.warning(

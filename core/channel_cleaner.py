@@ -1,16 +1,15 @@
 """
-channel_cleaner.py — Weekly alert-channel purge
+channel_cleaner.py — Weekly alert + monitored-channel purge
 
 Runs a background task that fires every minute and checks whether it is
 Friday at 18:00 local time.  When the window is hit (within a 1-minute
-tolerance), all messages posted during the past 7 days in every alert
-channel are bulk-deleted.
+tolerance):
 
-Alert channels purged:
-  • alert_channel
-  • pa-alert-channel
-  • toll-alert-channel
-  • general-tolls-alert
+  • Alert channels: every message posted during the past 7 days is
+    bulk-deleted (no preservation).
+  • Monitored channels (except `price-action-trades`): every message
+    posted during the past 7 days that is NOT tied to an ACTIVE or HIT
+    signal is bulk-deleted (orphans + cancelled / closed signals).
 
 The task is intentionally idempotent: a "last_purge_date" guard prevents
 it from running more than once per Friday even if the bot restarts mid-
@@ -19,6 +18,7 @@ window.
 
 import asyncio
 from datetime import datetime, timedelta, timezone
+from typing import Set
 
 import discord
 from discord.ext import tasks
@@ -32,9 +32,20 @@ PURGE_MINUTE = 0
 PURGE_TOLERANCE = 1  # minutes either side that still counts as "on time"
 MESSAGE_AGE_DAYS = 7  # delete messages younger than this
 
+ALERT_CHANNEL_KEYS = [
+    "alert_channel",
+    "pa-alert-channel",
+    "toll-alert-channel",
+    "general-tolls-alert",
+    "legends-trade-alert",
+]
+
+# Monitored channels whose signal messages are preserved by the weekly purge.
+EXEMPT_MONITORED_NAMES = {"price-action-trades"}
+
 
 class ChannelCleaner:
-    """Purges alert channels every Friday at 18:00."""
+    """Purges alert and monitored channels every Friday at 18:00."""
 
     def __init__(self, bot):
         self.bot = bot
@@ -67,9 +78,10 @@ class ChannelCleaner:
                 return
 
             # ── all guards passed — run the purge ────────────────────────────
-            self.logger.info("Friday 18:00 reached — starting weekly alert-channel purge")
+            self.logger.info("Friday 18:00 reached — starting weekly purge")
             self._last_purge_date = today
             await self._purge_alert_channels()
+            await self._purge_monitored_channels()
 
         except Exception as exc:
             self.logger.error(f"channel_cleaner loop error: {exc}", exc_info=True)
@@ -78,22 +90,14 @@ class ChannelCleaner:
     async def _before_loop(self):
         await self.bot.wait_until_ready()
 
-    # ── purge logic ───────────────────────────────────────────────────────────
+    # ── alert-channel purge ───────────────────────────────────────────────────
 
     async def _purge_alert_channels(self):
-        """Delete messages < MESSAGE_AGE_DAYS old from every alert channel."""
+        """Delete every message < MESSAGE_AGE_DAYS old from every alert channel."""
         cfg = getattr(self.bot, "channels_config", {}) or {}
 
-        # Build the list of alert channel IDs from channels.json keys
-        alert_channel_keys = [
-            "alert_channel",
-            "pa-alert-channel",
-            "toll-alert-channel",
-            "general-tolls-alert",
-        ]
-
         channel_ids = []
-        for key in alert_channel_keys:
+        for key in ALERT_CHANNEL_KEYS:
             raw = cfg.get(key)
             if raw:
                 try:
@@ -115,45 +119,99 @@ class ChannelCleaner:
 
             await self._purge_channel(channel, cutoff)
 
+    # ── monitored-channel purge ───────────────────────────────────────────────
+
+    async def _purge_monitored_channels(self):
+        """Delete orphans and non-active-signal messages from monitored channels."""
+        cfg = getattr(self.bot, "channels_config", {}) or {}
+        monitored = cfg.get("monitored_channels", {}) or {}
+        signal_db = getattr(self.bot, "signal_db", None)
+        if signal_db is None:
+            self.logger.warning("signal_db not available — skipping monitored purge")
+            return
+
+        cutoff = datetime.now(tz=timezone.utc) - timedelta(days=MESSAGE_AGE_DAYS)
+
+        for name, raw_id in monitored.items():
+            if name.lower() in EXEMPT_MONITORED_NAMES:
+                continue
+            try:
+                ch_id = int(raw_id)
+            except (TypeError, ValueError):
+                # placeholders like "REPLACE_WITH_CHANNEL_ID"
+                continue
+            channel = self.bot.get_channel(ch_id)
+            if channel is None:
+                self.logger.warning(
+                    f"Monitored channel {name} ({ch_id}) not in cache — skipping"
+                )
+                continue
+
+            try:
+                preserve = await signal_db.get_active_message_ids_for_channel(ch_id)
+            except Exception as exc:
+                self.logger.error(
+                    f"#{name}: could not load active signal IDs, skipping purge: {exc}",
+                    exc_info=True,
+                )
+                continue
+
+            await self._purge_channel_preserving(channel, cutoff, preserve)
+
+    # ── channel-level helpers ─────────────────────────────────────────────────
+
     async def _purge_channel(self, channel: discord.TextChannel, cutoff: datetime):
-        """Bulk-delete messages newer than *cutoff* in *channel*."""
+        """Bulk-delete every message newer than *cutoff* in *channel*."""
+        await self._purge_channel_preserving(channel, cutoff, preserve_ids=set())
+
+    async def _purge_channel_preserving(
+        self,
+        channel: discord.TextChannel,
+        cutoff: datetime,
+        preserve_ids: Set[str],
+    ):
+        """Bulk-delete messages newer than *cutoff* in *channel*, skipping
+        messages whose ID is in *preserve_ids* (e.g. active/hit signal posts)."""
         channel_name = getattr(channel, "name", str(channel.id))
         total_deleted = 0
-        total_skipped = 0  # messages older than 14 days (Discord API limit)
+        total_skipped_old = 0  # messages older than 14 days (Discord API limit)
+        total_preserved = 0
 
         try:
-            # collect messages to delete (Discord bulk-delete cap: 14 days old)
             to_delete = []
             async for msg in channel.history(limit=None, after=cutoff):
+                if str(msg.id) in preserve_ids:
+                    total_preserved += 1
+                    continue
                 age = datetime.now(tz=timezone.utc) - msg.created_at
                 if age.days < 14:
                     to_delete.append(msg)
                 else:
-                    total_skipped += 1
+                    total_skipped_old += 1
 
             if not to_delete:
                 self.logger.info(
-                    f"#{channel_name}: no messages in the past {MESSAGE_AGE_DAYS} days"
+                    f"#{channel_name}: no eligible messages "
+                    f"({total_preserved} preserved, {total_skipped_old} too old)"
                 )
                 return
 
-            # bulk_delete accepts up to 100 messages per call
             CHUNK = 100
             for i in range(0, len(to_delete), CHUNK):
                 chunk = to_delete[i : i + CHUNK]
                 try:
                     await channel.delete_messages(chunk)
                     total_deleted += len(chunk)
-                    await asyncio.sleep(1)  # small pause between bulk-delete calls
+                    await asyncio.sleep(1)
                 except discord.HTTPException as exc:
                     self.logger.error(
                         f"#{channel_name}: bulk delete failed for chunk {i}–{i + len(chunk)}: {exc}"
                     )
 
             self.logger.info(
-                f"#{channel_name}: deleted {total_deleted} messages "
-                f"({total_skipped} older than 14 days skipped — "
-                f"Discord API limit prevents bulk-deleting those)"
+                f"#{channel_name}: deleted {total_deleted}, "
+                f"preserved {total_preserved}, "
+                f"skipped {total_skipped_old} older than 14 days"
             )
 
         except discord.Forbidden:

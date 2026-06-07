@@ -53,7 +53,12 @@
         "XTIUSD": "XTIUSD",
         "USOILSPOT": "XTIUSD",
         "SPX500USD": "US500",
-        "NAS100USD": "USTEC"
+        "NAS100USD": "USTEC",
+        "US30USD": "US30",
+        "JP225": "JP225",
+        "DE30EUR": "DE40",
+        "BTCUSDT": "BTCUSD",
+        "ETHUSDT": "ETHUSD"
       }
     },
 

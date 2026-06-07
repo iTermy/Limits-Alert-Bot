@@ -2,31 +2,23 @@
 Utility functions for signal operations
 """
 
-from datetime import datetime, timedelta
+from datetime import datetime, time as dtime, timedelta
 from typing import Optional
 
 import pytz
 
-async def calculate_sl_pnl(signal_id: int, signal: dict, signal_db, tp_config) -> Optional[float]:
-    """Return combined P&L of all hit limits at the stop-loss price, or None if no hit limits."""
-    stop_price = signal.get("stop_loss")
-    if not stop_price:
-        return None
-    hit_limits = await signal_db.get_hit_limits_for_signal(signal_id)
-    if not hit_limits:
-        return None
-    combined = 0.0
-    for lim in hit_limits:
-        entry = lim.get("hit_price") or lim.get("price_level")
-        if entry is not None:
-            combined += tp_config.calculate_pnl(
-                signal["instrument"],
-                signal["direction"],
-                entry,
-                stop_price,
-                signal_type=signal.get("type", "standard"),
-            )
-    return combined
+
+def is_weekend_window(now_est: Optional[datetime] = None) -> bool:
+    """True if EST now is Friday at/after 4:45 PM, Saturday, or Sunday — i.e. heading
+    into or sitting in the weekend gap when traditional markets are closed."""
+    if now_est is None:
+        now_est = datetime.now(pytz.timezone("America/New_York"))
+    wd = now_est.weekday()
+    if wd >= 5:
+        return True
+    if wd == 4 and now_est.time() >= dtime(16, 45):
+        return True
+    return False
 
 
 def _parse_dt(value) -> Optional[datetime]:

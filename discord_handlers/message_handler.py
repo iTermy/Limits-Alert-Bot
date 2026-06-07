@@ -15,6 +15,9 @@ from utils.logger import get_logger
 
 logger = get_logger("message_handler")
 
+# Auto-delete delay for transient bot replies in monitored / alert channels.
+_REPLY_DELETE_AFTER = 15.0
+
 
 class MessageHandler:
     """Handles all message-related events for signal processing"""
@@ -33,6 +36,12 @@ class MessageHandler:
     async def _safe_remove_reaction(self, message: discord.Message, emoji: str) -> None:
         try:
             await message.remove_reaction(emoji, self.bot.user)
+        except Exception:
+            pass
+
+    async def _safe_delete(self, message: discord.Message) -> None:
+        try:
+            await message.delete()
         except Exception:
             pass
 
@@ -125,14 +134,17 @@ class MessageHandler:
                             f"Message looks like alert but isn't tracked: {referenced.id}"
                         )
                         await message.reply(
-                            "❌ This alert is not tracked. It may have been sent before the bot restarted."
+                            "❌ This alert is not tracked. It may have been sent before the bot restarted.",
+                            delete_after=_REPLY_DELETE_AFTER,
                         )
+                        await self._safe_delete(message)
                 return
 
             signal = await self.signal_db.get_signal_with_limits(signal_id)
             if not signal:
                 logger.warning(f"No signal found with ID {signal_id}")
-                await message.reply("❌ Signal not found.")
+                await message.reply("❌ Signal not found.", delete_after=_REPLY_DELETE_AFTER)
+                await self._safe_delete(message)
                 return
 
             await self._handle_reply_command(message, referenced, signal, signal_id)
@@ -140,7 +152,11 @@ class MessageHandler:
         except Exception as e:
             logger.error(f"Error in alert management reply: {e}", exc_info=True)
             try:
-                await message.reply("❌ An error occurred processing your command.")
+                await message.reply(
+                    "❌ An error occurred processing your command.",
+                    delete_after=_REPLY_DELETE_AFTER,
+                )
+                await self._safe_delete(message)
             except Exception:
                 pass
 
@@ -165,7 +181,11 @@ class MessageHandler:
                 else False
             )
             if not (is_author or is_admin):
-                await message.reply("Only the signal sender or admins can manage this signal.")
+                await message.reply(
+                    "Only the signal sender or admins can manage this signal.",
+                    delete_after=_REPLY_DELETE_AFTER,
+                )
+                await self._safe_delete(message)
                 return
 
             await self._handle_reply_command(
@@ -205,6 +225,8 @@ class MessageHandler:
                     ),
                     timeout=5.0,
                 )
+                if success and self.bot.services.monitor:
+                    self.bot.services.monitor.sync_signal_status_in_memory(signal_id, "cancelled")
                 action_taken = "cancelled"
 
             elif command in ("profit", "win", "tp"):
@@ -219,6 +241,10 @@ class MessageHandler:
                             from database import db as _db
 
                             await _db.mark_limit_hit(pending[0]["id"], pending[0]["price_level"])
+                            if self.bot.services.monitor:
+                                self.bot.services.monitor._mutate_limit_hit_in_memory(
+                                    signal_id, pending[0]["id"], pending[0]["price_level"]
+                                )
                             signal = (
                                 await self.signal_db.get_signal_with_limits(signal_id) or signal
                             )
@@ -234,6 +260,8 @@ class MessageHandler:
                     ),
                     timeout=5.0,
                 )
+                if success and self.bot.services.monitor:
+                    self.bot.services.monitor.sync_signal_status_in_memory(signal_id, "profit")
                 action_taken = "marked as PROFIT"
 
             elif command in ("hit",):
@@ -250,6 +278,7 @@ class MessageHandler:
                         await self.bot.services.tp_monitor.refresh_hit_limits(signal_id)
                         if signal_id in monitor.active_signals:
                             monitor.active_signals[signal_id]["status"] = "hit"
+                            monitor.mark_first_pending_limit_hit_in_memory(signal_id)
                         elif was_cancelled:
                             reloaded = await self.signal_db.get_signal_with_limits(signal_id)
                             if reloaded:
@@ -257,6 +286,7 @@ class MessageHandler:
                                 reloaded_for_monitor["signal_id"] = signal_id
                                 reloaded_for_monitor["status"] = "hit"
                                 monitor.active_signals[signal_id] = reloaded_for_monitor
+                                monitor._annotate_asset_class(reloaded_for_monitor)
                                 sym = signal.get("instrument")
                                 if sym:
                                     monitor.symbol_to_signals.setdefault(sym, [])
@@ -278,6 +308,8 @@ class MessageHandler:
                     ),
                     timeout=5.0,
                 )
+                if success and self.bot.services.monitor:
+                    self.bot.services.monitor.sync_signal_status_in_memory(signal_id, "breakeven")
                 action_taken = "marked as BREAKEVEN"
 
             elif command in ("sl", "stop", "stoploss"):
@@ -289,13 +321,17 @@ class MessageHandler:
                     ),
                     timeout=5.0,
                 )
+                if success and self.bot.services.monitor:
+                    self.bot.services.monitor.sync_signal_status_in_memory(signal_id, "stop_loss")
                 action_taken = "marked as STOP LOSS"
 
             elif command in ("reactivate", "reopen", "active"):
-                if signal["status"] != "cancelled":
+                if signal["status"] not in ("cancelled", "stop_loss"):
                     await message.reply(
-                        f"❌ Signal is not cancelled (current status: {signal['status']})"
+                        f"❌ Signal is not reactivatable (current status: {signal['status']})",
+                        delete_after=_REPLY_DELETE_AFTER,
                     )
+                    await self._safe_delete(message)
                     return
 
                 try:
@@ -316,8 +352,10 @@ class MessageHandler:
                         f"❌ Cannot reactivate — price has already moved past pending limits.\n"
                         f"Current price: **{cur}**\n"
                         f"**Limits past:**\n{limit_lines}\n\n"
-                        f"An admin can use `!setstatus {signal_id} active --force` to override."
+                        f"An admin can use `!setstatus {signal_id} active --force` to override.",
+                        delete_after=_REPLY_DELETE_AFTER,
                     )
+                    await self._safe_delete(message)
                     return
 
                 from core.parser import parse_signal
@@ -357,22 +395,33 @@ class MessageHandler:
 
             else:
                 await message.reply(
-                    "❓ Unknown command. Valid commands: `cancel`, `profit`, `tp`, `breakeven`, `be`, `sl`, `stop`, `reactivate`"
+                    "❓ Unknown command. Valid commands: `cancel`, `profit`, `tp`, `breakeven`, `be`, `sl`, `stop`, `reactivate`",
+                    delete_after=_REPLY_DELETE_AFTER,
                 )
+                await self._safe_delete(message)
                 return
 
         except asyncio.TimeoutError:
             logger.error(f"Operation timed out for command: {command}")
-            await message.reply(f"❌ {command.title()} operation timed out. Please try again.")
+            await message.reply(
+                f"❌ {command.title()} operation timed out. Please try again.",
+                delete_after=_REPLY_DELETE_AFTER,
+            )
+            await self._safe_delete(message)
             return
         except Exception as e:
             logger.error(f"Error processing command '{command}': {e}", exc_info=True)
-            await message.reply(f"❌ Error processing {command} command.")
+            await message.reply(
+                f"❌ Error processing {command} command.",
+                delete_after=_REPLY_DELETE_AFTER,
+            )
+            await self._safe_delete(message)
             return
 
         if not (success and action_taken):
-            await message.reply("❌ Failed to process command.")
+            await message.reply("❌ Failed to process command.", delete_after=_REPLY_DELETE_AFTER)
             logger.warning(f"Failed to process command '{command}' for signal {signal_id}")
+            await self._safe_delete(message)
             return
 
         # Update reactions on referenced message
@@ -383,11 +432,11 @@ class MessageHandler:
                 sig_id = signal["signal_id"]
                 has_embed = self.alert_system and sig_id in self.alert_system.signal_messages
                 if not has_embed:
-                    is_toll = (
+                    is_purge_channel = (
                         self.alert_system
-                        and str(referenced.channel.id) in self.alert_system.toll_channel_ids
+                        and self.alert_system.is_auto_purge_channel(referenced.channel.id)
                     )
-                    if is_toll:
+                    if is_purge_channel:
                         try:
                             await referenced.delete()
                             logger.info(
@@ -398,7 +447,7 @@ class MessageHandler:
                             logger.warning(
                                 f"Could not delete original signal message {referenced.id}: {_de}"
                             )
-                    if is_toll and self.alert_system:
+                    if is_purge_channel and self.alert_system:
                         try:
                             finished_channel = self.alert_system._get_finished_channel()
                             if finished_channel:
@@ -437,6 +486,20 @@ class MessageHandler:
                                 self.alert_system.signal_finished_messages[sig_id] = (
                                     cancel_embed_msg
                                 )
+                                try:
+                                    async with self.signal_db.db.get_connection() as conn:
+                                        await conn.execute(
+                                            "UPDATE signals "
+                                            "SET finished_message_id = $1, finished_channel_id = $2 "
+                                            "WHERE id = $3",
+                                            int(cancel_embed_msg.id),
+                                            int(finished_channel.id),
+                                            int(sig_id),
+                                        )
+                                except Exception as _pe:
+                                    logger.warning(
+                                        f"Could not persist finished embed IDs for signal {sig_id}: {_pe}"
+                                    )
                                 logger.info(
                                     f"Sent direct cancellation embed to finished-signals "
                                     f"for signal {sig_id} (no prior alert embed)"
@@ -464,10 +527,7 @@ class MessageHandler:
             await self._react_to_original_signal(signal, action_taken)
 
         # Delete user reply to reduce clutter
-        try:
-            await message.delete()
-        except Exception:
-            pass
+        await self._safe_delete(message)
 
         # Update the persistent embed and send a ping
         if self.alert_system:
@@ -636,6 +696,7 @@ class MessageHandler:
                         continue
 
                     if monitor:
+                        monitor.sync_signal_status_in_memory(old_id, "cancelled")
                         monitor.active_signals.pop(old_id, None)
                         try:
                             monitor.nm_monitor.evict_signal(old_id)

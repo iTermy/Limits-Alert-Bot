@@ -295,6 +295,14 @@ async def _run_migrations(conn):
         """
         ALTER TABLE signals ADD COLUMN IF NOT EXISTS ping_message_id BIGINT;
         """,
+        # Persist the archived embed location so reply commands (e.g. reactivate
+        # from finished-signals) survive a bot restart.
+        """
+        ALTER TABLE signals ADD COLUMN IF NOT EXISTS finished_message_id BIGINT;
+        """,
+        """
+        ALTER TABLE signals ADD COLUMN IF NOT EXISTS finished_channel_id BIGINT;
+        """,
     ]
 
     for migration in migrations:

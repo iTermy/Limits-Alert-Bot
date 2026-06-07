@@ -1,78 +1,882 @@
 {
-  "defaults": {
-    "forex": {
-      "type": "pips",
-      "value": 5.0,
-      "description": "Standard forex pairs"
+  "type_defaults": {
+    "standard": {
+      "forex": {
+        "type": "pips",
+        "value": 7.0,
+        "description": "Standard forex pairs"
+      },
+      "forex_jpy": {
+        "type": "pips",
+        "value": 7.0,
+        "description": "JPY pairs (auto-detected)"
+      },
+      "metals": {
+        "type": "dollars",
+        "value": 5.0,
+        "description": "Gold, Silver, etc."
+      },
+      "indices": {
+        "type": "dollars",
+        "value": 20.0,
+        "description": "Stock indices"
+      },
+      "stocks": {
+        "type": "dollars",
+        "value": 5.0,
+        "description": "Individual stocks"
+      },
+      "crypto": {
+        "type": "dollars",
+        "value": 500.0,
+        "description": "Cryptocurrencies"
+      },
+      "oil": {
+        "type": "dollars",
+        "value": 0.5,
+        "description": "Oil commodities"
+      }
     },
-    "forex_jpy": {
-      "type": "pips",
-      "value": 10.0,
-      "description": "JPY pairs (auto-detected)"
+    "scalp": {
+      "forex": {
+        "type": "pips",
+        "value": 5.0,
+        "description": "Scalp - Standard forex pairs"
+      },
+      "forex_jpy": {
+        "type": "pips",
+        "value": 5.0,
+        "description": "Scalp - JPY pairs (auto-detected)"
+      },
+      "metals": {
+        "type": "dollars",
+        "value": 4.0,
+        "description": "Scalp - Gold, Silver, etc."
+      },
+      "indices": {
+        "type": "dollars",
+        "value": 10.0,
+        "description": "Scalp - Stock indices"
+      },
+      "stocks": {
+        "type": "dollars",
+        "value": 0.5,
+        "description": "Scalp - Individual stocks"
+      },
+      "crypto": {
+        "type": "dollars",
+        "value": 300.0,
+        "description": "Scalp - Cryptocurrencies"
+      },
+      "oil": {
+        "type": "dollars",
+        "value": 0.2,
+        "description": "Scalp - Oil commodities"
+      }
     },
-    "metals": {
-      "type": "dollars",
-      "value": 5.0,
-      "description": "Gold, Silver, etc."
+    "swing": {
+      "forex": {
+        "type": "pips",
+        "value": 21.0,
+        "description": "Swing - forex"
+      },
+      "forex_jpy": {
+        "type": "pips",
+        "value": 21.0,
+        "description": "Swing - forex_jpy"
+      },
+      "metals": {
+        "type": "dollars",
+        "value": 15.0,
+        "description": "Swing - metals"
+      },
+      "indices": {
+        "type": "dollars",
+        "value": 60.0,
+        "description": "Swing - indices"
+      },
+      "stocks": {
+        "type": "dollars",
+        "value": 15.0,
+        "description": "Swing - stocks"
+      },
+      "crypto": {
+        "type": "dollars",
+        "value": 1500.0,
+        "description": "Swing - crypto"
+      },
+      "oil": {
+        "type": "dollars",
+        "value": 1.5,
+        "description": "Swing - oil"
+      }
     },
-    "indices": {
-      "type": "dollars",
-      "value": 20.0,
-      "description": "Stock indices"
+    "toll": {
+      "forex": {
+        "type": "pips",
+        "value": 5.0,
+        "description": "Scalp - Standard forex pairs"
+      },
+      "forex_jpy": {
+        "type": "pips",
+        "value": 5.0,
+        "description": "Scalp - JPY pairs (auto-detected)"
+      },
+      "metals": {
+        "type": "dollars",
+        "value": 5.0,
+        "description": "toll - metals",
+        "set_by": "itermy",
+        "set_at": "2026-06-06T01:11:28.604489+00:00"
+      },
+      "indices": {
+        "type": "dollars",
+        "value": 10.0,
+        "description": "Scalp - Stock indices"
+      },
+      "stocks": {
+        "type": "dollars",
+        "value": 0.5,
+        "description": "Scalp - Individual stocks"
+      },
+      "crypto": {
+        "type": "dollars",
+        "value": 300.0,
+        "description": "Scalp - Cryptocurrencies"
+      },
+      "oil": {
+        "type": "dollars",
+        "value": 0.2,
+        "description": "Scalp - Oil commodities"
+      }
     },
-    "stocks": {
-      "type": "dollars",
-      "value": 1.0,
-      "description": "Individual stocks"
+    "pa": {
+      "forex": {
+        "type": "pips",
+        "value": 7.0,
+        "description": "Standard forex pairs"
+      },
+      "forex_jpy": {
+        "type": "pips",
+        "value": 7.0,
+        "description": "JPY pairs (auto-detected)"
+      },
+      "metals": {
+        "type": "dollars",
+        "value": 5.0,
+        "description": "Gold, Silver, etc."
+      },
+      "indices": {
+        "type": "dollars",
+        "value": 20.0,
+        "description": "Stock indices"
+      },
+      "stocks": {
+        "type": "dollars",
+        "value": 5.0,
+        "description": "Individual stocks"
+      },
+      "crypto": {
+        "type": "dollars",
+        "value": 500.0,
+        "description": "Cryptocurrencies"
+      },
+      "oil": {
+        "type": "dollars",
+        "value": 0.5,
+        "description": "Oil commodities"
+      }
     },
-    "crypto": {
-      "type": "dollars",
-      "value": 50.0,
-      "description": "Cryptocurrencies"
-    },
-    "oil": {
-      "type": "dollars",
-      "value": 0.5,
-      "description": "Oil commodities"
+    "1-1": {
+      "metals": {
+        "type": "dollars",
+        "value": 10.0,
+        "description": "1-1 RR - metals"
+      }
     }
   },
-  "scalp_defaults": {
-    "forex": {
-      "type": "pips",
-      "value": 3.0,
-      "description": "Scalp - Standard forex pairs"
+  "type_overrides": {
+    "standard": {
+      "SPX500USD": {
+        "type": "dollars",
+        "value": 10.0,
+        "set_by": "itermy",
+        "set_at": "2026-03-02T15:28:04.385500+00:00"
+      },
+      "NAS100USD": {
+        "type": "dollars",
+        "value": 50.0,
+        "set_by": "itermy",
+        "set_at": "2026-05-14T15:43:51.935462+00:00"
+      },
+      "XTIUSD": {
+        "type": "dollars",
+        "value": 0.5,
+        "set_by": "itermy",
+        "set_at": "2026-05-13T18:32:41.603160+00:00"
+      },
+      "XAGUSD": {
+        "type": "dollars",
+        "value": 0.5,
+        "set_by": "manual",
+        "set_at": "2026-06-06T00:00:00+00:00"
+      },
+      "US30USD": {
+        "type": "dollars",
+        "value": 60.0,
+        "set_by": "manual",
+        "set_at": "2026-06-06T00:00:00+00:00"
+      },
+      "DE30EUR": {
+        "type": "dollars",
+        "value": 50.0,
+        "set_by": "manual",
+        "set_at": "2026-06-06T00:00:00+00:00"
+      },
+      "JP225": {
+        "type": "dollars",
+        "value": 250.0,
+        "set_by": "manual",
+        "set_at": "2026-06-06T00:00:00+00:00"
+      },
+      "ETHUSDT": {
+        "type": "dollars",
+        "value": 25.0,
+        "set_by": "manual",
+        "set_at": "2026-06-06T00:00:00+00:00"
+      },
+      "WMT.NAS": {
+        "type": "dollars",
+        "value": 1.0,
+        "set_by": "manual",
+        "set_at": "2026-06-06T00:00:00+00:00"
+      },
+      "AAPL.NAS": {
+        "type": "dollars",
+        "value": 2.5,
+        "set_by": "manual",
+        "set_at": "2026-06-06T00:00:00+00:00"
+      },
+      "AMD.NAS": {
+        "type": "dollars",
+        "value": 5.0,
+        "set_by": "manual",
+        "set_at": "2026-06-06T00:00:00+00:00"
+      },
+      "AMZN.NAS": {
+        "type": "dollars",
+        "value": 2.0,
+        "set_by": "manual",
+        "set_at": "2026-06-06T00:00:00+00:00"
+      },
+      "AVGO.NAS": {
+        "type": "dollars",
+        "value": 5.0,
+        "set_by": "manual",
+        "set_at": "2026-06-06T00:00:00+00:00"
+      },
+      "BIDU.NAS": {
+        "type": "dollars",
+        "value": 1.5,
+        "set_by": "manual",
+        "set_at": "2026-06-06T00:00:00+00:00"
+      },
+      "CLSK.NAS": {
+        "type": "dollars",
+        "value": 0.35,
+        "set_by": "manual",
+        "set_at": "2026-06-06T00:00:00+00:00"
+      },
+      "COIN.NAS": {
+        "type": "dollars",
+        "value": 3.0,
+        "set_by": "manual",
+        "set_at": "2026-06-06T00:00:00+00:00"
+      },
+      "CSCO.NAS": {
+        "type": "dollars",
+        "value": 0.75,
+        "set_by": "manual",
+        "set_at": "2026-06-06T00:00:00+00:00"
+      },
+      "GILD.NAS": {
+        "type": "dollars",
+        "value": 0.5,
+        "set_by": "manual",
+        "set_at": "2026-06-06T00:00:00+00:00"
+      },
+      "GOOG.NAS": {
+        "type": "dollars",
+        "value": 2.5,
+        "set_by": "manual",
+        "set_at": "2026-06-06T00:00:00+00:00"
+      },
+      "INTC.NAS": {
+        "type": "dollars",
+        "value": 1.5,
+        "set_by": "manual",
+        "set_at": "2026-06-06T00:00:00+00:00"
+      },
+      "MARA.NAS": {
+        "type": "dollars",
+        "value": 0.3,
+        "set_by": "manual",
+        "set_at": "2026-06-06T00:00:00+00:00"
+      },
+      "MRNA.NAS": {
+        "type": "dollars",
+        "value": 0.75,
+        "set_by": "manual",
+        "set_at": "2026-06-06T00:00:00+00:00"
+      },
+      "MSFT.NAS": {
+        "type": "dollars",
+        "value": 5.0,
+        "set_by": "manual",
+        "set_at": "2026-06-06T00:00:00+00:00"
+      },
+      "MU.NAS": {
+        "type": "dollars",
+        "value": 20.0,
+        "set_by": "manual",
+        "set_at": "2026-06-06T00:00:00+00:00"
+      },
+      "NFLX.NAS": {
+        "type": "dollars",
+        "value": 0.35,
+        "set_by": "manual",
+        "set_at": "2026-06-06T00:00:00+00:00"
+      },
+      "NVDA.NAS": {
+        "type": "dollars",
+        "value": 1.75,
+        "set_by": "manual",
+        "set_at": "2026-06-06T00:00:00+00:00"
+      },
+      "PDD.NAS": {
+        "type": "dollars",
+        "value": 0.75,
+        "set_by": "manual",
+        "set_at": "2026-06-06T00:00:00+00:00"
+      },
+      "PLTR.NAS": {
+        "type": "dollars",
+        "value": 2.0,
+        "set_by": "manual",
+        "set_at": "2026-06-06T00:00:00+00:00"
+      },
+      "PTON.NAS": {
+        "type": "dollars",
+        "value": 0.15,
+        "set_by": "manual",
+        "set_at": "2026-06-06T00:00:00+00:00"
+      },
+      "PYPL.NAS": {
+        "type": "dollars",
+        "value": 0.5,
+        "set_by": "manual",
+        "set_at": "2026-06-06T00:00:00+00:00"
+      },
+      "QCOM.NAS": {
+        "type": "dollars",
+        "value": 6.0,
+        "set_by": "manual",
+        "set_at": "2026-06-06T00:00:00+00:00"
+      },
+      "QQQ.NAS": {
+        "type": "dollars",
+        "value": 2.0,
+        "set_by": "manual",
+        "set_at": "2026-06-06T00:00:00+00:00"
+      },
+      "RIVN.NAS": {
+        "type": "dollars",
+        "value": 0.4,
+        "set_by": "manual",
+        "set_at": "2026-06-06T00:00:00+00:00"
+      },
+      "RKLB.NAS": {
+        "type": "dollars",
+        "value": 3.0,
+        "set_by": "manual",
+        "set_at": "2026-06-06T00:00:00+00:00"
+      },
+      "SBUX.NAS": {
+        "type": "dollars",
+        "value": 0.5,
+        "set_by": "manual",
+        "set_at": "2026-06-06T00:00:00+00:00"
+      },
+      "SOFI.NAS": {
+        "type": "dollars",
+        "value": 0.25,
+        "set_by": "manual",
+        "set_at": "2026-06-06T00:00:00+00:00"
+      },
+      "TSLA.NAS": {
+        "type": "dollars",
+        "value": 4.0,
+        "set_by": "manual",
+        "set_at": "2026-06-06T00:00:00+00:00"
+      },
+      "UAL.NAS": {
+        "type": "dollars",
+        "value": 1.5,
+        "set_by": "manual",
+        "set_at": "2026-06-06T00:00:00+00:00"
+      }
     },
-    "forex_jpy": {
-      "type": "pips",
-      "value": 5.0,
-      "description": "Scalp - JPY pairs (auto-detected)"
+    "scalp": {
+      "XAGUSD": {
+        "type": "dollars",
+        "value": 0.5,
+        "set_by": "manual",
+        "set_at": "2026-06-06T00:00:00+00:00"
+      },
+      "NAS100USD": {
+        "type": "dollars",
+        "value": 40.0,
+        "set_by": "manual",
+        "set_at": "2026-06-06T00:00:00+00:00"
+      },
+      "US30USD": {
+        "type": "dollars",
+        "value": 40.0,
+        "set_by": "manual",
+        "set_at": "2026-06-06T00:00:00+00:00"
+      },
+      "DE30EUR": {
+        "type": "dollars",
+        "value": 30.0,
+        "set_by": "manual",
+        "set_at": "2026-06-06T00:00:00+00:00"
+      },
+      "JP225": {
+        "type": "dollars",
+        "value": 125.0,
+        "set_by": "manual",
+        "set_at": "2026-06-06T00:00:00+00:00"
+      },
+      "ETHUSDT": {
+        "type": "dollars",
+        "value": 15.0,
+        "set_by": "manual",
+        "set_at": "2026-06-06T00:00:00+00:00"
+      },
+      "USOILSPOT": {
+        "type": "dollars",
+        "value": 0.3,
+        "set_by": "manual",
+        "set_at": "2026-06-06T00:00:00+00:00"
+      },
+      "XTIUSD": {
+        "type": "dollars",
+        "value": 0.3,
+        "set_by": "manual",
+        "set_at": "2026-06-06T00:00:00+00:00"
+      },
+      "WMT.NAS": {
+        "type": "dollars",
+        "value": 0.5,
+        "set_by": "manual",
+        "set_at": "2026-06-06T00:00:00+00:00"
+      },
+      "AAPL.NAS": {
+        "type": "dollars",
+        "value": 1.25,
+        "set_by": "manual",
+        "set_at": "2026-06-06T00:00:00+00:00"
+      },
+      "AMD.NAS": {
+        "type": "dollars",
+        "value": 2.5,
+        "set_by": "manual",
+        "set_at": "2026-06-06T00:00:00+00:00"
+      },
+      "AMZN.NAS": {
+        "type": "dollars",
+        "value": 1.0,
+        "set_by": "manual",
+        "set_at": "2026-06-06T00:00:00+00:00"
+      },
+      "AVGO.NAS": {
+        "type": "dollars",
+        "value": 2.5,
+        "set_by": "manual",
+        "set_at": "2026-06-06T00:00:00+00:00"
+      },
+      "BIDU.NAS": {
+        "type": "dollars",
+        "value": 0.75,
+        "set_by": "manual",
+        "set_at": "2026-06-06T00:00:00+00:00"
+      },
+      "CLSK.NAS": {
+        "type": "dollars",
+        "value": 0.25,
+        "set_by": "manual",
+        "set_at": "2026-06-06T00:00:00+00:00"
+      },
+      "COIN.NAS": {
+        "type": "dollars",
+        "value": 1.5,
+        "set_by": "manual",
+        "set_at": "2026-06-06T00:00:00+00:00"
+      },
+      "CSCO.NAS": {
+        "type": "dollars",
+        "value": 0.5,
+        "set_by": "manual",
+        "set_at": "2026-06-06T00:00:00+00:00"
+      },
+      "GILD.NAS": {
+        "type": "dollars",
+        "value": 0.25,
+        "set_by": "manual",
+        "set_at": "2026-06-06T00:00:00+00:00"
+      },
+      "GOOG.NAS": {
+        "type": "dollars",
+        "value": 1.5,
+        "set_by": "manual",
+        "set_at": "2026-06-06T00:00:00+00:00"
+      },
+      "INTC.NAS": {
+        "type": "dollars",
+        "value": 1.0,
+        "set_by": "manual",
+        "set_at": "2026-06-06T00:00:00+00:00"
+      },
+      "MARA.NAS": {
+        "type": "dollars",
+        "value": 0.15,
+        "set_by": "manual",
+        "set_at": "2026-06-06T00:00:00+00:00"
+      },
+      "MRNA.NAS": {
+        "type": "dollars",
+        "value": 0.5,
+        "set_by": "manual",
+        "set_at": "2026-06-06T00:00:00+00:00"
+      },
+      "MSFT.NAS": {
+        "type": "dollars",
+        "value": 2.5,
+        "set_by": "manual",
+        "set_at": "2026-06-06T00:00:00+00:00"
+      },
+      "MU.NAS": {
+        "type": "dollars",
+        "value": 10.0,
+        "set_by": "manual",
+        "set_at": "2026-06-06T00:00:00+00:00"
+      },
+      "NFLX.NAS": {
+        "type": "dollars",
+        "value": 0.2,
+        "set_by": "manual",
+        "set_at": "2026-06-06T00:00:00+00:00"
+      },
+      "NVDA.NAS": {
+        "type": "dollars",
+        "value": 1.0,
+        "set_by": "manual",
+        "set_at": "2026-06-06T00:00:00+00:00"
+      },
+      "PDD.NAS": {
+        "type": "dollars",
+        "value": 0.5,
+        "set_by": "manual",
+        "set_at": "2026-06-06T00:00:00+00:00"
+      },
+      "PLTR.NAS": {
+        "type": "dollars",
+        "value": 1.0,
+        "set_by": "manual",
+        "set_at": "2026-06-06T00:00:00+00:00"
+      },
+      "PTON.NAS": {
+        "type": "dollars",
+        "value": 0.1,
+        "set_by": "manual",
+        "set_at": "2026-06-06T00:00:00+00:00"
+      },
+      "PYPL.NAS": {
+        "type": "dollars",
+        "value": 0.25,
+        "set_by": "manual",
+        "set_at": "2026-06-06T00:00:00+00:00"
+      },
+      "QCOM.NAS": {
+        "type": "dollars",
+        "value": 3.0,
+        "set_by": "manual",
+        "set_at": "2026-06-06T00:00:00+00:00"
+      },
+      "QQQ.NAS": {
+        "type": "dollars",
+        "value": 1.0,
+        "set_by": "manual",
+        "set_at": "2026-06-06T00:00:00+00:00"
+      },
+      "RIVN.NAS": {
+        "type": "dollars",
+        "value": 0.2,
+        "set_by": "manual",
+        "set_at": "2026-06-06T00:00:00+00:00"
+      },
+      "RKLB.NAS": {
+        "type": "dollars",
+        "value": 1.5,
+        "set_by": "manual",
+        "set_at": "2026-06-06T00:00:00+00:00"
+      },
+      "SBUX.NAS": {
+        "type": "dollars",
+        "value": 0.25,
+        "set_by": "manual",
+        "set_at": "2026-06-06T00:00:00+00:00"
+      },
+      "SOFI.NAS": {
+        "type": "dollars",
+        "value": 0.15,
+        "set_by": "manual",
+        "set_at": "2026-06-06T00:00:00+00:00"
+      },
+      "TSLA.NAS": {
+        "type": "dollars",
+        "value": 2.0,
+        "set_by": "manual",
+        "set_at": "2026-06-06T00:00:00+00:00"
+      },
+      "UAL.NAS": {
+        "type": "dollars",
+        "value": 1.0,
+        "set_by": "manual",
+        "set_at": "2026-06-06T00:00:00+00:00"
+      }
     },
-    "metals": {
-      "type": "dollars",
-      "value": 2.0,
-      "description": "Scalp - Gold, Silver, etc."
+    "swing": {
+      "XAGUSD": {
+        "type": "dollars",
+        "value": 1.5,
+        "set_by": "manual",
+        "set_at": "2026-06-06T00:00:00+00:00"
+      },
+      "SPX500USD": {
+        "type": "dollars",
+        "value": 30.0,
+        "set_by": "manual",
+        "set_at": "2026-06-06T00:00:00+00:00"
+      },
+      "NAS100USD": {
+        "type": "dollars",
+        "value": 150.0,
+        "set_by": "manual",
+        "set_at": "2026-06-06T00:00:00+00:00"
+      },
+      "US30USD": {
+        "type": "dollars",
+        "value": 180.0,
+        "set_by": "manual",
+        "set_at": "2026-06-06T00:00:00+00:00"
+      },
+      "DE30EUR": {
+        "type": "dollars",
+        "value": 150.0,
+        "set_by": "manual",
+        "set_at": "2026-06-06T00:00:00+00:00"
+      },
+      "JP225": {
+        "type": "dollars",
+        "value": 750.0,
+        "set_by": "manual",
+        "set_at": "2026-06-06T00:00:00+00:00"
+      },
+      "ETHUSDT": {
+        "type": "dollars",
+        "value": 75.0,
+        "set_by": "manual",
+        "set_at": "2026-06-06T00:00:00+00:00"
+      },
+      "WMT.NAS": {
+        "type": "dollars",
+        "value": 3.0,
+        "set_by": "manual",
+        "set_at": "2026-06-06T00:00:00+00:00"
+      },
+      "AAPL.NAS": {
+        "type": "dollars",
+        "value": 7.5,
+        "set_by": "manual",
+        "set_at": "2026-06-06T00:00:00+00:00"
+      },
+      "AMZN.NAS": {
+        "type": "dollars",
+        "value": 6.0,
+        "set_by": "manual",
+        "set_at": "2026-06-06T00:00:00+00:00"
+      },
+      "BIDU.NAS": {
+        "type": "dollars",
+        "value": 4.5,
+        "set_by": "manual",
+        "set_at": "2026-06-06T00:00:00+00:00"
+      },
+      "CLSK.NAS": {
+        "type": "dollars",
+        "value": 1.05,
+        "set_by": "manual",
+        "set_at": "2026-06-06T00:00:00+00:00"
+      },
+      "COIN.NAS": {
+        "type": "dollars",
+        "value": 9.0,
+        "set_by": "manual",
+        "set_at": "2026-06-06T00:00:00+00:00"
+      },
+      "CSCO.NAS": {
+        "type": "dollars",
+        "value": 2.25,
+        "set_by": "manual",
+        "set_at": "2026-06-06T00:00:00+00:00"
+      },
+      "GILD.NAS": {
+        "type": "dollars",
+        "value": 1.5,
+        "set_by": "manual",
+        "set_at": "2026-06-06T00:00:00+00:00"
+      },
+      "GOOG.NAS": {
+        "type": "dollars",
+        "value": 7.5,
+        "set_by": "manual",
+        "set_at": "2026-06-06T00:00:00+00:00"
+      },
+      "INTC.NAS": {
+        "type": "dollars",
+        "value": 4.5,
+        "set_by": "manual",
+        "set_at": "2026-06-06T00:00:00+00:00"
+      },
+      "MARA.NAS": {
+        "type": "dollars",
+        "value": 0.9,
+        "set_by": "manual",
+        "set_at": "2026-06-06T00:00:00+00:00"
+      },
+      "MRNA.NAS": {
+        "type": "dollars",
+        "value": 2.25,
+        "set_by": "manual",
+        "set_at": "2026-06-06T00:00:00+00:00"
+      },
+      "MU.NAS": {
+        "type": "dollars",
+        "value": 60.0,
+        "set_by": "manual",
+        "set_at": "2026-06-06T00:00:00+00:00"
+      },
+      "NFLX.NAS": {
+        "type": "dollars",
+        "value": 1.05,
+        "set_by": "manual",
+        "set_at": "2026-06-06T00:00:00+00:00"
+      },
+      "NVDA.NAS": {
+        "type": "dollars",
+        "value": 5.25,
+        "set_by": "manual",
+        "set_at": "2026-06-06T00:00:00+00:00"
+      },
+      "PDD.NAS": {
+        "type": "dollars",
+        "value": 2.25,
+        "set_by": "manual",
+        "set_at": "2026-06-06T00:00:00+00:00"
+      },
+      "PLTR.NAS": {
+        "type": "dollars",
+        "value": 6.0,
+        "set_by": "manual",
+        "set_at": "2026-06-06T00:00:00+00:00"
+      },
+      "PTON.NAS": {
+        "type": "dollars",
+        "value": 0.45,
+        "set_by": "manual",
+        "set_at": "2026-06-06T00:00:00+00:00"
+      },
+      "PYPL.NAS": {
+        "type": "dollars",
+        "value": 1.5,
+        "set_by": "manual",
+        "set_at": "2026-06-06T00:00:00+00:00"
+      },
+      "QCOM.NAS": {
+        "type": "dollars",
+        "value": 18.0,
+        "set_by": "manual",
+        "set_at": "2026-06-06T00:00:00+00:00"
+      },
+      "QQQ.NAS": {
+        "type": "dollars",
+        "value": 6.0,
+        "set_by": "manual",
+        "set_at": "2026-06-06T00:00:00+00:00"
+      },
+      "RIVN.NAS": {
+        "type": "dollars",
+        "value": 1.2,
+        "set_by": "manual",
+        "set_at": "2026-06-06T00:00:00+00:00"
+      },
+      "RKLB.NAS": {
+        "type": "dollars",
+        "value": 9.0,
+        "set_by": "manual",
+        "set_at": "2026-06-06T00:00:00+00:00"
+      },
+      "SBUX.NAS": {
+        "type": "dollars",
+        "value": 1.5,
+        "set_by": "manual",
+        "set_at": "2026-06-06T00:00:00+00:00"
+      },
+      "SOFI.NAS": {
+        "type": "dollars",
+        "value": 0.75,
+        "set_by": "manual",
+        "set_at": "2026-06-06T00:00:00+00:00"
+      },
+      "TSLA.NAS": {
+        "type": "dollars",
+        "value": 12.0,
+        "set_by": "manual",
+        "set_at": "2026-06-06T00:00:00+00:00"
+      },
+      "UAL.NAS": {
+        "type": "dollars",
+        "value": 4.5,
+        "set_by": "manual",
+        "set_at": "2026-06-06T00:00:00+00:00"
+      }
     },
-    "indices": {
-      "type": "dollars",
-      "value": 10.0,
-      "description": "Scalp - Stock indices"
+    "toll": {
+      "USOILSPOT": {
+        "type": "dollars",
+        "value": 0.4,
+        "set_by": "manual",
+        "set_at": "2026-06-06T00:00:00+00:00"
+      },
+      "XTIUSD": {
+        "type": "dollars",
+        "value": 0.4,
+        "set_by": "manual",
+        "set_at": "2026-06-06T00:00:00+00:00"
+      }
     },
-    "stocks": {
-      "type": "dollars",
-      "value": 0.5,
-      "description": "Scalp - Individual stocks"
-    },
-    "crypto": {
-      "type": "dollars",
-      "value": 20.0,
-      "description": "Scalp - Cryptocurrencies"
-    },
-    "oil": {
-      "type": "dollars",
-      "value": 0.2,
-      "description": "Scalp - Oil commodities"
-    }
-  },
-  "overrides": {},
-  "scalp_overrides": {}
+    "pa": {},
+    "1-1": {}
+  }
 }

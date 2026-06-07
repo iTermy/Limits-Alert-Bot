@@ -36,3 +36,6 @@ Thumbs.db
 data/trading_bot.db
 config/local_settings.json
 .claude/
+
+# Local production bundles (contain credentials)
+dist/
