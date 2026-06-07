@@ -166,6 +166,7 @@ class ArchiveManager:
                 archive_label = "📁 Archived"
                 dest_name = "finished-signals channel"
 
+            finished_msg = None
             if dest_channel:
                 try:
                     sig_data = None
@@ -274,15 +275,26 @@ class ArchiveManager:
             if self.bot and self.bot.signal_db:
                 try:
                     async with self.bot.signal_db.db.get_connection() as conn:
-                        await conn.execute(
-                            "UPDATE signals "
-                            "SET alert_message_id = NULL, alert_channel_id = NULL, ping_message_id = NULL "
-                            "WHERE id = $1",
-                            int(signal_id),
-                        )
+                        if finished_msg is not None:
+                            await conn.execute(
+                                "UPDATE signals "
+                                "SET alert_message_id = NULL, alert_channel_id = NULL, ping_message_id = NULL, "
+                                "    finished_message_id = $1, finished_channel_id = $2 "
+                                "WHERE id = $3",
+                                int(finished_msg.id),
+                                int(dest_channel.id),
+                                int(signal_id),
+                            )
+                        else:
+                            await conn.execute(
+                                "UPDATE signals "
+                                "SET alert_message_id = NULL, alert_channel_id = NULL, ping_message_id = NULL "
+                                "WHERE id = $1",
+                                int(signal_id),
+                            )
                 except Exception as e:
                     logger.warning(
-                        f"Could not clear persisted alert IDs after archive for signal {signal_id}: {e}"
+                        f"Could not update persisted alert IDs after archive for signal {signal_id}: {e}"
                     )
 
             try:

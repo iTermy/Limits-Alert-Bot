@@ -250,12 +250,17 @@ class StreamingPriceMonitor:
         try:
             signals = await self.db.get_active_signals_for_tracking()
 
-            if not signals:
-                logger.info("No active signals to monitor")
-                return
-
             self.active_signals.clear()
             self.symbol_to_signals.clear()
+
+            if not signals:
+                logger.info("No active signals to monitor")
+                # Still recover any end-state embeds whose archive countdown
+                # was interrupted by a restart, and re-register finished embeds
+                # so reply commands against them survive a restart.
+                await self.alert_system.recover_pending_archives()
+                await self.alert_system.recover_finished_embeds()
+                return
 
             symbols_needed = set()
             guild_id = self.bot.guilds[0].id if self.bot.guilds else None
@@ -304,6 +309,15 @@ class StreamingPriceMonitor:
             # otherwise the first tick could fire send_*_alert and post a
             # duplicate embed alongside the orphaned one.
             await self.alert_system.hydrate_from_db(list(self.active_signals.values()))
+
+            # End-state signals whose archive countdown was interrupted by a
+            # restart need their move re-scheduled, otherwise the alert embed
+            # (and the auto-purge-channel original) linger forever.
+            await self.alert_system.recover_pending_archives()
+
+            # Re-register recently-archived embeds so reply commands against
+            # them (e.g. `reactivate`) survive a restart.
+            await self.alert_system.recover_finished_embeds()
 
             await self.stream_manager.bulk_subscribe(list(symbols_needed))
 

@@ -497,6 +497,142 @@ class AlertSystem:
                     exc_info=True,
                 )
 
+    async def recover_pending_archives(self) -> None:
+        """
+        End-state signals whose alert embed was not archived before the bot
+        restarted (the 15-min in-memory countdown is lost on shutdown) get
+        re-scheduled here, so the embed + auto-purge original message are
+        cleaned up instead of lingering forever.
+        """
+        if not self.bot or not self.bot.signal_db:
+            return
+        try:
+            rows = await self.bot.signal_db.db.fetch_all(
+                """
+                SELECT id, status, channel_id, message_id,
+                       alert_message_id, alert_channel_id, ping_message_id
+                FROM signals
+                WHERE alert_message_id IS NOT NULL
+                  AND status IN ('profit', 'stop_loss', 'cancelled', 'breakeven')
+                """,
+                (),
+            )
+        except Exception as e:
+            logger.error(f"recover_pending_archives query failed: {e}")
+            return
+
+        if not rows:
+            return
+
+        recovered = 0
+        for row in rows:
+            signal_id = row["id"]
+            status = row["status"]
+            try:
+                channel = None
+                if row["alert_channel_id"]:
+                    channel = self.bot.get_channel(int(row["alert_channel_id"]))
+                if channel is None:
+                    # Channel cache miss — fall back to status-based routing.
+                    channel = self._get_alert_channel({"channel_id": row["channel_id"]})
+                if channel is None:
+                    logger.warning(
+                        f"Cannot resolve alert channel for orphaned signal {signal_id}; clearing IDs"
+                    )
+                    await self._clear_persisted_alert_ids(signal_id)
+                    continue
+
+                try:
+                    embed_msg = await channel.fetch_message(int(row["alert_message_id"]))
+                except discord.NotFound:
+                    await self._clear_persisted_alert_ids(signal_id)
+                    continue
+
+                self.signal_messages[signal_id] = embed_msg
+                self.track_alert_message(embed_msg.id, signal_id)
+
+                if row["ping_message_id"]:
+                    try:
+                        ping_msg = await channel.fetch_message(int(row["ping_message_id"]))
+                        self.signal_ping_messages[signal_id] = ping_msg
+                    except discord.NotFound:
+                        pass
+                    except Exception as e:
+                        logger.debug(
+                            f"Could not refetch ping {row['ping_message_id']} for signal {signal_id}: {e}"
+                        )
+
+                self._archive_manager.schedule_end_state_move(signal_id, event=status)
+                recovered += 1
+            except Exception as e:
+                logger.warning(
+                    f"Could not recover pending archive for signal {signal_id}: {e}",
+                    exc_info=True,
+                )
+
+        if recovered:
+            logger.info(f"Re-scheduled archive move for {recovered} orphaned end-state signal(s)")
+
+    async def recover_finished_embeds(self) -> None:
+        """
+        Re-register finished-channel embeds at startup so reply commands against
+        them (e.g. `reactivate`) work after a restart. Only signals closed in the
+        recent past are recovered, to keep the in-memory tracking bounded.
+        """
+        if not self.bot or not self.bot.signal_db:
+            return
+        try:
+            rows = await self.bot.signal_db.db.fetch_all(
+                """
+                SELECT id, finished_message_id, finished_channel_id
+                FROM signals
+                WHERE finished_message_id IS NOT NULL
+                  AND finished_channel_id IS NOT NULL
+                  AND status IN ('profit', 'stop_loss', 'cancelled', 'breakeven')
+                  AND (closed_at IS NULL OR closed_at > NOW() - INTERVAL '14 days')
+                """,
+                (),
+            )
+        except Exception as e:
+            logger.error(f"recover_finished_embeds query failed: {e}")
+            return
+
+        if not rows:
+            return
+
+        recovered = 0
+        for row in rows:
+            signal_id = row["id"]
+            try:
+                channel = self.bot.get_channel(int(row["finished_channel_id"]))
+                if channel is None:
+                    continue
+                try:
+                    msg = await channel.fetch_message(int(row["finished_message_id"]))
+                except discord.NotFound:
+                    try:
+                        async with self.bot.signal_db.db.get_connection() as conn:
+                            await conn.execute(
+                                "UPDATE signals "
+                                "SET finished_message_id = NULL, finished_channel_id = NULL "
+                                "WHERE id = $1",
+                                int(signal_id),
+                            )
+                    except Exception:
+                        pass
+                    continue
+
+                self.signal_finished_messages[signal_id] = msg
+                self.track_alert_message(msg.id, signal_id)
+                recovered += 1
+            except Exception as e:
+                logger.warning(
+                    f"Could not recover finished embed for signal {signal_id}: {e}"
+                )
+
+        if recovered:
+            logger.info(f"Re-registered {recovered} finished-channel embed(s) for reply lookup")
+
     async def _hydrate_signal(self, signal: Dict) -> None:
         signal_id = signal["signal_id"]
         status = signal.get("status")
@@ -916,6 +1052,20 @@ class AlertSystem:
             except Exception as e:
                 logger.warning(
                     f"Could not delete finished-channel embed for signal {signal_id}: {e}"
+                )
+
+        if self.bot and self.bot.signal_db:
+            try:
+                async with self.bot.signal_db.db.get_connection() as conn:
+                    await conn.execute(
+                        "UPDATE signals "
+                        "SET finished_message_id = NULL, finished_channel_id = NULL "
+                        "WHERE id = $1",
+                        int(signal_id),
+                    )
+            except Exception as e:
+                logger.warning(
+                    f"Could not clear persisted finished IDs for signal {signal_id}: {e}"
                 )
 
         limits = await self._fetch_limits(signal)

@@ -486,6 +486,20 @@ class MessageHandler:
                                 self.alert_system.signal_finished_messages[sig_id] = (
                                     cancel_embed_msg
                                 )
+                                try:
+                                    async with self.signal_db.db.get_connection() as conn:
+                                        await conn.execute(
+                                            "UPDATE signals "
+                                            "SET finished_message_id = $1, finished_channel_id = $2 "
+                                            "WHERE id = $3",
+                                            int(cancel_embed_msg.id),
+                                            int(finished_channel.id),
+                                            int(sig_id),
+                                        )
+                                except Exception as _pe:
+                                    logger.warning(
+                                        f"Could not persist finished embed IDs for signal {sig_id}: {_pe}"
+                                    )
                                 logger.info(
                                     f"Sent direct cancellation embed to finished-signals "
                                     f"for signal {sig_id} (no prior alert embed)"
