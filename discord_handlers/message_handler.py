@@ -15,6 +15,9 @@ from utils.logger import get_logger
 
 logger = get_logger("message_handler")
 
+# Auto-delete delay for transient bot replies in monitored / alert channels.
+_REPLY_DELETE_AFTER = 15.0
+
 
 class MessageHandler:
     """Handles all message-related events for signal processing"""
@@ -33,6 +36,12 @@ class MessageHandler:
     async def _safe_remove_reaction(self, message: discord.Message, emoji: str) -> None:
         try:
             await message.remove_reaction(emoji, self.bot.user)
+        except Exception:
+            pass
+
+    async def _safe_delete(self, message: discord.Message) -> None:
+        try:
+            await message.delete()
         except Exception:
             pass
 
@@ -125,14 +134,17 @@ class MessageHandler:
                             f"Message looks like alert but isn't tracked: {referenced.id}"
                         )
                         await message.reply(
-                            "❌ This alert is not tracked. It may have been sent before the bot restarted."
+                            "❌ This alert is not tracked. It may have been sent before the bot restarted.",
+                            delete_after=_REPLY_DELETE_AFTER,
                         )
+                        await self._safe_delete(message)
                 return
 
             signal = await self.signal_db.get_signal_with_limits(signal_id)
             if not signal:
                 logger.warning(f"No signal found with ID {signal_id}")
-                await message.reply("❌ Signal not found.")
+                await message.reply("❌ Signal not found.", delete_after=_REPLY_DELETE_AFTER)
+                await self._safe_delete(message)
                 return
 
             await self._handle_reply_command(message, referenced, signal, signal_id)
@@ -140,7 +152,11 @@ class MessageHandler:
         except Exception as e:
             logger.error(f"Error in alert management reply: {e}", exc_info=True)
             try:
-                await message.reply("❌ An error occurred processing your command.")
+                await message.reply(
+                    "❌ An error occurred processing your command.",
+                    delete_after=_REPLY_DELETE_AFTER,
+                )
+                await self._safe_delete(message)
             except Exception:
                 pass
 
@@ -165,7 +181,11 @@ class MessageHandler:
                 else False
             )
             if not (is_author or is_admin):
-                await message.reply("Only the signal sender or admins can manage this signal.")
+                await message.reply(
+                    "Only the signal sender or admins can manage this signal.",
+                    delete_after=_REPLY_DELETE_AFTER,
+                )
+                await self._safe_delete(message)
                 return
 
             await self._handle_reply_command(
@@ -308,8 +328,10 @@ class MessageHandler:
             elif command in ("reactivate", "reopen", "active"):
                 if signal["status"] not in ("cancelled", "stop_loss"):
                     await message.reply(
-                        f"❌ Signal is not reactivatable (current status: {signal['status']})"
+                        f"❌ Signal is not reactivatable (current status: {signal['status']})",
+                        delete_after=_REPLY_DELETE_AFTER,
                     )
+                    await self._safe_delete(message)
                     return
 
                 try:
@@ -330,8 +352,10 @@ class MessageHandler:
                         f"❌ Cannot reactivate — price has already moved past pending limits.\n"
                         f"Current price: **{cur}**\n"
                         f"**Limits past:**\n{limit_lines}\n\n"
-                        f"An admin can use `!setstatus {signal_id} active --force` to override."
+                        f"An admin can use `!setstatus {signal_id} active --force` to override.",
+                        delete_after=_REPLY_DELETE_AFTER,
                     )
+                    await self._safe_delete(message)
                     return
 
                 from core.parser import parse_signal
@@ -371,22 +395,33 @@ class MessageHandler:
 
             else:
                 await message.reply(
-                    "❓ Unknown command. Valid commands: `cancel`, `profit`, `tp`, `breakeven`, `be`, `sl`, `stop`, `reactivate`"
+                    "❓ Unknown command. Valid commands: `cancel`, `profit`, `tp`, `breakeven`, `be`, `sl`, `stop`, `reactivate`",
+                    delete_after=_REPLY_DELETE_AFTER,
                 )
+                await self._safe_delete(message)
                 return
 
         except asyncio.TimeoutError:
             logger.error(f"Operation timed out for command: {command}")
-            await message.reply(f"❌ {command.title()} operation timed out. Please try again.")
+            await message.reply(
+                f"❌ {command.title()} operation timed out. Please try again.",
+                delete_after=_REPLY_DELETE_AFTER,
+            )
+            await self._safe_delete(message)
             return
         except Exception as e:
             logger.error(f"Error processing command '{command}': {e}", exc_info=True)
-            await message.reply(f"❌ Error processing {command} command.")
+            await message.reply(
+                f"❌ Error processing {command} command.",
+                delete_after=_REPLY_DELETE_AFTER,
+            )
+            await self._safe_delete(message)
             return
 
         if not (success and action_taken):
-            await message.reply("❌ Failed to process command.")
+            await message.reply("❌ Failed to process command.", delete_after=_REPLY_DELETE_AFTER)
             logger.warning(f"Failed to process command '{command}' for signal {signal_id}")
+            await self._safe_delete(message)
             return
 
         # Update reactions on referenced message
@@ -478,10 +513,7 @@ class MessageHandler:
             await self._react_to_original_signal(signal, action_taken)
 
         # Delete user reply to reduce clutter
-        try:
-            await message.delete()
-        except Exception:
-            pass
+        await self._safe_delete(message)
 
         # Update the persistent embed and send a ping
         if self.alert_system:
