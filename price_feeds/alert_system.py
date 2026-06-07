@@ -576,8 +576,9 @@ class AlertSystem:
     async def recover_finished_embeds(self) -> None:
         """
         Re-register finished-channel embeds at startup so reply commands against
-        them (e.g. `reactivate`) work after a restart. Only signals closed in the
-        recent past are recovered, to keep the in-memory tracking bounded.
+        them (e.g. `reactivate`) work after a restart. Uses ``PartialMessage`` —
+        no Discord API calls, just local channel-cache lookups, so startup cost
+        is O(N) regardless of how many signals are recovered.
         """
         if not self.bot or not self.bot.signal_db:
             return
@@ -603,32 +604,19 @@ class AlertSystem:
         recovered = 0
         for row in rows:
             signal_id = row["id"]
+            channel = self.bot.get_channel(int(row["finished_channel_id"]))
+            if channel is None:
+                continue
             try:
-                channel = self.bot.get_channel(int(row["finished_channel_id"]))
-                if channel is None:
-                    continue
-                try:
-                    msg = await channel.fetch_message(int(row["finished_message_id"]))
-                except discord.NotFound:
-                    try:
-                        async with self.bot.signal_db.db.get_connection() as conn:
-                            await conn.execute(
-                                "UPDATE signals "
-                                "SET finished_message_id = NULL, finished_channel_id = NULL "
-                                "WHERE id = $1",
-                                int(signal_id),
-                            )
-                    except Exception:
-                        pass
-                    continue
-
-                self.signal_finished_messages[signal_id] = msg
-                self.track_alert_message(msg.id, signal_id)
-                recovered += 1
+                partial = channel.get_partial_message(int(row["finished_message_id"]))
             except Exception as e:
                 logger.warning(
-                    f"Could not recover finished embed for signal {signal_id}: {e}"
+                    f"Could not build partial message for signal {signal_id}: {e}"
                 )
+                continue
+            self.signal_finished_messages[signal_id] = partial
+            self.track_alert_message(partial.id, signal_id)
+            recovered += 1
 
         if recovered:
             logger.info(f"Re-registered {recovered} finished-channel embed(s) for reply lookup")

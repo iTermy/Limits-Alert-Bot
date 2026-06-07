@@ -69,6 +69,8 @@ class SignalData(BaseModel):
     alert_message_id: Optional[int] = None
     alert_channel_id: Optional[int] = None
     ping_message_id: Optional[int] = None
+    finished_message_id: Optional[int] = None
+    finished_channel_id: Optional[int] = None
     created_at: Optional[datetime] = None
     updated_at: Optional[datetime] = None
 
