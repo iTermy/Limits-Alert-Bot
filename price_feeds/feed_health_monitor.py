@@ -95,7 +95,7 @@ class FeedHealthMonitor:
         self.last_seen: Dict[str, Dict[str, datetime]] = defaultdict(dict)
 
         # Track feed status
-        self.feed_status: Dict[str, str] = {}  # 'healthy', 'degraded', 'down'
+        self.feed_status: Dict[str, str] = {}  # 'healthy', 'down', 'idle'
         self.last_alert_time: Dict[str, datetime] = {}
         self.reconnect_attempts: Dict[str, int] = defaultdict(int)
         # Earliest stale-symbol last_update timestamp captured when the feed first
@@ -112,7 +112,6 @@ class FeedHealthMonitor:
             "reconnections_attempted": 0,
             "reconnections_successful": 0,
             "alerts_sent": 0,
-            "false_positives_avoided": 0,
         }
 
         # Timezone for market hours
@@ -251,10 +250,11 @@ class FeedHealthMonitor:
         # Determine feed health
         newest_seen = max(feed_symbols.values()) if feed_symbols else None
 
-        if not stale_symbols:
-            # All symbols healthy
-            if self.feed_status.get(feed_name) in ["degraded", "down"]:
-                # Feed recovered!
+        # The EX bot blocks placement on any feed marked "down", so we only mark a
+        # feed down when every subscribed symbol has stalled. One unrelated quiet
+        # symbol must not poison every other signal on the feed.
+        if len(stale_symbols) < len(feed_symbols):
+            if self.feed_status.get(feed_name) == "down":
                 await self._handle_feed_recovery(feed_name)
 
             self.feed_status[feed_name] = "healthy"
@@ -262,19 +262,7 @@ class FeedHealthMonitor:
             self.first_stale_time.pop(feed_name, None)
             await self._write_feed_health(feed_name, "healthy", 0, newest_seen)
 
-        elif len(stale_symbols) < len(feed_symbols) * 0.5:
-            # Less than 50% stale - degraded
-            if self.feed_status.get(feed_name) != "degraded":
-                self.feed_status[feed_name] = "degraded"
-                logger.warning(
-                    f"{feed_name} feed degraded: {len(stale_symbols)}/{len(feed_symbols)} symbols stale"
-                )
-                self.stats["false_positives_avoided"] += 1  # Might be temporary
-            max_stale_secs = int(max(s["time_since"].total_seconds() for s in stale_symbols))
-            await self._write_feed_health(feed_name, "degraded", max_stale_secs, newest_seen)
-
         else:
-            # 50%+ stale - feed is down
             if self.feed_status.get(feed_name) != "down":
                 self.stats["stale_detections"] += 1
                 # Capture the earliest last_update among stale symbols as the
@@ -587,7 +575,6 @@ class FeedHealthMonitor:
         for feed_name, details in stats["feed_details"].items():
             status_emoji = {
                 "healthy": "✅",
-                "degraded": "⚠️",
                 "down": "❌",
                 "idle": "⏸️",
                 "unknown": "❓",

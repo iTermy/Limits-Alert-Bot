@@ -314,7 +314,7 @@ Daily aggregates per instrument (total, profitable, breakeven, stop_loss, cancel
 `symbol TEXT PK`, bid, ask, feed, updated_at. `ic_bid DOUBLE PRECISION` / `ic_ask DOUBLE PRECISION` (nullable) — ICMarkets prices written at the same flush as the OANDA/Binance row so the EX offset calculator sees both prices from the same timestamp (no inter-fetch drift). Written every 5 s by `LivePriceWriter`.
 
 ### feed_health
-`feed TEXT PRIMARY KEY` (`icmarkets` / `oanda` / `binance` / `exness`), `status TEXT` (`idle` / `healthy` / `degraded` / `down`), `stale_seconds INTEGER`, `last_seen TIMESTAMPTZ`, `updated_at TIMESTAMPTZ`. Upserted by `FeedHealthMonitor._write_feed_health()` on every status transition. Read by the EX bot each cycle to skip placement on stale feeds.
+`feed TEXT PRIMARY KEY` (`icmarkets` / `oanda` / `binance` / `exness`), `status TEXT` (`idle` / `healthy` / `down`), `stale_seconds INTEGER`, `last_seen TIMESTAMPTZ`, `updated_at TIMESTAMPTZ`. Upserted by `FeedHealthMonitor._write_feed_health()` on every status transition. Read by the EX bot each cycle to skip placement on stale feeds. `down` only fires when **every** subscribed symbol on a feed has stalled — a single quiet symbol no longer poisons unrelated signals.
 
 ### bot_mode_status
 Singleton row (id=1, enforced by CHECK). `news_mode BOOLEAN`, `spread_hour BOOLEAN`. Updated in real-time by streaming_monitor on spread-hour state transitions.
