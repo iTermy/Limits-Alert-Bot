@@ -127,11 +127,7 @@ class LicenseCog(BaseCog):
         await member.send(
             f"✅ **License activated!**\n\n"
             f"**Your license key:**\n```\n{license_key}\n```\n\n"
-            f"**Setup:**\n"
-            f"1. Open `config.json` in your Auto-Limits-Adder folder.\n"
-            f'2. Add your key to the "license" section:\n'
-            f'```json\n"license": {{\n    "key": "{license_key}"\n}}\n```\n'
-            f"3. Save and start the bot — it validates on startup.\n\n"
+            f"Paste this key into the settings page of the Auto-Limits-Adder execution bot.\n\n"
             f"⚠️ Keep this key private. It is locked to MT5 account `{mt5_account}`."
         )
 
@@ -221,8 +217,7 @@ class LicenseCog(BaseCog):
             await member.send(
                 f"🔑 An admin has issued you an **Auto-Limits-Adder** license key.\n\n"
                 f"**Your license key:**\n```\n{license_key}\n```\n\n"
-                f'Add this to `config.json` under the `"license"` section:\n'
-                f'```json\n"license": {{\n    "key": "{license_key}"\n}}\n```\n'
+                f"Paste this key into the settings page of the Auto-Limits-Adder execution bot.\n\n"
                 f"This key is locked to MT5 account `{mt5_account}`. Keep it private."
             )
         except discord.Forbidden:
