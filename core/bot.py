@@ -236,7 +236,9 @@ class TradingBot(commands.Bot):
     async def on_command_error(self, ctx: commands.Context, error: commands.CommandError):
         """Handle command errors"""
         if isinstance(error, commands.CommandNotFound):
-            return  # Ignore unknown commands
+            if self.command_channel_id and ctx.channel.id == self.command_channel_id:
+                await ctx.send("❌ Unknown command. Use `!help` to see available commands.")
+            return
 
         if isinstance(error, commands.MissingPermissions):
             await ctx.send("❌ You don't have permission to use this command.")
