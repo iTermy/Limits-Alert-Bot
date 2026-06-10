@@ -452,6 +452,7 @@ class AlertSystem:
         """
         ping_msg = self.signal_ping_messages.pop(signal_id, None)
         if ping_msg:
+            self.alert_messages.pop(str(ping_msg.id), None)
             try:
                 await ping_msg.delete()
             except discord.NotFound:
@@ -555,6 +556,7 @@ class AlertSystem:
                     try:
                         ping_msg = await channel.fetch_message(int(row["ping_message_id"]))
                         self.signal_ping_messages[signal_id] = ping_msg
+                        self.track_alert_message(ping_msg.id, signal_id)
                     except discord.NotFound:
                         pass
                     except Exception as e:
@@ -640,6 +642,7 @@ class AlertSystem:
                         try:
                             ping_msg = await channel.fetch_message(int(ping_message_id))
                             self.signal_ping_messages[signal_id] = ping_msg
+                            self.track_alert_message(ping_msg.id, signal_id)
                         except discord.NotFound:
                             pass
                         except Exception as e:
@@ -800,6 +803,7 @@ class AlertSystem:
         if ping_text and embed_msg:
             old_ping = self.signal_ping_messages.get(signal_id)
             if old_ping:
+                self.alert_messages.pop(str(old_ping.id), None)
                 try:
                     await old_ping.delete()
                 except discord.NotFound:
@@ -810,6 +814,7 @@ class AlertSystem:
             try:
                 new_ping = await embed_msg.reply(f"{self.role_mention} {ping_text}")
                 self.signal_ping_messages[signal_id] = new_ping
+                self.track_alert_message(new_ping.id, signal_id)
                 await self._persist_ping_message(signal_id, new_ping.id)
             except Exception as e:
                 logger.error(f"Failed to send ping for signal {signal_id}: {e}")
