@@ -3,7 +3,7 @@
     "daily-trade-setup": "1402971916339380244",
     "scalps": "1402971964343320636",
     "forex-exotics": "1402972132920787077",
-    "gold-trades": "1402972164256432220",
+    "gold-swings": "1402972164256432220",
     "oil-trades": "1402972289993019463",
     "indices-trades": "1402972348193177745",
     "crypto-trades": "1402972426014429254",
@@ -42,9 +42,9 @@
     "forex-exotics": {
       "default_expiry": "week_end"
     },
-    "gold-trades": {
+    "gold-swings": {
       "default_instrument": "XAUUSD",
-      "default_expiry": "week_end"
+      "default_expiry": "month_end"
     },
     "gold-pa-signals": {
       "default_instrument": "XAUUSD",

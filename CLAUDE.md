@@ -482,7 +482,7 @@ Spread-hour and news cancels **edit the persistent embed** when one already exis
 
 ### Signal type taxonomy
 `signals.type` ∈ `{standard, scalp, swing, toll, pa, 1-1}`. Determined by `pattern_parsers.get_signal_type(text, channel_name)`:
-- `CHANNEL_TYPE_MAP` wins first: `scalps` → scalp; `swing-trades` → swing; `gold-tolls-map`/`general-tolls`/`oil-tolls` → toll; `gold-pa-signals`/`price-action-trades` → pa; `gold-1-1-rr` → 1-1.
+- `CHANNEL_TYPE_MAP` wins first: `scalps` → scalp; `swing-trades`/`gold-swings` → swing; `gold-tolls-map`/`general-tolls`/`oil-tolls` → toll; `gold-pa-signals`/`price-action-trades` → pa; `gold-1-1-rr` → 1-1.
 - Otherwise body keyword: `\bswing\b` → swing, `\bscalp\b` → scalp.
 - Default: standard.
 

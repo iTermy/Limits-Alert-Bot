@@ -131,6 +131,7 @@ SHORT_KEYWORDS = ["short", "sell"]
 CHANNEL_TYPE_MAP = {
     "scalps": "scalp",
     "swing-trades": "swing",
+    "gold-swings": "swing",
     "gold-tolls-map": "toll",
     "general-tolls": "toll",
     "oil-tolls": "toll",

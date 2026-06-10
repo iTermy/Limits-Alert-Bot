@@ -15,6 +15,7 @@ logger = get_logger("database.schema")
 _CHANNEL_NAME_TO_TYPE = {
     "scalps": "scalp",
     "swing-trades": "swing",
+    "gold-swings": "swing",
     "gold-tolls-map": "toll",
     "general-tolls": "toll",
     "oil-tolls": "toll",
