@@ -392,6 +392,16 @@ class MessageHandler:
                     action_taken = "reactivated"
                     if self.bot.services.nm_monitor:
                         self.bot.services.nm_monitor.mark_immune(signal_id)
+                    # Re-add to the streaming monitor immediately. Without this
+                    # the signal is invisible to price ticks until the 30s
+                    # periodic refresh picks it back up.
+                    if self.bot.services.monitor:
+                        await self.bot.services.monitor.refresh_signal_in_memory(signal_id)
+                    # Re-fetch so the embed update + downstream code see the
+                    # post-reactivation state (status active/hit, limits pending).
+                    refreshed = await self.signal_db.get_signal_with_limits(signal_id)
+                    if refreshed:
+                        signal = refreshed
 
             else:
                 await message.reply(
@@ -798,6 +808,10 @@ class MessageHandler:
                     if self.bot.services.nm_monitor:
                         self.bot.services.nm_monitor.mark_immune(existing["id"])
 
+                    monitor = self.bot.services.monitor
+                    if monitor:
+                        await monitor.refresh_signal_in_memory(existing["id"])
+
                     await after.clear_reactions()
                     await after.add_reaction("✅")
                     await after.add_reaction("♻️")
@@ -836,6 +850,10 @@ class MessageHandler:
                 await after.add_reaction("✅")
                 await after.add_reaction("📝")
                 self.logger.info(f"Signal updated after edit: {after.id}")
+
+                monitor = self.bot.services.monitor
+                if monitor:
+                    await monitor.refresh_signal_in_memory(existing["id"])
 
                 if self.alert_system:
                     try:

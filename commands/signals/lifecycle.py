@@ -46,7 +46,7 @@ class LifecycleCog(BaseCog):
 
         # Parse arguments
         instrument = None
-        sort_method = "recent"  # default
+        sort_method = "distance"  # default
 
         if args:
             args_parts = args.split()
@@ -426,6 +426,9 @@ class LifecycleCog(BaseCog):
                 try:
                     if self.services.monitor:
                         self.services.nm_monitor.mark_immune(signal_id)
+                        # Pull the signal back into active_signals so price ticks
+                        # see it immediately rather than waiting for the 30s refresh.
+                        await self.services.monitor.refresh_signal_in_memory(signal_id)
                 except Exception as _ne:
                     logger.warning(f"Could not mark signal {signal_id} NM-immune: {_ne}")
         else:

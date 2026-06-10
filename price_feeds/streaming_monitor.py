@@ -802,6 +802,91 @@ class StreamingPriceMonitor:
             return
         self._apply_status_to_signal(signal, new_status)
 
+    async def refresh_signal_in_memory(self, signal_id: int) -> bool:
+        """Re-fetch a signal from the DB and bring all in-memory caches in
+        lockstep with the new row.
+
+        The periodic refresh only diffs which signal_ids exist — it does not
+        re-pull updated limits/SL/instrument for a signal_id that stays
+        present. After a message edit or a reactivation the active_signals
+        entry and the alert system's live-embed entry would otherwise serve
+        stale data until restart (price ticks evaluate old limits; the 15s
+        live refresh re-renders the embed with the pre-update dict).
+
+        Returns True if anything was updated.
+        """
+        try:
+            fresh = await self.signal_db.get_signal_with_limits(signal_id)
+        except Exception as e:
+            logger.warning(f"refresh_signal_in_memory: DB fetch failed for {signal_id}: {e}")
+            return False
+        if fresh is None:
+            return False
+
+        guild_id = self.bot.guilds[0].id if self.bot.guilds else None
+        if guild_id is not None:
+            fresh["guild_id"] = guild_id
+        self._annotate_asset_class(fresh)
+
+        new_symbol = fresh.get("instrument")
+        new_status = fresh.get("status")
+
+        old = self.active_signals.get(signal_id)
+        old_symbol = old.get("instrument") if old else None
+
+        # Drop the old symbol bucket entry when the instrument changed or the
+        # signal is no longer trackable. Unsubscribing the feed is fine here:
+        # if the new symbol is the same we'll re-add and re-subscribe below.
+        if old_symbol and (old_symbol != new_symbol or new_status not in ("active", "hit")):
+            bucket = self.symbol_to_signals.get(old_symbol)
+            if bucket:
+                try:
+                    bucket.remove(signal_id)
+                except ValueError:
+                    pass
+                if not bucket:
+                    del self.symbol_to_signals[old_symbol]
+                    try:
+                        await self.stream_manager.unsubscribe_symbol(old_symbol)
+                    except Exception as e:
+                        logger.warning(
+                            f"refresh_signal_in_memory: unsubscribe {old_symbol} failed: {e}"
+                        )
+
+        if new_status in ("active", "hit"):
+            self.active_signals[signal_id] = fresh
+            if new_symbol:
+                needs_subscribe = new_symbol not in self.symbol_to_signals
+                bucket = self.symbol_to_signals.setdefault(new_symbol, [])
+                if signal_id not in bucket:
+                    bucket.append(signal_id)
+                if needs_subscribe:
+                    try:
+                        await self.stream_manager.bulk_subscribe([new_symbol])
+                    except Exception as e:
+                        logger.warning(
+                            f"refresh_signal_in_memory: subscribe {new_symbol} failed: {e}"
+                        )
+            if new_status == "hit":
+                try:
+                    await self.tp_monitor.refresh_hit_limits(signal_id)
+                except Exception as e:
+                    logger.warning(
+                        f"refresh_signal_in_memory: TP refresh for {signal_id} failed: {e}"
+                    )
+        else:
+            self.active_signals.pop(signal_id, None)
+
+        # The live-update loop reads signal["limits"] from this stored dict to
+        # avoid hitting the DB every 15 s. After an edit/reactivate that dict
+        # is stale, so swap it for the fresh fetch.
+        if self.alert_system is not None:
+            entry = self.alert_system._live_embeds.get(signal_id)
+            if entry:
+                entry["signal"] = fresh
+
+        return True
+
     async def _process_stop_loss_hit(self, signal: Dict):
         """Process stop loss hit"""
         try:

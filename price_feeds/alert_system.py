@@ -1058,6 +1058,15 @@ class AlertSystem:
 
         limits = await self._fetch_limits(signal)
 
+        # Caller often passes a signal dict fetched pre-reactivation, so its
+        # attached limits still carry status='cancelled'. The live-update loop
+        # would then render the embed with strikethrough/❌ rows on the next
+        # 15s tick. Sync the dict before _register_live_embed stores it.
+        try:
+            signal["limits"] = limits
+        except Exception:
+            pass
+
         hit_count = sum(1 for l in limits if l.get("status") == "hit" or l.get("hit_alert_sent"))
         event = "hit" if hit_count > 0 else "approaching"
 
