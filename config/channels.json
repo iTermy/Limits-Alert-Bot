@@ -92,6 +92,9 @@
     "gold-1-1-rr": {
       "default_instrument": "XAUUSD",
       "default_expiry": "week_end"
+    },
+    "lc-calls": {
+      "default_expiry": "week_end"
     }
   }
 }
