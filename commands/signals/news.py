@@ -80,14 +80,11 @@ class NewsCog(BaseCog):
                             logger.warning(
                                 f"Failed to send news ended alert for event #{event.event_id}: {e}"
                             )
-                # Update DB: news mode is off unless a scheduled event is still active
-                still_active = any(e.is_active() for e in news_manager.get_all_events())
-                try:
-                    await self.bot.db.set_news_mode(still_active)
-                except Exception as e:
-                    logger.warning(f"Failed to update news_mode in DB after !news off: {e}")
             else:
                 await ctx.send("ℹ️ No open-ended news windows were active.")
+            # Reconcile news_mode regardless: it must end up FALSE unless a
+            # scheduled window is still active, even if nothing was removed.
+            await news_manager.reconcile_news_mode()
             return
 
         # ── !news now / !news on [category] [N minutes] ───────────────────
@@ -310,11 +307,13 @@ class NewsCog(BaseCog):
                         logger.warning(
                             f"Failed to send news ended alert for event #{ev.event_id}: {e}"
                         )
+            await news_manager.reconcile_news_mode()
             await ctx.send(f"🗑️ Removed all {count} scheduled news event(s).")
             return
 
         removed_event = news_manager.remove_event(event_id)
         if removed_event:
+            await news_manager.reconcile_news_mode()
             await ctx.send(f"✅ News event #{event_id} removed.")
             if alert_system and event_id in alert_system._news_activation_messages:
                 try:

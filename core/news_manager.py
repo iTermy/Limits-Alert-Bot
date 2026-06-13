@@ -273,10 +273,30 @@ class NewsManager:
         self._next_id: int = 1
         self._cleanup_task: Optional[asyncio.Task] = None
         self._db = None  # Set by bot after DB initialisation via set_db()
+        # Last news_mode value written to bot_mode_status; None until first reconcile
+        self._last_news_mode: Optional[bool] = None
 
     def set_db(self, db) -> None:
         """Attach the DatabaseManager so mode-status flags can be persisted."""
         self._db = db
+
+    async def reconcile_news_mode(self) -> None:
+        """Sync bot_mode_status.news_mode to whether any window is active now.
+
+        Writes only when the value changes. Safe to call from any path
+        (commands, the cleanup loop) — it is the single source of truth for the
+        flag and does not rely on per-restart edge-detection state.
+        """
+        if self._db is None:
+            return
+        any_active = any(e.is_active() for e in self._events)
+        if any_active == self._last_news_mode:
+            return
+        try:
+            await self._db.set_news_mode(any_active)
+            self._last_news_mode = any_active
+        except Exception as e:
+            logger.error(f"Failed to reconcile news_mode in DB: {e}")
 
     # ------------------------------------------------------------------
     # Persistence
@@ -469,13 +489,6 @@ class NewsManager:
                             except Exception as e:
                                 logger.error(f"Failed to send news activated alert: {e}")
 
-                            # Update DB: news mode is now active
-                            if self._db is not None:
-                                try:
-                                    await self._db.set_news_mode(True)
-                                except Exception as e:
-                                    logger.error(f"Failed to set news_mode=True in DB: {e}")
-
                         # Fire ended alert for windows that just expired
                         if (
                             event.event_id not in ended_ids
@@ -488,17 +501,11 @@ class NewsManager:
                             except Exception as e:
                                 logger.error(f"Failed to send news ended alert: {e}")
 
-                            # Update DB: check if any other events are still active
-                            if self._db is not None:
-                                try:
-                                    still_active = any(
-                                        e.is_active(now)
-                                        for e in self._events
-                                        if e.event_id != event.event_id
-                                    )
-                                    await self._db.set_news_mode(still_active)
-                                except Exception as e:
-                                    logger.error(f"Failed to set news_mode in DB: {e}")
+                # Reconcile bot_mode_status.news_mode against the actual set of
+                # active windows. This self-heals every path (commands, expiry,
+                # restarts) since it does not depend on the local edge sets above,
+                # which reset to empty on each restart.
+                await self.reconcile_news_mode()
 
                 # Purge expired events (every ~5 min: 10 × 30 s)
                 if not hasattr(_run, "_purge_counter"):
