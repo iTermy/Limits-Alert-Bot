@@ -1139,6 +1139,36 @@ class AlertSystem:
             logger.error(f"reactivate_embed failed for signal {signal_id}: {e}", exc_info=True)
         return False
 
+    async def _reattach_persisted_embed(self, signal: Dict) -> bool:
+        """Re-attach a signal's persistent embed from its DB-persisted reference.
+
+        Used when the in-memory ``signal_messages`` entry was lost on restart but
+        the embed still exists in Discord (e.g. hydration hit a transient fetch
+        error). Mirrors the success path of ``_hydrate_signal``. Returns True if
+        the embed was re-attached and registered for live updates.
+        """
+        signal_id = signal["signal_id"]
+        alert_message_id = signal.get("alert_message_id")
+        if not alert_message_id:
+            return False
+        channel = self._resolve_channel(signal, signal.get("alert_channel_id"))
+        if not channel:
+            return False
+        try:
+            embed_msg = await channel.fetch_message(int(alert_message_id))
+        except discord.NotFound:
+            return False
+        except Exception as e:
+            logger.warning(f"Could not re-attach embed for signal {signal_id}: {e}")
+            return False
+
+        self.signal_messages[signal_id] = embed_msg
+        self.track_alert_message(embed_msg.id, signal_id)
+        event = "hit" if signal.get("status") == "hit" else "approaching"
+        self._register_live_embed(signal, event, spread_buffer_enabled=True)
+        logger.info(f"Re-attached persistent embed for signal {signal_id} (msg={embed_msg.id})")
+        return True
+
     async def update_signal_message(
         self,
         signal: Dict,
@@ -1155,7 +1185,9 @@ class AlertSystem:
         if event == "reactivated":
             return await self.reactivate_embed(signal=signal, ping_text=ping_text)
 
-        if signal_id not in self.signal_messages:
+        if signal_id not in self.signal_messages and not await self._reattach_persisted_embed(
+            signal
+        ):
             logger.debug(
                 f"update_signal_message: signal {signal_id} has no persistent message yet — skipping"
             )
@@ -1187,6 +1219,12 @@ class AlertSystem:
                 ping_text=ping_text,
                 delete_after_minutes=END_STATE_DELETE_MINUTES if end_state else None,
             )
+            # Keep the live-refresh loop's cached dict in lockstep with the limits
+            # just rendered, so the next 15s cycle does not re-render stale limits
+            # after an edit. Terminal events are already unregistered above.
+            if signal_id in self._live_embeds:
+                signal["limits"] = limits
+                self._live_embeds[signal_id]["signal"] = signal
             if end_state:
                 self._archive_manager.schedule_end_state_move(signal_id, event=event)
             return True
