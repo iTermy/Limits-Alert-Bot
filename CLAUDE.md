@@ -332,7 +332,7 @@ Daily aggregates per instrument (total, profitable, breakeven, stop_loss, cancel
 `feed TEXT PRIMARY KEY` (`icmarkets` / `oanda` / `binance` / `exness`), `status TEXT` (`idle` / `healthy` / `down`), `stale_seconds INTEGER`, `last_seen TIMESTAMPTZ`, `updated_at TIMESTAMPTZ`. Upserted by `FeedHealthMonitor._write_feed_health()` on every status transition. Read by the EX bot each cycle to skip placement on stale feeds. `down` only fires when **every** subscribed symbol on a feed has stalled — a single quiet symbol no longer poisons unrelated signals.
 
 ### bot_mode_status
-Singleton row (id=1, enforced by CHECK). `news_mode BOOLEAN`, `spread_hour BOOLEAN`. Updated in real-time by streaming_monitor on spread-hour state transitions.
+Singleton row (id=1, enforced by CHECK). `news_mode TEXT` (nullable — comma-separated active news categories like `EUR, GOLD` or `ALL`; NULL when no news), `spread_hour BOOLEAN`. `news_mode` is reconciled by `NewsManager.reconcile_news_mode()` (startup, every news command, and the 30 s cleanup loop); `spread_hour` is updated in real-time by streaming_monitor on spread-hour state transitions. Consumers (including the EX bot) read `news_mode` for truthiness, so it is NULL — never the string `'FALSE'` — when inactive.
 
 ### licenses / license_allowances
 License management for the Signal Subscriber role. Managed via `!activate`, `!grantkey`, `!revoke`, `!licenses` commands. Not involved in signal processing.

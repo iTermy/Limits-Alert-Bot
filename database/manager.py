@@ -3,7 +3,7 @@ DatabaseManager — integrates connection and core signal/limit operations
 """
 
 from datetime import datetime
-from typing import Any, Dict, List
+from typing import Any, Dict, List, Optional
 
 import pytz
 
@@ -346,8 +346,13 @@ class DatabaseManager(BaseConnectionManager):
 
     # === Bot Mode Status ===
 
-    async def set_news_mode(self, active: bool) -> None:
-        """Update the news_mode flag in bot_mode_status."""
+    async def set_news_mode(self, value: Optional[str]) -> None:
+        """Set bot_mode_status.news_mode to a category list (e.g. 'EUR, GOLD') or NULL.
+
+        A non-empty string marks news as active; NULL marks it inactive. Consumers
+        (including the EX bot) read this column for truthiness, so callers must pass
+        None — never the literal string 'FALSE' — when no news is active.
+        """
         try:
             await self.execute(
                 """
@@ -355,9 +360,9 @@ class DatabaseManager(BaseConnectionManager):
                 SET news_mode = $1, updated_at = NOW()
                 WHERE id = 1
                 """,
-                (active,),
+                (value,),
             )
-            logger.debug(f"bot_mode_status.news_mode → {active}")
+            logger.debug(f"bot_mode_status.news_mode → {value!r}")
         except Exception as e:
             logger.error(f"Failed to update news_mode status: {e}", exc_info=True)
 
@@ -384,7 +389,7 @@ class DatabaseManager(BaseConnectionManager):
             )
             if row:
                 return dict(row)
-            return {"news_mode": False, "spread_hour": False, "updated_at": None}
+            return {"news_mode": None, "spread_hour": False, "updated_at": None}
         except Exception as e:
             logger.error(f"Failed to fetch bot_mode_status: {e}", exc_info=True)
-            return {"news_mode": False, "spread_hour": False, "updated_at": None}
+            return {"news_mode": None, "spread_hour": False, "updated_at": None}

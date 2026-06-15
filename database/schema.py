@@ -210,12 +210,13 @@ async def _run_migrations(conn):
             CONSTRAINT licenses_status_check  CHECK (status IN ('active', 'revoked'))
         );
         """,
-        # Bot mode status — single-row table tracking whether news mode / spread hour is active.
-        # Updated in real-time as modes activate/deactivate.
+        # Bot mode status — single-row table tracking active modes. news_mode is a
+        # TEXT list of categories currently under news (e.g. 'EUR, GOLD' or 'ALL'),
+        # NULL when no news. spread_hour stays a boolean. Updated in real-time.
         """
         CREATE TABLE IF NOT EXISTS bot_mode_status (
             id           INT PRIMARY KEY DEFAULT 1,
-            news_mode    BOOLEAN NOT NULL DEFAULT FALSE,
+            news_mode    TEXT,
             spread_hour  BOOLEAN NOT NULL DEFAULT FALSE,
             updated_at   TIMESTAMPTZ NOT NULL DEFAULT NOW(),
             CONSTRAINT bot_mode_status_singleton CHECK (id = 1)
@@ -223,9 +224,23 @@ async def _run_migrations(conn):
         """,
         # Seed the single status row if it does not exist yet
         """
-        INSERT INTO bot_mode_status (id, news_mode, spread_hour)
-        VALUES (1, FALSE, FALSE)
+        INSERT INTO bot_mode_status (id, spread_hour)
+        VALUES (1, FALSE)
         ON CONFLICT (id) DO NOTHING;
+        """,
+        # Migrate existing installs: news_mode BOOLEAN → TEXT. Consumers (incl. the
+        # EX bot) read truthiness, so a non-empty string = active and NULL = inactive.
+        """
+        DO $$
+        BEGIN
+            IF (SELECT data_type FROM information_schema.columns
+                WHERE table_name = 'bot_mode_status' AND column_name = 'news_mode') = 'boolean' THEN
+                ALTER TABLE bot_mode_status ALTER COLUMN news_mode DROP DEFAULT;
+                ALTER TABLE bot_mode_status ALTER COLUMN news_mode TYPE TEXT
+                    USING (CASE WHEN news_mode THEN 'ALL' ELSE NULL END);
+                ALTER TABLE bot_mode_status ALTER COLUMN news_mode DROP NOT NULL;
+            END IF;
+        END $$;
         """,
         # Add revoked_reason to licenses table (stage18 — auto-revoke tracking)
         """

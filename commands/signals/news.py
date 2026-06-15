@@ -11,7 +11,6 @@ import pytz
 from discord.ext import commands
 
 from core.news_manager import (
-    EST,
     NewsManager,
     parse_news_command,
 )
@@ -166,7 +165,9 @@ class NewsCog(BaseCog):
 
         # ── Normal scheduled news ──────────────────────────────────────────
         try:
-            category, news_time_utc, window_minutes, tz_label = parse_news_command(args)
+            category, news_time_utc, window_minutes, tz_label, auto_advanced = parse_news_command(
+                args
+            )
         except ValueError as e:
             await ctx.send(f"❌ {e}")
             return
@@ -180,28 +181,15 @@ class NewsCog(BaseCog):
             display_tz=tz_label,
         )
 
-        news_est = news_time_utc.astimezone(EST)
-        start_est = event.start_time.astimezone(EST)
-        end_est = event.end_time.astimezone(EST)
-
-        # Detect whether the time was auto-advanced to tomorrow
-        today_in_tz = _dt.datetime.now(pytz.utc).astimezone(EST).date()
-        scheduled_date = news_est.date()
-        auto_advanced = scheduled_date > today_in_tz
-
-        # Also show in original timezone if not EST
-        # Use Discord timestamps so each viewer sees their local time
+        # Use Discord timestamps so each viewer sees their local time. The :f
+        # (short date + time) format always shows the date so a future-dated
+        # event is never mistaken for one scheduled today.
         news_ts = int(news_time_utc.timestamp())
         start_ts = int(event.start_time.timestamp())
         end_ts = int(event.end_time.timestamp())
-        tz_display = f"<t:{news_ts}:t>"
+        tz_display = f"<t:{news_ts}:f>"
         if tz_label not in ("EST", "EDT", "ET"):
             tz_display += f" ({tz_label})"
-
-        # Add date hint when auto-advanced (Discord timestamps show the date but an
-        # explicit note makes it clear this slipped to tomorrow)
-        if auto_advanced:
-            tz_display += f" — <t:{news_ts}:D>"
 
         embed = discord.Embed(
             title="📰 News Mode Scheduled",
@@ -216,7 +204,7 @@ class NewsCog(BaseCog):
         embed.add_field(name="Window", value=f"±{window_minutes} min", inline=True)
         embed.add_field(
             name="Active From → To",
-            value=f"<t:{start_ts}:t> → <t:{end_ts}:t>",
+            value=f"<t:{start_ts}:f> → <t:{end_ts}:f>",
             inline=False,
         )
         if auto_advanced:

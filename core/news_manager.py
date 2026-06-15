@@ -273,28 +273,51 @@ class NewsManager:
         self._next_id: int = 1
         self._cleanup_task: Optional[asyncio.Task] = None
         self._db = None  # Set by bot after DB initialisation via set_db()
-        # Last news_mode value written to bot_mode_status; None until first reconcile
-        self._last_news_mode: Optional[bool] = None
+        # Last news_mode value written to bot_mode_status. _news_mode_synced is
+        # False until the first successful write, forcing one reconcile at startup
+        # to correct any stale value a crash may have left behind.
+        self._last_news_mode: Optional[str] = None
+        self._news_mode_synced: bool = False
 
     def set_db(self, db) -> None:
         """Attach the DatabaseManager so mode-status flags can be persisted."""
         self._db = db
 
-    async def reconcile_news_mode(self) -> None:
-        """Sync bot_mode_status.news_mode to whether any window is active now.
+    def _compute_news_mode_value(self) -> Optional[str]:
+        """Return the news_mode column value for the currently-active events.
 
-        Writes only when the value changes. Safe to call from any path
-        (commands, the cleanup loop) — it is the single source of truth for the
-        flag and does not rely on per-restart edge-detection state.
+        'ALL' if any active event covers all symbols; otherwise a comma-separated
+        list of the active category labels (e.g. 'EUR, GOLD'); None when nothing
+        is active.
+        """
+        labels: List[str] = []
+        for event in self._events:
+            if not event.is_active():
+                continue
+            label = event.category.upper()
+            if label == "ALL":
+                return "ALL"
+            if label not in labels:
+                labels.append(label)
+        return ", ".join(labels) if labels else None
+
+    async def reconcile_news_mode(self) -> None:
+        """Sync bot_mode_status.news_mode to the active news categories.
+
+        Writes only when the value changes (the first call after startup always
+        writes, so a stale value left by a crash is corrected). Safe to call from
+        any path (commands, the cleanup loop) — it is the single source of truth
+        for the flag and does not rely on per-restart edge-detection state.
         """
         if self._db is None:
             return
-        any_active = any(e.is_active() for e in self._events)
-        if any_active == self._last_news_mode:
+        value = self._compute_news_mode_value()
+        if self._news_mode_synced and value == self._last_news_mode:
             return
         try:
-            await self._db.set_news_mode(any_active)
-            self._last_news_mode = any_active
+            await self._db.set_news_mode(value)
+            self._last_news_mode = value
+            self._news_mode_synced = True
         except Exception as e:
             logger.error(f"Failed to reconcile news_mode in DB: {e}")
 
@@ -537,10 +560,13 @@ class NewsManager:
 # ---------------------------------------------------------------------------
 
 
-def parse_news_command(args_str: str) -> Tuple[str, datetime, int, str]:
+def parse_news_command(args_str: str) -> Tuple[str, datetime, int, str, bool]:
     """
     Parse the argument string from !news and return
-    (category, news_time_utc, window_minutes, display_tz_label).
+    (category, news_time_utc, window_minutes, display_tz_label, auto_advanced).
+
+    auto_advanced is True only when no explicit date was given and the time had
+    already passed today, so it was rolled to tomorrow.
 
     Supported format:
         <category> <time> [window_minutes] [tz:<timezone>] [date:<date>]
@@ -611,18 +637,20 @@ def parse_news_command(args_str: str) -> Tuple[str, datetime, int, str]:
     # If no explicit date was given and the window has already fully passed,
     # auto-advance to the same time tomorrow.  This prevents silently scheduling
     # an event that is already expired (which would never appear in !newslist).
+    auto_advanced = False
     if date_override is None:
         now_utc = datetime.now(pytz.utc)
         window_end_utc = news_time_utc + timedelta(minutes=window_minutes)
         if window_end_utc < now_utc:
             news_time_local = news_time_local + timedelta(days=1)
             news_time_utc = news_time_local.astimezone(pytz.utc)
+            auto_advanced = True
             logger.info(
                 f"News time {time_str} has already passed today — "
                 f"auto-advanced to tomorrow: {news_time_utc.isoformat()}"
             )
 
-    return category, news_time_utc, window_minutes, tz_label
+    return category, news_time_utc, window_minutes, tz_label, auto_advanced
 
 
 def _parse_date(date_str: str, tz_zone: pytz.BaseTzInfo) -> datetime:
