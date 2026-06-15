@@ -236,9 +236,11 @@ async def _run_migrations(conn):
             IF (SELECT data_type FROM information_schema.columns
                 WHERE table_name = 'bot_mode_status' AND column_name = 'news_mode') = 'boolean' THEN
                 ALTER TABLE bot_mode_status ALTER COLUMN news_mode DROP DEFAULT;
+                -- Drop NOT NULL before the type change: the USING clause turns a
+                -- FALSE boolean into NULL, which the still-active constraint rejects.
+                ALTER TABLE bot_mode_status ALTER COLUMN news_mode DROP NOT NULL;
                 ALTER TABLE bot_mode_status ALTER COLUMN news_mode TYPE TEXT
                     USING (CASE WHEN news_mode THEN 'ALL' ELSE NULL END);
-                ALTER TABLE bot_mode_status ALTER COLUMN news_mode DROP NOT NULL;
             END IF;
         END $$;
         """,
