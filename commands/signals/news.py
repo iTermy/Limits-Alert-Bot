@@ -14,6 +14,7 @@ from core.news_manager import (
     NewsManager,
     parse_news_command,
 )
+from utils.config_loader import load_settings, save_settings
 from utils.logger import get_logger
 
 from .._base import BaseCog
@@ -55,6 +56,7 @@ class NewsCog(BaseCog):
             await ctx.send(
                 "❌ Usage: `!news <category> <time> [window] [tz:<tz>] [date:<date>]`\n"
                 "Or: `!news now [category]` / `!news on [category]` / `!news off`\n"
+                "Auto-fetch: `!news refresh` (pull ForexFactory now) / `!news auto on|off`\n"
                 "Categories: any currency code (USD, EUR, GBP…), `gold`, `oil`, `btc`, `crypto`, or `all`\n"
                 "Timezone tag example: `tz:UTC`  `tz:EST`  `tz:London`  `tz:CET`\n"
                 "Date tag example: `date:2025-06-15`  `date:06/15`  `date:tomorrow`"
@@ -63,6 +65,39 @@ class NewsCog(BaseCog):
 
         tokens = args.strip().split()
         subcommand = tokens[0].lower()
+
+        # ── !news refresh ──────────────────────────────────────────────────
+        if subcommand == "refresh":
+            fetcher = self.services.news_fetcher
+            if fetcher is None:
+                await ctx.send("❌ News auto-fetch is not available.")
+                return
+            added, removed = await fetcher.refresh_now()
+            await ctx.send(
+                f"🔄 ForexFactory refresh complete: **+{added}** added / **−{removed}** removed."
+            )
+            return
+
+        # ── !news auto on|off ──────────────────────────────────────────────
+        if subcommand == "auto":
+            if not self.is_admin(ctx.author):
+                await ctx.send("❌ Admin only.")
+                return
+            mode = tokens[1].lower() if len(tokens) >= 2 else ""
+            if mode not in ("on", "off"):
+                await ctx.send("❌ Usage: `!news auto on` / `!news auto off`")
+                return
+            settings = load_settings()
+            settings.news_autofetch.enabled = mode == "on"
+            save_settings(settings)
+            fetcher = self.services.news_fetcher
+            if fetcher is not None:
+                if mode == "on":
+                    fetcher.start()
+                else:
+                    fetcher.stop()
+            await ctx.send(f"✅ News auto-fetch turned **{mode.upper()}**.")
+            return
 
         # ── !news off ──────────────────────────────────────────────────────
         if subcommand == "off":
@@ -237,6 +272,8 @@ class NewsCog(BaseCog):
         now = _dt.datetime.now(pytz.utc)
 
         for event in events:
+            src_tag = " `[auto]`" if event.source == "forexfactory" else ""
+            title_line = f"\n*{event.title}*" if event.title else ""
             if event.is_now_mode:
                 activated_ts = int(event.news_time.timestamp())
                 status = "🔴 **ACTIVE NOW**"
@@ -246,8 +283,10 @@ class NewsCog(BaseCog):
                 else:
                     window_str = f"From <t:{activated_ts}:t> — Until `!news off`"
                 embed.add_field(
-                    name=f"#{event.event_id}  {event.category.upper()}",
-                    value=(f"{status}\nWindow: {window_str}\nSet by: {event.created_by}"),
+                    name=f"#{event.event_id}  {event.category.upper()}{src_tag}",
+                    value=(
+                        f"{status}{title_line}\nWindow: {window_str}\nSet by: {event.created_by}"
+                    ),
                     inline=False,
                 )
             else:
@@ -258,9 +297,10 @@ class NewsCog(BaseCog):
                     f" ({event.display_tz})" if event.display_tz not in ("EST", "EDT", "ET") else ""
                 )
                 embed.add_field(
-                    name=f"#{event.event_id}  {event.category.upper()}{tz_note}",
+                    name=f"#{event.event_id}  {event.category.upper()}{tz_note}{src_tag}",
                     value=(
-                        f"{status}\nWindow: <t:{s_ts}:t> → <t:{e_ts}:t>\nSet by: {event.created_by}"
+                        f"{status}{title_line}\nWindow: <t:{s_ts}:t> → <t:{e_ts}:t>"
+                        f"\nSet by: {event.created_by}"
                     ),
                     inline=False,
                 )

@@ -14,6 +14,19 @@ class SpreadBufferConfig(BaseModel):
     fallback_spread: float = 0.0
 
 
+class NewsAutofetchConfig(BaseModel):
+    """Auto-population of news windows from the ForexFactory weekly feed."""
+
+    enabled: bool = True
+    impact_levels: list[str] = Field(default_factory=lambda: ["High"])
+    window_minutes: int = 10
+    refresh_hours: int = 6
+    currencies: list[str] = Field(
+        default_factory=lambda: ["USD", "EUR", "GBP", "JPY", "AUD", "NZD", "CAD", "CHF"]
+    )
+    usd_affects_gold: bool = True
+
+
 class BotSettings(BaseModel):
     admin_ids: list[int] = Field(default_factory=list)
     health_alert_admin_id: Optional[int] = None
@@ -22,6 +35,7 @@ class BotSettings(BaseModel):
     license_role_name: str = "Signal Subscriber"
     gold_tolls_sl_offset: float = 5.0
     us_market_holidays: list[str] = Field(default_factory=list)
+    news_autofetch: NewsAutofetchConfig = Field(default_factory=NewsAutofetchConfig)
 
     model_config = {"extra": "allow"}
 

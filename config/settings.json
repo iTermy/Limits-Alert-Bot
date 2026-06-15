@@ -12,6 +12,25 @@
   },
   "license_role_name": "Signal Subscriber",
   "gold_tolls_sl_offset": 5.0,
+  "news_autofetch": {
+    "enabled": true,
+    "impact_levels": [
+      "High"
+    ],
+    "window_minutes": 10,
+    "refresh_hours": 6,
+    "currencies": [
+      "USD",
+      "EUR",
+      "GBP",
+      "JPY",
+      "AUD",
+      "NZD",
+      "CAD",
+      "CHF"
+    ],
+    "usd_affects_gold": true
+  },
   "us_market_holidays": [
     "2025-01-01",
     "2025-01-20",

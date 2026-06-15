@@ -10,6 +10,7 @@ from __future__ import annotations
 from typing import TYPE_CHECKING, Optional
 
 if TYPE_CHECKING:
+    from core.news_fetcher import NewsFetcher
     from database import DatabaseManager
     from database.signal_ops import SignalDatabase
     from price_feeds.alert_config import AlertDistanceConfig
@@ -36,3 +37,4 @@ class ServiceRegistry:
         self.alert_config: Optional[AlertDistanceConfig] = None
         self.signal_db: Optional[SignalDatabase] = None
         self.db: Optional[DatabaseManager] = None
+        self.news_fetcher: Optional[NewsFetcher] = None

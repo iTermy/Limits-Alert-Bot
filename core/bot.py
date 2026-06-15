@@ -50,6 +50,7 @@ class TradingBot(commands.Bot):
         self.expiry_manager = None
         self.monitor = None
         self.channel_cleaner = None
+        self.news_fetcher = None
 
         # Flat service registry — populated during setup_hook, injected into cogs/handlers
         self.services = ServiceRegistry()
@@ -337,6 +338,17 @@ class TradingBot(commands.Bot):
             # Re-start the news manager cleanup task now that we have an alert system
             self.news_manager.start_cleanup_task(alert_system=alert_system)
 
+            # Start the ForexFactory news fetcher (auto-populates news windows).
+            # Started here so newly-added windows get activation alerts via the
+            # cleanup loop above.
+            from core.news_fetcher import NewsFetcher
+
+            self.news_fetcher = NewsFetcher(self.news_manager, bot_settings.news_autofetch)
+            self.services.news_fetcher = self.news_fetcher
+            if bot_settings.news_autofetch.enabled:
+                self.news_fetcher.start()
+                self.logger.info("ForexFactory news fetcher started")
+
             self.logger.info("Price monitoring system initialized and started")
             self.logger.info(
                 f"Alert system created with {len(alert_system.alert_messages)} tracked messages"
@@ -399,6 +411,9 @@ class TradingBot(commands.Bot):
 
         if self.news_manager:
             self.news_manager.stop_cleanup_task()
+
+        if self.news_fetcher:
+            self.news_fetcher.stop()
 
         if self.monitor:
             await self.monitor.stop()

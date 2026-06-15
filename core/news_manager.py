@@ -153,6 +153,12 @@ class NewsEvent:
     display_tz: str = field(default="EST")
     # Optional explicit end time for timed "now" events (e.g. !news now gold 5 minutes)
     end_time_override: Optional[datetime] = field(default=None)
+    # "manual" (set via !news) or "forexfactory" (auto-fetched from the calendar feed)
+    source: str = field(default="manual")
+    # Stable dedup key for auto-fetched events; None for manual events
+    external_id: Optional[str] = field(default=None)
+    # Human-readable event name for auto-fetched events (e.g. "Federal Funds Rate")
+    title: Optional[str] = field(default=None)
 
     @property
     def start_time(self) -> datetime:
@@ -213,14 +219,16 @@ class NewsEvent:
         return cat in instr
 
     def __str__(self) -> str:
+        tag = " [auto]" if self.source == "forexfactory" else ""
+        name = f" {self.title}" if self.title else ""
         if self.is_now_mode:
             return (
-                f"[#{self.event_id}] {self.category.upper()} news @ "
+                f"[#{self.event_id}]{tag} {self.category.upper()}{name} news @ "
                 f"NOW (open-ended, manual off required)"
             )
         news_est = self.news_time.astimezone(EST)
         return (
-            f"[#{self.event_id}] {self.category.upper()} news @ "
+            f"[#{self.event_id}]{tag} {self.category.upper()}{name} news @ "
             f"{news_est.strftime('%I:%M %p')} EST "
             f"(±{self.window_minutes} min)"
         )
@@ -326,7 +334,12 @@ class NewsManager:
     # ------------------------------------------------------------------
 
     def _save(self) -> None:
-        """Serialise all non-expired events to disk."""
+        """Serialise non-expired manual events to disk.
+
+        Auto-fetched (ForexFactory) events are deliberately not persisted — they
+        are re-fetched from the feed on every startup, so saving them would only
+        risk restoring stale windows.
+        """
         now = datetime.now(pytz.utc)
         data = {
             "next_id": self._next_id,
@@ -345,7 +358,8 @@ class NewsManager:
                     else None,
                 }
                 for e in self._events
-                if not e.is_expired(now)  # don't bother saving already-expired events
+                # Skip already-expired events and auto-fetched ones (re-fetched on boot)
+                if not e.is_expired(now) and e.source == "manual"
             ],
         }
         try:
@@ -398,6 +412,9 @@ class NewsManager:
                     is_now_mode=item.get("is_now_mode", False),
                     display_tz=item.get("display_tz", "EST"),
                     end_time_override=_load_optional_dt(item.get("end_time_override")),
+                    source=item.get("source", "manual"),
+                    external_id=item.get("external_id"),
+                    title=item.get("title"),
                 )
 
                 if not event.is_expired(now):
@@ -425,6 +442,9 @@ class NewsManager:
         is_now_mode: bool = False,
         display_tz: str = "EST",
         end_time_override: Optional[datetime] = None,
+        source: str = "manual",
+        external_id: Optional[str] = None,
+        title: Optional[str] = None,
     ) -> NewsEvent:
         """Register a new news event, persist to disk, and return it."""
         event = NewsEvent(
@@ -436,6 +456,9 @@ class NewsManager:
             is_now_mode=is_now_mode,
             display_tz=display_tz,
             end_time_override=end_time_override,
+            source=source,
+            external_id=external_id,
+            title=title,
         )
         self._next_id += 1
         self._events.append(event)
@@ -484,6 +507,44 @@ class NewsManager:
         if removed:
             logger.debug(f"Purged {removed} expired news event(s)")
             self._save()
+
+    def sync_forexfactory_events(self, events: List[NewsEvent]) -> Tuple[int, int]:
+        """Reconcile the set of auto-fetched events against a fresh feed pull.
+
+        Adds any incoming event whose external_id is not already tracked, and
+        removes auto events that have dropped out of the feed unless their window
+        is currently active (so a live window is never yanked mid-event). Manual
+        events are left untouched. Returns (added, removed) counts.
+        """
+        now = datetime.now(pytz.utc)
+        existing_auto = {
+            e.external_id: e for e in self._events if e.source == "forexfactory" and e.external_id
+        }
+        incoming_ids = {e.external_id for e in events if e.external_id}
+
+        added = 0
+        for event in events:
+            if event.external_id in existing_auto:
+                continue
+            event.event_id = self._next_id
+            self._next_id += 1
+            self._events.append(event)
+            added += 1
+
+        before = len(self._events)
+        self._events = [
+            e
+            for e in self._events
+            if e.source != "forexfactory"
+            or e.external_id in incoming_ids
+            or e.is_active(now)
+        ]
+        removed = before - len(self._events)
+
+        if added or removed:
+            self._save()
+            logger.info(f"ForexFactory sync: +{added} / -{removed} auto news event(s)")
+        return added, removed
 
     def start_cleanup_task(self, alert_system=None):
         """
