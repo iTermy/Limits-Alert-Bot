@@ -300,7 +300,7 @@ class NewsCog(BaseCog):
                 embed.add_field(
                     name=f"#{event.event_id}  {event.category.upper()}{gold_tag}{tz_note}{src_tag}",
                     value=(
-                        f"{status}{title_line}\nWindow: <t:{s_ts}:t> → <t:{e_ts}:t>"
+                        f"{status}{title_line}\nWindow: <t:{s_ts}:f> → <t:{e_ts}:t>"
                         f"\nSet by: {event.created_by}"
                     ),
                     inline=False,
