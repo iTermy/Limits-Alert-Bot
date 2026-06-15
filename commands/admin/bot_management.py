@@ -282,12 +282,10 @@ class BotManagementCog(BaseCog):
         embed = discord.Embed(title="Bot Health", color=0x00FF00)
 
         # Uptime + latency
-        uptime_str = "—"
-        if hasattr(self.bot, "start_time"):
-            delta = now - self.bot.start_time
-            h = int(delta.total_seconds() // 3600)
-            m = int((delta.total_seconds() % 3600) // 60)
-            uptime_str = f"{h}h {m}m"
+        delta = now - self.bot.start_time
+        h = int(delta.total_seconds() // 3600)
+        m = int((delta.total_seconds() % 3600) // 60)
+        uptime_str = f"{h}h {m}m"
         embed.add_field(
             name="System",
             value=f"Uptime: {uptime_str}  ·  Latency: {round(self.bot.latency * 1000)}ms",

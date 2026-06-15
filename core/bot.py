@@ -2,6 +2,8 @@
 Trading Bot Core - Main bot class
 """
 
+import traceback
+from datetime import datetime
 from typing import Optional, Set
 
 import discord
@@ -37,6 +39,7 @@ class TradingBot(commands.Bot):
 
         # Initialize attributes
         self.logger = get_logger("bot")
+        self.start_time = datetime.utcnow()
         self.channels_config = None
         self.monitored_channels: Set[int] = set()
         self.allowed_channel_ids: Set[int] = set()
@@ -74,8 +77,11 @@ class TradingBot(commands.Bot):
         self.services.db = db
         self.services.signal_db = self.signal_db
 
-        # Give NewsManager a reference to the DB so it can persist mode status
+        # Give NewsManager a reference to the DB so it can persist mode status,
+        # then sync the news_mode column to the events loaded from disk (corrects
+        # any stale value a previous crash may have left behind).
         self.news_manager.set_db(db)
+        await self.news_manager.reconcile_news_mode()
 
         # Load channel configuration SECOND
         await self.load_config()
@@ -374,7 +380,13 @@ class TradingBot(commands.Bot):
 
     async def close(self):
         """Cleanup when bot shuts down"""
-        self.logger.info("Shutting down bot...")
+        # Log the call stack so we can see what triggered the shutdown — the
+        # trigger (e.g. a fatal gateway close inside discord.py) is otherwise
+        # invisible, leaving only feed teardown errors in the log.
+        self.logger.warning(
+            "Shutting down bot... close() called from:\n%s",
+            "".join(traceback.format_stack()),
+        )
 
         # Cancel background tasks
         self.heartbeat.cancel()
