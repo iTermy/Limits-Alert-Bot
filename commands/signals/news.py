@@ -273,6 +273,7 @@ class NewsCog(BaseCog):
 
         for event in events:
             src_tag = " `[auto]`" if event.source == "forexfactory" else ""
+            gold_tag = " +GOLD" if getattr(event, "affects_gold", False) else ""
             title_line = f"\n*{event.title}*" if event.title else ""
             if event.is_now_mode:
                 activated_ts = int(event.news_time.timestamp())
@@ -283,7 +284,7 @@ class NewsCog(BaseCog):
                 else:
                     window_str = f"From <t:{activated_ts}:t> — Until `!news off`"
                 embed.add_field(
-                    name=f"#{event.event_id}  {event.category.upper()}{src_tag}",
+                    name=f"#{event.event_id}  {event.category.upper()}{gold_tag}{src_tag}",
                     value=(
                         f"{status}{title_line}\nWindow: {window_str}\nSet by: {event.created_by}"
                     ),
@@ -297,7 +298,7 @@ class NewsCog(BaseCog):
                     f" ({event.display_tz})" if event.display_tz not in ("EST", "EDT", "ET") else ""
                 )
                 embed.add_field(
-                    name=f"#{event.event_id}  {event.category.upper()}{tz_note}{src_tag}",
+                    name=f"#{event.event_id}  {event.category.upper()}{gold_tag}{tz_note}{src_tag}",
                     value=(
                         f"{status}{title_line}\nWindow: <t:{s_ts}:t> → <t:{e_ts}:t>"
                         f"\nSet by: {event.created_by}"

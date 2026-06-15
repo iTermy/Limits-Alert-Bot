@@ -159,6 +159,9 @@ class NewsEvent:
     external_id: Optional[str] = field(default=None)
     # Human-readable event name for auto-fetched events (e.g. "Federal Funds Rate")
     title: Optional[str] = field(default=None)
+    # When True the event also pauses gold (XAUUSD) — used for USD news, which
+    # ForexFactory files dollar releases (FOMC/NFP/CPI) that move gold hard.
+    affects_gold: bool = field(default=False)
 
     @property
     def start_time(self) -> datetime:
@@ -192,6 +195,10 @@ class NewsEvent:
 
         # "all" catches everything
         if cat == "ALL":
+            return True
+
+        # USD news optionally also pauses gold (FOMC/NFP/CPI move gold hard)
+        if self.affects_gold and instr in {"XAUUSD", "GOLD"}:
             return True
 
         # Named categories (gold, oil, btc, …)

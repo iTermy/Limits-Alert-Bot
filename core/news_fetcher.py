@@ -63,12 +63,19 @@ class NewsFetcher:
             return None
 
     def _parse(self, raw: list) -> List[NewsEvent]:
-        """Filter and convert feed entries into NewsEvent objects."""
+        """Filter feed entries and merge releases that share a currency and time.
+
+        ForexFactory often lists several releases at the same moment (e.g. the
+        three FOMC items at 2:00 PM, or BOJ rate + statement). They cover the same
+        window for pausing purposes, so they collapse into one event whose title
+        joins the individual names. USD events also flag gold (FOMC/NFP/CPI move it).
+        """
         impacts = {lvl.lower() for lvl in self._config.impact_levels}
         currencies = {c.upper() for c in self._config.currencies}
         window = self._config.window_minutes
 
-        events: List[NewsEvent] = []
+        # Group by (currency, exact time) → list of titles, preserving feed order
+        groups: dict[tuple[str, datetime], List[str]] = {}
         for item in raw:
             country = str(item.get("country", "")).upper()
             impact = str(item.get("impact", "")).lower()
@@ -84,7 +91,12 @@ class NewsFetcher:
                 logger.debug(f"Skipping event with unparseable date: {date_str!r}")
                 continue
 
-            external_id = f"{country}|{title}|{news_time.isoformat()}"
+            titles = groups.setdefault((country, news_time), [])
+            if title and title not in titles:
+                titles.append(title)
+
+        events: List[NewsEvent] = []
+        for (country, news_time), titles in groups.items():
             events.append(
                 NewsEvent(
                     category=country,
@@ -93,26 +105,11 @@ class NewsFetcher:
                     created_by="forexfactory",
                     display_tz="EST",
                     source="forexfactory",
-                    external_id=external_id,
-                    title=title,
+                    external_id=f"{country}|{news_time.isoformat()}",
+                    title=" / ".join(titles),
+                    affects_gold=self._config.usd_affects_gold and country == "USD",
                 )
             )
-
-            # Gold-moving releases are filed under USD on ForexFactory; pair each
-            # high-impact USD window with a GOLD window so XAUUSD signals pause too.
-            if self._config.usd_affects_gold and country == "USD":
-                events.append(
-                    NewsEvent(
-                        category="GOLD",
-                        news_time=news_time,
-                        window_minutes=window,
-                        created_by="forexfactory",
-                        display_tz="EST",
-                        source="forexfactory",
-                        external_id=f"{external_id}|GOLD",
-                        title=title,
-                    )
-                )
 
         return events
 
