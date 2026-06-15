@@ -564,6 +564,12 @@ class StreamingPriceMonitor:
                 await self._cancel_signal_during_guard(signal, current_price, "spread_hour")
                 return
 
+            # Mark the limit hit in memory first so the embed edit and any
+            # concurrent live-refresh render identical state — the embed updates
+            # in the same beat as the ping instead of briefly reverting.
+            limit["status"] = "hit"
+            limit["hit_alert_sent"] = True
+
             await self.alert_system.send_limit_hit_alert(
                 signal,
                 limit,
@@ -574,7 +580,6 @@ class StreamingPriceMonitor:
             await react_to_original_signal(self.bot, signal, "🎯")
             await self._process_limit_hit(signal, limit, current_price)
 
-            limit["hit_alert_sent"] = True
             self.stats["limits_hit"] += 1
 
         # Check if approaching (first limit only)

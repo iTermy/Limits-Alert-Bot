@@ -711,9 +711,18 @@ class AlertSystem:
 
     async def _fetch_limits(self, signal: Dict) -> List[Dict]:
         """
-        Get ALL limits for a signal (hit + pending) from the DB.
-        Falls back to signal dict only if the DB call fails.
+        Get ALL limits for a signal (hit + pending).
+
+        Prefers the in-memory limits the streaming monitor keeps in lockstep with
+        the DB (same source the 15 s live-refresh uses) so an event edit doesn't
+        pay a Postgres round-trip before updating the embed. Falls back to the DB
+        only when the signal carries no limits (e.g. command paths that pass a
+        bare signal).
         """
+        in_memory = signal.get("limits") or signal.get("pending_limits")
+        if in_memory:
+            return in_memory
+
         if self.bot and self.bot.signal_db:
             try:
                 full = await self.bot.signal_db.get_signal_with_limits(signal["signal_id"])
@@ -723,7 +732,7 @@ class AlertSystem:
                 logger.warning(
                     f"Could not fetch limits from DB for signal {signal['signal_id']}: {e}"
                 )
-        return signal.get("limits") or signal.get("pending_limits") or []
+        return []
 
     # ── Core: get/create/edit the persistent message ─────────────────────────
 
