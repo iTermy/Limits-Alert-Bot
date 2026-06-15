@@ -17,6 +17,10 @@ from .._base import BaseCog
 
 logger = get_logger("report_commands")
 
+# Channels whose signals are reported under the "Legends" section, regardless
+# of signal type. Matched by their channels.json monitored-channel key.
+LEGENDS_CHANNEL_KEYS = {"legends-trades", "lc-calls"}
+
 
 class ReportsCog(BaseCog):
     """Trading report generation"""
@@ -130,12 +134,12 @@ class ReportsCog(BaseCog):
                 monitored_channels = {}
                 channels_data = {}
 
-            # Legends are still channel-driven (the Legends channel can host signals
-            # of any type), so collect its channel IDs from channels.json.
+            # Legends are still channel-driven (these channels can host signals
+            # of any type), so collect their channel IDs from channels.json.
             legends_channel_ids = {
                 str(channel_id)
                 for name, channel_id in monitored_channels.items()
-                if "legends" in name.lower()
+                if name in LEGENDS_CHANNEL_KEYS
             }
 
             # Partition into 5 groups: Legends wins by channel; the rest map by type.
