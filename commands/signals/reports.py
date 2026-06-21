@@ -42,20 +42,20 @@ class ReportsCog(BaseCog):
             return f"{sign}{magnitude} pips"
         return f"{sign}${magnitude}"
 
-    def _tp_distance_label(self, signal) -> str:
+    def _tp_distance_raw(self, signal):
         """
-        Profit distance measured to the hit limit furthest from the TP (lowest
-        hit limit for a long, highest for a short). For auto-TP closures the
-        distance runs from that limit to the recorded tp_price; for manual
-        profit it falls back to the configured auto-TP target for the symbol.
-        Returns "" if the signal has no hit limits.
+        Profit distance (native units) measured to the hit limit furthest from
+        the TP (lowest hit limit for a long, highest for a short). For auto-TP
+        closures the distance runs from that limit to the recorded tp_price; for
+        manual profit it falls back to the configured auto-TP target for the
+        symbol. Returns None if the signal has no hit limits.
         """
         hit = [
             l for l in signal.get("limits", [])
             if l.get("status") == "hit" or l.get("hit_alert_sent")
         ]
         if not hit:
-            return ""
+            return None
         direction = signal["direction"].lower()
         instrument = signal["instrument"]
         signal_type = (signal.get("type") or "standard").lower()
@@ -65,30 +65,43 @@ class ReportsCog(BaseCog):
         closed_reason = (signal.get("closed_reason") or "").lower()
         tp_price = signal.get("tp_price")
         if closed_reason == "automatic" and tp_price is not None:
-            raw = self.tp_config.calculate_pnl(
+            return self.tp_config.calculate_pnl(
                 instrument, direction, entry, float(tp_price), signal_type=signal_type
             )
-        else:
-            # Manual profit (or missing tp_price): use the configured auto-TP
-            # target distance from the furthest hit limit.
-            raw = self.tp_config.get_tp_value(instrument, signal_type=signal_type)
-        return self._format_distance(instrument, signal_type, raw)
+        # Manual profit (or missing tp_price): use the configured auto-TP
+        # target distance from the furthest hit limit.
+        return self.tp_config.get_tp_value(instrument, signal_type=signal_type)
 
-    def _sl_distance_label(self, signal) -> str:
+    def _tp_distance_label(self, signal) -> str:
+        """Signed profit-distance label, or "" if the signal has no hit limits."""
+        raw = self._tp_distance_raw(signal)
+        if raw is None:
+            return ""
+        signal_type = (signal.get("type") or "standard").lower()
+        return self._format_distance(signal["instrument"], signal_type, raw)
+
+    def _sl_distance_raw(self, signal):
         """
-        Loss distance from the first limit to the stop loss. Returns "" if the
-        signal has no stop loss or no limits.
+        Loss distance (native units, negative) from the first limit to the stop
+        loss. Returns None if the signal has no stop loss or no limits.
         """
         sl = signal.get("stop_loss")
         limits = signal.get("limits", [])
         if not sl or not limits:
-            return ""
+            return None
         direction = signal["direction"].lower()
         first = sorted(limits, key=lambda l: l.get("sequence_number", 0))[0]["price_level"]
         signal_type = (signal.get("type") or "standard").lower()
-        raw = self.tp_config.calculate_pnl(
+        return self.tp_config.calculate_pnl(
             signal["instrument"], direction, first, float(sl), signal_type=signal_type
         )
+
+    def _sl_distance_label(self, signal) -> str:
+        """Signed loss-distance label, or "" if the signal has no stop loss."""
+        raw = self._sl_distance_raw(signal)
+        if raw is None:
+            return ""
+        signal_type = (signal.get("type") or "standard").lower()
         return self._format_distance(signal["instrument"], signal_type, raw)
 
     @commands.command(name="report", description="Generate trading report")
@@ -318,12 +331,12 @@ class ReportsCog(BaseCog):
                 else:
                     limit_display = "N/A"
                 tp_label = self._tp_distance_label(signal)
-                symbol_seg = (
-                    f"{signal['instrument']} | {tp_label}" if tp_label else signal["instrument"]
-                )
+                direction_seg = signal["direction"].upper()
+                if tp_label:
+                    direction_seg = f"{direction_seg} | {tp_label}"
                 return (
-                    f"#{signal['signal_id']} | {symbol_seg} | "
-                    f"{limit_display} | {signal['direction'].upper()} 🟢"
+                    f"#{signal['signal_id']} | {signal['instrument']} | "
+                    f"{limit_display} | {direction_seg} 🟢"
                 )
 
             def sl_line(signal):
@@ -333,12 +346,12 @@ class ReportsCog(BaseCog):
                     else "N/A"
                 )
                 sl_label = self._sl_distance_label(signal)
-                symbol_seg = (
-                    f"{signal['instrument']} | {sl_label}" if sl_label else signal["instrument"]
-                )
+                direction_seg = signal["direction"].upper()
+                if sl_label:
+                    direction_seg = f"{direction_seg} | {sl_label}"
                 return (
-                    f"#{signal['signal_id']} | {symbol_seg} | "
-                    f"SL: {sl_value} | {signal['direction'].upper()} 🛑"
+                    f"#{signal['signal_id']} | {signal['instrument']} | "
+                    f"SL: {sl_value} | {direction_seg} 🛑"
                 )
 
             # Per-group trade detail sections (profit first, then SL)
@@ -354,6 +367,43 @@ class ReportsCog(BaseCog):
                         value=cap_field_value(lines),
                         inline=False,
                     )
+
+            # Cumulative gain: pips across forex, dollars across gold. Profit
+            # signals add their TP distance; stop losses subtract their SL
+            # distance. Other asset classes (indices, oil, crypto, stocks) are
+            # ignored.
+            forex_pips = 0.0
+            gold_dollars = 0.0
+            for stats in group_stats.values():
+                for signal in stats["profit"]:
+                    raw = self._tp_distance_raw(signal)
+                    if raw is None:
+                        continue
+                    asset_class = self.tp_config.determine_asset_class(signal["instrument"])
+                    if asset_class in ("forex", "forex_jpy"):
+                        forex_pips += raw
+                    elif asset_class == "metals":
+                        gold_dollars += raw
+                for signal in stats["sl"]:
+                    raw = self._sl_distance_raw(signal)
+                    if raw is None:
+                        continue
+                    asset_class = self.tp_config.determine_asset_class(signal["instrument"])
+                    if asset_class in ("forex", "forex_jpy"):
+                        forex_pips += raw
+                    elif asset_class == "metals":
+                        gold_dollars += raw
+
+            forex_sign = "+" if forex_pips >= 0 else "-"
+            gold_sign = "+" if gold_dollars >= 0 else "-"
+            embed.add_field(
+                name="Profit",
+                value=(
+                    f"Forex: {forex_sign}{abs(forex_pips):.1f} pips\n"
+                    f"Gold: {gold_sign}${abs(gold_dollars):.2f}"
+                ),
+                inline=False,
+            )
 
             # Add live proof link from profit_channel
             profit_channel_id = channels_data.get("profit_channel")
