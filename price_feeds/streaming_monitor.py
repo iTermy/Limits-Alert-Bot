@@ -454,6 +454,20 @@ class StreamingPriceMonitor:
         direction = signal["direction"].lower()
         current_price = price_data["ask"] if direction == "long" else price_data["bid"]
 
+        # An already-HIT signal sitting open when a news window opens is
+        # cancelled outright — swings are exempt (they ride news out).
+        if signal.get("status") == "hit" and signal.get("type") != "swing" and self.bot.news_manager:
+            news_event = self.bot.news_manager.is_news_active_for(signal["instrument"])
+            if news_event is not None:
+                logger.info(
+                    f"News mode: cancelling open HIT signal {signal['signal_id']} "
+                    f"({signal['instrument']}) — event: {news_event}"
+                )
+                await self._cancel_signal_during_guard(
+                    signal, current_price, "news", news_event
+                )
+                return
+
         for limit in signal.get("pending_limits", []):
             await self._check_limit(
                 signal, limit, current_price, direction, is_spread_hour, spread_buffer_enabled

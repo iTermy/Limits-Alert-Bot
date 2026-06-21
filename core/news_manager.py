@@ -164,6 +164,15 @@ class NewsEvent:
     affects_gold: bool = field(default=False)
 
     @property
+    def display_label(self) -> str:
+        """Human-readable label for alerts: 'USD — Federal Funds Rate' when a
+        title is known (auto-fetched events), otherwise just the category."""
+        cat = self.category.upper()
+        if self.title:
+            return f"{cat} — {self.title}"
+        return cat
+
+    @property
     def start_time(self) -> datetime:
         return self.news_time - timedelta(minutes=self.window_minutes)
 
@@ -211,6 +220,10 @@ class NewsEvent:
 
         # Forex currency code (USD, EUR, …)
         if cat in FOREX_CURRENCIES:
+            # US dollar releases also pause US equities and US indices.
+            if cat == "USD" and (_is_us_stock(instr) or _is_us_index(instr)):
+                return True
+
             # Match any 6-char forex pair that contains this currency on either side
             # but exclude metal/commodity pairs (XAU, XAG, XPT, XPD prefix)
             METAL_PREFIXES = {"XAU", "XAG", "XPT", "XPD", "BCO", "WTI"}
@@ -239,6 +252,33 @@ class NewsEvent:
             f"{news_est.strftime('%I:%M %p')} EST "
             f"(±{self.window_minutes} min)"
         )
+
+
+# US index identifiers (internal/feed symbol fragments). USD news pauses these
+# alongside US equities — high-impact dollar releases move US indices hardest.
+US_INDEX_KEYWORDS: Set[str] = {
+    "NAS100",
+    "US30",
+    "US500",
+    "SPX500",
+    "SPX",
+    "USTEC",
+    "US2000",
+    "NDX",
+    "DJI",
+    "DJ30",
+    "NASDAQ",
+}
+
+
+def _is_us_stock(symbol: str) -> bool:
+    """US equities are stored with a .NAS / .NYSE suffix."""
+    return symbol.endswith(".NAS") or symbol.endswith(".NYSE")
+
+
+def _is_us_index(symbol: str) -> bool:
+    """Match US index symbols while excluding non-US indices (DAX, JP225, …)."""
+    return any(tok in symbol for tok in US_INDEX_KEYWORDS)
 
 
 def _is_crypto(symbol: str) -> bool:

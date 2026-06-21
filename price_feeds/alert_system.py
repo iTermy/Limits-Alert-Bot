@@ -1315,7 +1315,7 @@ class AlertSystem:
                     signal=signal,
                     event="cancelled",
                     current_price=current_price,
-                    ping_text=f"📰 **{instrument}** {direction} — cancelled (news: {news_event.category.upper()})",
+                    ping_text=f"📰 **{instrument}** {direction} — cancelled (news: {news_event.display_label})",
                 )
                 self.stats["news_cancelled"] += 1
                 self.stats["total_alerts"] += 1
@@ -1329,11 +1329,16 @@ class AlertSystem:
             news_ts = int(news_event.news_time.timestamp())
             all_limits = signal.get("limits", signal.get("pending_limits", []))
             if all_limits:
+                # Limits may be LimitData, dicts, or bare floats. LimitData and
+                # dicts both support item access; bare floats are used as-is.
+                def _limit_price(l):
+                    return l if isinstance(l, (int, float)) else l["price_level"]
+
+                def _limit_seq(l):
+                    return 0 if isinstance(l, (int, float)) else l["sequence_number"]
+
                 limit_prices = "  |  ".join(
-                    _fmt(l["price_level"] if isinstance(l, dict) else l)
-                    for l in sorted(
-                        all_limits, key=lambda x: x["sequence_number"] if isinstance(x, dict) else 0
-                    )
+                    _fmt(_limit_price(l)) for l in sorted(all_limits, key=_limit_seq)
                 )
             else:
                 limit_prices = "—"
@@ -1346,7 +1351,7 @@ class AlertSystem:
                 title="📰 Signal Cancelled — News",
                 description=(
                     f"The following signal was cancelled due to news "
-                    f"({news_event.category.upper()} @ "
+                    f"({news_event.display_label} @ "
                     f"<t:{news_ts}:t>):\n\n"
                     f"{signal_summary}"
                 ),
@@ -1461,7 +1466,7 @@ class AlertSystem:
         embed = discord.Embed(
             title="📰 News Mode Active",
             description=(
-                f"News window activated for **{news_event.category.upper()}**\n{time_str}"
+                f"News window activated for **{news_event.display_label}**\n{time_str}"
             ),
             color=0x5865F2,
             timestamp=datetime.now(timezone.utc),
@@ -1493,7 +1498,7 @@ class AlertSystem:
         embed = discord.Embed(
             title="📰 News Mode Ended",
             description=(
-                f"News window for **{news_event.category.upper()}** has ended.\n"
+                f"News window for **{news_event.display_label}** has ended.\n"
                 f"**Ended at <t:{end_ts}:t>**"
             ),
             color=0x808080,
