@@ -284,14 +284,11 @@ class FeedHealthMonitor:
             logger.debug("Within startup grace period, skipping health checks")
             return
 
-        # Skip stale-feed alerts entirely on weekends (Saturday & Sunday).
-        # Forex, metals, and indices are closed from Friday 5 PM EST to Sunday 6 PM EST,
-        # so stale data is completely expected — no need to alert.
-        now_est = datetime.now(self.est)
-        if now_est.weekday() >= 5:  # 5 = Saturday, 6 = Sunday
-            logger.debug("Weekend — skipping feed health alerts (markets closed)")
-            return
-
+        # Stale-feed alerts during closed-market windows (weekends, the Friday
+        # 5 PM–Sunday 6 PM EST forex break, holidays, spread hour) are suppressed
+        # per-symbol by is_market_open() in _check_feed, so no blanket weekend
+        # skip is needed here — and skipping the whole check would also stop the
+        # feed_health table from being written while markets are open.
         stale_threshold = timedelta(seconds=STALE_THRESHOLD_SECONDS)
 
         # Check each feed
