@@ -128,8 +128,6 @@ async def initialize_database(db_manager):
                 bid        DOUBLE PRECISION NOT NULL,
                 ask        DOUBLE PRECISION NOT NULL,
                 feed       TEXT NOT NULL,
-                ic_bid     DOUBLE PRECISION,
-                ic_ask     DOUBLE PRECISION,
                 updated_at TIMESTAMPTZ NOT NULL DEFAULT NOW()
             )
         """)
@@ -260,13 +258,13 @@ async def _run_migrations(conn):
         """
         CREATE INDEX IF NOT EXISTS idx_bot_mode_status_updated ON bot_mode_status(updated_at);
         """,
-        # H1: ICMarkets mid-price columns on live_prices — allows EX to compute
-        # feed offset from two prices at the same updated_at, eliminating drift.
+        # ic_bid/ic_ask are obsolete — the execution bot now derives its broker
+        # offset from its own MT5 feed against the stored price. Drop the columns.
         """
-        ALTER TABLE live_prices ADD COLUMN IF NOT EXISTS ic_bid DOUBLE PRECISION;
+        ALTER TABLE live_prices DROP COLUMN IF EXISTS ic_bid;
         """,
         """
-        ALTER TABLE live_prices ADD COLUMN IF NOT EXISTS ic_ask DOUBLE PRECISION;
+        ALTER TABLE live_prices DROP COLUMN IF EXISTS ic_ask;
         """,
         # M5: feed health table — written by FeedHealthMonitor each health check.
         # EX reads this in Phase 4.4 to skip placement on stale feeds.
