@@ -44,13 +44,12 @@ class ReportsCog(BaseCog):
 
     def _tp_distance_label(self, signal) -> str:
         """
-        Profit distance from tp_price to the hit limit furthest from it
-        (lowest hit limit for a long, highest for a short). Returns "" if the
-        signal has no tp_price or no hit limits.
+        Profit distance measured to the hit limit furthest from the TP (lowest
+        hit limit for a long, highest for a short). For auto-TP closures the
+        distance runs from that limit to the recorded tp_price; for manual
+        profit it falls back to the configured auto-TP target for the symbol.
+        Returns "" if the signal has no hit limits.
         """
-        tp_price = signal.get("tp_price")
-        if tp_price is None:
-            return ""
         hit = [
             l for l in signal.get("limits", [])
             if l.get("status") == "hit" or l.get("hit_alert_sent")
@@ -58,13 +57,22 @@ class ReportsCog(BaseCog):
         if not hit:
             return ""
         direction = signal["direction"].lower()
+        instrument = signal["instrument"]
+        signal_type = (signal.get("type") or "standard").lower()
         prices = [l["price_level"] for l in hit]
         entry = min(prices) if direction == "long" else max(prices)
-        signal_type = (signal.get("type") or "standard").lower()
-        raw = self.tp_config.calculate_pnl(
-            signal["instrument"], direction, entry, float(tp_price), signal_type=signal_type
-        )
-        return self._format_distance(signal["instrument"], signal_type, raw)
+
+        closed_reason = (signal.get("closed_reason") or "").lower()
+        tp_price = signal.get("tp_price")
+        if closed_reason == "automatic" and tp_price is not None:
+            raw = self.tp_config.calculate_pnl(
+                instrument, direction, entry, float(tp_price), signal_type=signal_type
+            )
+        else:
+            # Manual profit (or missing tp_price): use the configured auto-TP
+            # target distance from the furthest hit limit.
+            raw = self.tp_config.get_tp_value(instrument, signal_type=signal_type)
+        return self._format_distance(instrument, signal_type, raw)
 
     def _sl_distance_label(self, signal) -> str:
         """
