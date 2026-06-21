@@ -825,7 +825,7 @@ class SignalDatabase:
 
             if signal and len(signal["hit_limits"]) == signal["total_limits"]:
                 result["all_limits_hit"] = True
-                logger.info(f"All limits hit for signal {signal['id']}")
+                logger.info(f"All limits hit for signal {signal['signal_id']}")
             else:
                 result["all_limits_hit"] = False
 
