@@ -154,6 +154,11 @@ def _build_signal_embed(
     if pnl_display and event in ("auto_tp", "profit"):
         embed.add_field(name="Profit", value=f"**+{pnl_display}**", inline=True)
 
+    # ── TP price (auto_tp event only) ────────────────────────────────────────
+    tp_price = signal.get("tp_price")
+    if event == "auto_tp" and tp_price is not None:
+        embed.add_field(name="TP Price", value=f"**{_fmt(float(tp_price))}**", inline=True)
+
     # ── Stop loss ────────────────────────────────────────────────────────────
     sl = signal.get("stop_loss")
     if sl:

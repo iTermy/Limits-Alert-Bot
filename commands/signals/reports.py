@@ -3,6 +3,7 @@ Report Commands — trading performance reports.
 """
 
 import json
+import math
 from datetime import datetime
 from pathlib import Path
 
@@ -28,6 +29,59 @@ class ReportsCog(BaseCog):
     def __init__(self, bot):
         super().__init__(bot)
         self.tp_config = TPConfig()
+
+    def _format_distance(self, instrument: str, signal_type: str, raw: float) -> str:
+        """
+        Format a native-unit distance (pips for forex, dollars otherwise) with a
+        signed label, rounding the magnitude up. e.g. "+8 pips", "-20 pips", "+$5".
+        """
+        tp_type = self.tp_config.get_tp_type(instrument, signal_type=signal_type)
+        magnitude = math.ceil(abs(raw) - 1e-9)
+        sign = "+" if raw >= 0 else "-"
+        if tp_type == "pips":
+            return f"{sign}{magnitude} pips"
+        return f"{sign}${magnitude}"
+
+    def _tp_distance_label(self, signal) -> str:
+        """
+        Profit distance from tp_price to the hit limit furthest from it
+        (lowest hit limit for a long, highest for a short). Returns "" if the
+        signal has no tp_price or no hit limits.
+        """
+        tp_price = signal.get("tp_price")
+        if tp_price is None:
+            return ""
+        hit = [
+            l for l in signal.get("limits", [])
+            if l.get("status") == "hit" or l.get("hit_alert_sent")
+        ]
+        if not hit:
+            return ""
+        direction = signal["direction"].lower()
+        prices = [l["price_level"] for l in hit]
+        entry = min(prices) if direction == "long" else max(prices)
+        signal_type = (signal.get("type") or "standard").lower()
+        raw = self.tp_config.calculate_pnl(
+            signal["instrument"], direction, entry, float(tp_price), signal_type=signal_type
+        )
+        return self._format_distance(signal["instrument"], signal_type, raw)
+
+    def _sl_distance_label(self, signal) -> str:
+        """
+        Loss distance from the first limit to the stop loss. Returns "" if the
+        signal has no stop loss or no limits.
+        """
+        sl = signal.get("stop_loss")
+        limits = signal.get("limits", [])
+        if not sl or not limits:
+            return ""
+        direction = signal["direction"].lower()
+        first = sorted(limits, key=lambda l: l.get("sequence_number", 0))[0]["price_level"]
+        signal_type = (signal.get("type") or "standard").lower()
+        raw = self.tp_config.calculate_pnl(
+            signal["instrument"], direction, first, float(sl), signal_type=signal_type
+        )
+        return self._format_distance(signal["instrument"], signal_type, raw)
 
     @commands.command(name="report", description="Generate trading report")
     async def generate_report(
@@ -255,8 +309,12 @@ class ReportsCog(BaseCog):
                     )
                 else:
                     limit_display = "N/A"
+                tp_label = self._tp_distance_label(signal)
+                symbol_seg = (
+                    f"{signal['instrument']} | {tp_label}" if tp_label else signal["instrument"]
+                )
                 return (
-                    f"#{signal['signal_id']} | {signal['instrument']} | "
+                    f"#{signal['signal_id']} | {symbol_seg} | "
                     f"{limit_display} | {signal['direction'].upper()} 🟢"
                 )
 
@@ -266,8 +324,12 @@ class ReportsCog(BaseCog):
                     if signal.get("stop_loss")
                     else "N/A"
                 )
+                sl_label = self._sl_distance_label(signal)
+                symbol_seg = (
+                    f"{signal['instrument']} | {sl_label}" if sl_label else signal["instrument"]
+                )
                 return (
-                    f"#{signal['signal_id']} | {signal['instrument']} | "
+                    f"#{signal['signal_id']} | {symbol_seg} | "
                     f"SL: {sl_value} | {signal['direction'].upper()} 🛑"
                 )
 
