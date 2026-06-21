@@ -24,6 +24,13 @@ RECONNECT_DELAY_SECONDS = 10
 ALERT_COOLDOWN_MINUTES = 15
 STARTUP_GRACE_PERIOD_SECONDS = 120
 
+# Price-flow watchdog: when at least one subscribed symbol's market should be
+# open but ZERO ticks have arrived across EVERY feed for this long, the bot is
+# effectively dead (feeds frozen). Force a supervised restart. The open-market
+# gate (is_market_open) means weekends, holidays, and spread hour never trip it.
+WATCHDOG_SILENCE_SECONDS = 180
+WATCHDOG_GRACE_SECONDS = 180
+
 # Spread hour: 5–6 PM EST weekdays (matches streaming_monitor._is_spread_hour)
 _SPREAD_START = dtime(17, 0)
 _SPREAD_END = dtime(18, 0)
@@ -90,6 +97,9 @@ class FeedHealthMonitor:
         self.running = False
         self.monitor_task = None
         self.startup_time = datetime.now()
+
+        # Set once the watchdog has initiated a restart, so it never fires twice.
+        self._watchdog_fired = False
 
         # Track last update times: feed -> symbol -> timestamp
         self.last_seen: Dict[str, Dict[str, datetime]] = defaultdict(dict)
@@ -160,7 +170,83 @@ class FeedHealthMonitor:
             except Exception as e:
                 logger.error(f"Error in health check: {e}", exc_info=True)
 
+            try:
+                await self._check_price_flow_watchdog(datetime.now())
+            except Exception as e:
+                logger.error(f"Error in price-flow watchdog: {e}", exc_info=True)
+
             await asyncio.sleep(CHECK_INTERVAL_SECONDS)
+
+    def _global_newest_tick(self):
+        """Most recent tick timestamp across every feed and symbol, or None."""
+        newest = None
+        for feed_data in self.last_seen.values():
+            for ts in feed_data.values():
+                if newest is None or ts > newest:
+                    newest = ts
+        return newest
+
+    def _any_open_market_subscribed(self) -> bool:
+        """True if any currently-subscribed symbol's market should be open now."""
+        subscribed = getattr(self.stream_manager, "subscribed_symbols", set())
+        for symbol in subscribed:
+            asset_class = self.symbol_mapper.determine_asset_class(symbol)
+            if self.is_market_open(asset_class):
+                return True
+        return False
+
+    async def _check_price_flow_watchdog(self, now: datetime):
+        """Force a supervised restart if the bot is producing no ticks at all
+        while a subscribed market should be open.
+
+        Conservative by construction — all of these must hold:
+        - past the watchdog grace period (avoids startup churn)
+        - at least one subscribed symbol whose market is open right now
+        - no tick on ANY feed for WATCHDOG_SILENCE_SECONDS
+        The open-market gate reuses is_market_open, which already excludes
+        weekends, holidays, and spread hour, so legitimately-quiet periods do
+        not trip the watchdog.
+        """
+        if self._watchdog_fired:
+            return
+
+        if (now - self.startup_time).total_seconds() < WATCHDOG_GRACE_SECONDS:
+            return
+
+        if not self._any_open_market_subscribed():
+            return
+
+        newest = self._global_newest_tick() or self.startup_time
+        silence = (now - newest).total_seconds()
+        if silence <= WATCHDOG_SILENCE_SECONDS:
+            return
+
+        self._watchdog_fired = True
+        logger.critical(
+            "Price-flow watchdog: no ticks on any feed for %.0fs while a market "
+            "is open — forcing restart",
+            silence,
+        )
+        # Run the shutdown in its own task: bot.close() cancels this monitor
+        # task, so awaiting it here would make the task await itself.
+        asyncio.create_task(self._watchdog_restart(int(silence)))
+
+    async def _watchdog_restart(self, silence: int):
+        """Alert the admin, then gracefully close the bot so the supervisor
+        relaunches a fresh instance."""
+        try:
+            await self.send_admin_alert(
+                f"🚨 **Price-flow watchdog tripped**\n"
+                f"No ticks on any feed for {silence}s while a market is open.\n"
+                f"Restarting the bot."
+            )
+        except Exception as e:
+            logger.error(f"Watchdog admin alert failed: {e}")
+
+        try:
+            await self.bot.close()
+        except Exception as e:
+            logger.error(f"Watchdog bot.close() failed: {e}")
 
     def update_last_seen(self, symbol: str, feed: str):
         """
@@ -337,10 +423,10 @@ class FeedHealthMonitor:
         try:
             await asyncio.sleep(RECONNECT_DELAY_SECONDS)
 
-            # Attempt reconnection through stream manager
-            result = await self.stream_manager.reconnect_all()
+            # Reconnect only the stale feed — never tear down healthy feeds.
+            success = await self.stream_manager.reconnect_feed(feed_name)
 
-            if result.get(feed_name):
+            if success:
                 self.stats["reconnections_successful"] += 1
                 logger.info(f"{feed_name} reconnection successful")
                 return True

@@ -14,6 +14,10 @@ import aiohttp
 
 logger = logging.getLogger(__name__)
 
+# OANDA sends a HEARTBEAT every ~5 s, so no data for this long means the
+# connection has silently half-died (no exception raised). Force a reconnect.
+_STREAM_READ_TIMEOUT = 15
+
 
 class OANDAStream:
     """
@@ -186,9 +190,25 @@ class OANDAStream:
 
                     self.stream_response = response
 
-                    # Read stream line by line
-                    async for line in response.content:
-                        if not self.streaming:
+                    # Read stream line by line with a watchdog: OANDA's heartbeat
+                    # keeps data flowing, so a read that stalls past the timeout
+                    # means the connection is dead — break out to reconnect.
+                    while self.streaming:
+                        try:
+                            line = await asyncio.wait_for(
+                                response.content.readline(),
+                                timeout=_STREAM_READ_TIMEOUT,
+                            )
+                        except asyncio.TimeoutError:
+                            logger.warning(
+                                "OANDA stream stalled (no data for %ss) — reconnecting",
+                                _STREAM_READ_TIMEOUT,
+                            )
+                            break
+
+                        if not line:
+                            # EOF — server closed the stream; reconnect.
+                            logger.debug("OANDA stream closed by server — reconnecting")
                             break
 
                         # Parse JSON line
