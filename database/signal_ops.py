@@ -156,42 +156,40 @@ class SignalDatabase:
                 )
                 return False
 
-            async with self.db.get_connection() as conn:
-                await conn.execute(
-                    """
-                    UPDATE signals
-                    SET instrument = $1, direction = $2, stop_loss = $3,
-                        expiry_type = $4, total_limits = $5, type = $6,
-                        updated_at = CURRENT_TIMESTAMP
-                    WHERE id = $7
-                    """,
-                    parsed_signal.instrument,
-                    parsed_signal.direction,
-                    parsed_signal.stop_loss,
-                    parsed_signal.expiry_type,
-                    len(parsed_signal.limits),
-                    getattr(parsed_signal, "type", "standard"),
-                    signal_id,
-                )
+            # Re-derive expiry_time only when the expiry_type actually changed,
+            # so a same-type edit doesn't silently push the deadline out.
+            new_expiry_time = existing.get("expiry_time")
+            if parsed_signal.expiry_type != existing.get("expiry_type"):
+                new_expiry_time = _parse_dt(calculate_expiry(parsed_signal.expiry_type))
 
+            async with self.db.get_connection() as conn:
+                # Capture existing hit limits keyed by price so a HIT signal
+                # keeps its fill price/time when the limit rows are rebuilt.
                 hit_rows = await conn.fetch(
-                    "SELECT price_level FROM limits WHERE signal_id = $1 AND status = 'hit' ORDER BY sequence_number",
+                    "SELECT price_level, hit_price, hit_time FROM limits "
+                    "WHERE signal_id = $1 AND status = 'hit' ORDER BY sequence_number",
                     signal_id,
                 )
-                hit_prices = [r["price_level"] for r in hit_rows]
+                hit_by_price = {r["price_level"]: r for r in hit_rows}
 
                 await conn.execute("DELETE FROM limits WHERE signal_id = $1", signal_id)
 
+                hit_count = 0
                 for idx, level in enumerate(parsed_signal.limits):
-                    if level in hit_prices:
+                    prior = hit_by_price.get(level)
+                    if prior is not None:
+                        hit_count += 1
                         await conn.execute(
                             """
-                            INSERT INTO limits (signal_id, price_level, sequence_number, status, hit_time)
-                            VALUES ($1, $2, $3, 'hit', CURRENT_TIMESTAMP)
+                            INSERT INTO limits (signal_id, price_level, sequence_number,
+                                                status, hit_time, hit_price, hit_alert_sent)
+                            VALUES ($1, $2, $3, 'hit', $4, $5, TRUE)
                             """,
                             signal_id,
                             level,
                             idx + 1,
+                            prior["hit_time"],
+                            prior["hit_price"],
                         )
                     else:
                         await conn.execute(
@@ -203,6 +201,32 @@ class SignalDatabase:
                             level,
                             idx + 1,
                         )
+
+                # A HIT signal whose hit limit(s) were edited away reverts to ACTIVE.
+                new_status = existing["status"]
+                if existing["status"] == SignalStatus.HIT and hit_count == 0:
+                    new_status = SignalStatus.ACTIVE
+
+                await conn.execute(
+                    """
+                    UPDATE signals
+                    SET instrument = $1, direction = $2, stop_loss = $3,
+                        expiry_type = $4, expiry_time = $5, total_limits = $6,
+                        type = $7, limits_hit = $8, status = $9,
+                        updated_at = CURRENT_TIMESTAMP
+                    WHERE id = $10
+                    """,
+                    parsed_signal.instrument,
+                    parsed_signal.direction,
+                    parsed_signal.stop_loss,
+                    parsed_signal.expiry_type,
+                    new_expiry_time,
+                    len(parsed_signal.limits),
+                    getattr(parsed_signal, "type", "standard"),
+                    hit_count,
+                    new_status,
+                    signal_id,
+                )
 
             logger.info(f"Updated signal {signal_id} from edited message")
             return True
