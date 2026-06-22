@@ -22,6 +22,10 @@ logger = get_logger("report_commands")
 # of signal type. Matched by their channels.json monitored-channel key.
 LEGENDS_CHANNEL_KEYS = {"legends-trades", "lc-calls"}
 
+# Manual-profit closures are credited a fraction of the configured auto-TP
+# target, since a manually closed signal didn't ride all the way to auto-TP.
+MANUAL_PROFIT_TP_FRACTION = 2 / 3
+
 
 class ReportsCog(BaseCog):
     """Trading report generation"""
@@ -54,7 +58,8 @@ class ReportsCog(BaseCog):
         Cumulative profit distance (native units): the sum, over every hit
         limit, of that limit's P&L to the take-profit. For auto-TP closures the
         target is the recorded tp_price; for manual profit each limit's P&L is
-        measured to the configured auto-TP target from the last hit limit.
+        measured to a fraction (MANUAL_PROFIT_TP_FRACTION) of the configured
+        auto-TP target from the last hit limit.
         Returns None if the signal has no hit limits.
         """
         hit = self._hit_limits(signal)
@@ -74,9 +79,13 @@ class ReportsCog(BaseCog):
                 )
                 for l in hit
             )
-        # Manual profit (or missing tp_price): each limit's P&L measured to the
-        # configured auto-TP target distance from the last hit limit.
-        target = self.tp_config.get_tp_value(instrument, signal_type=signal_type)
+        # Manual profit (or missing tp_price): each limit's P&L measured to a
+        # fraction of the configured auto-TP target distance from the last hit
+        # limit, since a manual close didn't ride all the way to auto-TP.
+        target = (
+            self.tp_config.get_tp_value(instrument, signal_type=signal_type)
+            * MANUAL_PROFIT_TP_FRACTION
+        )
         last_hit = max(hit, key=lambda l: l.get("sequence_number", 0))["price_level"]
         return sum(
             target
