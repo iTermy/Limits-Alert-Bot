@@ -42,35 +42,50 @@ class ReportsCog(BaseCog):
             return f"{sign}{magnitude} pips"
         return f"{sign}${magnitude}"
 
-    def _tp_distance_raw(self, signal):
-        """
-        Profit distance (native units) measured to the hit limit furthest from
-        the TP (lowest hit limit for a long, highest for a short). For auto-TP
-        closures the distance runs from that limit to the recorded tp_price; for
-        manual profit it falls back to the configured auto-TP target for the
-        symbol. Returns None if the signal has no hit limits.
-        """
-        hit = [
+    @staticmethod
+    def _hit_limits(signal):
+        return [
             l for l in signal.get("limits", [])
             if l.get("status") == "hit" or l.get("hit_alert_sent")
         ]
+
+    def _tp_distance_raw(self, signal):
+        """
+        Cumulative profit distance (native units): the sum, over every hit
+        limit, of that limit's P&L to the take-profit. For auto-TP closures the
+        target is the recorded tp_price; for manual profit each limit's P&L is
+        measured to the configured auto-TP target from the last hit limit.
+        Returns None if the signal has no hit limits.
+        """
+        hit = self._hit_limits(signal)
         if not hit:
             return None
         direction = signal["direction"].lower()
         instrument = signal["instrument"]
         signal_type = (signal.get("type") or "standard").lower()
-        prices = [l["price_level"] for l in hit]
-        entry = min(prices) if direction == "long" else max(prices)
 
         closed_reason = (signal.get("closed_reason") or "").lower()
         tp_price = signal.get("tp_price")
         if closed_reason == "automatic" and tp_price is not None:
-            return self.tp_config.calculate_pnl(
-                instrument, direction, entry, float(tp_price), signal_type=signal_type
+            return sum(
+                self.tp_config.calculate_pnl(
+                    instrument, direction, l["price_level"], float(tp_price),
+                    signal_type=signal_type,
+                )
+                for l in hit
             )
-        # Manual profit (or missing tp_price): use the configured auto-TP
-        # target distance from the furthest hit limit.
-        return self.tp_config.get_tp_value(instrument, signal_type=signal_type)
+        # Manual profit (or missing tp_price): each limit's P&L measured to the
+        # configured auto-TP target distance from the last hit limit.
+        target = self.tp_config.get_tp_value(instrument, signal_type=signal_type)
+        last_hit = max(hit, key=lambda l: l.get("sequence_number", 0))["price_level"]
+        return sum(
+            target
+            + self.tp_config.calculate_pnl(
+                instrument, direction, l["price_level"], last_hit,
+                signal_type=signal_type,
+            )
+            for l in hit
+        )
 
     def _tp_distance_label(self, signal) -> str:
         """Signed profit-distance label, or "" if the signal has no hit limits."""
@@ -82,18 +97,25 @@ class ReportsCog(BaseCog):
 
     def _sl_distance_raw(self, signal):
         """
-        Loss distance (native units, negative) from the first limit to the stop
-        loss. Returns None if the signal has no stop loss or no limits.
+        Cumulative loss distance (native units, negative): the sum, over every
+        hit limit, of that limit's P&L to the stop loss. Returns None if the
+        signal has no stop loss or no hit limits.
         """
         sl = signal.get("stop_loss")
-        limits = signal.get("limits", [])
-        if not sl or not limits:
+        if not sl:
+            return None
+        hit = self._hit_limits(signal)
+        if not hit:
             return None
         direction = signal["direction"].lower()
-        first = sorted(limits, key=lambda l: l.get("sequence_number", 0))[0]["price_level"]
+        instrument = signal["instrument"]
         signal_type = (signal.get("type") or "standard").lower()
-        return self.tp_config.calculate_pnl(
-            signal["instrument"], direction, first, float(sl), signal_type=signal_type
+        return sum(
+            self.tp_config.calculate_pnl(
+                instrument, direction, l["price_level"], float(sl),
+                signal_type=signal_type,
+            )
+            for l in hit
         )
 
     def _sl_distance_label(self, signal) -> str:
