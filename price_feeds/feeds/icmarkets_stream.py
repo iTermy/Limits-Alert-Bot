@@ -44,6 +44,11 @@ class ICMarketsStream:
         # monotonic timestamp of the next allowed poll per reference symbol.
         self._reference_next_poll: Dict[str, float] = {}
 
+        # Resolved MT5 name per requested stock "-24" symbol. Some stocks have
+        # no 24-hour variant on this broker, so we fall back to the bare symbol
+        # and cache the result to avoid re-probing on every subscribe.
+        self._stock_symbol_cache: Dict[str, str] = {}
+
         # Price cache to detect changes
         self.last_prices: Dict[str, Dict] = {}
 
@@ -129,6 +134,10 @@ class ICMarketsStream:
             raise Exception("Not connected to MT5")
 
         if symbol not in self.reference_symbols:
+            # Resolve the 24-hour stock fallback before validating, so a stock
+            # without a "-24" variant subscribes to its bare symbol instead.
+            symbol = await self._resolve_stock_symbol(symbol)
+
             # Validate symbol exists. Reference symbols are already validated
             # at subscribe_reference time, so skip here for the promotion case.
             loop = asyncio.get_event_loop()
@@ -144,6 +153,36 @@ class ICMarketsStream:
         # Promote a reference symbol to signal-bearing cadence immediately.
         self._reference_next_poll.pop(symbol, None)
         logger.info(f"Subscribed to {symbol} on MT5")
+
+    async def _resolve_stock_symbol(self, symbol: str) -> str:
+        """
+        Resolve a stock "-24" symbol to a name that exists on this broker.
+
+        Most stocks expose a 24-hour feed (e.g. AMD.NAS-24), but some only
+        have the bare symbol (AMD.NAS). When the "-24" variant is missing,
+        fall back to the bare symbol. The result is cached so each symbol is
+        probed at most once.
+        """
+        if not symbol.endswith("-24"):
+            return symbol
+
+        if symbol in self._stock_symbol_cache:
+            return self._stock_symbol_cache[symbol]
+
+        loop = asyncio.get_event_loop()
+        if await loop.run_in_executor(None, mt5.symbol_info, symbol) is not None:
+            self._stock_symbol_cache[symbol] = symbol
+            return symbol
+
+        bare = symbol[:-3]
+        if await loop.run_in_executor(None, mt5.symbol_info, bare) is not None:
+            logger.info("Stock %s has no 24-hour variant; using %s", symbol, bare)
+            self._stock_symbol_cache[symbol] = bare
+            return bare
+
+        # Neither exists — keep the original so the normal not-found error fires.
+        self._stock_symbol_cache[symbol] = symbol
+        return symbol
 
     async def subscribe_reference(self, symbol: str):
         """
@@ -174,6 +213,9 @@ class ICMarketsStream:
 
     async def unsubscribe(self, symbol: str):
         """Unsubscribe from a symbol"""
+        # Resolve through the stock fallback cache so we discard the name that
+        # was actually subscribed (bare symbol when "-24" didn't exist).
+        symbol = self._stock_symbol_cache.get(symbol, symbol)
         self.subscribed_symbols.discard(symbol)
         # If the symbol was *also* a reference subscription it stays subscribed
         # at the slow cadence; only drop last_prices when it's gone from both.
