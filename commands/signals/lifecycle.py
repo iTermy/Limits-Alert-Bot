@@ -196,14 +196,14 @@ class LifecycleCog(BaseCog):
         )
         embed.add_field(name="Stop Loss", value=stop_loss_formatted, inline=True)
 
-        # Streaming status
-        if self.services.monitor:
-            is_subscribed = signal["instrument"] in self.services.stream_manager.subscribed_symbols
-            embed.add_field(
-                name="Streaming Status",
-                value="🟢 Subscribed" if is_subscribed else "⚪ Not Subscribed",
-                inline=True,
-            )
+        # Take-profit price (manual closures show "Manual" instead of a price)
+        if signal.get("closed_reason") == "manual":
+            tp_value = "Manual"
+        elif signal.get("tp_price") is not None:
+            tp_value = format_price(signal["tp_price"], signal["instrument"])
+        else:
+            tp_value = "N/A"
+        embed.add_field(name="TP Price", value=tp_value, inline=True)
 
         # Limits info
         if signal["limits"]:
