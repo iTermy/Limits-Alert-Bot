@@ -747,7 +747,6 @@ class AlertSystem:
         spread_buffer_enabled: bool = False,
         ping_text: Optional[str] = None,
         hit_limit_ids: Optional[set] = None,
-        pnl_display: Optional[str] = None,
         force_hit_up_to_seq: int = 0,
         limit_pnl_map: Optional[Dict] = None,
         delete_after_minutes: Optional[int] = None,
@@ -776,7 +775,6 @@ class AlertSystem:
             guild_id=guild_id,
             bot=self.bot,
             hit_limit_ids=hit_limit_ids,
-            pnl_display=pnl_display,
             force_hit_up_to_seq=force_hit_up_to_seq,
             limit_pnl_map=limit_pnl_map,
             delete_after_minutes=delete_after_minutes,
@@ -1011,7 +1009,6 @@ class AlertSystem:
                 event="auto_tp",
                 ping_text=ping,
                 hit_limit_ids=hit_limit_ids,
-                pnl_display=pnl_display,
                 limit_pnl_map=limit_pnl_map,
                 delete_after_minutes=END_STATE_DELETE_MINUTES,
             )

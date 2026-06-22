@@ -50,7 +50,6 @@ def _build_signal_embed(
     guild_id: Optional[int] = None,
     bot=None,
     hit_limit_ids: Optional[set] = None,
-    pnl_display: Optional[str] = None,
     force_hit_up_to_seq: int = 0,
     limit_pnl_map: Optional[Dict] = None,
     delete_after_minutes: Optional[int] = None,
@@ -63,8 +62,6 @@ def _build_signal_embed(
     hit_limit_ids: optional set of limit_id values that are confirmed hit.
                    Used when limits come from the hit-limits DB query, which
                    returns rows without a 'status' key.
-    pnl_display:   formatted profit string (e.g. "+12.3 pips") shown for
-                   auto_tp and profit events only.
     force_hit_up_to_seq: treat all limits with sequence_number <= this value
                    as hit, regardless of DB status. Used when the alert fires
                    before the DB write has committed.
@@ -149,10 +146,6 @@ def _build_signal_embed(
         value="\n".join(limit_lines) if limit_lines else "—",
         inline=False,
     )
-
-    # ── Profit display (auto_tp / profit events only) ────────────────────────
-    if pnl_display and event in ("auto_tp", "profit"):
-        embed.add_field(name="Profit", value=f"**+{pnl_display}**", inline=True)
 
     # ── TP price (auto_tp event only) ────────────────────────────────────────
     tp_price = signal.get("tp_price")
@@ -275,10 +268,26 @@ def _build_profit_archive_embed(
     embed.add_field(name="Method", value=method, inline=True)
 
     if hit_limits:
-        lines = [
-            f"Limit #{l.get('sequence_number', '?')}: {_fmt(l.get('price_level', 0))} ✅"
-            for l in hit_limits
-        ]
+        dir_lc = (sig_data.get("direction") or "long").lower()
+        signal_type = (sig_data.get("type") or "standard").lower()
+        close_price = float(tp_price) if tp_price is not None else None
+        lines = []
+        for l in hit_limits:
+            seq = l.get("sequence_number", "?")
+            price = _fmt(l.get("price_level", 0))
+            entry = l.get("hit_price") or l.get("price_level")
+            if close_price is not None and entry and _tp_config is not None:
+                try:
+                    pnl_val = _tp_config.calculate_pnl(
+                        instrument, dir_lc, entry, close_price, signal_type=signal_type
+                    )
+                    pnl_str = _tp_config.format_value(instrument, abs(pnl_val))
+                    sign = "+" if pnl_val >= 0 else "-"
+                    lines.append(f"~~Limit #{seq}: {price}~~ ✅  {sign}{pnl_str}")
+                except Exception:
+                    lines.append(f"~~Limit #{seq}: {price}~~ ✅")
+            else:
+                lines.append(f"~~Limit #{seq}: {price}~~ ✅")
         embed.add_field(
             name=f"Limits Hit ({num_hit}/{total})",
             value="\n".join(lines),
