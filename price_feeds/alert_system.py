@@ -44,6 +44,13 @@ class AlertSystem:
 
     LIVE_UPDATE_INTERVAL = 15
 
+    # Max concurrent embed edits during a live-refresh pass. Editing different
+    # messages uses separate rate-limit buckets, so a bounded fan-out keeps a
+    # full pass to ~1-2s regardless of how many embeds are active, instead of
+    # the old 1s-per-embed serial stagger that pushed the effective refresh
+    # period past 60s once a dozen signals were live.
+    _LIVE_REFRESH_CONCURRENCY = 5
+
     def __init__(
         self,
         alert_channel: Optional[discord.TextChannel] = None,
@@ -75,6 +82,12 @@ class AlertSystem:
 
         # signal_id -> {"signal": dict, "event": str, "spread_buffer_enabled": bool}
         self._live_embeds: Dict[int, Dict] = {}
+
+        # signal_id -> asyncio.Lock. Serializes message mutations for a single
+        # signal so an event edit (hit/SL/TP) and a live-refresh edit on the
+        # same embed never overlap or land out of order. Pruned in the refresh
+        # loop once a signal's embed is gone.
+        self._message_locks: Dict[int, asyncio.Lock] = {}
 
         self._live_update_task: Optional[asyncio.Task] = None
         self._news_activation_messages: Dict[int, list] = {}
@@ -132,106 +145,122 @@ class AlertSystem:
                 logger.error(f"Live update loop error: {e}", exc_info=True)
 
     async def _refresh_live_embeds(self):
-        """Refresh each live embed with the latest price, staggered 1s apart."""
+        """Refresh every live embed with the latest price, fanned out concurrently.
+
+        Edits run under a bounded semaphore (separate messages use separate
+        rate-limit buckets, so this is safe) and each edit is serialized against
+        event edits via the per-signal lock. A full pass completes in ~1-2s
+        regardless of embed count.
+        """
         if not self._live_embeds:
             return
         if not self.stream_manager:
             return
 
-        stream_manager = self.stream_manager
+        # Prune locks for signals whose embed is gone so the dict stays bounded
+        # to roughly the number of live signals.
+        for sid in list(self._message_locks.keys()):
+            if sid not in self.signal_messages and not self._message_locks[sid].locked():
+                del self._message_locks[sid]
 
         signal_ids = list(self._live_embeds.keys())
         logger.debug("Refreshing %d live embed(s)", len(signal_ids))
 
-        for i, signal_id in enumerate(signal_ids):
-            if i > 0:
-                await asyncio.sleep(1)
+        semaphore = asyncio.Semaphore(self._LIVE_REFRESH_CONCURRENCY)
 
-            entry = self._live_embeds.get(signal_id)
-            if not entry:
-                continue
+        async def _guarded(signal_id: int):
+            async with semaphore:
+                await self._refresh_one_embed(signal_id)
 
-            signal = entry["signal"]
-            event = entry["event"]
-            spread_buffer_enabled = entry.get("spread_buffer_enabled", False)
+        await asyncio.gather(*(_guarded(sid) for sid in signal_ids))
+
+    async def _refresh_one_embed(self, signal_id: int):
+        """Re-render a single live embed with the current price and distance."""
+        entry = self._live_embeds.get(signal_id)
+        if not entry:
+            return
+
+        signal = entry["signal"]
+        event = entry["event"]
+        spread_buffer_enabled = entry.get("spread_buffer_enabled", False)
+
+        try:
+            instrument = signal["instrument"]
+            price_data = await self.stream_manager.get_latest_price(instrument)
+            if not price_data:
+                return
+
+            direction = signal.get("direction", "long").lower()
+            current_price = price_data["ask"] if direction == "long" else price_data["bid"]
+            spread = price_data.get("spread", 0.0)
+
+            # In-memory limits are kept in lockstep with DB writes by
+            # streaming_monitor mutations + the sync helpers called from every
+            # command path, so this path no longer round-trips to Postgres.
+            limits = signal.get("limits") or []
+
+            distance_formatted = None
+            if event in ("approaching", "hit"):
+                pending_limits = [
+                    l
+                    for l in limits
+                    if l.get("status") == "pending" and not l.get("hit_alert_sent")
+                ]
+                if pending_limits:
+                    nearest = min(
+                        pending_limits, key=lambda l: abs(current_price - l["price_level"])
+                    )
+                    distance = abs(current_price - nearest["price_level"])
+                    if self.alert_config:
+                        distance_formatted = self.alert_config.format_distance_for_display(
+                            instrument, distance, current_price
+                        )
+
+            if signal_id not in self._live_embeds:
+                logger.debug(
+                    f"Live update: signal {signal_id} was unregistered mid-cycle, skipping"
+                )
+                return
+
+            existing_msg = self.signal_messages.get(signal_id)
+            if not existing_msg:
+                return
+
+            guild_id = signal.get("guild_id")
+            if not guild_id and self.bot and self.bot.guilds:
+                guild_id = self.bot.guilds[0].id
+
+            embed = _build_signal_embed(
+                signal=signal,
+                limits=limits,
+                current_price=current_price,
+                distance_formatted=distance_formatted,
+                spread=spread,
+                spread_buffer_enabled=spread_buffer_enabled,
+                event=event,
+                guild_id=guild_id,
+                bot=self.bot,
+            )
 
             try:
-                instrument = signal["instrument"]
-                price_data = await stream_manager.get_latest_price(instrument)
-                if not price_data:
-                    continue
-
-                direction = signal.get("direction", "long").lower()
-                current_price = price_data["ask"] if direction == "long" else price_data["bid"]
-                spread = price_data.get("spread", 0.0)
-
-                # In-memory limits are kept in lockstep with DB writes by
-                # streaming_monitor mutations + the sync helpers called from
-                # every command path. The live-refresh path therefore no longer
-                # round-trips to Postgres on every 15 s cycle.
-                limits = signal.get("limits") or []
-
-                distance_formatted = None
-                if event in ("approaching", "hit"):
-                    pending_limits = [
-                        l
-                        for l in limits
-                        if l.get("status") == "pending" and not l.get("hit_alert_sent")
-                    ]
-                    if pending_limits:
-                        nearest = min(
-                            pending_limits, key=lambda l: abs(current_price - l["price_level"])
-                        )
-                        distance = abs(current_price - nearest["price_level"])
-                        if self.alert_config:
-                            distance_formatted = self.alert_config.format_distance_for_display(
-                                instrument, distance, current_price
-                            )
-
-                if signal_id not in self._live_embeds:
-                    logger.debug(
-                        f"Live update: signal {signal_id} was unregistered mid-cycle, skipping"
-                    )
-                    continue
-
-                existing_msg = self.signal_messages.get(signal_id)
-                if not existing_msg:
-                    continue
-
-                guild_id = signal.get("guild_id")
-                if not guild_id and self.bot and self.bot.guilds:
-                    guild_id = self.bot.guilds[0].id
-
-                embed = _build_signal_embed(
-                    signal=signal,
-                    limits=limits,
-                    current_price=current_price,
-                    distance_formatted=distance_formatted,
-                    spread=spread,
-                    spread_buffer_enabled=spread_buffer_enabled,
-                    event=event,
-                    guild_id=guild_id,
-                    bot=self.bot,
-                )
-
-                try:
+                async with self._get_message_lock(signal_id):
                     await existing_msg.edit(embed=embed)
-                    logger.debug("Live-updated embed for signal %s @ %s", signal_id, current_price)
-                except discord.NotFound:
-                    logger.warning(f"Live update: embed for signal {signal_id} not found, removing")
-                    self._live_embeds.pop(signal_id, None)
-                    self.signal_messages.pop(signal_id, None)
-                    await self._clear_persisted_alert_ids(signal_id)
-                except discord.HTTPException as e:
-                    if e.status == 429:
-                        logger.warning(
-                            f"Live update rate-limited for signal {signal_id}, skipping this cycle"
-                        )
-                    else:
-                        logger.warning(f"Live update HTTP error for signal {signal_id}: {e}")
+                logger.debug("Live-updated embed for signal %s @ %s", signal_id, current_price)
+            except discord.NotFound:
+                logger.warning(f"Live update: embed for signal {signal_id} not found, removing")
+                self._live_embeds.pop(signal_id, None)
+                self.signal_messages.pop(signal_id, None)
+                await self._clear_persisted_alert_ids(signal_id)
+            except discord.HTTPException as e:
+                if e.status == 429:
+                    logger.warning(
+                        f"Live update rate-limited for signal {signal_id}, skipping this cycle"
+                    )
+                else:
+                    logger.warning(f"Live update HTTP error for signal {signal_id}: {e}")
 
-            except Exception as e:
-                logger.error(f"Live update failed for signal {signal_id}: {e}", exc_info=True)
+        except Exception as e:
+            logger.error(f"Live update failed for signal {signal_id}: {e}", exc_info=True)
 
     def _register_live_embed(self, signal: Dict, event: str, spread_buffer_enabled: bool = False):
         signal_id = signal["signal_id"]
@@ -243,6 +272,14 @@ class AlertSystem:
 
     def _unregister_live_embed(self, signal_id: int):
         self._live_embeds.pop(signal_id, None)
+
+    def _get_message_lock(self, signal_id: int) -> asyncio.Lock:
+        """Return (creating if needed) the per-signal edit lock."""
+        lock = self._message_locks.get(signal_id)
+        if lock is None:
+            lock = asyncio.Lock()
+            self._message_locks[signal_id] = lock
+        return lock
 
     # ── Channel helpers ──────────────────────────────────────────────────────
 
@@ -780,51 +817,54 @@ class AlertSystem:
             delete_after_minutes=delete_after_minutes,
         )
 
-        existing_msg = self.signal_messages.get(signal_id)
-        embed_msg = None
+        # Serialize against the live-refresh edit for this same signal so the
+        # two never overlap or land out of order on the same message.
+        async with self._get_message_lock(signal_id):
+            existing_msg = self.signal_messages.get(signal_id)
+            embed_msg = None
 
-        if existing_msg:
-            try:
-                await existing_msg.edit(embed=embed)
-                logger.info(f"Edited persistent message for signal {signal_id} (event={event})")
-                embed_msg = existing_msg
-            except discord.NotFound:
-                logger.warning(f"Persistent message for signal {signal_id} deleted — recreating")
-                del self.signal_messages[signal_id]
-                existing_msg = None
-            except Exception as e:
-                logger.error(f"Failed to edit persistent message for signal {signal_id}: {e}")
-                return None
-
-        if not existing_msg:
-            try:
-                embed_msg = await target_channel.send(content=self.role_mention, embed=embed)
-                self.signal_messages[signal_id] = embed_msg
-                self.track_alert_message(embed_msg.id, signal_id)
-                await self._persist_alert_message(signal_id, embed_msg.id, target_channel.id)
-                logger.info(f"Created persistent message for signal {signal_id} (event={event})")
-            except Exception as e:
-                logger.error(f"Failed to send new persistent message for signal {signal_id}: {e}")
-                return None
-
-        if ping_text and embed_msg:
-            old_ping = self.signal_ping_messages.get(signal_id)
-            if old_ping:
-                self.alert_messages.pop(str(old_ping.id), None)
+            if existing_msg:
                 try:
-                    await old_ping.delete()
+                    await existing_msg.edit(embed=embed)
+                    logger.info(f"Edited persistent message for signal {signal_id} (event={event})")
+                    embed_msg = existing_msg
                 except discord.NotFound:
-                    pass
+                    logger.warning(f"Persistent message for signal {signal_id} deleted — recreating")
+                    del self.signal_messages[signal_id]
+                    existing_msg = None
                 except Exception as e:
-                    logger.warning(f"Could not delete old ping for signal {signal_id}: {e}")
+                    logger.error(f"Failed to edit persistent message for signal {signal_id}: {e}")
+                    return None
 
-            try:
-                new_ping = await embed_msg.reply(f"{self.role_mention} {ping_text}")
-                self.signal_ping_messages[signal_id] = new_ping
-                self.track_alert_message(new_ping.id, signal_id)
-                await self._persist_ping_message(signal_id, new_ping.id)
-            except Exception as e:
-                logger.error(f"Failed to send ping for signal {signal_id}: {e}")
+            if not existing_msg:
+                try:
+                    embed_msg = await target_channel.send(content=self.role_mention, embed=embed)
+                    self.signal_messages[signal_id] = embed_msg
+                    self.track_alert_message(embed_msg.id, signal_id)
+                    await self._persist_alert_message(signal_id, embed_msg.id, target_channel.id)
+                    logger.info(f"Created persistent message for signal {signal_id} (event={event})")
+                except Exception as e:
+                    logger.error(f"Failed to send new persistent message for signal {signal_id}: {e}")
+                    return None
+
+            if ping_text and embed_msg:
+                old_ping = self.signal_ping_messages.get(signal_id)
+                if old_ping:
+                    self.alert_messages.pop(str(old_ping.id), None)
+                    try:
+                        await old_ping.delete()
+                    except discord.NotFound:
+                        pass
+                    except Exception as e:
+                        logger.warning(f"Could not delete old ping for signal {signal_id}: {e}")
+
+                try:
+                    new_ping = await embed_msg.reply(f"{self.role_mention} {ping_text}")
+                    self.signal_ping_messages[signal_id] = new_ping
+                    self.track_alert_message(new_ping.id, signal_id)
+                    await self._persist_ping_message(signal_id, new_ping.id)
+                except Exception as e:
+                    logger.error(f"Failed to send ping for signal {signal_id}: {e}")
 
         return embed_msg
 

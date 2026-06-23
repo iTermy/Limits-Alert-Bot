@@ -129,6 +129,10 @@ class StreamingPriceMonitor:
         self.active_signals: Dict[int, Dict] = {}  # signal_id -> signal_data
         self.symbol_to_signals: Dict[str, List[int]] = {}  # symbol -> [signal_ids]
 
+        # Strong refs to fire-and-forget reaction tasks so they aren't GC'd
+        # mid-flight; discarded on completion.
+        self._reaction_tasks: set = set()
+
         # Spread buffer cache: refreshed by _refresh_spread_buffer_loop every 30 s,
         # never read from disk on the price-tick hot path.
         self._spread_buffer_enabled = True
@@ -162,6 +166,17 @@ class StreamingPriceMonitor:
         except Exception as e:
             logger.error(f"Failed to initialize monitor: {e}")
             raise
+
+    def _react_async(self, signal: Dict, emoji: str) -> None:
+        """Add an emoji reaction to the original signal off the tick hot path.
+
+        Reactions are cosmetic and order-independent, so fetching the message
+        and adding the reaction (two API round-trips) must not block per-tick
+        signal evaluation or delay the embed edit.
+        """
+        task = asyncio.create_task(react_to_original_signal(self.bot, signal, emoji))
+        self._reaction_tasks.add(task)
+        task.add_done_callback(self._reaction_tasks.discard)
 
     def _is_spread_hour(self) -> bool:
         """
@@ -479,7 +494,7 @@ class StreamingPriceMonitor:
             if nm_triggered:
                 signal_id = signal["signal_id"]
                 self.active_signals.pop(signal_id, None)
-                await react_to_original_signal(self.bot, signal, "❌")
+                self._react_async(signal, "❌")
                 success = await self.nm_monitor.trigger_near_miss(signal)
                 if success:
                     self._apply_status_to_signal(signal, "cancelled")
@@ -502,7 +517,7 @@ class StreamingPriceMonitor:
             )
             if tp_triggered:
                 self._apply_status_to_signal(signal, "profit")
-                await react_to_original_signal(self.bot, signal, "💰")
+                self._react_async(signal, "💰")
                 await self._maybe_unsubscribe_symbol(signal["instrument"], signal["signal_id"])
 
     async def _check_limit(
@@ -591,7 +606,7 @@ class StreamingPriceMonitor:
                 spread=spread,
                 spread_buffer_enabled=spread_buffer_enabled,
             )
-            await react_to_original_signal(self.bot, signal, "🎯")
+            self._react_async(signal, "🎯")
             await self._process_limit_hit(signal, limit, current_price)
 
             self.stats["limits_hit"] += 1
@@ -701,7 +716,7 @@ class StreamingPriceMonitor:
             signal["sl_alert_sent"] = True
 
             await self.alert_system.send_stop_loss_alert(signal, current_price)
-            await react_to_original_signal(self.bot, signal, "🛑")
+            self._react_async(signal, "🛑")
             await self._process_stop_loss_hit(signal)
             self.stats["stop_losses_hit"] += 1
 
@@ -717,7 +732,7 @@ class StreamingPriceMonitor:
             await self.alert_system.send_news_cancel_alert(signal, current_price, news_event)
         else:
             await self.alert_system.send_spread_hour_cancel_alert(signal, current_price)
-        await react_to_original_signal(self.bot, signal, "❌")
+        self._react_async(signal, "❌")
         if reason == "news":
             await self._process_news_cancel(signal, news_event)
         else:
