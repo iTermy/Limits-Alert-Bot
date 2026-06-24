@@ -207,32 +207,15 @@ class LifecycleCog(BaseCog):
 
         # Limits info
         if signal["limits"]:
-            pending_limits = [l for l in signal["limits"] if l["status"] == "pending"]
-            hit_limits = [l for l in signal["limits"] if l["status"] == "hit"]
-
-            if pending_limits:
-                pending_str = "\n".join(
-                    [
-                        f"• {format_price(l['price_level'], signal['instrument'])}"
-                        for l in pending_limits[:5]
-                    ]
-                )
-                if len(pending_limits) > 5:
-                    pending_str += f"\n... +{len(pending_limits) - 5} more"
-                embed.add_field(
-                    name=f"Pending Limits ({len(pending_limits)})", value=pending_str, inline=False
-                )
-
-            if hit_limits:
-                hit_str = "\n".join(
-                    [
-                        f"• {format_price(l['price_level'], signal['instrument'])} ✅"
-                        for l in hit_limits[:5]
-                    ]
-                )
-                if len(hit_limits) > 5:
-                    hit_str += f"\n... +{len(hit_limits) - 5} more"
-                embed.add_field(name=f"Hit Limits ({len(hit_limits)})", value=hit_str, inline=False)
+            limits_str = "\n".join(
+                [
+                    f"• ~~{format_price(l['price_level'], signal['instrument'])}~~ ✅"
+                    if l["status"] == "hit"
+                    else f"• {format_price(l['price_level'], signal['instrument'])}"
+                    for l in signal["limits"]
+                ]
+            )
+            embed.add_field(name=f"Limits ({len(signal['limits'])})", value=limits_str, inline=False)
 
         # Progress
         embed.add_field(
