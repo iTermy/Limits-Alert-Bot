@@ -230,10 +230,34 @@ class TradingBot(commands.Bot):
                 f"Error processing commands for message {message.id}: {str(e)!r}", exc_info=True
             )
 
-    async def on_message_edit(self, before: discord.Message, after: discord.Message):
-        """Handle message edits"""
-        if self.message_handler:
-            await self.message_handler.handle_message_edit(before, after)
+    async def on_raw_message_edit(self, payload: discord.RawMessageUpdateEvent):
+        """Handle message edits, including messages edited after a restart.
+
+        The cached ``on_message_edit`` only fires for messages received since the
+        process started; an edit to an older signal would be silently missed. The
+        raw event fires for every edit, so we filter to monitored channels (cheap,
+        avoids fetching for the many edits the bot makes in alert channels), fetch
+        the current message, and hand it to the same handler.
+        """
+        if not self.message_handler:
+            return
+
+        if payload.channel_id not in self.monitored_channels:
+            return
+
+        channel = self.get_channel(payload.channel_id)
+        if channel is None:
+            try:
+                channel = await self.fetch_channel(payload.channel_id)
+            except (discord.NotFound, discord.Forbidden):
+                return
+
+        try:
+            message = await channel.fetch_message(payload.message_id)
+        except (discord.NotFound, discord.Forbidden):
+            return
+
+        await self.message_handler.handle_message_edit(message)
 
     async def on_raw_message_delete(self, payload: discord.RawMessageDeleteEvent):
         """Handle message deletions"""

@@ -765,35 +765,35 @@ class MessageHandler:
         except Exception as e:
             self.logger.error(f"Unexpected error adding reaction: {str(e)!r}", exc_info=False)
 
-    async def handle_message_edit(self, before: discord.Message, after: discord.Message):
+    async def handle_message_edit(self, message: discord.Message):
         """Handle message edits with signal reparsing"""
-        if after.author.bot:
+        if message.author.bot:
             return
 
-        if not self.is_allowed_channel(after.channel.id):
+        if not self.is_allowed_channel(message.channel.id):
             return
 
-        if after.channel.id not in self.bot.monitored_channels:
+        if message.channel.id not in self.bot.monitored_channels:
             return
 
-        self.logger.info(f"Message edited in monitored channel: {after.channel.name}")
+        self.logger.info(f"Message edited in monitored channel: {message.channel.name}")
 
-        existing = await self.signal_db.get_signal_by_message_id(str(after.id))
+        existing = await self.signal_db.get_signal_by_message_id(str(message.id))
         if not existing:
-            await after.clear_reactions()
-            await self.process_signal(after)
+            await message.clear_reactions()
+            await self.process_signal(message)
             return
 
         from core.parser import RejectedSignal, parse_signal
 
-        channel_name = self.get_channel_name(after.channel.id)
-        parsed = parse_signal(after.content, channel_name)
+        channel_name = self.get_channel_name(message.channel.id)
+        parsed = parse_signal(message.content, channel_name)
 
         if isinstance(parsed, RejectedSignal):
-            await after.clear_reactions()
-            await after.add_reaction("❌")
+            await message.clear_reactions()
+            await message.add_reaction("❌")
             self.logger.info(
-                f"Signal edit rejected as malformed (likely typo): {after.id}: {parsed.reason}"
+                f"Signal edit rejected as malformed (likely typo): {message.id}: {parsed.reason}"
             )
             return
 
@@ -803,7 +803,7 @@ class MessageHandler:
                     existing["id"], parsed
                 )
                 if reactivated:
-                    await self.signal_db.update_signal_from_edit(str(after.id), parsed)
+                    await self.signal_db.update_signal_from_edit(str(message.id), parsed)
 
                     if self.bot.services.nm_monitor:
                         self.bot.services.nm_monitor.mark_immune(existing["id"])
@@ -812,10 +812,10 @@ class MessageHandler:
                     if monitor:
                         await monitor.refresh_signal_in_memory(existing["id"])
 
-                    await after.clear_reactions()
-                    await after.add_reaction("✅")
-                    await after.add_reaction("♻️")
-                    self.logger.info(f"Cancelled signal reactivated after edit: {after.id}")
+                    await message.clear_reactions()
+                    await message.add_reaction("✅")
+                    await message.add_reaction("♻️")
+                    self.logger.info(f"Cancelled signal reactivated after edit: {message.id}")
 
                     if self.alert_system:
                         try:
@@ -837,19 +837,19 @@ class MessageHandler:
                                 f"Could not update embed after reactivation via edit: {_ue}"
                             )
                 else:
-                    await after.add_reaction("❌")
+                    await message.add_reaction("❌")
                     self.logger.warning(
-                        f"Failed to reactivate cancelled signal on edit: {after.id}"
+                        f"Failed to reactivate cancelled signal on edit: {message.id}"
                     )
                 return
 
-            success = await self.signal_db.update_signal_from_edit(str(after.id), parsed)
+            success = await self.signal_db.update_signal_from_edit(str(message.id), parsed)
 
             if success:
-                await after.clear_reactions()
-                await after.add_reaction("✅")
-                await after.add_reaction("📝")
-                self.logger.info(f"Signal updated after edit: {after.id}")
+                await message.clear_reactions()
+                await message.add_reaction("✅")
+                await message.add_reaction("📝")
+                self.logger.info(f"Signal updated after edit: {message.id}")
 
                 monitor = self.bot.services.monitor
                 if monitor:
@@ -871,12 +871,12 @@ class MessageHandler:
                     except Exception as _ue:
                         self.logger.warning(f"Could not update embed after signal edit: {_ue}")
             elif existing["status"] in ["profit", "breakeven", "stop_loss"]:
-                await after.add_reaction("🔒")
+                await message.add_reaction("🔒")
                 self.logger.info(f"Cannot update signal in final status: {existing['status']}")
         else:
-            await after.clear_reactions()
-            await after.add_reaction("❌")
-            self.logger.info(f"Signal parse failed after edit: {after.id}")
+            await message.clear_reactions()
+            await message.add_reaction("❌")
+            self.logger.info(f"Signal parse failed after edit: {message.id}")
 
     async def handle_message_delete(self, payload: discord.RawMessageDeleteEvent):
         """Handle message deletions with signal cancellation"""
