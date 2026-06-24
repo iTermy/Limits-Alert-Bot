@@ -95,6 +95,35 @@ class TrailingStopMonitor:
             },
         )
 
+    async def resume_if_tracked(self, signal: Dict) -> None:
+        """Re-hydrate a still-HIT signal's shadow state after a restart.
+
+        A signal whose real position hasn't closed yet (still HIT, not yet
+        auto-TP'd to profit) is loaded through the normal active-signal path,
+        not recover_incomplete_signals (which only covers the post-profit
+        shadow-only phase). Without this, the next tick's lazy start() would
+        re-create tracking from the anchor price, discarding whatever
+        high-water-mark progress was already persisted. No-op if no rows
+        exist yet — the next tick's start() creates them fresh as normal.
+        """
+        signal_id = signal["signal_id"]
+        if signal_id in self._tracking:
+            return
+
+        levels = await self._db.get_levels_for_signal(signal_id)
+        if not levels:
+            return
+
+        self.restore(
+            {
+                "signal_id": signal_id,
+                "instrument": signal["instrument"],
+                "direction": signal["direction"],
+                "type": signal.get("type") or "standard",
+                "levels": levels,
+            }
+        )
+
     async def update(self, signal: Dict, bid: float, ask: float) -> bool:
         """Advance shadow tracking on a price tick. Returns True once every level has stopped out."""
         signal_id = signal["signal_id"]

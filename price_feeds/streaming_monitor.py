@@ -316,6 +316,19 @@ class StreamingPriceMonitor:
                             f"Failed to load hit limits for signal {signal_id}: {_hit_err}"
                         )
 
+                    # Resume trailing-stop shadow tracking from its persisted
+                    # high-water-mark if this signal was already being tracked
+                    # before the restart — otherwise the next tick's lazy
+                    # start() would reset progress back to the anchor price.
+                    try:
+                        await self.trailing_monitor.resume_if_tracked(
+                            self.active_signals[signal_id]
+                        )
+                    except Exception as _resume_err:
+                        logger.error(
+                            f"Failed to resume trailing tracking for signal {signal_id}: {_resume_err}"
+                        )
+
             # Hydrate alert embed references BEFORE the price stream starts —
             # otherwise the first tick could fire send_*_alert and post a
             # duplicate embed alongside the orphaned one.

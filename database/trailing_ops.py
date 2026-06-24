@@ -23,6 +23,12 @@ class TrailingDatabase:
         """Insert one row per level for a signal that just went HIT.
 
         levels: {level_name: {distance_value, distance_type, anchor_price}}
+
+        A (signal_id, level) row can already exist if this signal was
+        reactivated after a prior HIT cycle finished tracking — upsert resets
+        it to a fresh open row instead of silently no-opping, otherwise the
+        unique constraint would block the insert and every later
+        update_high_water_mark/finalize_level call would match zero rows.
         """
         for level, cfg in levels.items():
             await self.db.execute(
@@ -32,7 +38,17 @@ class TrailingDatabase:
                     anchor_price, high_water_mark, hwm_updated_at
                 )
                 VALUES ($1, $2, $3, $4, $5, $5, NOW())
-                ON CONFLICT (signal_id, level) DO NOTHING
+                ON CONFLICT (signal_id, level) DO UPDATE SET
+                    distance_value = EXCLUDED.distance_value,
+                    distance_type = EXCLUDED.distance_type,
+                    anchor_price = EXCLUDED.anchor_price,
+                    high_water_mark = EXCLUDED.high_water_mark,
+                    hwm_updated_at = EXCLUDED.hwm_updated_at,
+                    stopped_out = FALSE,
+                    stop_price = NULL,
+                    stop_time = NULL,
+                    stop_reason = NULL,
+                    pnl_at_stop = NULL
                 """,
                 (
                     signal_id,
@@ -80,6 +96,24 @@ class TrailingDatabase:
             (signal_id,),
         )
         return [r["level"] for r in rows]
+
+    async def get_levels_for_signal(self, signal_id: int) -> List[Dict[str, Any]]:
+        """All tracking rows for a signal, any state.
+
+        Used to resume a signal that's still HIT (real position not yet
+        closed) across a restart, so its high-water-mark progress isn't
+        wiped back to the anchor price.
+        """
+        rows = await self.db.fetch_all(
+            """
+            SELECT level, distance_value, distance_type, anchor_price,
+                   high_water_mark, stopped_out
+            FROM trailing_simulations
+            WHERE signal_id = $1
+            """,
+            (signal_id,),
+        )
+        return rows
 
     async def get_incomplete_shadow_signals(self) -> List[Dict[str, Any]]:
         """Signals closed via auto-TP that still have at least one open trail level.
