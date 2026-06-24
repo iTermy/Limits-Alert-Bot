@@ -89,6 +89,15 @@ class AlertSystem:
         # loop once a signal's embed is gone.
         self._message_locks: Dict[int, asyncio.Lock] = {}
 
+        # Count of status/event edits currently in flight. While > 0 the live
+        # refresh stands down so a hit/SL/TP edit lands without competing for
+        # the rate-limit budget. Incremented around every _upsert_signal_message.
+        self._priority_edits_active: int = 0
+
+        # signal_id -> signature of the last live-rendered embed, so the refresh
+        # loop can skip edits that would produce an identical embed.
+        self._last_live_render: Dict[int, str] = {}
+
         self._live_update_task: Optional[asyncio.Task] = None
         self._news_activation_messages: Dict[int, list] = {}
 
@@ -180,6 +189,10 @@ class AlertSystem:
         if not entry:
             return
 
+        # Stand down while a status/event edit is in flight so it lands first.
+        if self._priority_edits_active:
+            return
+
         signal = entry["signal"]
         event = entry["event"]
         spread_buffer_enabled = entry.get("spread_buffer_enabled", False)
@@ -242,9 +255,20 @@ class AlertSystem:
                 bot=self.bot,
             )
 
+            # Skip edits that would render an identical embed — keeps the channel
+            # quiet for low-volatility signals and frees rate-limit budget.
+            signature = self._embed_signature(embed)
+            if self._last_live_render.get(signal_id) == signature:
+                return
+
+            # Re-check preemption: an event may have fired during the price fetch.
+            if self._priority_edits_active:
+                return
+
             try:
                 async with self._get_message_lock(signal_id):
                     await existing_msg.edit(embed=embed)
+                self._last_live_render[signal_id] = signature
                 logger.debug("Live-updated embed for signal %s @ %s", signal_id, current_price)
             except discord.NotFound:
                 logger.warning(f"Live update: embed for signal {signal_id} not found, removing")
@@ -272,6 +296,14 @@ class AlertSystem:
 
     def _unregister_live_embed(self, signal_id: int):
         self._live_embeds.pop(signal_id, None)
+        self._last_live_render.pop(signal_id, None)
+
+    @staticmethod
+    def _embed_signature(embed: discord.Embed) -> str:
+        """Content signature of an embed, ignoring the volatile timestamp."""
+        data = embed.to_dict()
+        data.pop("timestamp", None)
+        return json.dumps(data, sort_keys=True, default=str)
 
     def _get_message_lock(self, signal_id: int) -> asyncio.Lock:
         """Return (creating if needed) the per-signal edit lock."""
@@ -817,54 +849,77 @@ class AlertSystem:
             delete_after_minutes=delete_after_minutes,
         )
 
-        # Serialize against the live-refresh edit for this same signal so the
-        # two never overlap or land out of order on the same message.
-        async with self._get_message_lock(signal_id):
-            existing_msg = self.signal_messages.get(signal_id)
-            embed_msg = None
+        # Status/event edits preempt cosmetic distance refreshes: while one is
+        # in flight the live loop stands down (see _refresh_one_embed) so the
+        # event lands without competing for the rate-limit budget. Serialize
+        # against the live-refresh edit for this same signal too, so the two
+        # never overlap or land out of order on the same message.
+        self._priority_edits_active += 1
+        try:
+            async with self._get_message_lock(signal_id):
+                existing_msg = self.signal_messages.get(signal_id)
+                embed_msg = None
 
-            if existing_msg:
-                try:
-                    await existing_msg.edit(embed=embed)
-                    logger.info(f"Edited persistent message for signal {signal_id} (event={event})")
-                    embed_msg = existing_msg
-                except discord.NotFound:
-                    logger.warning(f"Persistent message for signal {signal_id} deleted — recreating")
-                    del self.signal_messages[signal_id]
-                    existing_msg = None
-                except Exception as e:
-                    logger.error(f"Failed to edit persistent message for signal {signal_id}: {e}")
-                    return None
-
-            if not existing_msg:
-                try:
-                    embed_msg = await target_channel.send(content=self.role_mention, embed=embed)
-                    self.signal_messages[signal_id] = embed_msg
-                    self.track_alert_message(embed_msg.id, signal_id)
-                    await self._persist_alert_message(signal_id, embed_msg.id, target_channel.id)
-                    logger.info(f"Created persistent message for signal {signal_id} (event={event})")
-                except Exception as e:
-                    logger.error(f"Failed to send new persistent message for signal {signal_id}: {e}")
-                    return None
-
-            if ping_text and embed_msg:
-                old_ping = self.signal_ping_messages.get(signal_id)
-                if old_ping:
-                    self.alert_messages.pop(str(old_ping.id), None)
+                if existing_msg:
                     try:
-                        await old_ping.delete()
+                        await existing_msg.edit(embed=embed)
+                        logger.info(
+                            f"Edited persistent message for signal {signal_id} (event={event})"
+                        )
+                        embed_msg = existing_msg
                     except discord.NotFound:
-                        pass
+                        logger.warning(
+                            f"Persistent message for signal {signal_id} deleted — recreating"
+                        )
+                        del self.signal_messages[signal_id]
+                        existing_msg = None
                     except Exception as e:
-                        logger.warning(f"Could not delete old ping for signal {signal_id}: {e}")
+                        logger.error(
+                            f"Failed to edit persistent message for signal {signal_id}: {e}"
+                        )
+                        return None
 
-                try:
-                    new_ping = await embed_msg.reply(f"{self.role_mention} {ping_text}")
-                    self.signal_ping_messages[signal_id] = new_ping
-                    self.track_alert_message(new_ping.id, signal_id)
-                    await self._persist_ping_message(signal_id, new_ping.id)
-                except Exception as e:
-                    logger.error(f"Failed to send ping for signal {signal_id}: {e}")
+                if not existing_msg:
+                    try:
+                        embed_msg = await target_channel.send(
+                            content=self.role_mention, embed=embed
+                        )
+                        self.signal_messages[signal_id] = embed_msg
+                        self.track_alert_message(embed_msg.id, signal_id)
+                        await self._persist_alert_message(
+                            signal_id, embed_msg.id, target_channel.id
+                        )
+                        logger.info(
+                            f"Created persistent message for signal {signal_id} (event={event})"
+                        )
+                    except Exception as e:
+                        logger.error(
+                            f"Failed to send new persistent message for signal {signal_id}: {e}"
+                        )
+                        return None
+
+                if ping_text and embed_msg:
+                    old_ping = self.signal_ping_messages.get(signal_id)
+                    if old_ping:
+                        self.alert_messages.pop(str(old_ping.id), None)
+                        try:
+                            await old_ping.delete()
+                        except discord.NotFound:
+                            pass
+                        except Exception as e:
+                            logger.warning(
+                                f"Could not delete old ping for signal {signal_id}: {e}"
+                            )
+
+                    try:
+                        new_ping = await embed_msg.reply(f"{self.role_mention} {ping_text}")
+                        self.signal_ping_messages[signal_id] = new_ping
+                        self.track_alert_message(new_ping.id, signal_id)
+                        await self._persist_ping_message(signal_id, new_ping.id)
+                    except Exception as e:
+                        logger.error(f"Failed to send ping for signal {signal_id}: {e}")
+        finally:
+            self._priority_edits_active -= 1
 
         return embed_msg
 
