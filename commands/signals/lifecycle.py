@@ -387,6 +387,8 @@ class LifecycleCog(BaseCog):
         if success:
             if self.services.monitor:
                 self.services.monitor.sync_signal_status_in_memory(signal_id, status)
+                if status in ("profit", "breakeven", "stop_loss", "cancelled"):
+                    await self.services.monitor.finalize_trailing_on_manual_close(signal_id)
             status_emoji = get_status_emoji(status)
 
             embed = discord.Embed(
@@ -646,6 +648,7 @@ class LifecycleCog(BaseCog):
             # 1. Evict from streaming monitor so price-checking stops immediately
             if monitor:
                 monitor.sync_signal_status_in_memory(sid, "cancelled")
+                await monitor.finalize_trailing_on_manual_close(sid)
                 monitor.active_signals.pop(sid, None)
                 monitor.nm_monitor.evict_signal(sid)
                 monitor.tp_monitor.evict_signal(sid)

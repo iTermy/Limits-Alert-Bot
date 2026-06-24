@@ -227,6 +227,7 @@ class MessageHandler:
                 )
                 if success and self.bot.services.monitor:
                     self.bot.services.monitor.sync_signal_status_in_memory(signal_id, "cancelled")
+                    await self.bot.services.monitor.finalize_trailing_on_manual_close(signal_id)
                 action_taken = "cancelled"
 
             elif command in ("profit", "win", "tp"):
@@ -262,6 +263,7 @@ class MessageHandler:
                 )
                 if success and self.bot.services.monitor:
                     self.bot.services.monitor.sync_signal_status_in_memory(signal_id, "profit")
+                    await self.bot.services.monitor.finalize_trailing_on_manual_close(signal_id)
                 action_taken = "marked as PROFIT"
 
             elif command in ("hit",):
@@ -310,6 +312,7 @@ class MessageHandler:
                 )
                 if success and self.bot.services.monitor:
                     self.bot.services.monitor.sync_signal_status_in_memory(signal_id, "breakeven")
+                    await self.bot.services.monitor.finalize_trailing_on_manual_close(signal_id)
                 action_taken = "marked as BREAKEVEN"
 
             elif command in ("sl", "stop", "stoploss"):
@@ -323,6 +326,7 @@ class MessageHandler:
                 )
                 if success and self.bot.services.monitor:
                     self.bot.services.monitor.sync_signal_status_in_memory(signal_id, "stop_loss")
+                    await self.bot.services.monitor.finalize_trailing_on_manual_close(signal_id)
                 action_taken = "marked as STOP LOSS"
 
             elif command in ("reactivate", "reopen", "active"):
@@ -707,6 +711,7 @@ class MessageHandler:
 
                     if monitor:
                         monitor.sync_signal_status_in_memory(old_id, "cancelled")
+                        await monitor.finalize_trailing_on_manual_close(old_id)
                         monitor.active_signals.pop(old_id, None)
                         try:
                             monitor.nm_monitor.evict_signal(old_id)

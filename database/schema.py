@@ -132,6 +132,34 @@ async def initialize_database(db_manager):
             )
         """)
 
+        # Create trailing_simulations table — shadow what-if trailing-stop
+        # tracking, written by TrailingStopMonitor. Never read by alerting code.
+        await conn.execute("""
+            CREATE TABLE IF NOT EXISTS trailing_simulations (
+                id              BIGINT GENERATED ALWAYS AS IDENTITY PRIMARY KEY,
+                signal_id       BIGINT NOT NULL REFERENCES signals(id) ON DELETE CASCADE,
+                level           TEXT NOT NULL,
+                distance_value  DOUBLE PRECISION NOT NULL,
+                distance_type   TEXT NOT NULL,
+                anchor_price    DOUBLE PRECISION NOT NULL,
+                high_water_mark DOUBLE PRECISION NOT NULL,
+                hwm_updated_at  TIMESTAMPTZ,
+                stopped_out     BOOLEAN DEFAULT FALSE,
+                stop_price      DOUBLE PRECISION,
+                stop_time       TIMESTAMPTZ,
+                stop_reason     TEXT,
+                pnl_at_stop     DOUBLE PRECISION,
+                created_at      TIMESTAMPTZ DEFAULT NOW(),
+
+                CONSTRAINT trailing_level_check
+                    CHECK (level IN ('tight', 'medium', 'loose')),
+                CONSTRAINT trailing_distance_type_check
+                    CHECK (distance_type IN ('pips', 'dollars')),
+                CONSTRAINT trailing_signal_level_unique
+                    UNIQUE (signal_id, level)
+            )
+        """)
+
         await _create_indexes(conn)
 
         # Run migrations for any new columns added to existing tables
@@ -158,6 +186,8 @@ async def _create_indexes(conn):
         "CREATE INDEX IF NOT EXISTS idx_status_changes_signal ON status_changes(signal_id)",
         "CREATE INDEX IF NOT EXISTS idx_performance_date ON performance_metrics(date)",
         "CREATE INDEX IF NOT EXISTS idx_live_prices_updated ON live_prices(updated_at)",
+        "CREATE INDEX IF NOT EXISTS idx_trailing_signal ON trailing_simulations(signal_id)",
+        "CREATE INDEX IF NOT EXISTS idx_trailing_incomplete ON trailing_simulations(stopped_out) WHERE stopped_out = FALSE",
     ]
 
     for index_query in indexes:

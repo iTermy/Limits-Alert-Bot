@@ -104,6 +104,7 @@ class TradingBot(commands.Bot):
             self.services.nm_config = self.monitor.nm_config
             self.services.nm_monitor = self.monitor.nm_monitor
             self.services.alert_config = self.monitor.alert_config
+            self.services.trailing_monitor = self.monitor.trailing_monitor
 
         # Connect alert system to message handler
         if self.monitor and self.message_handler:
@@ -301,6 +302,10 @@ class TradingBot(commands.Bot):
             from price_feeds.streaming_monitor import StreamingPriceMonitor
             from price_feeds.tp_config import TPConfig
             from price_feeds.tp_monitor import AutoTPMonitor
+            from price_feeds.trailing_config import TrailingStopConfig
+            from price_feeds.trailing_monitor import TrailingStopMonitor
+
+            from database.trailing_ops import TrailingDatabase
 
             # Create subsystems
             alert_config = AlertDistanceConfig()
@@ -321,6 +326,11 @@ class TradingBot(commands.Bot):
                 signal_db=self.signal_db,
                 db=db,
                 alert_system=alert_system,
+            )
+            trailing_config = TrailingStopConfig(tp_config=tp_config)
+            trailing_monitor = TrailingStopMonitor(
+                trailing_config=trailing_config,
+                trailing_db=TrailingDatabase(db),
             )
             live_price_writer = LivePriceWriter(
                 db_manager=db,
@@ -351,6 +361,7 @@ class TradingBot(commands.Bot):
                 tp_monitor=tp_monitor,
                 nm_config=nm_config,
                 nm_monitor=nm_monitor,
+                trailing_monitor=trailing_monitor,
                 live_price_writer=live_price_writer,
                 health_monitor=health_monitor,
             )
