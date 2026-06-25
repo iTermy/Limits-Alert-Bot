@@ -2,6 +2,7 @@
 Signal-specific database operations — CRUD, lifecycle, and analytics
 """
 
+from collections import defaultdict
 from datetime import datetime, timedelta
 from typing import Any, Dict, List, Optional, Tuple
 
@@ -163,33 +164,60 @@ class SignalDatabase:
                 new_expiry_time = _parse_dt(calculate_expiry(parsed_signal.expiry_type))
 
             async with self.db.get_connection() as conn:
-                # Capture existing hit limits keyed by price so a HIT signal
-                # keeps its fill price/time when the limit rows are rebuilt.
-                hit_rows = await conn.fetch(
-                    "SELECT price_level, hit_price, hit_time FROM limits "
-                    "WHERE signal_id = $1 AND status = 'hit' ORDER BY sequence_number",
+                # Diff existing limits against the edited levels by price, preserving the
+                # limit_id of every unchanged level. The execution bot keys its pending
+                # orders and filled positions off limit_id; a DELETE-all + re-INSERT would
+                # mint fresh IDENTITY ids for every level on each edit, forcing the bot to
+                # cancel + re-place untouched limits — and, worse, drop limits that were
+                # already hit/filled because it can no longer correlate the new id. So we
+                # UPDATE matched levels in place, INSERT only genuinely new prices, and
+                # DELETE only removed ones. A matched 'hit' row keeps its fill price/time
+                # and alert flags untouched.
+                existing_limits = await conn.fetch(
+                    "SELECT id, price_level, sequence_number, status FROM limits "
+                    "WHERE signal_id = $1 ORDER BY sequence_number",
                     signal_id,
                 )
-                hit_by_price = {r["price_level"]: r for r in hit_rows}
+                # Only pending/hit rows are preservable; cancelled rows are rebuilt fresh.
+                preservable_by_price = defaultdict(list)
+                for r in existing_limits:
+                    if r["status"] in ("pending", "hit"):
+                        preservable_by_price[r["price_level"]].append(r)
 
-                await conn.execute("DELETE FROM limits WHERE signal_id = $1", signal_id)
-
+                plan = []  # (sequence_number, price_level, matched_row_or_None)
+                matched_ids = set()
                 hit_count = 0
                 for idx, level in enumerate(parsed_signal.limits):
-                    prior = hit_by_price.get(level)
-                    if prior is not None:
-                        hit_count += 1
+                    queue = preservable_by_price.get(level)
+                    matched = queue.pop(0) if queue else None
+                    if matched is not None:
+                        matched_ids.add(matched["id"])
+                        if matched["status"] == "hit":
+                            hit_count += 1
+                    plan.append((idx + 1, level, matched))
+
+                removed_ids = [r["id"] for r in existing_limits if r["id"] not in matched_ids]
+                if removed_ids:
+                    await conn.execute(
+                        "DELETE FROM limits WHERE id = ANY($1::bigint[])", removed_ids
+                    )
+
+                # Vacate the sequence space so kept rows can be renumbered without
+                # tripping the (signal_id, sequence_number) unique constraint mid-update.
+                kept_ids = list(matched_ids)
+                if kept_ids:
+                    await conn.execute(
+                        "UPDATE limits SET sequence_number = sequence_number + 100000 "
+                        "WHERE id = ANY($1::bigint[])",
+                        kept_ids,
+                    )
+
+                for seq, level, matched in plan:
+                    if matched is not None:
                         await conn.execute(
-                            """
-                            INSERT INTO limits (signal_id, price_level, sequence_number,
-                                                status, hit_time, hit_price, hit_alert_sent)
-                            VALUES ($1, $2, $3, 'hit', $4, $5, TRUE)
-                            """,
-                            signal_id,
-                            level,
-                            idx + 1,
-                            prior["hit_time"],
-                            prior["hit_price"],
+                            "UPDATE limits SET sequence_number = $1 WHERE id = $2",
+                            seq,
+                            matched["id"],
                         )
                     else:
                         await conn.execute(
@@ -199,7 +227,7 @@ class SignalDatabase:
                             """,
                             signal_id,
                             level,
-                            idx + 1,
+                            seq,
                         )
 
                 # A HIT signal whose hit limit(s) were edited away reverts to ACTIVE.
