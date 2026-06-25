@@ -199,8 +199,18 @@ class StreamingPriceMonitor:
         else:
             result = dtime(17, 0) <= now_est.time() < dtime(18, 0)
 
+        # Clamp the cache so it never serves a stale value across the 17:00 /
+        # 18:00 ET boundaries. Spreads widen exactly at 17:00; a flat 5 s cache
+        # would let a spread-induced false hit slip through the gate for up to
+        # 5 s after the boundary.
+        cache_seconds = _SPREAD_HOUR_CACHE_SECONDS
+        for hh in (17, 18):
+            boundary = now_est.replace(hour=hh, minute=0, second=0, microsecond=0)
+            if boundary > now_est:
+                cache_seconds = min(cache_seconds, (boundary - now_est).total_seconds())
+
         self._spread_hour_cached = result
-        self._spread_hour_cache_expires = now_mono + _SPREAD_HOUR_CACHE_SECONDS
+        self._spread_hour_cache_expires = now_mono + cache_seconds
         return result
 
     def _is_crypto_signal(self, signal: Dict) -> bool:
