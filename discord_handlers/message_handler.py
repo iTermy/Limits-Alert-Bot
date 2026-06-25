@@ -848,7 +848,9 @@ class MessageHandler:
                     )
                 return
 
-            success = await self.signal_db.update_signal_from_edit(str(message.id), parsed)
+            success, alert_invalidated = await self.signal_db.update_signal_from_edit(
+                str(message.id), parsed
+            )
 
             if success:
                 await message.clear_reactions()
@@ -862,17 +864,28 @@ class MessageHandler:
 
                 if self.alert_system:
                     try:
-                        updated_signal = await self.signal_db.get_signal_with_limits(existing["id"])
-                        if updated_signal:
-                            ping_text = (
-                                f"📝 **{updated_signal['instrument']}** {updated_signal['direction'].upper()} — "
-                                f"signal updated by sender"
+                        if alert_invalidated:
+                            # The edit corrected a limit that had already fired a (false)
+                            # approaching/hit alert — retract the stale embed/ping so a
+                            # corrected alert fires fresh when the real level is reached.
+                            await self.alert_system.retract_approaching_embed(existing["id"])
+                            self.logger.info(
+                                f"Retracted stale alert embed after corrective edit: {message.id}"
                             )
-                            await self.alert_system.update_signal_message(
-                                signal=updated_signal,
-                                event="edited",
-                                ping_text=ping_text,
+                        else:
+                            updated_signal = await self.signal_db.get_signal_with_limits(
+                                existing["id"]
                             )
+                            if updated_signal:
+                                ping_text = (
+                                    f"📝 **{updated_signal['instrument']}** {updated_signal['direction'].upper()} — "
+                                    f"signal updated by sender"
+                                )
+                                await self.alert_system.update_signal_message(
+                                    signal=updated_signal,
+                                    event="edited",
+                                    ping_text=ping_text,
+                                )
                     except Exception as _ue:
                         self.logger.warning(f"Could not update embed after signal edit: {_ue}")
             elif existing["status"] in ["profit", "breakeven", "stop_loss"]:

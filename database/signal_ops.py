@@ -140,13 +140,19 @@ class SignalDatabase:
 
         return SignalData.from_db_row(signal, limits)
 
-    async def update_signal_from_edit(self, message_id: str, parsed_signal: ParsedSignal) -> bool:
-        """Update an existing signal from an edited message."""
+    async def update_signal_from_edit(
+        self, message_id: str, parsed_signal: ParsedSignal
+    ) -> Tuple[bool, bool]:
+        """Update an existing signal from an edited message.
+
+        Returns (success, alert_invalidated). alert_invalidated is True when the edit
+        removed a limit that had already fired an approaching/hit alert (e.g. a mistyped
+        price being corrected), so the caller should retract the now-stale embed."""
         try:
             existing = await self.get_signal_by_message_id(message_id)
             if not existing:
                 logger.warning(f"No signal found for message {message_id}")
-                return False
+                return False, False
 
             signal_id = existing["id"]
 
@@ -155,7 +161,7 @@ class SignalDatabase:
                 logger.warning(
                     f"Cannot update signal {signal_id} in final status {existing['status']}"
                 )
-                return False
+                return False, False
 
             # Re-derive expiry_time only when the expiry_type actually changed,
             # so a same-type edit doesn't silently push the deadline out.
@@ -174,7 +180,8 @@ class SignalDatabase:
                 # DELETE only removed ones. A matched 'hit' row keeps its fill price/time
                 # and alert flags untouched.
                 existing_limits = await conn.fetch(
-                    "SELECT id, price_level, sequence_number, status FROM limits "
+                    "SELECT id, price_level, sequence_number, status, "
+                    "approaching_alert_sent, hit_alert_sent FROM limits "
                     "WHERE signal_id = $1 ORDER BY sequence_number",
                     signal_id,
                 )
@@ -196,10 +203,19 @@ class SignalDatabase:
                             hit_count += 1
                     plan.append((idx + 1, level, matched))
 
-                removed_ids = [r["id"] for r in existing_limits if r["id"] not in matched_ids]
-                if removed_ids:
+                removed_rows = [r for r in existing_limits if r["id"] not in matched_ids]
+                # A removed row that had already fired an alert means the alert we sent is
+                # now stale — typically a mistyped price that fired a false approaching/hit
+                # alert and is being corrected. Signal it so the caller retracts the embed
+                # and a corrected alert can fire fresh once the real level is reached.
+                alert_invalidated = any(
+                    r["status"] == "hit" or r["hit_alert_sent"] or r["approaching_alert_sent"]
+                    for r in removed_rows
+                )
+                if removed_rows:
                     await conn.execute(
-                        "DELETE FROM limits WHERE id = ANY($1::bigint[])", removed_ids
+                        "DELETE FROM limits WHERE id = ANY($1::bigint[])",
+                        [r["id"] for r in removed_rows],
                     )
 
                 # Vacate the sequence space so kept rows can be renumbered without
@@ -230,6 +246,16 @@ class SignalDatabase:
                             seq,
                         )
 
+                # When a stale alert was cleared above, let the surviving pending limits
+                # re-alert by clearing their approaching flag (the shared embed is retracted
+                # by the caller, so it must be re-established on re-approach).
+                if alert_invalidated:
+                    await conn.execute(
+                        "UPDATE limits SET approaching_alert_sent = FALSE "
+                        "WHERE signal_id = $1 AND status = 'pending'",
+                        signal_id,
+                    )
+
                 # A HIT signal whose hit limit(s) were edited away reverts to ACTIVE.
                 new_status = existing["status"]
                 if existing["status"] == SignalStatus.HIT and hit_count == 0:
@@ -257,11 +283,11 @@ class SignalDatabase:
                 )
 
             logger.info(f"Updated signal {signal_id} from edited message")
-            return True
+            return True, alert_invalidated
 
         except Exception as e:
             logger.error(f"Error updating signal from edit: {e}", exc_info=True)
-            return False
+            return False, False
 
     async def get_active_signals_detailed_sorted(
         self, instrument: str = None, sort_by: str = "recent", limit: int = None
