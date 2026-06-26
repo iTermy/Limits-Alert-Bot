@@ -12,11 +12,18 @@ from price_feeds.embed_builders import _build_signal_embed, _set_archive_footer
 from price_feeds.tp_config import TPConfig
 from utils.formatting import format_price, get_channel_name as _get_channel_name
 from utils.logger import get_logger
+from utils.permissions import is_signal_manager
 
 logger = get_logger("message_handler")
 
 # Auto-delete delay for transient bot replies in monitored / alert channels.
 _REPLY_DELETE_AFTER = 15.0
+
+# DM sent when a non-manager tries to manage a signal via reply.
+_NO_PERMISSION_DM = (
+    "You don't have permission to manage signals. "
+    "If you'd like access, please ask an admin."
+)
 
 
 class MessageHandler:
@@ -44,6 +51,18 @@ class MessageHandler:
             await message.delete()
         except Exception:
             pass
+
+    async def _deny_signal_management(self, message: discord.Message) -> None:
+        """Delete an unauthorized management reply and DM the user why."""
+        try:
+            await message.author.send(_NO_PERMISSION_DM)
+        except discord.Forbidden:
+            self.logger.info(
+                f"Could not DM {message.author} about denied signal management (DMs closed)"
+            )
+        except Exception as e:
+            self.logger.warning(f"Error DMing user about denied signal management: {e}")
+        await self._safe_delete(message)
 
     async def handle_new_message(self, message: discord.Message):
         if message.author.bot:
@@ -140,6 +159,10 @@ class MessageHandler:
                         await self._safe_delete(message)
                 return
 
+            if not is_signal_manager(self.bot, message.author):
+                await self._deny_signal_management(message)
+                return
+
             signal = await self.signal_db.get_signal_with_limits(signal_id)
             if not signal:
                 logger.warning(f"No signal found with ID {signal_id}")
@@ -174,18 +197,8 @@ class MessageHandler:
             if not signal:
                 return
 
-            is_author = message.author.id == referenced.author.id
-            is_admin = (
-                message.author.guild_permissions.administrator
-                if hasattr(message.author, "guild_permissions")
-                else False
-            )
-            if not (is_author or is_admin):
-                await message.reply(
-                    "Only the signal sender or admins can manage this signal.",
-                    delete_after=_REPLY_DELETE_AFTER,
-                )
-                await self._safe_delete(message)
+            if not is_signal_manager(self.bot, message.author):
+                await self._deny_signal_management(message)
                 return
 
             await self._handle_reply_command(
@@ -227,6 +240,7 @@ class MessageHandler:
                 )
                 if success and self.bot.services.monitor:
                     self.bot.services.monitor.sync_signal_status_in_memory(signal_id, "cancelled")
+                    await self.bot.services.monitor.finalize_trailing_on_manual_close(signal_id)
                 action_taken = "cancelled"
 
             elif command in ("profit", "win", "tp"):
@@ -262,6 +276,7 @@ class MessageHandler:
                 )
                 if success and self.bot.services.monitor:
                     self.bot.services.monitor.sync_signal_status_in_memory(signal_id, "profit")
+                    await self.bot.services.monitor.finalize_trailing_on_manual_close(signal_id)
                 action_taken = "marked as PROFIT"
 
             elif command in ("hit",):
@@ -310,6 +325,7 @@ class MessageHandler:
                 )
                 if success and self.bot.services.monitor:
                     self.bot.services.monitor.sync_signal_status_in_memory(signal_id, "breakeven")
+                    await self.bot.services.monitor.finalize_trailing_on_manual_close(signal_id)
                 action_taken = "marked as BREAKEVEN"
 
             elif command in ("sl", "stop", "stoploss"):
@@ -323,6 +339,7 @@ class MessageHandler:
                 )
                 if success and self.bot.services.monitor:
                     self.bot.services.monitor.sync_signal_status_in_memory(signal_id, "stop_loss")
+                    await self.bot.services.monitor.finalize_trailing_on_manual_close(signal_id)
                 action_taken = "marked as STOP LOSS"
 
             elif command in ("reactivate", "reopen", "active"):
@@ -392,6 +409,16 @@ class MessageHandler:
                     action_taken = "reactivated"
                     if self.bot.services.nm_monitor:
                         self.bot.services.nm_monitor.mark_immune(signal_id)
+                    # Re-add to the streaming monitor immediately. Without this
+                    # the signal is invisible to price ticks until the 30s
+                    # periodic refresh picks it back up.
+                    if self.bot.services.monitor:
+                        await self.bot.services.monitor.refresh_signal_in_memory(signal_id)
+                    # Re-fetch so the embed update + downstream code see the
+                    # post-reactivation state (status active/hit, limits pending).
+                    refreshed = await self.signal_db.get_signal_with_limits(signal_id)
+                    if refreshed:
+                        signal = refreshed
 
             else:
                 await message.reply(
@@ -665,11 +692,7 @@ class MessageHandler:
                     return False
                 if str(reaction.emoji) not in ("✅", "❌"):
                     return False
-                is_author = user.id == message.author.id
-                is_admin = (
-                    hasattr(user, "guild_permissions") and user.guild_permissions.administrator
-                )
-                return is_author or is_admin
+                return is_signal_manager(self.bot, user)
 
             cancel_old = True  # default on timeout
             try:
@@ -697,6 +720,7 @@ class MessageHandler:
 
                     if monitor:
                         monitor.sync_signal_status_in_memory(old_id, "cancelled")
+                        await monitor.finalize_trailing_on_manual_close(old_id)
                         monitor.active_signals.pop(old_id, None)
                         try:
                             monitor.nm_monitor.evict_signal(old_id)
@@ -755,35 +779,35 @@ class MessageHandler:
         except Exception as e:
             self.logger.error(f"Unexpected error adding reaction: {str(e)!r}", exc_info=False)
 
-    async def handle_message_edit(self, before: discord.Message, after: discord.Message):
+    async def handle_message_edit(self, message: discord.Message):
         """Handle message edits with signal reparsing"""
-        if after.author.bot:
+        if message.author.bot:
             return
 
-        if not self.is_allowed_channel(after.channel.id):
+        if not self.is_allowed_channel(message.channel.id):
             return
 
-        if after.channel.id not in self.bot.monitored_channels:
+        if message.channel.id not in self.bot.monitored_channels:
             return
 
-        self.logger.info(f"Message edited in monitored channel: {after.channel.name}")
+        self.logger.info(f"Message edited in monitored channel: {message.channel.name}")
 
-        existing = await self.signal_db.get_signal_by_message_id(str(after.id))
+        existing = await self.signal_db.get_signal_by_message_id(str(message.id))
         if not existing:
-            await after.clear_reactions()
-            await self.process_signal(after)
+            await message.clear_reactions()
+            await self.process_signal(message)
             return
 
         from core.parser import RejectedSignal, parse_signal
 
-        channel_name = self.get_channel_name(after.channel.id)
-        parsed = parse_signal(after.content, channel_name)
+        channel_name = self.get_channel_name(message.channel.id)
+        parsed = parse_signal(message.content, channel_name)
 
         if isinstance(parsed, RejectedSignal):
-            await after.clear_reactions()
-            await after.add_reaction("❌")
+            await message.clear_reactions()
+            await message.add_reaction("❌")
             self.logger.info(
-                f"Signal edit rejected as malformed (likely typo): {after.id}: {parsed.reason}"
+                f"Signal edit rejected as malformed (likely typo): {message.id}: {parsed.reason}"
             )
             return
 
@@ -793,15 +817,19 @@ class MessageHandler:
                     existing["id"], parsed
                 )
                 if reactivated:
-                    await self.signal_db.update_signal_from_edit(str(after.id), parsed)
+                    await self.signal_db.update_signal_from_edit(str(message.id), parsed)
 
                     if self.bot.services.nm_monitor:
                         self.bot.services.nm_monitor.mark_immune(existing["id"])
 
-                    await after.clear_reactions()
-                    await after.add_reaction("✅")
-                    await after.add_reaction("♻️")
-                    self.logger.info(f"Cancelled signal reactivated after edit: {after.id}")
+                    monitor = self.bot.services.monitor
+                    if monitor:
+                        await monitor.refresh_signal_in_memory(existing["id"])
+
+                    await message.clear_reactions()
+                    await message.add_reaction("✅")
+                    await message.add_reaction("♻️")
+                    self.logger.info(f"Cancelled signal reactivated after edit: {message.id}")
 
                     if self.alert_system:
                         try:
@@ -823,42 +851,69 @@ class MessageHandler:
                                 f"Could not update embed after reactivation via edit: {_ue}"
                             )
                 else:
-                    await after.add_reaction("❌")
+                    await message.add_reaction("❌")
                     self.logger.warning(
-                        f"Failed to reactivate cancelled signal on edit: {after.id}"
+                        f"Failed to reactivate cancelled signal on edit: {message.id}"
                     )
                 return
 
-            success = await self.signal_db.update_signal_from_edit(str(after.id), parsed)
+            success, alert_invalidated = await self.signal_db.update_signal_from_edit(
+                str(message.id), parsed
+            )
 
             if success:
-                await after.clear_reactions()
-                await after.add_reaction("✅")
-                await after.add_reaction("📝")
-                self.logger.info(f"Signal updated after edit: {after.id}")
+                await message.clear_reactions()
+                await message.add_reaction("✅")
+                await message.add_reaction("📝")
+                self.logger.info(f"Signal updated after edit: {message.id}")
+
+                monitor = self.bot.services.monitor
+                if monitor:
+                    await monitor.refresh_signal_in_memory(existing["id"])
 
                 if self.alert_system:
                     try:
-                        updated_signal = await self.signal_db.get_signal_with_limits(existing["id"])
-                        if updated_signal:
-                            ping_text = (
-                                f"📝 **{updated_signal['instrument']}** {updated_signal['direction'].upper()} — "
-                                f"signal updated by sender"
+                        if alert_invalidated:
+                            # The edit corrected a limit that had already fired a (false)
+                            # approaching/hit alert — retract the stale embed/ping so a
+                            # corrected alert fires fresh when the real level is reached.
+                            await self.alert_system.retract_approaching_embed(existing["id"])
+                            self.logger.info(
+                                f"Retracted stale alert embed after corrective edit: {message.id}"
                             )
-                            await self.alert_system.update_signal_message(
-                                signal=updated_signal,
-                                event="edited",
-                                ping_text=ping_text,
+                        else:
+                            updated_signal = await self.signal_db.get_signal_with_limits(
+                                existing["id"]
                             )
+                            if updated_signal:
+                                ping_text = (
+                                    f"📝 **{updated_signal['instrument']}** {updated_signal['direction'].upper()} — "
+                                    f"signal updated by sender"
+                                )
+                                await self.alert_system.update_signal_message(
+                                    signal=updated_signal,
+                                    event="edited",
+                                    ping_text=ping_text,
+                                )
                     except Exception as _ue:
                         self.logger.warning(f"Could not update embed after signal edit: {_ue}")
             elif existing["status"] in ["profit", "breakeven", "stop_loss"]:
-                await after.add_reaction("🔒")
+                await message.add_reaction("🔒")
                 self.logger.info(f"Cannot update signal in final status: {existing['status']}")
+            else:
+                # The DB update failed and rolled back (e.g. a constraint violation),
+                # leaving the old limits in place. Surface it instead of silently
+                # swallowing the failure — otherwise the signal keeps showing stale
+                # limits in !active with no indication the edit didn't take.
+                await message.add_reaction("⚠️")
+                self.logger.error(
+                    f"Signal edit failed to persist for message {message.id} "
+                    f"(signal {existing['id']}, status {existing['status']}); limits unchanged"
+                )
         else:
-            await after.clear_reactions()
-            await after.add_reaction("❌")
-            self.logger.info(f"Signal parse failed after edit: {after.id}")
+            await message.clear_reactions()
+            await message.add_reaction("❌")
+            self.logger.info(f"Signal parse failed after edit: {message.id}")
 
     async def handle_message_delete(self, payload: discord.RawMessageDeleteEvent):
         """Handle message deletions with signal cancellation"""

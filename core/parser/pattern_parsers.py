@@ -131,6 +131,7 @@ SHORT_KEYWORDS = ["short", "sell"]
 CHANNEL_TYPE_MAP = {
     "scalps": "scalp",
     "swing-trades": "swing",
+    "gold-swings": "swing",
     "gold-tolls-map": "toll",
     "general-tolls": "toll",
     "oil-tolls": "toll",
@@ -816,10 +817,16 @@ class StockPatternParser:
     Stock-specific parser with MT5 integration for symbol lookup
     """
 
+    # Minimum seconds between symbol-cache refreshes when stock symbols are missing.
+    # Prevents every miss from paying the ~24 ms symbols_get() cost if the broker
+    # genuinely has no stocks.
+    _SYMBOL_REFRESH_MIN_INTERVAL = 60.0
+
     def __init__(self, channel_config: dict = None):
         self.channel_config = channel_config or {}
         self.mt5_initialized = False
         self.available_symbols: Set[str] = set()
+        self._last_symbol_refresh: float = 0.0
         self._initialize_mt5()
         logger.info("Initialized StockPatternParser")
 
@@ -839,6 +846,7 @@ class StockPatternParser:
             if symbols:
                 self.available_symbols = {s.name for s in symbols}
                 self.mt5_initialized = True
+                self._last_symbol_refresh = time.monotonic()
                 logger.info(f"MT5 initialized with {len(self.available_symbols)} symbols")
             else:
                 logger.warning("No symbols retrieved from MT5")
@@ -846,6 +854,20 @@ class StockPatternParser:
         except Exception as e:
             logger.error(f"MT5 initialization error: {e}")
             self.mt5_initialized = False
+
+    def _refresh_symbols(self) -> None:
+        """Re-fetch MT5's symbol set. Rate-limited so misses on a stock-less broker don't stall the event loop."""
+        now = time.monotonic()
+        if now - self._last_symbol_refresh < self._SYMBOL_REFRESH_MIN_INTERVAL:
+            return
+        self._last_symbol_refresh = now
+        try:
+            symbols = mt5.symbols_get()
+            if symbols:
+                self.available_symbols = {s.name for s in symbols}
+                logger.debug(f"Refreshed MT5 symbol set: {len(self.available_symbols)} symbols")
+        except Exception as e:
+            logger.debug(f"Symbol refresh failed: {e}")
 
     def parse(self, message: str, channel_name: str = None) -> Optional[ParsedSignal]:
         """
@@ -944,6 +966,14 @@ class StockPatternParser:
         stock_symbols = [
             s for s in self.available_symbols if s.endswith((".NYSE", ".NAS", ".NASDAQ"))
         ]
+
+        # Cache was empty of stock symbols — MT5 may have loaded them after init.
+        # Refresh once and retry (rate-limited inside _refresh_symbols).
+        if not stock_symbols:
+            self._refresh_symbols()
+            stock_symbols = [
+                s for s in self.available_symbols if s.endswith((".NYSE", ".NAS", ".NASDAQ"))
+            ]
 
         if not stock_symbols:
             logger.warning("No stock symbols found in MT5")

@@ -11,10 +11,10 @@ import pytz
 from discord.ext import commands
 
 from core.news_manager import (
-    EST,
     NewsManager,
     parse_news_command,
 )
+from utils.config_loader import load_settings, save_settings
 from utils.logger import get_logger
 
 from .._base import BaseCog
@@ -52,10 +52,13 @@ class NewsCog(BaseCog):
             !news now USD
             !news off
         """
+        if not await self.require_signal_manager(ctx):
+            return
         if not args:
             await ctx.send(
                 "❌ Usage: `!news <category> <time> [window] [tz:<tz>] [date:<date>]`\n"
                 "Or: `!news now [category]` / `!news on [category]` / `!news off`\n"
+                "Auto-fetch: `!news refresh` (pull ForexFactory now) / `!news auto on|off`\n"
                 "Categories: any currency code (USD, EUR, GBP…), `gold`, `oil`, `btc`, `crypto`, or `all`\n"
                 "Timezone tag example: `tz:UTC`  `tz:EST`  `tz:London`  `tz:CET`\n"
                 "Date tag example: `date:2025-06-15`  `date:06/15`  `date:tomorrow`"
@@ -64,6 +67,39 @@ class NewsCog(BaseCog):
 
         tokens = args.strip().split()
         subcommand = tokens[0].lower()
+
+        # ── !news refresh ──────────────────────────────────────────────────
+        if subcommand == "refresh":
+            fetcher = self.services.news_fetcher
+            if fetcher is None:
+                await ctx.send("❌ News auto-fetch is not available.")
+                return
+            added, removed = await fetcher.refresh_now()
+            await ctx.send(
+                f"🔄 ForexFactory refresh complete: **+{added}** added / **−{removed}** removed."
+            )
+            return
+
+        # ── !news auto on|off ──────────────────────────────────────────────
+        if subcommand == "auto":
+            if not self.is_admin(ctx.author):
+                await ctx.send("❌ Admin only.")
+                return
+            mode = tokens[1].lower() if len(tokens) >= 2 else ""
+            if mode not in ("on", "off"):
+                await ctx.send("❌ Usage: `!news auto on` / `!news auto off`")
+                return
+            settings = load_settings()
+            settings.news_autofetch.enabled = mode == "on"
+            save_settings(settings)
+            fetcher = self.services.news_fetcher
+            if fetcher is not None:
+                if mode == "on":
+                    fetcher.start()
+                else:
+                    fetcher.stop()
+            await ctx.send(f"✅ News auto-fetch turned **{mode.upper()}**.")
+            return
 
         # ── !news off ──────────────────────────────────────────────────────
         if subcommand == "off":
@@ -80,14 +116,11 @@ class NewsCog(BaseCog):
                             logger.warning(
                                 f"Failed to send news ended alert for event #{event.event_id}: {e}"
                             )
-                # Update DB: news mode is off unless a scheduled event is still active
-                still_active = any(e.is_active() for e in news_manager.get_all_events())
-                try:
-                    await self.bot.db.set_news_mode(still_active)
-                except Exception as e:
-                    logger.warning(f"Failed to update news_mode in DB after !news off: {e}")
             else:
                 await ctx.send("ℹ️ No open-ended news windows were active.")
+            # Reconcile news_mode regardless: it must end up FALSE unless a
+            # scheduled window is still active, even if nothing was removed.
+            await news_manager.reconcile_news_mode()
             return
 
         # ── !news now / !news on [category] [N minutes] ───────────────────
@@ -169,7 +202,9 @@ class NewsCog(BaseCog):
 
         # ── Normal scheduled news ──────────────────────────────────────────
         try:
-            category, news_time_utc, window_minutes, tz_label = parse_news_command(args)
+            category, news_time_utc, window_minutes, tz_label, auto_advanced = parse_news_command(
+                args
+            )
         except ValueError as e:
             await ctx.send(f"❌ {e}")
             return
@@ -183,28 +218,15 @@ class NewsCog(BaseCog):
             display_tz=tz_label,
         )
 
-        news_est = news_time_utc.astimezone(EST)
-        start_est = event.start_time.astimezone(EST)
-        end_est = event.end_time.astimezone(EST)
-
-        # Detect whether the time was auto-advanced to tomorrow
-        today_in_tz = _dt.datetime.now(pytz.utc).astimezone(EST).date()
-        scheduled_date = news_est.date()
-        auto_advanced = scheduled_date > today_in_tz
-
-        # Also show in original timezone if not EST
-        # Use Discord timestamps so each viewer sees their local time
+        # Use Discord timestamps so each viewer sees their local time. The :f
+        # (short date + time) format always shows the date so a future-dated
+        # event is never mistaken for one scheduled today.
         news_ts = int(news_time_utc.timestamp())
         start_ts = int(event.start_time.timestamp())
         end_ts = int(event.end_time.timestamp())
-        tz_display = f"<t:{news_ts}:t>"
+        tz_display = f"<t:{news_ts}:f>"
         if tz_label not in ("EST", "EDT", "ET"):
             tz_display += f" ({tz_label})"
-
-        # Add date hint when auto-advanced (Discord timestamps show the date but an
-        # explicit note makes it clear this slipped to tomorrow)
-        if auto_advanced:
-            tz_display += f" — <t:{news_ts}:D>"
 
         embed = discord.Embed(
             title="📰 News Mode Scheduled",
@@ -219,7 +241,7 @@ class NewsCog(BaseCog):
         embed.add_field(name="Window", value=f"±{window_minutes} min", inline=True)
         embed.add_field(
             name="Active From → To",
-            value=f"<t:{start_ts}:t> → <t:{end_ts}:t>",
+            value=f"<t:{start_ts}:f> → <t:{end_ts}:f>",
             inline=False,
         )
         if auto_advanced:
@@ -252,6 +274,9 @@ class NewsCog(BaseCog):
         now = _dt.datetime.now(pytz.utc)
 
         for event in events:
+            src_tag = " `[auto]`" if event.source == "forexfactory" else ""
+            gold_tag = " +GOLD" if getattr(event, "affects_gold", False) else ""
+            title_line = f"\n*{event.title}*" if event.title else ""
             if event.is_now_mode:
                 activated_ts = int(event.news_time.timestamp())
                 status = "🔴 **ACTIVE NOW**"
@@ -261,8 +286,10 @@ class NewsCog(BaseCog):
                 else:
                     window_str = f"From <t:{activated_ts}:t> — Until `!news off`"
                 embed.add_field(
-                    name=f"#{event.event_id}  {event.category.upper()}",
-                    value=(f"{status}\nWindow: {window_str}\nSet by: {event.created_by}"),
+                    name=f"#{event.event_id}  {event.category.upper()}{gold_tag}{src_tag}",
+                    value=(
+                        f"{status}{title_line}\nWindow: {window_str}\nSet by: {event.created_by}"
+                    ),
                     inline=False,
                 )
             else:
@@ -273,9 +300,10 @@ class NewsCog(BaseCog):
                     f" ({event.display_tz})" if event.display_tz not in ("EST", "EDT", "ET") else ""
                 )
                 embed.add_field(
-                    name=f"#{event.event_id}  {event.category.upper()}{tz_note}",
+                    name=f"#{event.event_id}  {event.category.upper()}{gold_tag}{tz_note}{src_tag}",
                     value=(
-                        f"{status}\nWindow: <t:{s_ts}:t> → <t:{e_ts}:t>\nSet by: {event.created_by}"
+                        f"{status}{title_line}\nWindow: <t:{s_ts}:f> → <t:{e_ts}:t>"
+                        f"\nSet by: {event.created_by}"
                     ),
                     inline=False,
                 )
@@ -295,6 +323,8 @@ class NewsCog(BaseCog):
             !newsclear 3      → remove event #3
             !newsclear        → remove all events
         """
+        if not await self.require_signal_manager(ctx):
+            return
         news_manager: NewsManager = self.bot.news_manager
         alert_system = self.services.alert_system
 
@@ -310,11 +340,13 @@ class NewsCog(BaseCog):
                         logger.warning(
                             f"Failed to send news ended alert for event #{ev.event_id}: {e}"
                         )
+            await news_manager.reconcile_news_mode()
             await ctx.send(f"🗑️ Removed all {count} scheduled news event(s).")
             return
 
         removed_event = news_manager.remove_event(event_id)
         if removed_event:
+            await news_manager.reconcile_news_mode()
             await ctx.send(f"✅ News event #{event_id} removed.")
             if alert_system and event_id in alert_system._news_activation_messages:
                 try:

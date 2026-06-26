@@ -15,6 +15,7 @@ logger = get_logger("database.schema")
 _CHANNEL_NAME_TO_TYPE = {
     "scalps": "scalp",
     "swing-trades": "swing",
+    "gold-swings": "swing",
     "gold-tolls-map": "toll",
     "general-tolls": "toll",
     "oil-tolls": "toll",
@@ -127,9 +128,35 @@ async def initialize_database(db_manager):
                 bid        DOUBLE PRECISION NOT NULL,
                 ask        DOUBLE PRECISION NOT NULL,
                 feed       TEXT NOT NULL,
-                ic_bid     DOUBLE PRECISION,
-                ic_ask     DOUBLE PRECISION,
                 updated_at TIMESTAMPTZ NOT NULL DEFAULT NOW()
+            )
+        """)
+
+        # Create trailing_simulations table — shadow what-if trailing-stop
+        # tracking, written by TrailingStopMonitor. Never read by alerting code.
+        await conn.execute("""
+            CREATE TABLE IF NOT EXISTS trailing_simulations (
+                id              BIGINT GENERATED ALWAYS AS IDENTITY PRIMARY KEY,
+                signal_id       BIGINT NOT NULL REFERENCES signals(id) ON DELETE CASCADE,
+                level           TEXT NOT NULL,
+                distance_value  DOUBLE PRECISION NOT NULL,
+                distance_type   TEXT NOT NULL,
+                anchor_price    DOUBLE PRECISION NOT NULL,
+                high_water_mark DOUBLE PRECISION NOT NULL,
+                hwm_updated_at  TIMESTAMPTZ,
+                stopped_out     BOOLEAN DEFAULT FALSE,
+                stop_price      DOUBLE PRECISION,
+                stop_time       TIMESTAMPTZ,
+                stop_reason     TEXT,
+                pnl_at_stop     DOUBLE PRECISION,
+                created_at      TIMESTAMPTZ DEFAULT NOW(),
+
+                CONSTRAINT trailing_level_check
+                    CHECK (level IN ('tight', 'medium', 'loose')),
+                CONSTRAINT trailing_distance_type_check
+                    CHECK (distance_type IN ('pips', 'dollars')),
+                CONSTRAINT trailing_signal_level_unique
+                    UNIQUE (signal_id, level)
             )
         """)
 
@@ -159,6 +186,8 @@ async def _create_indexes(conn):
         "CREATE INDEX IF NOT EXISTS idx_status_changes_signal ON status_changes(signal_id)",
         "CREATE INDEX IF NOT EXISTS idx_performance_date ON performance_metrics(date)",
         "CREATE INDEX IF NOT EXISTS idx_live_prices_updated ON live_prices(updated_at)",
+        "CREATE INDEX IF NOT EXISTS idx_trailing_signal ON trailing_simulations(signal_id)",
+        "CREATE INDEX IF NOT EXISTS idx_trailing_incomplete ON trailing_simulations(stopped_out) WHERE stopped_out = FALSE",
     ]
 
     for index_query in indexes:
@@ -209,12 +238,13 @@ async def _run_migrations(conn):
             CONSTRAINT licenses_status_check  CHECK (status IN ('active', 'revoked'))
         );
         """,
-        # Bot mode status — single-row table tracking whether news mode / spread hour is active.
-        # Updated in real-time as modes activate/deactivate.
+        # Bot mode status — single-row table tracking active modes. news_mode is a
+        # TEXT list of categories currently under news (e.g. 'EUR, GOLD' or 'ALL'),
+        # NULL when no news. spread_hour stays a boolean. Updated in real-time.
         """
         CREATE TABLE IF NOT EXISTS bot_mode_status (
             id           INT PRIMARY KEY DEFAULT 1,
-            news_mode    BOOLEAN NOT NULL DEFAULT FALSE,
+            news_mode    TEXT,
             spread_hour  BOOLEAN NOT NULL DEFAULT FALSE,
             updated_at   TIMESTAMPTZ NOT NULL DEFAULT NOW(),
             CONSTRAINT bot_mode_status_singleton CHECK (id = 1)
@@ -222,9 +252,25 @@ async def _run_migrations(conn):
         """,
         # Seed the single status row if it does not exist yet
         """
-        INSERT INTO bot_mode_status (id, news_mode, spread_hour)
-        VALUES (1, FALSE, FALSE)
+        INSERT INTO bot_mode_status (id, spread_hour)
+        VALUES (1, FALSE)
         ON CONFLICT (id) DO NOTHING;
+        """,
+        # Migrate existing installs: news_mode BOOLEAN → TEXT. Consumers (incl. the
+        # EX bot) read truthiness, so a non-empty string = active and NULL = inactive.
+        """
+        DO $$
+        BEGIN
+            IF (SELECT data_type FROM information_schema.columns
+                WHERE table_name = 'bot_mode_status' AND column_name = 'news_mode') = 'boolean' THEN
+                ALTER TABLE bot_mode_status ALTER COLUMN news_mode DROP DEFAULT;
+                -- Drop NOT NULL before the type change: the USING clause turns a
+                -- FALSE boolean into NULL, which the still-active constraint rejects.
+                ALTER TABLE bot_mode_status ALTER COLUMN news_mode DROP NOT NULL;
+                ALTER TABLE bot_mode_status ALTER COLUMN news_mode TYPE TEXT
+                    USING (CASE WHEN news_mode THEN 'ALL' ELSE NULL END);
+            END IF;
+        END $$;
         """,
         # Add revoked_reason to licenses table (stage18 — auto-revoke tracking)
         """
@@ -242,13 +288,13 @@ async def _run_migrations(conn):
         """
         CREATE INDEX IF NOT EXISTS idx_bot_mode_status_updated ON bot_mode_status(updated_at);
         """,
-        # H1: ICMarkets mid-price columns on live_prices — allows EX to compute
-        # feed offset from two prices at the same updated_at, eliminating drift.
+        # ic_bid/ic_ask are obsolete — the execution bot now derives its broker
+        # offset from its own MT5 feed against the stored price. Drop the columns.
         """
-        ALTER TABLE live_prices ADD COLUMN IF NOT EXISTS ic_bid DOUBLE PRECISION;
+        ALTER TABLE live_prices DROP COLUMN IF EXISTS ic_bid;
         """,
         """
-        ALTER TABLE live_prices ADD COLUMN IF NOT EXISTS ic_ask DOUBLE PRECISION;
+        ALTER TABLE live_prices DROP COLUMN IF EXISTS ic_ask;
         """,
         # M5: feed health table — written by FeedHealthMonitor each health check.
         # EX reads this in Phase 4.4 to skip placement on stale feeds.

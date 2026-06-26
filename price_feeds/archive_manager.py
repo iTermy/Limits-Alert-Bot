@@ -147,6 +147,7 @@ class ArchiveManager:
 
             ping_msg = self.signal_ping_messages.pop(signal_id, None)
             if ping_msg:
+                self.alert_messages.pop(str(ping_msg.id), None)
                 try:
                     await ping_msg.delete()
                 except Exception:

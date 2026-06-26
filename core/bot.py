@@ -2,6 +2,8 @@
 Trading Bot Core - Main bot class
 """
 
+import traceback
+from datetime import datetime
 from typing import Optional, Set
 
 import discord
@@ -37,6 +39,7 @@ class TradingBot(commands.Bot):
 
         # Initialize attributes
         self.logger = get_logger("bot")
+        self.start_time = datetime.utcnow()
         self.channels_config = None
         self.monitored_channels: Set[int] = set()
         self.allowed_channel_ids: Set[int] = set()
@@ -47,6 +50,8 @@ class TradingBot(commands.Bot):
         self.expiry_manager = None
         self.monitor = None
         self.channel_cleaner = None
+        self.news_fetcher = None
+        self.vol_guard = None
 
         # Flat service registry — populated during setup_hook, injected into cogs/handlers
         self.services = ServiceRegistry()
@@ -61,6 +66,9 @@ class TradingBot(commands.Bot):
         # Admin user IDs from settings.json
         bot_settings = load_settings()
         self.admin_ids = bot_settings.admin_ids
+        # Roles / users allowed to manage signals (in addition to admins)
+        self.signal_manager_role_ids = set(bot_settings.signal_manager_role_ids)
+        self.signal_manager_user_ids = set(bot_settings.signal_manager_user_ids)
 
     async def setup_hook(self):
         """Called when bot is getting ready"""
@@ -74,8 +82,11 @@ class TradingBot(commands.Bot):
         self.services.db = db
         self.services.signal_db = self.signal_db
 
-        # Give NewsManager a reference to the DB so it can persist mode status
+        # Give NewsManager a reference to the DB so it can persist mode status,
+        # then sync the news_mode column to the events loaded from disk (corrects
+        # any stale value a previous crash may have left behind).
         self.news_manager.set_db(db)
+        await self.news_manager.reconcile_news_mode()
 
         # Load channel configuration SECOND
         await self.load_config()
@@ -97,6 +108,7 @@ class TradingBot(commands.Bot):
             self.services.nm_config = self.monitor.nm_config
             self.services.nm_monitor = self.monitor.nm_monitor
             self.services.alert_config = self.monitor.alert_config
+            self.services.trailing_monitor = self.monitor.trailing_monitor
 
         # Connect alert system to message handler
         if self.monitor and self.message_handler:
@@ -223,10 +235,34 @@ class TradingBot(commands.Bot):
                 f"Error processing commands for message {message.id}: {str(e)!r}", exc_info=True
             )
 
-    async def on_message_edit(self, before: discord.Message, after: discord.Message):
-        """Handle message edits"""
-        if self.message_handler:
-            await self.message_handler.handle_message_edit(before, after)
+    async def on_raw_message_edit(self, payload: discord.RawMessageUpdateEvent):
+        """Handle message edits, including messages edited after a restart.
+
+        The cached ``on_message_edit`` only fires for messages received since the
+        process started; an edit to an older signal would be silently missed. The
+        raw event fires for every edit, so we filter to monitored channels (cheap,
+        avoids fetching for the many edits the bot makes in alert channels), fetch
+        the current message, and hand it to the same handler.
+        """
+        if not self.message_handler:
+            return
+
+        if payload.channel_id not in self.monitored_channels:
+            return
+
+        channel = self.get_channel(payload.channel_id)
+        if channel is None:
+            try:
+                channel = await self.fetch_channel(payload.channel_id)
+            except (discord.NotFound, discord.Forbidden):
+                return
+
+        try:
+            message = await channel.fetch_message(payload.message_id)
+        except (discord.NotFound, discord.Forbidden):
+            return
+
+        await self.message_handler.handle_message_edit(message)
 
     async def on_raw_message_delete(self, payload: discord.RawMessageDeleteEvent):
         """Handle message deletions"""
@@ -236,7 +272,9 @@ class TradingBot(commands.Bot):
     async def on_command_error(self, ctx: commands.Context, error: commands.CommandError):
         """Handle command errors"""
         if isinstance(error, commands.CommandNotFound):
-            return  # Ignore unknown commands
+            if self.command_channel_id and ctx.channel.id == self.command_channel_id:
+                await ctx.send("❌ Unknown command. Use `!help` to see available commands.")
+            return
 
         if isinstance(error, commands.MissingPermissions):
             await ctx.send("❌ You don't have permission to use this command.")
@@ -268,6 +306,10 @@ class TradingBot(commands.Bot):
             from price_feeds.streaming_monitor import StreamingPriceMonitor
             from price_feeds.tp_config import TPConfig
             from price_feeds.tp_monitor import AutoTPMonitor
+            from price_feeds.trailing_config import TrailingStopConfig
+            from price_feeds.trailing_monitor import TrailingStopMonitor
+
+            from database.trailing_ops import TrailingDatabase
 
             # Create subsystems
             alert_config = AlertDistanceConfig()
@@ -288,6 +330,11 @@ class TradingBot(commands.Bot):
                 signal_db=self.signal_db,
                 db=db,
                 alert_system=alert_system,
+            )
+            trailing_config = TrailingStopConfig(tp_config=tp_config)
+            trailing_monitor = TrailingStopMonitor(
+                trailing_config=trailing_config,
+                trailing_db=TrailingDatabase(db),
             )
             live_price_writer = LivePriceWriter(
                 db_manager=db,
@@ -318,6 +365,7 @@ class TradingBot(commands.Bot):
                 tp_monitor=tp_monitor,
                 nm_config=nm_config,
                 nm_monitor=nm_monitor,
+                trailing_monitor=trailing_monitor,
                 live_price_writer=live_price_writer,
                 health_monitor=health_monitor,
             )
@@ -328,6 +376,21 @@ class TradingBot(commands.Bot):
 
             # Re-start the news manager cleanup task now that we have an alert system
             self.news_manager.start_cleanup_task(alert_system=alert_system)
+
+            # Start the ForexFactory news fetcher (auto-populates news windows).
+            # Started here so newly-added windows get activation alerts via the
+            # cleanup loop above.
+            from core.news_fetcher import NewsFetcher
+
+            self.news_fetcher = NewsFetcher(self.news_manager, bot_settings.news_autofetch)
+            self.services.news_fetcher = self.news_fetcher
+            if bot_settings.news_autofetch.enabled:
+                self.news_fetcher.start()
+                self.logger.info("ForexFactory news fetcher started")
+
+            # Volatility guard — informational only; subscribes to the same price
+            # stream and announces sharp moves per currency (gold flags "ALL").
+            await self._start_vol_guard(stream_manager)
 
             self.logger.info("Price monitoring system initialized and started")
             self.logger.info(
@@ -360,6 +423,28 @@ class TradingBot(commands.Bot):
             else:
                 self.logger.warning(f"No {key} configured in channels.json")
 
+    async def _start_vol_guard(self, stream_manager):
+        """Create and start the volatility guard, posting to its own channel
+        (`vol-guard-alert` in channels.json) or the main alert channel as a fallback."""
+        from price_feeds.vol_guard import VolatilityGuard
+
+        channel_id = self.channels_config.get("vol-guard-alert") or self.channels_config.get(
+            "alert_channel"
+        )
+        if not channel_id:
+            self.logger.warning("No vol-guard-alert or alert_channel configured — vol guard off")
+            return
+        try:
+            channel = await self.fetch_channel(int(channel_id))
+        except Exception as e:
+            self.logger.error(f"Failed to resolve vol guard channel: {e}")
+            return
+
+        self.vol_guard = VolatilityGuard(self, stream_manager, channel)
+        self.services.vol_guard = self.vol_guard
+        self.vol_guard.start()
+        self.logger.info(f"Volatility guard channel set: #{channel.name}")
+
     @tasks.loop(seconds=30)
     async def heartbeat(self):
         """Periodic heartbeat for monitoring"""
@@ -372,7 +457,13 @@ class TradingBot(commands.Bot):
 
     async def close(self):
         """Cleanup when bot shuts down"""
-        self.logger.info("Shutting down bot...")
+        # Log the call stack so we can see what triggered the shutdown — the
+        # trigger (e.g. a fatal gateway close inside discord.py) is otherwise
+        # invisible, leaving only feed teardown errors in the log.
+        self.logger.warning(
+            "Shutting down bot... close() called from:\n%s",
+            "".join(traceback.format_stack()),
+        )
 
         # Cancel background tasks
         self.heartbeat.cancel()
@@ -385,6 +476,12 @@ class TradingBot(commands.Bot):
 
         if self.news_manager:
             self.news_manager.stop_cleanup_task()
+
+        if self.news_fetcher:
+            self.news_fetcher.stop()
+
+        if self.vol_guard:
+            self.vol_guard.stop()
 
         if self.monitor:
             await self.monitor.stop()

@@ -91,13 +91,31 @@ class LicenseCog(BaseCog):
                 "SELECT mt5_account, license_key FROM licenses WHERE discord_id = $1 AND status = 'active'",
                 str(member.id),
             )
-            if existing_keys:
+            max_keys = (
+                await conn.fetchval(
+                    "SELECT max_keys FROM license_allowances WHERE discord_id = $1",
+                    str(member.id),
+                )
+                or 1
+            )
+
+            # Already registered this exact account → don't issue a duplicate key.
+            if any(r["mt5_account"] == mt5_account for r in existing_keys):
+                await member.send(
+                    f"ℹ️ You already have an active license for MT5 account `{mt5_account}`.\n"
+                    "If you've **lost your key**, ask an admin to re-issue it with `!grantkey`."
+                )
+                return
+
+            # Block only when the user has used up their key allowance.
+            if len(existing_keys) >= max_keys:
                 accounts = ", ".join(f"`{r['mt5_account']}`" for r in existing_keys)
                 await member.send(
-                    f"ℹ️ You already have an active license for MT5 account(s): {accounts}.\n\n"
-                    "If you need to register a **different** MT5 account, contact an admin "
-                    "to revoke your existing key first.\n"
-                    "If you've **lost your key**, ask an admin to re-issue it with `!grantkey`."
+                    f"ℹ️ You've reached your license limit ({len(existing_keys)}/{max_keys}) "
+                    f"for MT5 account(s): {accounts}.\n\n"
+                    "To register an **additional** MT5 account, ask an admin to raise your "
+                    "limit with `!setkeys`.\n"
+                    "If you've **lost a key**, ask an admin to re-issue it with `!grantkey`."
                 )
                 return
 
@@ -127,11 +145,7 @@ class LicenseCog(BaseCog):
         await member.send(
             f"✅ **License activated!**\n\n"
             f"**Your license key:**\n```\n{license_key}\n```\n\n"
-            f"**Setup:**\n"
-            f"1. Open `config.json` in your Auto-Limits-Adder folder.\n"
-            f'2. Add your key to the "license" section:\n'
-            f'```json\n"license": {{\n    "key": "{license_key}"\n}}\n```\n'
-            f"3. Save and start the bot — it validates on startup.\n\n"
+            f"Paste this key into the settings page of the Auto-Limits-Adder execution bot.\n\n"
             f"⚠️ Keep this key private. It is locked to MT5 account `{mt5_account}`."
         )
 
@@ -221,8 +235,7 @@ class LicenseCog(BaseCog):
             await member.send(
                 f"🔑 An admin has issued you an **Auto-Limits-Adder** license key.\n\n"
                 f"**Your license key:**\n```\n{license_key}\n```\n\n"
-                f'Add this to `config.json` under the `"license"` section:\n'
-                f'```json\n"license": {{\n    "key": "{license_key}"\n}}\n```\n'
+                f"Paste this key into the settings page of the Auto-Limits-Adder execution bot.\n\n"
                 f"This key is locked to MT5 account `{mt5_account}`. Keep it private."
             )
         except discord.Forbidden:

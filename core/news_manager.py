@@ -153,6 +153,24 @@ class NewsEvent:
     display_tz: str = field(default="EST")
     # Optional explicit end time for timed "now" events (e.g. !news now gold 5 minutes)
     end_time_override: Optional[datetime] = field(default=None)
+    # "manual" (set via !news) or "forexfactory" (auto-fetched from the calendar feed)
+    source: str = field(default="manual")
+    # Stable dedup key for auto-fetched events; None for manual events
+    external_id: Optional[str] = field(default=None)
+    # Human-readable event name for auto-fetched events (e.g. "Federal Funds Rate")
+    title: Optional[str] = field(default=None)
+    # When True the event also pauses gold (XAUUSD) — used for USD news, which
+    # ForexFactory files dollar releases (FOMC/NFP/CPI) that move gold hard.
+    affects_gold: bool = field(default=False)
+
+    @property
+    def display_label(self) -> str:
+        """Human-readable label for alerts: 'USD — Federal Funds Rate' when a
+        title is known (auto-fetched events), otherwise just the category."""
+        cat = self.category.upper()
+        if self.title:
+            return f"{cat} — {self.title}"
+        return cat
 
     @property
     def start_time(self) -> datetime:
@@ -188,6 +206,10 @@ class NewsEvent:
         if cat == "ALL":
             return True
 
+        # USD news optionally also pauses gold (FOMC/NFP/CPI move gold hard)
+        if self.affects_gold and instr in {"XAUUSD", "GOLD"}:
+            return True
+
         # Named categories (gold, oil, btc, …)
         if cat in NAMED_CATEGORIES:
             explicit = NAMED_CATEGORIES[cat]
@@ -198,6 +220,10 @@ class NewsEvent:
 
         # Forex currency code (USD, EUR, …)
         if cat in FOREX_CURRENCIES:
+            # US dollar releases also pause US equities and US indices.
+            if cat == "USD" and (_is_us_stock(instr) or _is_us_index(instr)):
+                return True
+
             # Match any 6-char forex pair that contains this currency on either side
             # but exclude metal/commodity pairs (XAU, XAG, XPT, XPD prefix)
             METAL_PREFIXES = {"XAU", "XAG", "XPT", "XPD", "BCO", "WTI"}
@@ -213,17 +239,46 @@ class NewsEvent:
         return cat in instr
 
     def __str__(self) -> str:
+        tag = " [auto]" if self.source == "forexfactory" else ""
+        name = f" {self.title}" if self.title else ""
         if self.is_now_mode:
             return (
-                f"[#{self.event_id}] {self.category.upper()} news @ "
+                f"[#{self.event_id}]{tag} {self.category.upper()}{name} news @ "
                 f"NOW (open-ended, manual off required)"
             )
         news_est = self.news_time.astimezone(EST)
         return (
-            f"[#{self.event_id}] {self.category.upper()} news @ "
+            f"[#{self.event_id}]{tag} {self.category.upper()}{name} news @ "
             f"{news_est.strftime('%I:%M %p')} EST "
             f"(±{self.window_minutes} min)"
         )
+
+
+# US index identifiers (internal/feed symbol fragments). USD news pauses these
+# alongside US equities — high-impact dollar releases move US indices hardest.
+US_INDEX_KEYWORDS: Set[str] = {
+    "NAS100",
+    "US30",
+    "US500",
+    "SPX500",
+    "SPX",
+    "USTEC",
+    "US2000",
+    "NDX",
+    "DJI",
+    "DJ30",
+    "NASDAQ",
+}
+
+
+def _is_us_stock(symbol: str) -> bool:
+    """US equities are stored with a .NAS / .NYSE suffix."""
+    return symbol.endswith(".NAS") or symbol.endswith(".NYSE")
+
+
+def _is_us_index(symbol: str) -> bool:
+    """Match US index symbols while excluding non-US indices (DAX, JP225, …)."""
+    return any(tok in symbol for tok in US_INDEX_KEYWORDS)
 
 
 def _is_crypto(symbol: str) -> bool:
@@ -273,17 +328,65 @@ class NewsManager:
         self._next_id: int = 1
         self._cleanup_task: Optional[asyncio.Task] = None
         self._db = None  # Set by bot after DB initialisation via set_db()
+        # Last news_mode value written to bot_mode_status. _news_mode_synced is
+        # False until the first successful write, forcing one reconcile at startup
+        # to correct any stale value a crash may have left behind.
+        self._last_news_mode: Optional[str] = None
+        self._news_mode_synced: bool = False
 
     def set_db(self, db) -> None:
         """Attach the DatabaseManager so mode-status flags can be persisted."""
         self._db = db
+
+    def _compute_news_mode_value(self) -> Optional[str]:
+        """Return the news_mode column value for the currently-active events.
+
+        'ALL' if any active event covers all symbols; otherwise a comma-separated
+        list of the active category labels (e.g. 'EUR, GOLD'); None when nothing
+        is active.
+        """
+        labels: List[str] = []
+        for event in self._events:
+            if not event.is_active():
+                continue
+            label = event.category.upper()
+            if label == "ALL":
+                return "ALL"
+            if label not in labels:
+                labels.append(label)
+        return ", ".join(labels) if labels else None
+
+    async def reconcile_news_mode(self) -> None:
+        """Sync bot_mode_status.news_mode to the active news categories.
+
+        Writes only when the value changes (the first call after startup always
+        writes, so a stale value left by a crash is corrected). Safe to call from
+        any path (commands, the cleanup loop) — it is the single source of truth
+        for the flag and does not rely on per-restart edge-detection state.
+        """
+        if self._db is None:
+            return
+        value = self._compute_news_mode_value()
+        if self._news_mode_synced and value == self._last_news_mode:
+            return
+        try:
+            await self._db.set_news_mode(value)
+            self._last_news_mode = value
+            self._news_mode_synced = True
+        except Exception as e:
+            logger.error(f"Failed to reconcile news_mode in DB: {e}")
 
     # ------------------------------------------------------------------
     # Persistence
     # ------------------------------------------------------------------
 
     def _save(self) -> None:
-        """Serialise all non-expired events to disk."""
+        """Serialise non-expired manual events to disk.
+
+        Auto-fetched (ForexFactory) events are deliberately not persisted — they
+        are re-fetched from the feed on every startup, so saving them would only
+        risk restoring stale windows.
+        """
         now = datetime.now(pytz.utc)
         data = {
             "next_id": self._next_id,
@@ -302,7 +405,8 @@ class NewsManager:
                     else None,
                 }
                 for e in self._events
-                if not e.is_expired(now)  # don't bother saving already-expired events
+                # Skip already-expired events and auto-fetched ones (re-fetched on boot)
+                if not e.is_expired(now) and e.source == "manual"
             ],
         }
         try:
@@ -355,6 +459,9 @@ class NewsManager:
                     is_now_mode=item.get("is_now_mode", False),
                     display_tz=item.get("display_tz", "EST"),
                     end_time_override=_load_optional_dt(item.get("end_time_override")),
+                    source=item.get("source", "manual"),
+                    external_id=item.get("external_id"),
+                    title=item.get("title"),
                 )
 
                 if not event.is_expired(now):
@@ -382,6 +489,9 @@ class NewsManager:
         is_now_mode: bool = False,
         display_tz: str = "EST",
         end_time_override: Optional[datetime] = None,
+        source: str = "manual",
+        external_id: Optional[str] = None,
+        title: Optional[str] = None,
     ) -> NewsEvent:
         """Register a new news event, persist to disk, and return it."""
         event = NewsEvent(
@@ -393,6 +503,9 @@ class NewsManager:
             is_now_mode=is_now_mode,
             display_tz=display_tz,
             end_time_override=end_time_override,
+            source=source,
+            external_id=external_id,
+            title=title,
         )
         self._next_id += 1
         self._events.append(event)
@@ -442,6 +555,44 @@ class NewsManager:
             logger.debug(f"Purged {removed} expired news event(s)")
             self._save()
 
+    def sync_forexfactory_events(self, events: List[NewsEvent]) -> Tuple[int, int]:
+        """Reconcile the set of auto-fetched events against a fresh feed pull.
+
+        Adds any incoming event whose external_id is not already tracked, and
+        removes auto events that have dropped out of the feed unless their window
+        is currently active (so a live window is never yanked mid-event). Manual
+        events are left untouched. Returns (added, removed) counts.
+        """
+        now = datetime.now(pytz.utc)
+        existing_auto = {
+            e.external_id: e for e in self._events if e.source == "forexfactory" and e.external_id
+        }
+        incoming_ids = {e.external_id for e in events if e.external_id}
+
+        added = 0
+        for event in events:
+            if event.external_id in existing_auto:
+                continue
+            event.event_id = self._next_id
+            self._next_id += 1
+            self._events.append(event)
+            added += 1
+
+        before = len(self._events)
+        self._events = [
+            e
+            for e in self._events
+            if e.source != "forexfactory"
+            or e.external_id in incoming_ids
+            or e.is_active(now)
+        ]
+        removed = before - len(self._events)
+
+        if added or removed:
+            self._save()
+            logger.info(f"ForexFactory sync: +{added} / -{removed} auto news event(s)")
+        return added, removed
+
     def start_cleanup_task(self, alert_system=None):
         """
         Start a background task that:
@@ -469,13 +620,6 @@ class NewsManager:
                             except Exception as e:
                                 logger.error(f"Failed to send news activated alert: {e}")
 
-                            # Update DB: news mode is now active
-                            if self._db is not None:
-                                try:
-                                    await self._db.set_news_mode(True)
-                                except Exception as e:
-                                    logger.error(f"Failed to set news_mode=True in DB: {e}")
-
                         # Fire ended alert for windows that just expired
                         if (
                             event.event_id not in ended_ids
@@ -488,17 +632,11 @@ class NewsManager:
                             except Exception as e:
                                 logger.error(f"Failed to send news ended alert: {e}")
 
-                            # Update DB: check if any other events are still active
-                            if self._db is not None:
-                                try:
-                                    still_active = any(
-                                        e.is_active(now)
-                                        for e in self._events
-                                        if e.event_id != event.event_id
-                                    )
-                                    await self._db.set_news_mode(still_active)
-                                except Exception as e:
-                                    logger.error(f"Failed to set news_mode in DB: {e}")
+                # Reconcile bot_mode_status.news_mode against the actual set of
+                # active windows. This self-heals every path (commands, expiry,
+                # restarts) since it does not depend on the local edge sets above,
+                # which reset to empty on each restart.
+                await self.reconcile_news_mode()
 
                 # Purge expired events (every ~5 min: 10 × 30 s)
                 if not hasattr(_run, "_purge_counter"):
@@ -530,10 +668,13 @@ class NewsManager:
 # ---------------------------------------------------------------------------
 
 
-def parse_news_command(args_str: str) -> Tuple[str, datetime, int, str]:
+def parse_news_command(args_str: str) -> Tuple[str, datetime, int, str, bool]:
     """
     Parse the argument string from !news and return
-    (category, news_time_utc, window_minutes, display_tz_label).
+    (category, news_time_utc, window_minutes, display_tz_label, auto_advanced).
+
+    auto_advanced is True only when no explicit date was given and the time had
+    already passed today, so it was rolled to tomorrow.
 
     Supported format:
         <category> <time> [window_minutes] [tz:<timezone>] [date:<date>]
@@ -604,18 +745,20 @@ def parse_news_command(args_str: str) -> Tuple[str, datetime, int, str]:
     # If no explicit date was given and the window has already fully passed,
     # auto-advance to the same time tomorrow.  This prevents silently scheduling
     # an event that is already expired (which would never appear in !newslist).
+    auto_advanced = False
     if date_override is None:
         now_utc = datetime.now(pytz.utc)
         window_end_utc = news_time_utc + timedelta(minutes=window_minutes)
         if window_end_utc < now_utc:
             news_time_local = news_time_local + timedelta(days=1)
             news_time_utc = news_time_local.astimezone(pytz.utc)
+            auto_advanced = True
             logger.info(
                 f"News time {time_str} has already passed today — "
                 f"auto-advanced to tomorrow: {news_time_utc.isoformat()}"
             )
 
-    return category, news_time_utc, window_minutes, tz_label
+    return category, news_time_utc, window_minutes, tz_label, auto_advanced
 
 
 def _parse_date(date_str: str, tz_zone: pytz.BaseTzInfo) -> datetime:

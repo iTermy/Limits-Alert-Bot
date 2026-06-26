@@ -46,7 +46,7 @@ class LifecycleCog(BaseCog):
 
         # Parse arguments
         instrument = None
-        sort_method = "recent"  # default
+        sort_method = "distance"  # default
 
         if args:
             args_parts = args.split()
@@ -196,43 +196,26 @@ class LifecycleCog(BaseCog):
         )
         embed.add_field(name="Stop Loss", value=stop_loss_formatted, inline=True)
 
-        # Streaming status
-        if self.services.monitor:
-            is_subscribed = signal["instrument"] in self.services.stream_manager.subscribed_symbols
-            embed.add_field(
-                name="Streaming Status",
-                value="🟢 Subscribed" if is_subscribed else "⚪ Not Subscribed",
-                inline=True,
-            )
+        # Take-profit price (manual closures show "Manual" instead of a price)
+        if signal.get("closed_reason") == "manual":
+            tp_value = "Manual"
+        elif signal.get("tp_price") is not None:
+            tp_value = format_price(signal["tp_price"], signal["instrument"])
+        else:
+            tp_value = "N/A"
+        embed.add_field(name="TP Price", value=tp_value, inline=True)
 
         # Limits info
         if signal["limits"]:
-            pending_limits = [l for l in signal["limits"] if l["status"] == "pending"]
-            hit_limits = [l for l in signal["limits"] if l["status"] == "hit"]
-
-            if pending_limits:
-                pending_str = "\n".join(
-                    [
-                        f"• {format_price(l['price_level'], signal['instrument'])}"
-                        for l in pending_limits[:5]
-                    ]
-                )
-                if len(pending_limits) > 5:
-                    pending_str += f"\n... +{len(pending_limits) - 5} more"
-                embed.add_field(
-                    name=f"Pending Limits ({len(pending_limits)})", value=pending_str, inline=False
-                )
-
-            if hit_limits:
-                hit_str = "\n".join(
-                    [
-                        f"• {format_price(l['price_level'], signal['instrument'])} ✅"
-                        for l in hit_limits[:5]
-                    ]
-                )
-                if len(hit_limits) > 5:
-                    hit_str += f"\n... +{len(hit_limits) - 5} more"
-                embed.add_field(name=f"Hit Limits ({len(hit_limits)})", value=hit_str, inline=False)
+            limits_str = "\n".join(
+                [
+                    f"• ~~{format_price(l['price_level'], signal['instrument'])}~~ ✅"
+                    if l["status"] == "hit"
+                    else f"• {format_price(l['price_level'], signal['instrument'])}"
+                    for l in signal["limits"]
+                ]
+            )
+            embed.add_field(name=f"Limits ({len(signal['limits'])})", value=limits_str, inline=False)
 
         # Progress
         embed.add_field(
@@ -283,6 +266,8 @@ class LifecycleCog(BaseCog):
         self, ctx: commands.Context, signal_id: int, status: str, *, rest: str = ""
     ):
         """Manually set a signal's status. Append --force to bypass the reactivation guard (admin only)."""
+        if not await self.require_signal_manager(ctx):
+            return
         valid_statuses = [
             "active",
             "hit",
@@ -387,6 +372,8 @@ class LifecycleCog(BaseCog):
         if success:
             if self.services.monitor:
                 self.services.monitor.sync_signal_status_in_memory(signal_id, status)
+                if status in ("profit", "breakeven", "stop_loss", "cancelled"):
+                    await self.services.monitor.finalize_trailing_on_manual_close(signal_id)
             status_emoji = get_status_emoji(status)
 
             embed = discord.Embed(
@@ -426,6 +413,9 @@ class LifecycleCog(BaseCog):
                 try:
                     if self.services.monitor:
                         self.services.nm_monitor.mark_immune(signal_id)
+                        # Pull the signal back into active_signals so price ticks
+                        # see it immediately rather than waiting for the 30s refresh.
+                        await self.services.monitor.refresh_signal_in_memory(signal_id)
                 except Exception as _ne:
                     logger.warning(f"Could not mark signal {signal_id} NM-immune: {_ne}")
         else:
@@ -439,6 +429,8 @@ class LifecycleCog(BaseCog):
     @commands.command(name="hit", description="Mark signal as hit")
     async def set_hit(self, ctx: commands.Context, signal_id: int):
         """Manually mark a signal as HIT, treating limit 1 as hit and starting auto-TP."""
+        if not await self.require_signal_manager(ctx):
+            return
         try:
             transitioned = await asyncio.wait_for(
                 self.signal_db.manually_set_signal_to_hit(
@@ -498,6 +490,8 @@ class LifecycleCog(BaseCog):
           !cancel all <CURRENCY>                    - Cancel all signals containing a currency (e.g. !cancel all EUR)
         For detailed help: !help cancel
         """
+        if not await self.require_signal_manager(ctx):
+            return
         if args is None:
             await ctx.send(
                 "❌ Usage: `!cancel <id>` or `!cancel gold longs/shorts/both <type>` or `!cancel all <PAIR/CURRENCY>`\nSee `!help cancel` for full details."
@@ -643,6 +637,7 @@ class LifecycleCog(BaseCog):
             # 1. Evict from streaming monitor so price-checking stops immediately
             if monitor:
                 monitor.sync_signal_status_in_memory(sid, "cancelled")
+                await monitor.finalize_trailing_on_manual_close(sid)
                 monitor.active_signals.pop(sid, None)
                 monitor.nm_monitor.evict_signal(sid)
                 monitor.tp_monitor.evict_signal(sid)
@@ -844,6 +839,8 @@ class LifecycleCog(BaseCog):
         Set signal expiry
         Valid types: day_end, week_end, month_end, no_expiry
         """
+        if not await self.require_signal_manager(ctx):
+            return
         valid_types = ["day_end", "week_end", "month_end", "no_expiry"]
 
         if expiry_type.lower() not in valid_types:

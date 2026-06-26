@@ -75,31 +75,58 @@ class BotManagementCog(BaseCog):
         if topic and topic.lower() == "tp":
             embed = discord.Embed(
                 title="Take-Profit Command — Detailed Help",
-                description="View and manage auto take-profit thresholds.",
+                description=(
+                    "View and manage auto take-profit thresholds.\n"
+                    "Every TP value is scoped to a **signal type**: `standard`, `scalp`, `swing`, "
+                    "`toll`, `pa`, `1-1`."
+                ),
                 color=0x00BFFF,
             )
             embed.add_field(
                 name="Show config",
                 value=(
-                    "`!tp config` — show all defaults and per-symbol overrides\n"
-                    "`!tp config <symbol>` — show TP config for a specific symbol (e.g. `!tp config XAUUSD`)"
+                    "`!tp config` — show all type defaults at a glance\n"
+                    "`!tp config <type>` — show one type's full config (e.g. `!tp config swing`)\n"
+                    "`!tp config <symbol> [--type=X]` — effective TP for a symbol "
+                    "(e.g. `!tp config XAUUSD --type=swing`)"
                 ),
                 inline=False,
             )
             embed.add_field(
-                name="Set TP threshold (admin)",
+                name="Set asset-class default (admin)",
                 value=(
-                    "`!tp set <class> <value>` — set asset-class default (e.g. `!tp set metals 5`)\n"
-                    "`!tp set <symbol> <value>` — set per-symbol override (e.g. `!tp set XAUUSD 5`)\n"
-                    "`!tp set <target> <value> pips` — specify pips (e.g. `!tp set forex 10 pips`)\n"
-                    "`!tp set <target> <value> dollars` — specify dollars (e.g. `!tp set XAUUSD 5 dollars`)\n\n"
-                    "Valid asset classes: forex, forex_jpy, metals, indices, stocks, crypto, oil"
+                    "`!tp set <type> <class> <value> [pips|dollars]` — per-type asset-class default\n"
+                    "  • `!tp set swing metals 15 dollars` — gold swings → $15\n"
+                    "  • `!tp set standard metals 5 dollars` — gold standard → $5\n"
+                    "  • `!tp set scalp forex 3 pips` — forex scalps → 3 pips\n\n"
+                    "`!tp set <class> <value>` — shortcut for `standard` (e.g. `!tp set metals 5`)"
+                ),
+                inline=False,
+            )
+            embed.add_field(
+                name="Set per-symbol override (admin)",
+                value=(
+                    "`!tp set <symbol> <value> [pips|dollars] [--type=X]`\n"
+                    "  • `!tp set XAUUSD 8 dollars --type=swing` — gold swings, $8 on XAUUSD only\n"
+                    "  • `!tp set XAUUSD 5 dollars` — standard override on XAUUSD\n\n"
+                    "Per-symbol overrides take priority over asset-class defaults."
                 ),
                 inline=False,
             )
             embed.add_field(
                 name="Remove override (admin)",
-                value="`!tp remove <symbol>` — remove per-symbol override, reverting to asset-class default (e.g. `!tp remove XAUUSD`)",
+                value=(
+                    "`!tp remove <symbol> [--type=X]` — drop a per-symbol override, reverting to "
+                    "the asset-class default (e.g. `!tp remove XAUUSD --type=swing`)"
+                ),
+                inline=False,
+            )
+            embed.add_field(
+                name="Reference",
+                value=(
+                    "**Signal types:** standard, scalp, swing, toll, pa, 1-1\n"
+                    "**Asset classes:** forex, forex_jpy, metals, indices, stocks, crypto, oil"
+                ),
                 inline=False,
             )
             embed.set_footer(
@@ -255,12 +282,10 @@ class BotManagementCog(BaseCog):
         embed = discord.Embed(title="Bot Health", color=0x00FF00)
 
         # Uptime + latency
-        uptime_str = "—"
-        if hasattr(self.bot, "start_time"):
-            delta = now - self.bot.start_time
-            h = int(delta.total_seconds() // 3600)
-            m = int((delta.total_seconds() % 3600) // 60)
-            uptime_str = f"{h}h {m}m"
+        delta = now - self.bot.start_time
+        h = int(delta.total_seconds() // 3600)
+        m = int((delta.total_seconds() % 3600) // 60)
+        uptime_str = f"{h}h {m}m"
         embed.add_field(
             name="System",
             value=f"Uptime: {uptime_str}  ·  Latency: {round(self.bot.latency * 1000)}ms",

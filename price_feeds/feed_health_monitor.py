@@ -24,6 +24,13 @@ RECONNECT_DELAY_SECONDS = 10
 ALERT_COOLDOWN_MINUTES = 15
 STARTUP_GRACE_PERIOD_SECONDS = 120
 
+# Price-flow watchdog: when at least one subscribed symbol's market should be
+# open but ZERO ticks have arrived across EVERY feed for this long, the bot is
+# effectively dead (feeds frozen). Force a supervised restart. The open-market
+# gate (is_market_open) means weekends, holidays, and spread hour never trip it.
+WATCHDOG_SILENCE_SECONDS = 180
+WATCHDOG_GRACE_SECONDS = 180
+
 # Spread hour: 5–6 PM EST weekdays (matches streaming_monitor._is_spread_hour)
 _SPREAD_START = dtime(17, 0)
 _SPREAD_END = dtime(18, 0)
@@ -91,11 +98,14 @@ class FeedHealthMonitor:
         self.monitor_task = None
         self.startup_time = datetime.now()
 
+        # Set once the watchdog has initiated a restart, so it never fires twice.
+        self._watchdog_fired = False
+
         # Track last update times: feed -> symbol -> timestamp
         self.last_seen: Dict[str, Dict[str, datetime]] = defaultdict(dict)
 
         # Track feed status
-        self.feed_status: Dict[str, str] = {}  # 'healthy', 'degraded', 'down'
+        self.feed_status: Dict[str, str] = {}  # 'healthy', 'down', 'idle'
         self.last_alert_time: Dict[str, datetime] = {}
         self.reconnect_attempts: Dict[str, int] = defaultdict(int)
         # Earliest stale-symbol last_update timestamp captured when the feed first
@@ -112,7 +122,6 @@ class FeedHealthMonitor:
             "reconnections_attempted": 0,
             "reconnections_successful": 0,
             "alerts_sent": 0,
-            "false_positives_avoided": 0,
         }
 
         # Timezone for market hours
@@ -161,7 +170,83 @@ class FeedHealthMonitor:
             except Exception as e:
                 logger.error(f"Error in health check: {e}", exc_info=True)
 
+            try:
+                await self._check_price_flow_watchdog(datetime.now())
+            except Exception as e:
+                logger.error(f"Error in price-flow watchdog: {e}", exc_info=True)
+
             await asyncio.sleep(CHECK_INTERVAL_SECONDS)
+
+    def _global_newest_tick(self):
+        """Most recent tick timestamp across every feed and symbol, or None."""
+        newest = None
+        for feed_data in self.last_seen.values():
+            for ts in feed_data.values():
+                if newest is None or ts > newest:
+                    newest = ts
+        return newest
+
+    def _any_open_market_subscribed(self) -> bool:
+        """True if any currently-subscribed symbol's market should be open now."""
+        subscribed = getattr(self.stream_manager, "subscribed_symbols", set())
+        for symbol in subscribed:
+            asset_class = self.symbol_mapper.determine_asset_class(symbol)
+            if self.is_market_open(asset_class):
+                return True
+        return False
+
+    async def _check_price_flow_watchdog(self, now: datetime):
+        """Force a supervised restart if the bot is producing no ticks at all
+        while a subscribed market should be open.
+
+        Conservative by construction — all of these must hold:
+        - past the watchdog grace period (avoids startup churn)
+        - at least one subscribed symbol whose market is open right now
+        - no tick on ANY feed for WATCHDOG_SILENCE_SECONDS
+        The open-market gate reuses is_market_open, which already excludes
+        weekends, holidays, and spread hour, so legitimately-quiet periods do
+        not trip the watchdog.
+        """
+        if self._watchdog_fired:
+            return
+
+        if (now - self.startup_time).total_seconds() < WATCHDOG_GRACE_SECONDS:
+            return
+
+        if not self._any_open_market_subscribed():
+            return
+
+        newest = self._global_newest_tick() or self.startup_time
+        silence = (now - newest).total_seconds()
+        if silence <= WATCHDOG_SILENCE_SECONDS:
+            return
+
+        self._watchdog_fired = True
+        logger.critical(
+            "Price-flow watchdog: no ticks on any feed for %.0fs while a market "
+            "is open — forcing restart",
+            silence,
+        )
+        # Run the shutdown in its own task: bot.close() cancels this monitor
+        # task, so awaiting it here would make the task await itself.
+        asyncio.create_task(self._watchdog_restart(int(silence)))
+
+    async def _watchdog_restart(self, silence: int):
+        """Alert the admin, then gracefully close the bot so the supervisor
+        relaunches a fresh instance."""
+        try:
+            await self.send_admin_alert(
+                f"🚨 **Price-flow watchdog tripped**\n"
+                f"No ticks on any feed for {silence}s while a market is open.\n"
+                f"Restarting the bot."
+            )
+        except Exception as e:
+            logger.error(f"Watchdog admin alert failed: {e}")
+
+        try:
+            await self.bot.close()
+        except Exception as e:
+            logger.error(f"Watchdog bot.close() failed: {e}")
 
     def update_last_seen(self, symbol: str, feed: str):
         """
@@ -199,14 +284,11 @@ class FeedHealthMonitor:
             logger.debug("Within startup grace period, skipping health checks")
             return
 
-        # Skip stale-feed alerts entirely on weekends (Saturday & Sunday).
-        # Forex, metals, and indices are closed from Friday 5 PM EST to Sunday 6 PM EST,
-        # so stale data is completely expected — no need to alert.
-        now_est = datetime.now(self.est)
-        if now_est.weekday() >= 5:  # 5 = Saturday, 6 = Sunday
-            logger.debug("Weekend — skipping feed health alerts (markets closed)")
-            return
-
+        # Stale-feed alerts during closed-market windows (weekends, the Friday
+        # 5 PM–Sunday 6 PM EST forex break, holidays, spread hour) are suppressed
+        # per-symbol by is_market_open() in _check_feed, so no blanket weekend
+        # skip is needed here — and skipping the whole check would also stop the
+        # feed_health table from being written while markets are open.
         stale_threshold = timedelta(seconds=STALE_THRESHOLD_SECONDS)
 
         # Check each feed
@@ -251,10 +333,11 @@ class FeedHealthMonitor:
         # Determine feed health
         newest_seen = max(feed_symbols.values()) if feed_symbols else None
 
-        if not stale_symbols:
-            # All symbols healthy
-            if self.feed_status.get(feed_name) in ["degraded", "down"]:
-                # Feed recovered!
+        # The EX bot blocks placement on any feed marked "down", so we only mark a
+        # feed down when every subscribed symbol has stalled. One unrelated quiet
+        # symbol must not poison every other signal on the feed.
+        if len(stale_symbols) < len(feed_symbols):
+            if self.feed_status.get(feed_name) == "down":
                 await self._handle_feed_recovery(feed_name)
 
             self.feed_status[feed_name] = "healthy"
@@ -262,19 +345,7 @@ class FeedHealthMonitor:
             self.first_stale_time.pop(feed_name, None)
             await self._write_feed_health(feed_name, "healthy", 0, newest_seen)
 
-        elif len(stale_symbols) < len(feed_symbols) * 0.5:
-            # Less than 50% stale - degraded
-            if self.feed_status.get(feed_name) != "degraded":
-                self.feed_status[feed_name] = "degraded"
-                logger.warning(
-                    f"{feed_name} feed degraded: {len(stale_symbols)}/{len(feed_symbols)} symbols stale"
-                )
-                self.stats["false_positives_avoided"] += 1  # Might be temporary
-            max_stale_secs = int(max(s["time_since"].total_seconds() for s in stale_symbols))
-            await self._write_feed_health(feed_name, "degraded", max_stale_secs, newest_seen)
-
         else:
-            # 50%+ stale - feed is down
             if self.feed_status.get(feed_name) != "down":
                 self.stats["stale_detections"] += 1
                 # Capture the earliest last_update among stale symbols as the
@@ -349,10 +420,10 @@ class FeedHealthMonitor:
         try:
             await asyncio.sleep(RECONNECT_DELAY_SECONDS)
 
-            # Attempt reconnection through stream manager
-            result = await self.stream_manager.reconnect_all()
+            # Reconnect only the stale feed — never tear down healthy feeds.
+            success = await self.stream_manager.reconnect_feed(feed_name)
 
-            if result.get(feed_name):
+            if success:
                 self.stats["reconnections_successful"] += 1
                 logger.info(f"{feed_name} reconnection successful")
                 return True
@@ -587,7 +658,6 @@ class FeedHealthMonitor:
         for feed_name, details in stats["feed_details"].items():
             status_emoji = {
                 "healthy": "✅",
-                "degraded": "⚠️",
                 "down": "❌",
                 "idle": "⏸️",
                 "unknown": "❓",

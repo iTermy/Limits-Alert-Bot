@@ -48,8 +48,10 @@ core/
                                   updates embeds; uses react_to_original_signal() from streaming_monitor
   news_manager.py               Tracks active news windows; persists to data/news_events.json;
                                   cleanup polls every 30 s; parse_news_command() parses !news args
-  channel_cleaner.py            @tasks.loop(1min) — bulk-deletes alert-channel messages every
-                                  Friday 18:00 local time (7-day window)
+  channel_cleaner.py            @tasks.loop(1min) — every Friday 18:00 local time, bulk-deletes
+                                  the past 7 days of messages from every alert channel AND every
+                                  monitored channel (except `price-action-trades`); preserves
+                                  messages tied to ACTIVE/HIT signals. Idempotent via _last_purge_date
   parser/
     __init__.py                 parse_signal(message, channel_name) entry point;
                                   ParsedSignal / RejectedSignal types; lazy sub-parser init
@@ -85,9 +87,16 @@ price_feeds/
   streaming_monitor.py          Per-tick signal evaluation; receives all deps via constructor;
                                   react_to_original_signal() as module-level function;
                                   _MAX_TICK_AGE_SECONDS = 5 — drops stale ticks before signal evaluation;
+                                  refresh_signal_in_memory(signal_id) — re-fetches a single signal
+                                  from DB and syncs active_signals + alert_system._live_embeds
+                                  (called from edit / reactivate paths to avoid 30 s drift);
                                   check order documented below
-  alert_system.py               Persistent embed orchestrator; 4 data dicts; 5-channel routing;
-                                  15 s live-refresh background task; delegates embed building and archiving
+  alert_system.py               Persistent embed orchestrator; 4 data dicts + _live_embeds;
+                                  5-channel routing; 15 s live-refresh background task;
+                                  hydrate_from_db / recover_pending_archives / recover_finished_embeds
+                                  re-attach existing embeds on restart; retract_approaching_embed
+                                  drops the embed when price drifts back past the alert window;
+                                  delegates embed building and archiving
   embed_builders.py             Pure functions: _build_signal_embed(), _build_profit_archive_embed(),
                                   _set_archive_footer() + formatting helpers
   archive_manager.py            ArchiveManager — schedule_end_state_move(), cancel_pending_move(),
@@ -106,10 +115,13 @@ price_feeds/
                                   15 min alert cooldown; DMs health_alert_admin_id from settings.json;
                                   spread hour (17–18 ET) treated as market-closed for forex/metals/indices/oil;
                                   first_stale_time tracks real stall start for accurate recovery downtime;
+                                  reconnects only the stale feed (reconnect_feed), never all feeds;
+                                  price-flow watchdog force-restarts the bot when a subscribed market is
+                                  open but no feed has ticked for WATCHDOG_SILENCE_SECONDS;
                                   all knobs are module-level constants (no config file)
-  live_price_writer.py          Writes bid/ask/feed to live_prices table every 5 s (OANDA/Binance/Exness);
-                                  also reads ICMarkets last_prices at flush time and writes ic_bid/ic_ask
-                                  in the same UPSERT row (used by EX offset calculator)
+  live_price_writer.py          Writes bid/ask/feed to live_prices table every 5 s for every signal-bearing
+                                  symbol (ICMarkets/OANDA/Binance/Exness); the EX bot derives its own broker
+                                  offset from its MT5 feed vs the stored price, so no IC reference price is written
   symbol_mapper.py              Internal ↔ feed-specific symbol translation; always returns UPPERCASE
   feeds/
     icmarkets_stream.py         MT5 polling 100 ms/symbol — Windows only;
@@ -126,7 +138,10 @@ price_feeds/
 
 discord_handlers/
   message_handler.py            Handles new/edited/deleted messages; dispatches reply commands for
-                                  both alert embeds (any user) and signal messages (author/admin only);
+                                  both alert embeds + pings (any user) and signal messages
+                                  (author/admin only); bot reply messages and the user's trigger
+                                  reply are auto-deleted after _REPLY_DELETE_AFTER (15 s) to keep
+                                  monitored / alert channels tidy;
                                   _handle_overlap_prompt() — 30 s reaction prompt when new signal overlaps
                                   an existing one (✅ cancel old / ❌ keep both / timeout = cancel old)
 
@@ -141,8 +156,9 @@ commands/
     license.py                  !activate, !setkeys, !grantkey, !revoke, !licenses + member listeners
   signals/
     __init__.py                 Cog setup: LifecycleCog + ReportsCog + NewsCog
-    lifecycle.py                !active, !info, !setstatus [--force], !profit, !hit,
-                                  !stoploss, !cancel (+ bulk), !setexpiry, !breakeven
+    lifecycle.py                !active (default sort: distance), !info, !setstatus [--force],
+                                  !profit, !hit, !stoploss/!sl, !cancel/!nm (+ bulk), !setexpiry
+                                  (breakeven only via !setstatus <id> breakeven — no shortcut)
     reports.py                  !report (performance statistics generator; partitions into
                                   Regular / PA / Legends by channel name)
     news.py                     !news, !newslist, !newsclear
@@ -238,6 +254,9 @@ Every incoming price update calls `streaming_monitor._on_price_update()` → `_c
    news_manager.is_news_active_for(instrument)
    └─ News active AND would trigger → send_news_cancel_alert()
       Edits embed if one exists; standalone message only if no embed yet.
+   └─ Also in _check_signal: an already-HIT signal (non-swing) is cancelled
+      outright the moment a news window covering its instrument opens, even
+      if no further limit/SL is touched. Swings ride news out.
 
 3. Approaching check
    First pending limit only (lowest sequence_number, approaching_alert_sent=False)
@@ -289,7 +308,9 @@ All PKs: `BIGINT GENERATED ALWAYS AS IDENTITY`. Timestamps: `TIMESTAMPTZ`. RLS: 
 | tp_price | DOUBLE PRECISION; market close price recorded on profit (auto-TP price for automatic; live bid/ask at command time for manual profit — bid if long, ask if short). NULL for SL / cancel / breakeven / other closures, and for manual profit when `live_prices` has no row for the instrument. Backend-only — not shown in the profit-archive embed for manual profit. |
 | alert_message_id | BIGINT (nullable); Discord message ID of the active-channel alert embed. Persisted so restarts can reuse the existing embed instead of orphaning it. Cleared on archive move, live-update NotFound, and approaching-alert retraction. |
 | alert_channel_id | BIGINT (nullable); Discord channel ID where the alert embed lives. Used at hydration to pin the fetch to the same channel even if `channels.json` was reconfigured. Falls back to `_get_alert_channel(signal)` if missing. |
-| ping_message_id | BIGINT (nullable); Discord message ID of the most recent ping reply to the embed. Refetched on restart so the next event can delete it cleanly before sending a new one. |
+| ping_message_id | BIGINT (nullable); Discord message ID of the most recent ping reply to the embed. Refetched on restart so the next event can delete it cleanly before sending a new one. Also added to `alert_messages` on hydration so users can reply to the ping itself, not just the embed. |
+| finished_message_id | BIGINT (nullable); Discord message ID of the archived embed in `finished_signals` / `profit_channel`. Persisted so reply commands against archived embeds (e.g. `reactivate`) still resolve to a signal after restart. Cleared on `reactivate_embed` (which deletes the finished message). |
+| finished_channel_id | BIGINT (nullable); Discord channel ID where the archived embed lives. Used by `recover_finished_embeds` at startup to build a `PartialMessage` reference without an extra API fetch. |
 | total_limits / limits_hit | INTEGER |
 
 ### limits
@@ -311,13 +332,13 @@ Audit trail: signal_id FK, old_status, new_status, change_type (`automatic`/`man
 Daily aggregates per instrument (total, profitable, breakeven, stop_loss, cancelled, win_rate). UNIQUE(date, instrument).
 
 ### live_prices
-`symbol TEXT PK`, bid, ask, feed, updated_at. `ic_bid DOUBLE PRECISION` / `ic_ask DOUBLE PRECISION` (nullable) — ICMarkets prices written at the same flush as the OANDA/Binance row so the EX offset calculator sees both prices from the same timestamp (no inter-fetch drift). Written every 5 s by `LivePriceWriter`.
+`symbol TEXT PK`, bid, ask, feed, updated_at. Written every 5 s by `LivePriceWriter` for every signal-bearing symbol, sourced from whichever feed serves it (icmarkets/oanda/binance/exness). The EX bot reads these prices and computes its broker offset against its own MT5 feed, so no ICMarkets reference price is stored.
 
 ### feed_health
-`feed TEXT PRIMARY KEY` (`icmarkets` / `oanda` / `binance` / `exness`), `status TEXT` (`idle` / `healthy` / `degraded` / `down`), `stale_seconds INTEGER`, `last_seen TIMESTAMPTZ`, `updated_at TIMESTAMPTZ`. Upserted by `FeedHealthMonitor._write_feed_health()` on every status transition. Read by the EX bot each cycle to skip placement on stale feeds.
+`feed TEXT PRIMARY KEY` (`icmarkets` / `oanda` / `binance` / `exness`), `status TEXT` (`idle` / `healthy` / `down`), `stale_seconds INTEGER`, `last_seen TIMESTAMPTZ`, `updated_at TIMESTAMPTZ`. Upserted by `FeedHealthMonitor._write_feed_health()` on every status transition. Read by the EX bot each cycle to skip placement on stale feeds. `down` only fires when **every** subscribed symbol on a feed has stalled — a single quiet symbol no longer poisons unrelated signals.
 
 ### bot_mode_status
-Singleton row (id=1, enforced by CHECK). `news_mode BOOLEAN`, `spread_hour BOOLEAN`. Updated in real-time by streaming_monitor on spread-hour state transitions.
+Singleton row (id=1, enforced by CHECK). `news_mode TEXT` (nullable — comma-separated active news categories like `EUR, GOLD` or `ALL`; NULL when no news), `spread_hour BOOLEAN`. `news_mode` is reconciled by `NewsManager.reconcile_news_mode()` (startup, every news command, and the 30 s cleanup loop); `spread_hour` is updated in real-time by streaming_monitor on spread-hour state transitions. Consumers (including the EX bot) read `news_mode` for truthiness, so it is NULL — never the string `'FALSE'` — when inactive.
 
 ### licenses / license_allowances
 License management for the Signal Subscriber role. Managed via `!activate`, `!grantkey`, `!revoke`, `!licenses` commands. Not involved in signal processing.
@@ -366,8 +387,10 @@ One persistent Discord embed per signal. Created on first approaching or hit eve
 |------|-------------|
 | `signal_messages` | signal_id → persistent embed `discord.Message` |
 | `signal_ping_messages` | signal_id → latest ping reply `discord.Message` |
-| `signal_finished_messages` | signal_id → archived copy in finished-signals/profit channel |
-| `alert_messages` | message_id_str → signal_id (bounded; for reply-handler lookup) |
+| `signal_finished_messages` | signal_id → archived copy in finished-signals/profit channel (`PartialMessage` after `recover_finished_embeds`) |
+| `alert_messages` | message_id_str → signal_id (bounded at 1000; for reply-handler lookup). Holds BOTH embed IDs AND ping IDs so users can reply to either. Tracked on send + hydration; untracked when a message is deleted (retraction, archive move, old-ping replacement). |
+| `_live_embeds` | signal_id → `{"signal": dict, "event": str, "spread_buffer_enabled": bool}`; drives the 15 s live-refresh loop. Caller must keep `signal["limits"]` in sync; otherwise the refresh re-renders stale data |
+| `auto_purge_channel_ids` | Set of channel_id strings whose original signal messages are deleted on end-state. Built from `monitored_channels` minus `AUTO_PURGE_EXEMPT_NAMES = {"price-action-trades"}`. |
 
 ### Embed edit vs standalone
 | Event | Behavior |
@@ -395,7 +418,11 @@ Priority order:
 - `send_near_miss_cancel_alert(signal, nm_state)` — edits embed; sends ping
 - `update_signal_message(signal, event, limits, current_price, ping_text)` — generic editor
 - `update_embed_for_signal_id(signal_id, event, ping_text)` — fetches signal, calls `update_signal_message`; safe to call from anywhere
-- `reactivate_embed(signal, ping_text)` — rebuilds embed for reactivated signals with live price/distance
+- `reactivate_embed(signal, ping_text)` — rebuilds embed for reactivated signals with live price/distance; cancels the pending archive move so embed + original signal message survive the 15-min window
+- `retract_approaching_embed(signal_id)` — deletes the embed + ping for a signal whose price has drifted back past `_APPROACHING_RETRACTION_MULTIPLIER × alert_distance`; resets the limit's `approaching_alert_sent` so a future re-approach fires fresh
+- `hydrate_from_db(signals)` — startup recovery; per-signal: reuse Discord embed if found, otherwise rebuild (HIT) or reset `approaching_alert_sent` (ACTIVE)
+- `recover_pending_archives()` — re-schedules `schedule_end_state_move` for end-state signals whose 15-min countdown was interrupted by restart
+- `recover_finished_embeds()` — re-registers finished-channel embeds via `PartialMessage` so reply commands (e.g. `reactivate`) survive a restart
 - `track_alert_message(message_id, signal_id)` / `get_signal_from_alert(message_id)` — reply-handler lookup
 
 ---
@@ -441,6 +468,12 @@ self.services.tp_config      # instead of bot.monitor.tp_config
 ### NM immunity after reactivation
 `nm_monitor.mark_immune(signal_id)` is called whenever a cancelled signal is reactivated (any path: reply command, `!setstatus active`, `!reactivate`). Immune signals skip NM checks permanently for that signal's lifetime and can only close via hit, profit, SL, or manual cancel.
 
+### In-memory refresh after edit / reactivate
+`StreamingPriceMonitor.refresh_signal_in_memory(signal_id)` re-fetches a single signal from the DB and swaps the dict in both `active_signals` (read by every price tick) and `alert_system._live_embeds` (read by the 15 s live-refresh). It also handles instrument changes (re-keys `symbol_to_signals`, unsubscribes the old feed, subscribes the new) and calls `tp_monitor.refresh_hit_limits` for HIT signals. Called from `handle_message_edit` (both normal-edit and cancelled-then-re-edited branches), the `reactivate` reply handler, and `!setstatus active`. Without this call, the 30 s periodic refresh would briefly serve stale data and price ticks would evaluate pre-edit limits/SL.
+
+### `!active` defaults to sort:distance
+The default sort for `!active` is `distance` (closest pending limit first). Other choices: `recent` / `oldest` / `progress` via `sort:<method>` or `!active <SYMBOL> sort:<method>`. Signals without a usable distance fall to the end.
+
 ### Windows-only MT5
 `MetaTrader5` package requires Windows. On Linux/Mac, the ICMarkets and Exness feeds will be unavailable. The bot handles this gracefully but loses those feeds.
 
@@ -453,9 +486,12 @@ Internal symbol `USOILSPOT` maps to `USOILm` on Exness MT5. The mapping is defin
 ### Spread/news cancel behavior
 Spread-hour and news cancels **edit the persistent embed** when one already exists. They only fall back to standalone messages if no embed has been created yet for that signal.
 
+### News matching is per-currency; USD also covers US markets
+`NewsEvent.instrument_affected` matches per currency (CHF news never touches EURUSD). A `USD` category additionally pauses US equities (`.NAS`/`.NYSE`) and US indices (`US_INDEX_KEYWORDS`: NAS100/US30/US500/SPX500/SPX/USTEC/US2000/…), and pauses gold when `affects_gold` is set (auto-fetched high-impact USD events). Auto-fetched events carry a merged `title` ("EUR — ECB Rate / Press Conf"); `NewsEvent.display_label` is used in all news alerts (activation, cancel, ended), falling back to the bare category for manual events.
+
 ### Signal type taxonomy
 `signals.type` ∈ `{standard, scalp, swing, toll, pa, 1-1}`. Determined by `pattern_parsers.get_signal_type(text, channel_name)`:
-- `CHANNEL_TYPE_MAP` wins first: `scalps` → scalp; `swing-trades` → swing; `gold-tolls-map`/`general-tolls`/`oil-tolls` → toll; `gold-pa-signals`/`price-action-trades` → pa; `gold-1-1-rr` → 1-1.
+- `CHANNEL_TYPE_MAP` wins first: `scalps` → scalp; `swing-trades`/`gold-swings` → swing; `gold-tolls-map`/`general-tolls`/`oil-tolls` → toll; `gold-pa-signals`/`price-action-trades` → pa; `gold-1-1-rr` → 1-1.
 - Otherwise body keyword: `\bswing\b` → swing, `\bscalp\b` → scalp.
 - Default: standard.
 
@@ -471,13 +507,16 @@ Each type has its own `tp_configuration.json` defaults under `type_defaults[<typ
 `signals.stop_loss` is `NOT NULL`. Toll channels auto-calculate SL from limits; general-tolls derives SL from message numbers. Any new channel or parse path that doesn't produce a SL value will fail on insert.
 
 ### Reply command authorization
-- Reply to an **alert embed**: any user can execute reply commands; this includes embeds in the finished-signals channel (e.g. `reactivate` works from there)
+- Reply to an **alert embed OR its ping reply**: any user can execute reply commands; this includes embeds in the finished-signals channel (e.g. `reactivate` works from there). Ping IDs are tracked in `alert_messages` on send and on hydration; the entry is removed when the ping is deleted (retraction, archive move, or replaced by a newer ping for the same signal).
 - Reply to the **original signal message** (has ✅ reaction): signal author **or** admins only
+
+### Bot reply auto-delete
+Bot reply messages (acknowledgements, error responses, the user's trigger reply itself) are deleted after `_REPLY_DELETE_AFTER = 15 s` in monitored / alert channels to keep them tidy. Persistent embeds, pings, and confirmations sent via `ctx.send` in command channels are not auto-deleted.
 
 ### Cancel via original signal message reply (no prior alert embed)
 When `cancel` is replied to the original signal message and no approaching/hit embed exists yet:
-- **Gold-toll channels** (`alert_system.toll_channel_ids`): original message is deleted and a cancellation embed is posted to the finished-signals channel
-- **All other channels**: ❌ reaction is added to the original message; it is **not** deleted
+- **Auto-purge channels** (`alert_system.auto_purge_channel_ids` — every monitored channel except `price-action-trades`): original message is deleted and a cancellation embed is posted to the finished-signals channel (also tracked in `alert_messages` so the user can reply `reactivate` to it)
+- **Exempt channels** (only `price-action-trades` today): ❌ reaction is added to the original message; it is **not** deleted
 
 ### Reactivate when original message is gone
 `reactivate_cancelled_signal` in `signal_ops.py` does not use its `parsed_signal` argument — it reactivates purely from DB state. The reactivate reply handler tries to fetch and re-parse the original message but falls back gracefully if it has been deleted (e.g. toll signals after archive move). Pass `None` as `parsed_signal` and reactivation proceeds.
@@ -512,15 +551,27 @@ All updates in `manager.mark_limit_hit` (limit row, signal counter, status→HIT
 ### Hit limits loaded on restart
 `streaming_monitor._load_and_subscribe_signals` fetches hit limits for every HIT-status signal (via `get_hit_limits_for_signal`) and appends them as `LimitData(status="hit")` to `signal.limits`. After restart, `signal.hit_limits` is non-empty so embed builders see the complete limit history without waiting for the next event.
 
-### live_prices ic_bid / ic_ask columns
-`live_prices` has two nullable columns `ic_bid` and `ic_ask`. `LivePriceWriter` reads the ICMarkets `last_prices` cache at flush time and writes them in the same UPSERT row as the OANDA/Binance/Exness `bid`/`ask`. Both prices are therefore from the same flush window — the EX offset calculator reads `ic_mid − feed_mid` without a separate MT5 tick fetch, eliminating the 5-second inter-fetch drift. When `ic_bid`/`ic_ask` are NULL (rolling-deploy gap), EX falls back to a live MT5 tick and logs once.
+### live_prices is written for every feed (no IC reference columns)
+`LivePriceWriter.TRACKED_FEEDS` includes `icmarkets`, so every signal-bearing symbol gets a `live_prices` row sourced from its serving feed — including IC-primary instruments (forex, stocks, GCQ26 metals, XTIUSD oil) that previously had no row. IC reference-only symbols never reach the writer (the IC stream only yields signal-bearing ticks), so they are not written. The old `ic_bid`/`ic_ask` columns were dropped (migration `ALTER TABLE live_prices DROP COLUMN IF EXISTS`): the EX bot now derives its broker offset from its own MT5 feed against the stored price at the same timestamp.
+
+### Price-flow watchdog
+`FeedHealthMonitor._check_price_flow_watchdog` force-restarts the bot (graceful `bot.close()` → `main.py` supervisor relaunch) only when ALL hold: past `WATCHDOG_GRACE_SECONDS`, at least one subscribed symbol whose market is open now (via `is_market_open`, which already excludes weekends/holidays/spread hour), and zero ticks across every feed for `WATCHDOG_SILENCE_SECONDS` (180 s). Fires at most once (`_watchdog_fired`). Runs the shutdown in a separate task so it doesn't await its own monitor task.
+
+### Per-feed reconnect (no cascade)
+`FeedHealthMonitor.attempt_reconnection` calls `PriceStreamManager.reconnect_feed(name)` to reconnect only the stale feed. It must never call `reconnect_all()` from the health path — that tore down healthy feeds (and the MT5 terminal) whenever one feed went stale. OANDA additionally self-heals via a read-timeout watchdog in `oanda_stream.stream_prices` (`_STREAM_READ_TIMEOUT` = 15 s; OANDA heartbeats every ~5 s), so a silently half-dead stream reconnects without health-monitor involvement.
 
 ### Alert embed recovery on restart
-The alert embed message reference is persisted on `signals` (`alert_message_id`, `alert_channel_id`, `ping_message_id`) every time `_upsert_signal_message` creates a new embed or sends a new ping. On startup, `AlertSystem.hydrate_from_db` runs from `streaming_monitor._load_and_subscribe_signals` AFTER hit-limits are loaded and BEFORE `bulk_subscribe` — this ordering matters: if the price stream started first, the next tick could fire `send_approaching_alert` / `send_limit_hit_alert` and post a duplicate embed alongside the orphaned one. Per-signal decision:
-- **Persisted ID + Discord fetch succeeds** → re-populate `signal_messages` / `signal_ping_messages` / `alert_messages` and register for live updates. Same embed continues live-refreshing on the 15 s loop.
+The alert embed message reference is persisted on `signals` (`alert_message_id`, `alert_channel_id`, `ping_message_id`) every time `_upsert_signal_message` creates a new embed or sends a new ping. The archived embed location is persisted on `finished_message_id` / `finished_channel_id` when `archive_manager._move_after_delay` moves the embed, or when the signal-reply cancel path posts a direct cancellation embed to the finished channel.
+
+On startup, `AlertSystem.hydrate_from_db` runs from `streaming_monitor._load_and_subscribe_signals` AFTER hit-limits are loaded and BEFORE `bulk_subscribe` — this ordering matters: if the price stream started first, the next tick could fire `send_approaching_alert` / `send_limit_hit_alert` and post a duplicate embed alongside the orphaned one. Per-signal decision for active/hit signals:
+- **Persisted ID + Discord fetch succeeds** → re-populate `signal_messages` / `signal_ping_messages` / `alert_messages` (both embed and ping IDs) and register for live updates. Same embed continues live-refreshing on the 15 s loop.
 - **Persisted ID + NotFound, status=ACTIVE** → clear persisted IDs, `UPDATE limits SET approaching_alert_sent = FALSE WHERE signal_id=$1 AND status='pending'`, mutate in-memory limit copies. The approaching alert re-fires on the next price tick with a fresh embed.
 - **Persisted ID + NotFound, status=HIT** → clear persisted IDs and call `reactivate_embed(signal, ping_text=None)` to rebuild the embed immediately so live updates and future events have a target.
 - **No persisted ID** (pre-feature signals, first deploy) → same fallback as above: ACTIVE resets `approaching_alert_sent`; HIT rebuilds. One-time cosmetic churn on first restart after deploy.
+
+After hydration, two more recovery passes run:
+- **`recover_pending_archives()`** — any end-state signal (`profit`/`stop_loss`/`cancelled`/`breakeven`) with a non-NULL `alert_message_id` had its 15-min archive countdown interrupted by the restart. The embed is refetched, registered, and `schedule_end_state_move` is re-armed so it eventually moves to finished / profit.
+- **`recover_finished_embeds()`** — every signal with non-NULL `finished_message_id` and `finished_channel_id` (closed in the last 14 days) gets a `PartialMessage` reference put in `signal_finished_messages` + tracked in `alert_messages`. This is O(N) with no Discord API calls; the partial is enough for delete / reply lookup. Reply commands like `reactivate` against archived embeds work across restarts as a result.
 
 IDs are cleared in `_clear_persisted_alert_ids` on live-update NotFound (`alert_system._refresh_live_embeds`), in `archive_manager._move_after_delay` after the embed is moved out of the alert channel, and during retraction.
 

@@ -3,7 +3,7 @@
     "daily-trade-setup": "1402971916339380244",
     "scalps": "1402971964343320636",
     "forex-exotics": "1402972132920787077",
-    "gold-trades": "1402972164256432220",
+    "gold-swings": "1402972164256432220",
     "oil-trades": "1402972289993019463",
     "indices-trades": "1402972348193177745",
     "crypto-trades": "1402972426014429254",
@@ -18,6 +18,7 @@
     "general-tolls": "1477339674166169911",
     "oil-tolls": "1484316173515489392",
     "legends-trades": "1500246110491639818",
+    "lc-calls": "1516192183126855832",
     "gold-1-1-rr": "REPLACE_WITH_CHANNEL_ID"
   },
   "alert_channel": "1402971805890773005",
@@ -25,6 +26,7 @@
   "toll-alert-channel": "1472685910549332113",
   "general-tolls-alert": "1477339631900168284",
   "legends-trade-alert": "1500246110491639818",
+  "vol-guard-alert": "",
   "command_channel": "1402971848731398174",
   "profit_channel": "1414288228206514279",
   "finished_signals": "1479245676377407610",
@@ -42,9 +44,9 @@
     "forex-exotics": {
       "default_expiry": "week_end"
     },
-    "gold-trades": {
+    "gold-swings": {
       "default_instrument": "XAUUSD",
-      "default_expiry": "week_end"
+      "default_expiry": "month_end"
     },
     "gold-pa-signals": {
       "default_instrument": "XAUUSD",
@@ -91,6 +93,9 @@
     },
     "gold-1-1-rr": {
       "default_instrument": "XAUUSD",
+      "default_expiry": "week_end"
+    },
+    "lc-calls": {
       "default_expiry": "week_end"
     }
   }

@@ -8,6 +8,7 @@ import discord
 from discord.ext import commands
 
 from utils.formatting import get_channel_name as _get_channel_name
+from utils.permissions import is_signal_manager as _is_signal_manager
 
 
 class BaseCog(commands.Cog):
@@ -23,6 +24,18 @@ class BaseCog(commands.Cog):
         if hasattr(user, "guild_permissions"):
             return user.id in self.bot.admin_ids or user.guild_permissions.administrator
         return user.id in self.bot.admin_ids
+
+    def is_signal_manager(self, user: discord.User) -> bool:
+        """True if the user may manage signals (admins + configured roles/IDs)."""
+        return _is_signal_manager(self.bot, user)
+
+    async def require_signal_manager(self, ctx: commands.Context) -> bool:
+        """Gate a management command. Replies with a denial and returns False if
+        the invoker isn't authorized."""
+        if self.is_signal_manager(ctx.author):
+            return True
+        await ctx.send("❌ You don't have permission to manage signals.")
+        return False
 
     def is_command_channel(self, channel: discord.TextChannel) -> bool:
         """Check if channel is the designated command channel"""

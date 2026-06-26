@@ -3,6 +3,7 @@ Report Commands — trading performance reports.
 """
 
 import json
+import math
 from datetime import datetime
 from pathlib import Path
 
@@ -17,6 +18,14 @@ from .._base import BaseCog
 
 logger = get_logger("report_commands")
 
+# Channels whose signals are reported under the "Legends" section, regardless
+# of signal type. Matched by their channels.json monitored-channel key.
+LEGENDS_CHANNEL_KEYS = {"legends-trades", "lc-calls"}
+
+# Manual-profit closures are credited a fraction of the configured auto-TP
+# target, since a manually closed signal didn't ride all the way to auto-TP.
+MANUAL_PROFIT_TP_FRACTION = 2 / 3
+
 
 class ReportsCog(BaseCog):
     """Trading report generation"""
@@ -24,6 +33,107 @@ class ReportsCog(BaseCog):
     def __init__(self, bot):
         super().__init__(bot)
         self.tp_config = TPConfig()
+
+    def _format_distance(self, instrument: str, signal_type: str, raw: float) -> str:
+        """
+        Format a native-unit distance (pips for forex, dollars otherwise) with a
+        signed label, rounding the magnitude up. e.g. "+8 pips", "-20 pips", "+$5".
+        """
+        tp_type = self.tp_config.get_tp_type(instrument, signal_type=signal_type)
+        magnitude = math.ceil(abs(raw) - 1e-9)
+        sign = "+" if raw >= 0 else "-"
+        if tp_type == "pips":
+            return f"{sign}{magnitude} pips"
+        return f"{sign}${magnitude}"
+
+    @staticmethod
+    def _hit_limits(signal):
+        return [
+            l for l in signal.get("limits", [])
+            if l.get("status") == "hit" or l.get("hit_alert_sent")
+        ]
+
+    def _tp_distance_raw(self, signal):
+        """
+        Cumulative profit distance (native units): the sum, over every hit
+        limit, of that limit's P&L to the take-profit. For auto-TP closures the
+        target is the recorded tp_price; for manual profit each limit's P&L is
+        measured to a fraction (MANUAL_PROFIT_TP_FRACTION) of the configured
+        auto-TP target from the last hit limit.
+        Returns None if the signal has no hit limits.
+        """
+        hit = self._hit_limits(signal)
+        if not hit:
+            return None
+        direction = signal["direction"].lower()
+        instrument = signal["instrument"]
+        signal_type = (signal.get("type") or "standard").lower()
+
+        closed_reason = (signal.get("closed_reason") or "").lower()
+        tp_price = signal.get("tp_price")
+        if closed_reason == "automatic" and tp_price is not None:
+            return sum(
+                self.tp_config.calculate_pnl(
+                    instrument, direction, l["price_level"], float(tp_price),
+                    signal_type=signal_type,
+                )
+                for l in hit
+            )
+        # Manual profit (or missing tp_price): each limit's P&L measured to a
+        # fraction of the configured auto-TP target distance from the last hit
+        # limit, since a manual close didn't ride all the way to auto-TP.
+        target = (
+            self.tp_config.get_tp_value(instrument, signal_type=signal_type)
+            * MANUAL_PROFIT_TP_FRACTION
+        )
+        last_hit = max(hit, key=lambda l: l.get("sequence_number", 0))["price_level"]
+        return sum(
+            target
+            + self.tp_config.calculate_pnl(
+                instrument, direction, l["price_level"], last_hit,
+                signal_type=signal_type,
+            )
+            for l in hit
+        )
+
+    def _tp_distance_label(self, signal) -> str:
+        """Signed profit-distance label, or "" if the signal has no hit limits."""
+        raw = self._tp_distance_raw(signal)
+        if raw is None:
+            return ""
+        signal_type = (signal.get("type") or "standard").lower()
+        return self._format_distance(signal["instrument"], signal_type, raw)
+
+    def _sl_distance_raw(self, signal):
+        """
+        Cumulative loss distance (native units, negative): the sum, over every
+        hit limit, of that limit's P&L to the stop loss. Returns None if the
+        signal has no stop loss or no hit limits.
+        """
+        sl = signal.get("stop_loss")
+        if not sl:
+            return None
+        hit = self._hit_limits(signal)
+        if not hit:
+            return None
+        direction = signal["direction"].lower()
+        instrument = signal["instrument"]
+        signal_type = (signal.get("type") or "standard").lower()
+        return sum(
+            self.tp_config.calculate_pnl(
+                instrument, direction, l["price_level"], float(sl),
+                signal_type=signal_type,
+            )
+            for l in hit
+        )
+
+    def _sl_distance_label(self, signal) -> str:
+        """Signed loss-distance label, or "" if the signal has no stop loss."""
+        raw = self._sl_distance_raw(signal)
+        if raw is None:
+            return ""
+        signal_type = (signal.get("type") or "standard").lower()
+        return self._format_distance(signal["instrument"], signal_type, raw)
 
     @commands.command(name="report", description="Generate trading report")
     async def generate_report(
@@ -130,12 +240,12 @@ class ReportsCog(BaseCog):
                 monitored_channels = {}
                 channels_data = {}
 
-            # Legends are still channel-driven (the Legends channel can host signals
-            # of any type), so collect its channel IDs from channels.json.
+            # Legends are still channel-driven (these channels can host signals
+            # of any type), so collect their channel IDs from channels.json.
             legends_channel_ids = {
                 str(channel_id)
                 for name, channel_id in monitored_channels.items()
-                if "legends" in name.lower()
+                if name in LEGENDS_CHANNEL_KEYS
             }
 
             # Partition into 5 groups: Legends wins by channel; the rest map by type.
@@ -251,9 +361,13 @@ class ReportsCog(BaseCog):
                     )
                 else:
                     limit_display = "N/A"
+                tp_label = self._tp_distance_label(signal)
+                direction_seg = signal["direction"].upper()
+                if tp_label:
+                    direction_seg = f"{direction_seg} | {tp_label}"
                 return (
                     f"#{signal['signal_id']} | {signal['instrument']} | "
-                    f"{limit_display} | {signal['direction'].upper()} 🟢"
+                    f"{limit_display} | {direction_seg} 🟢"
                 )
 
             def sl_line(signal):
@@ -262,9 +376,13 @@ class ReportsCog(BaseCog):
                     if signal.get("stop_loss")
                     else "N/A"
                 )
+                sl_label = self._sl_distance_label(signal)
+                direction_seg = signal["direction"].upper()
+                if sl_label:
+                    direction_seg = f"{direction_seg} | {sl_label}"
                 return (
                     f"#{signal['signal_id']} | {signal['instrument']} | "
-                    f"SL: {sl_value} | {signal['direction'].upper()} 🛑"
+                    f"SL: {sl_value} | {direction_seg} 🛑"
                 )
 
             # Per-group trade detail sections (profit first, then SL)
@@ -280,6 +398,43 @@ class ReportsCog(BaseCog):
                         value=cap_field_value(lines),
                         inline=False,
                     )
+
+            # Cumulative gain: pips across forex, dollars across gold. Profit
+            # signals add their TP distance; stop losses subtract their SL
+            # distance. Other asset classes (indices, oil, crypto, stocks) are
+            # ignored.
+            forex_pips = 0.0
+            gold_dollars = 0.0
+            for stats in group_stats.values():
+                for signal in stats["profit"]:
+                    raw = self._tp_distance_raw(signal)
+                    if raw is None:
+                        continue
+                    asset_class = self.tp_config.determine_asset_class(signal["instrument"])
+                    if asset_class in ("forex", "forex_jpy"):
+                        forex_pips += raw
+                    elif asset_class == "metals":
+                        gold_dollars += raw
+                for signal in stats["sl"]:
+                    raw = self._sl_distance_raw(signal)
+                    if raw is None:
+                        continue
+                    asset_class = self.tp_config.determine_asset_class(signal["instrument"])
+                    if asset_class in ("forex", "forex_jpy"):
+                        forex_pips += raw
+                    elif asset_class == "metals":
+                        gold_dollars += raw
+
+            forex_sign = "+" if forex_pips >= 0 else "-"
+            gold_sign = "+" if gold_dollars >= 0 else "-"
+            embed.add_field(
+                name="Profit",
+                value=(
+                    f"Forex: {forex_sign}{abs(forex_pips):.1f} pips\n"
+                    f"Gold: {gold_sign}${abs(gold_dollars):.2f}"
+                ),
+                inline=False,
+            )
 
             # Add live proof link from profit_channel
             profit_channel_id = channels_data.get("profit_channel")

@@ -229,6 +229,7 @@ class AutoTPMonitor:
             return False
 
         self.evict_signal(signal_id)
+        signal["tp_price"] = close_price
         logger.info(f"Signal {signal_id}: marked as PROFIT via auto-TP")
 
         # Send Discord alerts (alert channel + profit channel)

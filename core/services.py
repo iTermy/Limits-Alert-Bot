@@ -10,6 +10,7 @@ from __future__ import annotations
 from typing import TYPE_CHECKING, Optional
 
 if TYPE_CHECKING:
+    from core.news_fetcher import NewsFetcher
     from database import DatabaseManager
     from database.signal_ops import SignalDatabase
     from price_feeds.alert_config import AlertDistanceConfig
@@ -20,6 +21,8 @@ if TYPE_CHECKING:
     from price_feeds.streaming_monitor import StreamingPriceMonitor
     from price_feeds.tp_config import TPConfig
     from price_feeds.tp_monitor import AutoTPMonitor
+    from price_feeds.trailing_monitor import TrailingStopMonitor
+    from price_feeds.vol_guard import VolatilityGuard
 
 
 class ServiceRegistry:
@@ -33,6 +36,9 @@ class ServiceRegistry:
         self.tp_monitor: Optional[AutoTPMonitor] = None
         self.nm_config: Optional[NMConfig] = None
         self.nm_monitor: Optional[NearMissMonitor] = None
+        self.trailing_monitor: Optional[TrailingStopMonitor] = None
         self.alert_config: Optional[AlertDistanceConfig] = None
         self.signal_db: Optional[SignalDatabase] = None
         self.db: Optional[DatabaseManager] = None
+        self.news_fetcher: Optional[NewsFetcher] = None
+        self.vol_guard: Optional[VolatilityGuard] = None
