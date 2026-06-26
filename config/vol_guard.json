@@ -1,0 +1,10 @@
+{
+  "enabled": true,
+  "lookback_seconds": 180,
+  "guard_minutes": 15,
+  "thresholds": {
+    "forex": 20.0,
+    "forex_jpy": 20.0,
+    "metals": 20.0
+  }
+}

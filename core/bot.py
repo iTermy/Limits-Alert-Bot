@@ -51,6 +51,7 @@ class TradingBot(commands.Bot):
         self.monitor = None
         self.channel_cleaner = None
         self.news_fetcher = None
+        self.vol_guard = None
 
         # Flat service registry — populated during setup_hook, injected into cogs/handlers
         self.services = ServiceRegistry()
@@ -387,6 +388,10 @@ class TradingBot(commands.Bot):
                 self.news_fetcher.start()
                 self.logger.info("ForexFactory news fetcher started")
 
+            # Volatility guard — informational only; subscribes to the same price
+            # stream and announces sharp moves per currency (gold flags "ALL").
+            await self._start_vol_guard(stream_manager)
+
             self.logger.info("Price monitoring system initialized and started")
             self.logger.info(
                 f"Alert system created with {len(alert_system.alert_messages)} tracked messages"
@@ -417,6 +422,28 @@ class TradingBot(commands.Bot):
                     self.logger.error(f"Failed to set {key} channel: {e}")
             else:
                 self.logger.warning(f"No {key} configured in channels.json")
+
+    async def _start_vol_guard(self, stream_manager):
+        """Create and start the volatility guard, posting to its own channel
+        (`vol-guard-alert` in channels.json) or the main alert channel as a fallback."""
+        from price_feeds.vol_guard import VolatilityGuard
+
+        channel_id = self.channels_config.get("vol-guard-alert") or self.channels_config.get(
+            "alert_channel"
+        )
+        if not channel_id:
+            self.logger.warning("No vol-guard-alert or alert_channel configured — vol guard off")
+            return
+        try:
+            channel = await self.fetch_channel(int(channel_id))
+        except Exception as e:
+            self.logger.error(f"Failed to resolve vol guard channel: {e}")
+            return
+
+        self.vol_guard = VolatilityGuard(self, stream_manager, channel)
+        self.services.vol_guard = self.vol_guard
+        self.vol_guard.start()
+        self.logger.info(f"Volatility guard channel set: #{channel.name}")
 
     @tasks.loop(seconds=30)
     async def heartbeat(self):
@@ -452,6 +479,9 @@ class TradingBot(commands.Bot):
 
         if self.news_fetcher:
             self.news_fetcher.stop()
+
+        if self.vol_guard:
+            self.vol_guard.stop()
 
         if self.monitor:
             await self.monitor.stop()
