@@ -29,16 +29,24 @@ import asyncio
 import json
 from collections import deque
 from datetime import datetime, timezone
+from datetime import time as dtime
 from pathlib import Path
 from time import monotonic
 from typing import Deque, Dict, Optional, Set, Tuple
 
 import discord
+import pytz
 
 from price_feeds.symbol_mapper import SymbolMapper
 from utils.logger import get_logger
 
 logger = get_logger("vol_guard")
+
+_EST_TZ = pytz.timezone("America/New_York")
+
+# Ticks whose broker timestamp is older than this (seconds) are ignored — a late
+# rollover print could otherwise inject a spread-distorted price into the window.
+_MAX_TICK_AGE_SECONDS = 5
 
 # Pip size per asset class — forex/forex_jpy thresholds are expressed in pips,
 # everything else in dollars (pip size 1.0).
@@ -109,6 +117,11 @@ class VolatilityGuard:
 
         self._eval_task: Optional[asyncio.Task] = None
 
+        # Cache for the spread-hour check so the per-tick path doesn't build a
+        # tz-aware datetime on every print.
+        self._spread_hour_cached: bool = False
+        self._spread_hour_cache_expires: float = 0.0
+
     def start(self) -> None:
         """Register as a price subscriber and start the evaluation loop."""
         if not self.enabled:
@@ -142,6 +155,21 @@ class VolatilityGuard:
         # Only sample asset classes we have a threshold for; skip the rest entirely.
         if self._threshold_price_units(symbol) is None:
             return
+
+        # Drop stale ticks — a late rollover print timestamped before the spread
+        # hour but delivered after it could carry a distorted price.
+        tick_time = price_data.get("updated_at")
+        if tick_time is not None:
+            if tick_time.tzinfo is None:
+                tick_time = tick_time.replace(tzinfo=timezone.utc)
+            if (datetime.now(timezone.utc) - tick_time).total_seconds() > _MAX_TICK_AGE_SECONDS:
+                return
+
+        # Don't sample during the daily spread hour: wide, thin books produce
+        # erratic prints that look like volatility but aren't real movement.
+        if self._is_spread_hour():
+            return
+
         mid = (bid + ask) / 2.0
         now = monotonic()
         samples = self._samples.get(symbol)
@@ -155,6 +183,32 @@ class VolatilityGuard:
         cutoff = now - self.lookback_seconds
         while samples and samples[0][0] < cutoff:
             samples.popleft()
+
+    def _is_spread_hour(self) -> bool:
+        """True during the daily spread hour (17:00–18:00 America/New_York, weekdays).
+
+        Cached for a few seconds and clamped at the hour boundaries so the cache
+        never serves a stale value across the 17:00 / 18:00 transitions.
+        """
+        now_mono = monotonic()
+        if now_mono < self._spread_hour_cache_expires:
+            return self._spread_hour_cached
+
+        now_est = datetime.now(_EST_TZ)
+        if now_est.weekday() >= 5:
+            result = False
+        else:
+            result = dtime(17, 0) <= now_est.time() < dtime(18, 0)
+
+        cache_seconds = 5.0
+        for hh in (17, 18):
+            boundary = now_est.replace(hour=hh, minute=0, second=0, microsecond=0)
+            if boundary > now_est:
+                cache_seconds = min(cache_seconds, (boundary - now_est).total_seconds())
+
+        self._spread_hour_cached = result
+        self._spread_hour_cache_expires = now_mono + cache_seconds
+        return result
 
     # ------------------------------------------------------------------
     # Evaluation loop — arm / re-arm / release
