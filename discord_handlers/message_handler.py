@@ -891,6 +891,16 @@ class MessageHandler:
             elif existing["status"] in ["profit", "breakeven", "stop_loss"]:
                 await message.add_reaction("🔒")
                 self.logger.info(f"Cannot update signal in final status: {existing['status']}")
+            else:
+                # The DB update failed and rolled back (e.g. a constraint violation),
+                # leaving the old limits in place. Surface it instead of silently
+                # swallowing the failure — otherwise the signal keeps showing stale
+                # limits in !active with no indication the edit didn't take.
+                await message.add_reaction("⚠️")
+                self.logger.error(
+                    f"Signal edit failed to persist for message {message.id} "
+                    f"(signal {existing['id']}, status {existing['status']}); limits unchanged"
+                )
         else:
             await message.clear_reactions()
             await message.add_reaction("❌")
