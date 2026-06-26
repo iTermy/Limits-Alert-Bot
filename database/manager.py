@@ -366,6 +366,27 @@ class DatabaseManager(BaseConnectionManager):
         except Exception as e:
             logger.error(f"Failed to update news_mode status: {e}", exc_info=True)
 
+    async def set_vol_guard_mode(self, value: Optional[str]) -> None:
+        """Set bot_mode_status.vol_guard to a currency list (e.g. 'EUR, USD'), 'ALL',
+        or NULL.
+
+        A non-empty string marks the market as volatile; NULL marks it calm. Like
+        news_mode, consumers read this column for truthiness, so callers must pass
+        None — never the literal string 'FALSE' — when no volatility is active.
+        """
+        try:
+            await self.execute(
+                """
+                UPDATE bot_mode_status
+                SET vol_guard = $1, updated_at = NOW()
+                WHERE id = 1
+                """,
+                (value,),
+            )
+            logger.debug(f"bot_mode_status.vol_guard → {value!r}")
+        except Exception as e:
+            logger.error(f"Failed to update vol_guard status: {e}", exc_info=True)
+
     async def set_spread_hour(self, active: bool) -> None:
         """Update the spread_hour flag in bot_mode_status."""
         try:
@@ -385,11 +406,13 @@ class DatabaseManager(BaseConnectionManager):
         """Retrieve the current bot mode flags."""
         try:
             row = await self.fetch_one(
-                "SELECT news_mode, spread_hour, updated_at FROM bot_mode_status WHERE id = 1", ()
+                "SELECT news_mode, vol_guard, spread_hour, updated_at "
+                "FROM bot_mode_status WHERE id = 1",
+                (),
             )
             if row:
                 return dict(row)
-            return {"news_mode": None, "spread_hour": False, "updated_at": None}
+            return {"news_mode": None, "vol_guard": None, "spread_hour": False, "updated_at": None}
         except Exception as e:
             logger.error(f"Failed to fetch bot_mode_status: {e}", exc_info=True)
-            return {"news_mode": None, "spread_hour": False, "updated_at": None}
+            return {"news_mode": None, "vol_guard": None, "spread_hour": False, "updated_at": None}

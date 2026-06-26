@@ -94,10 +94,11 @@ def _load_config() -> Dict:
 class VolatilityGuard:
     """Watches subscribed-symbol ticks and announces volatility per currency."""
 
-    def __init__(self, bot, stream_manager, channel: discord.abc.Messageable):
+    def __init__(self, bot, stream_manager, channel: discord.abc.Messageable, db=None):
         self.bot = bot
         self.stream_manager = stream_manager
         self.channel = channel
+        self.db = db
         self.symbol_mapper: SymbolMapper = stream_manager.symbol_mapper
 
         config = _load_config()
@@ -116,6 +117,12 @@ class VolatilityGuard:
         self._key_messages: Dict[str, discord.Message] = {}
 
         self._eval_task: Optional[asyncio.Task] = None
+
+        # Last value written to bot_mode_status.vol_guard. None before the first
+        # write; the first reconcile always writes so a stale value left by a crash
+        # is corrected.
+        self._last_vol_guard_mode: Optional[str] = None
+        self._vol_guard_synced: bool = False
 
         # Cache for the spread-hour check so the per-tick path doesn't build a
         # tz-aware datetime on every print.
@@ -246,6 +253,8 @@ class VolatilityGuard:
             if not samples and symbol not in self._symbol_guards:
                 del self._samples[symbol]
 
+        await self._reconcile_vol_guard_mode()
+
     @staticmethod
     def _is_volatile(samples: Deque[Tuple[float, float]], threshold: float) -> bool:
         if len(samples) < 2:
@@ -274,6 +283,35 @@ class VolatilityGuard:
             if not members:
                 del self._key_members[key]
                 await self._send_ended(key)
+
+    # ------------------------------------------------------------------
+    # DB state — mirror active keys to bot_mode_status.vol_guard
+    # ------------------------------------------------------------------
+
+    def _compute_vol_guard_value(self) -> Optional[str]:
+        """Comma-separated active keys (currencies and/or 'ALL'), or None if calm."""
+        keys = [k for k, members in self._key_members.items() if members]
+        if not keys:
+            return None
+        return ", ".join(sorted(keys))
+
+    async def _reconcile_vol_guard_mode(self) -> None:
+        """Sync bot_mode_status.vol_guard to the active guard keys.
+
+        Writes only when the value changes (the first call always writes, so a
+        stale value left by a crash is corrected).
+        """
+        if self.db is None:
+            return
+        value = self._compute_vol_guard_value()
+        if self._vol_guard_synced and value == self._last_vol_guard_mode:
+            return
+        try:
+            await self.db.set_vol_guard_mode(value)
+            self._last_vol_guard_mode = value
+            self._vol_guard_synced = True
+        except Exception as e:
+            logger.error(f"Failed to reconcile vol_guard in DB: {e}")
 
     # ------------------------------------------------------------------
     # Threshold + key mapping

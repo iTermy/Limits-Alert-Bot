@@ -440,7 +440,7 @@ class TradingBot(commands.Bot):
             self.logger.error(f"Failed to resolve vol guard channel: {e}")
             return
 
-        self.vol_guard = VolatilityGuard(self, stream_manager, channel)
+        self.vol_guard = VolatilityGuard(self, stream_manager, channel, db=db)
         self.services.vol_guard = self.vol_guard
         self.vol_guard.start()
         self.logger.info(f"Volatility guard channel set: #{channel.name}")

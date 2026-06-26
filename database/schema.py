@@ -238,13 +238,15 @@ async def _run_migrations(conn):
             CONSTRAINT licenses_status_check  CHECK (status IN ('active', 'revoked'))
         );
         """,
-        # Bot mode status — single-row table tracking active modes. news_mode is a
-        # TEXT list of categories currently under news (e.g. 'EUR, GOLD' or 'ALL'),
-        # NULL when no news. spread_hour stays a boolean. Updated in real-time.
+        # Bot mode status — single-row table tracking active modes. news_mode and
+        # vol_guard are TEXT lists of currencies/categories currently active (e.g.
+        # 'EUR, GOLD' or 'ALL'), NULL when inactive. spread_hour stays a boolean.
+        # Updated in real-time.
         """
         CREATE TABLE IF NOT EXISTS bot_mode_status (
             id           INT PRIMARY KEY DEFAULT 1,
             news_mode    TEXT,
+            vol_guard    TEXT,
             spread_hour  BOOLEAN NOT NULL DEFAULT FALSE,
             updated_at   TIMESTAMPTZ NOT NULL DEFAULT NOW(),
             CONSTRAINT bot_mode_status_singleton CHECK (id = 1)
@@ -271,6 +273,11 @@ async def _run_migrations(conn):
                     USING (CASE WHEN news_mode THEN 'ALL' ELSE NULL END);
             END IF;
         END $$;
+        """,
+        # Add vol_guard to existing installs (CREATE TABLE IF NOT EXISTS skips it).
+        # Mirrors news_mode: TEXT list of volatile currencies/'ALL', NULL when calm.
+        """
+        ALTER TABLE bot_mode_status ADD COLUMN IF NOT EXISTS vol_guard TEXT;
         """,
         # Add revoked_reason to licenses table (stage18 — auto-revoke tracking)
         """
