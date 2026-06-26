@@ -266,6 +266,8 @@ class LifecycleCog(BaseCog):
         self, ctx: commands.Context, signal_id: int, status: str, *, rest: str = ""
     ):
         """Manually set a signal's status. Append --force to bypass the reactivation guard (admin only)."""
+        if not await self.require_signal_manager(ctx):
+            return
         valid_statuses = [
             "active",
             "hit",
@@ -427,6 +429,8 @@ class LifecycleCog(BaseCog):
     @commands.command(name="hit", description="Mark signal as hit")
     async def set_hit(self, ctx: commands.Context, signal_id: int):
         """Manually mark a signal as HIT, treating limit 1 as hit and starting auto-TP."""
+        if not await self.require_signal_manager(ctx):
+            return
         try:
             transitioned = await asyncio.wait_for(
                 self.signal_db.manually_set_signal_to_hit(
@@ -486,6 +490,8 @@ class LifecycleCog(BaseCog):
           !cancel all <CURRENCY>                    - Cancel all signals containing a currency (e.g. !cancel all EUR)
         For detailed help: !help cancel
         """
+        if not await self.require_signal_manager(ctx):
+            return
         if args is None:
             await ctx.send(
                 "❌ Usage: `!cancel <id>` or `!cancel gold longs/shorts/both <type>` or `!cancel all <PAIR/CURRENCY>`\nSee `!help cancel` for full details."
@@ -833,6 +839,8 @@ class LifecycleCog(BaseCog):
         Set signal expiry
         Valid types: day_end, week_end, month_end, no_expiry
         """
+        if not await self.require_signal_manager(ctx):
+            return
         valid_types = ["day_end", "week_end", "month_end", "no_expiry"]
 
         if expiry_type.lower() not in valid_types:

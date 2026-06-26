@@ -29,6 +29,8 @@ class NewsAutofetchConfig(BaseModel):
 
 class BotSettings(BaseModel):
     admin_ids: list[int] = Field(default_factory=list)
+    signal_manager_role_ids: list[int] = Field(default_factory=list)
+    signal_manager_user_ids: list[int] = Field(default_factory=list)
     health_alert_admin_id: Optional[int] = None
     spread_buffer_enabled: bool = True
     spread_buffer_config: SpreadBufferConfig = Field(default_factory=SpreadBufferConfig)

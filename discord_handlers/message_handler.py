@@ -12,11 +12,18 @@ from price_feeds.embed_builders import _build_signal_embed, _set_archive_footer
 from price_feeds.tp_config import TPConfig
 from utils.formatting import format_price, get_channel_name as _get_channel_name
 from utils.logger import get_logger
+from utils.permissions import is_signal_manager
 
 logger = get_logger("message_handler")
 
 # Auto-delete delay for transient bot replies in monitored / alert channels.
 _REPLY_DELETE_AFTER = 15.0
+
+# DM sent when a non-manager tries to manage a signal via reply.
+_NO_PERMISSION_DM = (
+    "You don't have permission to manage signals. "
+    "If you'd like access, please ask an admin."
+)
 
 
 class MessageHandler:
@@ -44,6 +51,18 @@ class MessageHandler:
             await message.delete()
         except Exception:
             pass
+
+    async def _deny_signal_management(self, message: discord.Message) -> None:
+        """Delete an unauthorized management reply and DM the user why."""
+        try:
+            await message.author.send(_NO_PERMISSION_DM)
+        except discord.Forbidden:
+            self.logger.info(
+                f"Could not DM {message.author} about denied signal management (DMs closed)"
+            )
+        except Exception as e:
+            self.logger.warning(f"Error DMing user about denied signal management: {e}")
+        await self._safe_delete(message)
 
     async def handle_new_message(self, message: discord.Message):
         if message.author.bot:
@@ -140,6 +159,10 @@ class MessageHandler:
                         await self._safe_delete(message)
                 return
 
+            if not is_signal_manager(self.bot, message.author):
+                await self._deny_signal_management(message)
+                return
+
             signal = await self.signal_db.get_signal_with_limits(signal_id)
             if not signal:
                 logger.warning(f"No signal found with ID {signal_id}")
@@ -174,18 +197,8 @@ class MessageHandler:
             if not signal:
                 return
 
-            is_author = message.author.id == referenced.author.id
-            is_admin = (
-                message.author.guild_permissions.administrator
-                if hasattr(message.author, "guild_permissions")
-                else False
-            )
-            if not (is_author or is_admin):
-                await message.reply(
-                    "Only the signal sender or admins can manage this signal.",
-                    delete_after=_REPLY_DELETE_AFTER,
-                )
-                await self._safe_delete(message)
+            if not is_signal_manager(self.bot, message.author):
+                await self._deny_signal_management(message)
                 return
 
             await self._handle_reply_command(
@@ -679,11 +692,7 @@ class MessageHandler:
                     return False
                 if str(reaction.emoji) not in ("✅", "❌"):
                     return False
-                is_author = user.id == message.author.id
-                is_admin = (
-                    hasattr(user, "guild_permissions") and user.guild_permissions.administrator
-                )
-                return is_author or is_admin
+                return is_signal_manager(self.bot, user)
 
             cancel_old = True  # default on timeout
             try:

@@ -52,6 +52,8 @@ class NewsCog(BaseCog):
             !news now USD
             !news off
         """
+        if not await self.require_signal_manager(ctx):
+            return
         if not args:
             await ctx.send(
                 "❌ Usage: `!news <category> <time> [window] [tz:<tz>] [date:<date>]`\n"
@@ -321,6 +323,8 @@ class NewsCog(BaseCog):
             !newsclear 3      → remove event #3
             !newsclear        → remove all events
         """
+        if not await self.require_signal_manager(ctx):
+            return
         news_manager: NewsManager = self.bot.news_manager
         alert_system = self.services.alert_system
 

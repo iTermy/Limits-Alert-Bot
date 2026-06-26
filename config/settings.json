@@ -2,6 +2,8 @@
   "admin_ids": [
     582358569542877184
   ],
+  "signal_manager_role_ids": [],
+  "signal_manager_user_ids": [],
   "health_alert_admin_id": 582358569542877184,
   "spread_buffer_enabled": true,
   "spread_buffer_config": {
@@ -17,7 +19,7 @@
     "impact_levels": [
       "High"
     ],
-    "window_minutes": 10,
+    "window_minutes": 15,
     "refresh_hours": 6,
     "currencies": [
       "USD",

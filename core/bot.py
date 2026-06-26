@@ -65,6 +65,9 @@ class TradingBot(commands.Bot):
         # Admin user IDs from settings.json
         bot_settings = load_settings()
         self.admin_ids = bot_settings.admin_ids
+        # Roles / users allowed to manage signals (in addition to admins)
+        self.signal_manager_role_ids = set(bot_settings.signal_manager_role_ids)
+        self.signal_manager_user_ids = set(bot_settings.signal_manager_user_ids)
 
     async def setup_hook(self):
         """Called when bot is getting ready"""
