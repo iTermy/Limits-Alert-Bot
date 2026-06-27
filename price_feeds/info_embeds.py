@@ -58,13 +58,8 @@ def _build_main_embed() -> discord.Embed:
     embed.add_field(
         name="What's included",
         value=(
-            "Signals across:\n"
-            "• **Forex** (scalp / daily / swing) & exotics\n"
-            "• **Indices**\n"
-            "• **Oil**\n"
-            "• **Stocks**\n"
-            "• **Crypto**\n"
-            "Win rate **>90%**.\n"
+            "**Forex** (scalp / daily / swing) & exotics, **indices**, **oil**, "
+            "**stocks** and **crypto** — win rate **>90%**.\n"
             "*Expiry:* scalps & daily setups expire **end of day**; forex, exotics & "
             "indices valid **all week**; swings, stocks & crypto **all month**. Unfilled "
             "limits expire at the end of their window."
