@@ -10,7 +10,7 @@ being reposted.
 
 import json
 from pathlib import Path
-from typing import Callable, Dict, Optional
+from typing import Callable, Dict, Optional, Set
 
 import discord
 
@@ -19,6 +19,21 @@ from utils.logger import get_logger
 logger = get_logger("info_embeds")
 
 _DATA_PATH = Path(__file__).resolve().parent.parent / "data" / "info_embeds.json"
+
+
+def info_embed_message_ids() -> Set[str]:
+    """Return the set of persisted info-embed message IDs (as strings).
+
+    Used by the weekly channel cleaner to preserve these permanent embeds.
+    """
+    if not _DATA_PATH.exists():
+        return set()
+    try:
+        with open(_DATA_PATH) as f:
+            return {str(v) for v in json.load(f).values()}
+    except Exception as e:
+        logger.error(f"Failed to read info_embeds.json: {e}")
+        return set()
 
 _FOOTER = "Discipline over everything — protect your account first. Small, consistent gains win long-term."
 

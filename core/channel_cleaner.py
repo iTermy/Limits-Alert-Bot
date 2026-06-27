@@ -23,6 +23,7 @@ from typing import Set
 import discord
 from discord.ext import tasks
 
+from price_feeds.info_embeds import info_embed_message_ids
 from utils.logger import get_logger
 
 # ── tuneable constants ────────────────────────────────────────────────────────
@@ -93,7 +94,8 @@ class ChannelCleaner:
     # ── alert-channel purge ───────────────────────────────────────────────────
 
     async def _purge_alert_channels(self):
-        """Delete every message < MESSAGE_AGE_DAYS old from every alert channel."""
+        """Delete every message < MESSAGE_AGE_DAYS old from every alert channel,
+        preserving the permanent informational embeds."""
         cfg = getattr(self.bot, "channels_config", {}) or {}
 
         channel_ids = []
@@ -110,6 +112,7 @@ class ChannelCleaner:
             return
 
         cutoff = datetime.now(tz=timezone.utc) - timedelta(days=MESSAGE_AGE_DAYS)
+        preserve = info_embed_message_ids()
 
         for ch_id in channel_ids:
             channel = self.bot.get_channel(ch_id)
@@ -117,7 +120,7 @@ class ChannelCleaner:
                 self.logger.warning(f"Channel {ch_id} not found in cache — skipping")
                 continue
 
-            await self._purge_channel(channel, cutoff)
+            await self._purge_channel_preserving(channel, cutoff, preserve)
 
     # ── monitored-channel purge ───────────────────────────────────────────────
 
@@ -159,10 +162,6 @@ class ChannelCleaner:
             await self._purge_channel_preserving(channel, cutoff, preserve)
 
     # ── channel-level helpers ─────────────────────────────────────────────────
-
-    async def _purge_channel(self, channel: discord.TextChannel, cutoff: datetime):
-        """Bulk-delete every message newer than *cutoff* in *channel*."""
-        await self._purge_channel_preserving(channel, cutoff, preserve_ids=set())
 
     async def _purge_channel_preserving(
         self,
