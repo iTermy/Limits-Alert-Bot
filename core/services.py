@@ -22,6 +22,7 @@ if TYPE_CHECKING:
     from price_feeds.tp_config import TPConfig
     from price_feeds.tp_monitor import AutoTPMonitor
     from price_feeds.trailing_monitor import TrailingStopMonitor
+    from price_feeds.excursion_monitor import ExcursionMonitor
     from price_feeds.vol_guard import VolatilityGuard
 
 
@@ -37,6 +38,7 @@ class ServiceRegistry:
         self.nm_config: Optional[NMConfig] = None
         self.nm_monitor: Optional[NearMissMonitor] = None
         self.trailing_monitor: Optional[TrailingStopMonitor] = None
+        self.excursion_monitor: Optional[ExcursionMonitor] = None
         self.alert_config: Optional[AlertDistanceConfig] = None
         self.signal_db: Optional[SignalDatabase] = None
         self.db: Optional[DatabaseManager] = None

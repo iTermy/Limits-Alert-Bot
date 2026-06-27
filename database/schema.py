@@ -160,6 +160,71 @@ async def initialize_database(db_manager):
             )
         """)
 
+        # Create signal_excursions table — one row per signal, MFE/MAE + entry
+        # context. Pure backend analytics; never read by alerting code.
+        await conn.execute("""
+            CREATE TABLE IF NOT EXISTS signal_excursions (
+                signal_id   BIGINT PRIMARY KEY REFERENCES signals(id) ON DELETE CASCADE,
+                instrument  TEXT NOT NULL,
+                direction   TEXT NOT NULL,
+                signal_type TEXT NOT NULL,
+                pip_size    DOUBLE PRECISION NOT NULL,
+                phase       TEXT NOT NULL DEFAULT 'approach',
+
+                approach_start_price DOUBLE PRECISION,
+                approach_start_time  TIMESTAMPTZ,
+                approach_velocity    DOUBLE PRECISION,
+                pre_hit_mae          DOUBLE PRECISION,
+
+                entry_price DOUBLE PRECISION,
+                entry_time  TIMESTAMPTZ,
+
+                mfe_price    DOUBLE PRECISION,
+                mfe_pips     DOUBLE PRECISION,
+                mfe_atr_mult DOUBLE PRECISION,
+                mfe_time     TIMESTAMPTZ,
+                mae_price    DOUBLE PRECISION,
+                mae_pips     DOUBLE PRECISION,
+                mae_atr_mult DOUBLE PRECISION,
+                mae_time     TIMESTAMPTZ,
+
+                exit_price  DOUBLE PRECISION,
+                exit_time   TIMESTAMPTZ,
+                exit_reason TEXT,
+
+                atr_at_hit        DOUBLE PRECISION,
+                rsi_at_hit        DOUBLE PRECISION,
+                ema_distance_atr  DOUBLE PRECISION,
+                wick_rejection    DOUBLE PRECISION,
+                htf_trend         INTEGER,
+                htf_aligned       BOOLEAN,
+                volume_at_hit     DOUBLE PRECISION,
+                avg_volume        DOUBLE PRECISION,
+                volume_spike_ratio DOUBLE PRECISION,
+                spread_at_hit     DOUBLE PRECISION,
+                session           TEXT,
+
+                created_at TIMESTAMPTZ DEFAULT NOW(),
+
+                CONSTRAINT excursion_phase_check
+                    CHECK (phase IN ('approach', 'in_trade', 'closed'))
+            )
+        """)
+
+        # Create signal_volume_samples table — bounded per-minute volume/ATR
+        # snapshots over a signal's life, for volume-trend exit analysis.
+        await conn.execute("""
+            CREATE TABLE IF NOT EXISTS signal_volume_samples (
+                id         BIGINT GENERATED ALWAYS AS IDENTITY PRIMARY KEY,
+                signal_id  BIGINT NOT NULL REFERENCES signals(id) ON DELETE CASCADE,
+                sampled_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+                phase      TEXT NOT NULL,
+                price      DOUBLE PRECISION,
+                volume     DOUBLE PRECISION,
+                atr        DOUBLE PRECISION
+            )
+        """)
+
         await _create_indexes(conn)
 
         # Run migrations for any new columns added to existing tables
@@ -188,6 +253,8 @@ async def _create_indexes(conn):
         "CREATE INDEX IF NOT EXISTS idx_live_prices_updated ON live_prices(updated_at)",
         "CREATE INDEX IF NOT EXISTS idx_trailing_signal ON trailing_simulations(signal_id)",
         "CREATE INDEX IF NOT EXISTS idx_trailing_incomplete ON trailing_simulations(stopped_out) WHERE stopped_out = FALSE",
+        "CREATE INDEX IF NOT EXISTS idx_excursions_open ON signal_excursions(phase) WHERE phase <> 'closed'",
+        "CREATE INDEX IF NOT EXISTS idx_volume_samples_signal ON signal_volume_samples(signal_id)",
     ]
 
     for index_query in indexes:

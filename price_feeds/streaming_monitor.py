@@ -107,6 +107,7 @@ class StreamingPriceMonitor:
         nm_config,
         nm_monitor,
         trailing_monitor,
+        excursion_monitor,
         live_price_writer,
         health_monitor,
     ):
@@ -123,6 +124,7 @@ class StreamingPriceMonitor:
         self.nm_config = nm_config
         self.nm_monitor = nm_monitor
         self.trailing_monitor = trailing_monitor
+        self.excursion_monitor = excursion_monitor
         self.live_price_writer = live_price_writer
         self.health_monitor = health_monitor
 
@@ -241,6 +243,7 @@ class StreamingPriceMonitor:
 
         asyncio.create_task(self._periodic_signal_refresh())
         asyncio.create_task(self._spread_buffer_refresh_loop())
+        asyncio.create_task(self.excursion_monitor.run_volume_sampler())
 
         self.live_price_writer.start()
 
@@ -263,6 +266,7 @@ class StreamingPriceMonitor:
     async def stop(self):
         """Stop the streaming monitor"""
         self.running = False
+        self.excursion_monitor.stop()
 
         await self.stream_manager.shutdown()
         await self.live_price_writer.stop()
@@ -338,6 +342,17 @@ class StreamingPriceMonitor:
                         logger.error(
                             f"Failed to resume trailing tracking for signal {signal_id}: {_resume_err}"
                         )
+
+            # Re-hydrate excursion tracking (approach + in-trade) from any open
+            # rows so a restart mid-signal keeps accumulating MFE/MAE instead of
+            # restarting from scratch.
+            for signal in self.active_signals.values():
+                try:
+                    await self.excursion_monitor.resume_if_tracked(signal)
+                except Exception as _exc_err:
+                    logger.error(
+                        f"Failed to resume excursion for signal {signal['signal_id']}: {_exc_err}"
+                    )
 
             # Hydrate alert embed references BEFORE the price stream starts —
             # otherwise the first tick could fire send_*_alert and post a
@@ -539,6 +554,7 @@ class StreamingPriceMonitor:
 
         # Near-miss check: only for active signals (not hit) with approaching alert sent
         if signal.get("status") in ("active", None):
+            await self.excursion_monitor.update_approach(signal, current_price)
             nm_triggered = self.nm_monitor.update(signal, current_price)
             if nm_triggered:
                 signal_id = signal["signal_id"]
@@ -549,6 +565,7 @@ class StreamingPriceMonitor:
                     self._apply_status_to_signal(signal, "cancelled")
                     self.nm_monitor.evict_signal(signal_id)
                     self.tp_monitor.evict_signal(signal_id)
+                    await self.excursion_monitor.finalize(signal_id, current_price, "near_miss")
                     await self._maybe_unsubscribe_symbol(signal["instrument"], signal_id)
                     self.stats["nm_cancels"] = self.stats.get("nm_cancels", 0) + 1
                 return
@@ -570,7 +587,14 @@ class StreamingPriceMonitor:
                 await self.trailing_monitor.start(signal)
             await self.trailing_monitor.update(signal, price_data["bid"], price_data["ask"])
 
+            # Excursion entry is set lazily from the first hit limit (no-op once
+            # entered), then MFE/MAE advances each tick alongside trailing.
+            await self.excursion_monitor.mark_entry(signal)
+            await self.excursion_monitor.update(signal, price_data["bid"], price_data["ask"])
+
             if tp_triggered:
+                close_price = price_data["bid"] if direction == "long" else price_data["ask"]
+                await self.excursion_monitor.finalize(signal_id, close_price, "auto_tp")
                 self._apply_status_to_signal(signal, "profit")
                 self._react_async(signal, "💰")
                 # If the trailing-stop shadow simulation still has open levels,
@@ -708,6 +732,7 @@ class StreamingPriceMonitor:
                     if sent:
                         await self._mark_approaching_sent(limit["id"])
                         limit["approaching_alert_sent"] = True
+                        await self.excursion_monitor.start_approach(signal, current_price)
 
         # Retraction: price has drifted past N x the alert threshold —
         # delete the embed and reset the flag so it can re-fire later.
@@ -737,6 +762,9 @@ class StreamingPriceMonitor:
         await self._reset_approaching_sent(limit["id"])
         limit["approaching_alert_sent"] = False
         self.nm_monitor.evict_signal(signal_id)
+        # Drop approach-phase excursion state so a later re-approach measures
+        # velocity/pre-hit behaviour fresh (the DB row resets on re-approach).
+        self.excursion_monitor.evict_signal(signal_id)
         logger.info(
             f"Retracted approaching alert for signal {signal_id} "
             f"({signal['instrument']}) — distance {distance:.5f} exceeded "
@@ -793,6 +821,7 @@ class StreamingPriceMonitor:
         self.active_signals.pop(signal_id, None)
         await self.trailing_monitor.finalize_with_price(signal_id, current_price, reason=reason)
         self.trailing_monitor.evict_signal(signal_id)
+        await self.excursion_monitor.finalize(signal_id, current_price, reason)
         if reason == "news":
             await self.alert_system.send_news_cancel_alert(signal, current_price, news_event)
         else:
@@ -902,29 +931,39 @@ class StreamingPriceMonitor:
         self._apply_status_to_signal(signal, new_status)
 
     async def finalize_trailing_on_manual_close(self, signal_id: int) -> None:
-        """Close out any open trailing-stop shadow levels after a manual
-        status override (setstatus/profit/cancel/bulk-cancel) that doesn't
-        have a precise tick price on hand. No-op if this signal never went
-        HIT, since trailing only starts at that point.
+        """Close out trailing-stop and excursion tracking after a manual status
+        override (setstatus/profit/cancel/bulk-cancel) that doesn't have a
+        precise tick price on hand. No-op for whichever isn't tracking this
+        signal — trailing only starts at HIT, excursion starts at approach.
         """
-        if not self.trailing_monitor.is_tracking(signal_id):
+        tracking_trailing = self.trailing_monitor.is_tracking(signal_id)
+        tracking_excursion = self.excursion_monitor.is_tracking(signal_id)
+        if not tracking_trailing and not tracking_excursion:
             return
 
         signal = self.active_signals.get(signal_id)
         instrument = signal.get("instrument") if signal else None
         direction = (signal.get("direction") if signal else "") or ""
 
+        price = None
         if instrument:
             price_row = await self.db.fetch_one(
                 "SELECT bid, ask FROM live_prices WHERE symbol = $1", (instrument.upper(),)
             )
             if price_row:
                 price = price_row["bid"] if direction.lower() == "long" else price_row["ask"]
-                await self.trailing_monitor.finalize_with_price(
-                    signal_id, price, reason="manual_close"
-                )
 
+        if tracking_trailing and price is not None:
+            await self.trailing_monitor.finalize_with_price(
+                signal_id, price, reason="manual_close"
+            )
         self.trailing_monitor.evict_signal(signal_id)
+
+        if tracking_excursion:
+            if price is not None:
+                await self.excursion_monitor.finalize(signal_id, price, "manual_close")
+            else:
+                self.excursion_monitor.evict_signal(signal_id)
 
     async def refresh_signal_in_memory(self, signal_id: int) -> bool:
         """Re-fetch a signal from the DB and bring all in-memory caches in
@@ -1028,6 +1067,9 @@ class StreamingPriceMonitor:
                     signal["signal_id"], current_price, reason="real_sl"
                 )
                 self.trailing_monitor.evict_signal(signal["signal_id"])
+                await self.excursion_monitor.finalize(
+                    signal["signal_id"], current_price, "real_sl"
+                )
                 await self._maybe_unsubscribe_symbol(signal["instrument"], signal["signal_id"])
 
         except Exception as e:
