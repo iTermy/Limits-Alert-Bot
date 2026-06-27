@@ -52,6 +52,7 @@ class TradingBot(commands.Bot):
         self.channel_cleaner = None
         self.news_fetcher = None
         self.vol_guard = None
+        self._info_embeds_synced = False
 
         # Flat service registry — populated during setup_hook, injected into cogs/handlers
         self.services = ServiceRegistry()
@@ -203,6 +204,17 @@ class TradingBot(commands.Bot):
             self.monitor.alert_system.bot = self
             self.monitor.alert_system.start_live_updates()
             self.logger.info("Live embed update loop started")
+
+        # Post/refresh the pinned informational embed in each alert channel.
+        # Guarded so reconnect-triggered on_ready calls don't re-run it.
+        if self.monitor and self.monitor.alert_system and not self._info_embeds_synced:
+            self._info_embeds_synced = True
+            try:
+                from price_feeds.info_embeds import InfoEmbedManager
+
+                await InfoEmbedManager(self, self.monitor.alert_system).sync()
+            except Exception as e:
+                self.logger.error(f"Failed to sync info embeds: {e}", exc_info=True)
 
         # Set bot status
         await self.change_presence(
