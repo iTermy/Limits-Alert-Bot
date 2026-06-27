@@ -37,41 +37,6 @@ def info_embed_message_ids() -> Set[str]:
 
 _FOOTER = "Discipline over everything — protect your account first. Small, consistent gains win long-term."
 
-# ── Shared sections ──────────────────────────────────────────────────────────
-
-_MARKERS_AND_TERMS = (
-    "**Markers**\n"
-    "🟡 Approaching  ·  🎯 Limit hit  ·  🛑 Stop loss\n"
-    "❌ Cancelled  ·  ♻️ Reactivated  ·  💰 Profit\n\n"
-    "**Terms**\n"
-    "• **Approaching** — price is near a limit.\n"
-    "• **Near-Miss (NM)** — price reverses a few pips before a limit and runs the "
-    "other way; the trade is auto-cancelled.\n"
-    "• **VTH (Valid Till Hit)** — stays active until filled.\n"
-    "• **HOT / POC** — high-conviction limits to focus size on."
-)
-
-_RISK_MANAGEMENT = (
-    "• Set your limits in advance — markets move fast.\n"
-    "• Risk **max 5%** across *all* limits in a signal (5 limits ≈ 1% each). "
-    "Equal lots is simplest for beginners.\n"
-    "• Treat every signal as **one trade** — average the whole basket, not each limit alone.\n"
-    "• Manage losing positions first; trailing stops (5–10 pips) lock profit without adding risk."
-)
-
-_VALIDITY = (
-    "• Forex, exotics, indices and tolls — valid **all week**; unfilled limits are "
-    "cancelled at week's end.\n"
-    "• Swings & stocks — valid **all month**.\n"
-    "• New week, new signals (swings & stocks carry over).\n"
-    "• Not every limit fills — the ones that hit are worked, the rest expire."
-)
-
-_STAY_SAFE = (
-    "Only follow official profiles in this server. We will **never** DM you offering "
-    "services or help — ignore and report anyone who does."
-)
-
 
 def _base_embed(title: str, description: str, color: int) -> discord.Embed:
     embed = discord.Embed(title=title, description=description, color=color)
@@ -84,187 +49,165 @@ def _base_embed(title: str, description: str, color: int) -> discord.Embed:
 
 def _build_main_embed() -> discord.Embed:
     embed = _base_embed(
-        "📊 Signal Alerts — How This Channel Works",
-        "Every signal posted here becomes **one live embed** that updates itself as "
-        "price approaches, hits limits and closes — so the channel stays clean. When "
-        "it's quiet, there simply aren't any active trades right now. Here's how to "
-        "use it. 👇",
+        "👑 Signal Alerts",
+        "The main feed — **most signals land here**. Each one is a single live embed "
+        "that updates as price approaches, hits and closes. Quiet just means nothing's "
+        "active right now.",
         0x5865F2,
     )
     embed.add_field(
-        name="📈 Trade Types",
+        name="What's included",
         value=(
-            "♎ **Scalp** — quick in-and-out, 3–10 pips. Don't hold.\n"
-            "👑 **Daily** — clean setups, 10–50 pips, fast take-profits.\n"
-            "🌂 **Swing** — longer holds, 50–500 pips; exit when structure changes.\n"
-            "🔮 **Price Action** — higher risk (~60–70% win), wider stops (own channel)."
+            "Signals across:\n"
+            "• **Forex** (scalp / daily / swing) & exotics\n"
+            "• **Indices**\n"
+            "• **Oil**\n"
+            "• **Stocks**\n"
+            "• **Crypto**\n"
+            "Win rate **>90%**.\n"
+            "*Expiry:* scalps & daily setups expire **end of day**; forex, exotics & "
+            "indices valid **all week**; swings, stocks & crypto **all month**. Unfilled "
+            "limits expire at the end of their window."
         ),
         inline=False,
     )
     embed.add_field(
-        name="💸 Taking Profit",
+        name="🎯 How to take it",
         value=(
-            "Overall profit across the basket is what matters — these are guides, not "
-            "hard rules:\n"
-            "• Scalps — 5–10 pips\n"
-            "• Daily forex — 10–20 pips + runners\n"
-            "• Forex swings — 50–100–150 pips\n"
-            "• SPX — 5–10–15 pts  ·  NASDAQ / US30 / DAX — 10–20–50 pts\n"
-            "• Stocks — TP when you see it (unless marked investment/swing)\n"
-            "Close lower entries first at breakeven or small profit; protect equity "
-            "over chasing pips."
+            "Treat each signal as **one trade** — average the basket, risk **max 5%** "
+            "across all limits, equal lots is simplest. Close lower entries first, hold "
+            "runners.\n"
+            "*Rough TPs:*\n"
+            "• Scalp 5–10 pips · Daily 10–20 pips + runners · Swing 50–150 pips\n"
+            "• Indices — SPX 5–15 pts · NASDAQ/US30/DAX 10–50 pts\n"
+            "• Oil ~$0.5 · Crypto ~$500 (BTCUSDT; varies by symbol)\n"
+            "• Stocks — ranges vary per name, **use discretion**\n"
+            "*Prices:* indices & oil via **OANDA**, crypto via **Binance** — find the "
+            "exact symbol on TradingView."
         ),
         inline=False,
     )
-    embed.add_field(name="🗓️ Validity & Expiry", value=_VALIDITY, inline=False)
-    embed.add_field(name="⚠️ Risk Management", value=_RISK_MANAGEMENT, inline=False)
-    embed.add_field(name="🔔 Alert Markers & Terms", value=_MARKERS_AND_TERMS, inline=False)
-    embed.add_field(name="🛡️ Stay Safe", value=_STAY_SAFE, inline=False)
+    embed.add_field(
+        name="Reading the embeds",
+        value=(
+            "🟡 Approaching · 🎯 Hit · 🛑 Stop · ❌ Cancelled · ♻️ Reactivated · 💰 Profit"
+        ),
+        inline=False,
+    )
     return embed
 
 
 def _build_pa_embed() -> discord.Embed:
     embed = _base_embed(
-        "🔮 Price Action Trades — How This Channel Works",
-        "Higher-risk, higher-reward setups (~60–70% win rate) with wider stops. Each "
-        "signal is **one live embed** that updates as price moves and closes — a quiet "
-        "channel just means nothing is active right now.",
+        "🔮 Price Action Trades",
+        "Higher-risk, higher-reward gold setups with wider stops.",
         0x9B59B6,
     )
     embed.add_field(
-        name="🎯 How to Take PA Trades",
+        name="What's included",
         value=(
-            "• Enter when called — expect spikes/dips around entry.\n"
-            "• Keep total risk **under 3%** of your account.\n"
-            "• You may add positions if it moves against you, but exit once risk hits 3%.\n"
-            "• If price spikes hard right after entry, consider the move done and step aside."
+            "Gold price-action calls only — roughly **60–70% win rate** with wider stops "
+            "than the main feed. Fewer, more selective setups. Valid for the session "
+            "they're called in."
         ),
         inline=False,
     )
     embed.add_field(
-        name="💸 Taking Profit",
+        name="🎯 How to take it",
         value=(
-            "Gold PA — **10 / 15 / 25 $**. These are guides: if the setup looks weak, "
-            "exit sooner. With a ~60–70% win rate, size for the wider stops and let your "
-            "winners cover the losers."
+            "• Enter when called — expect spikes/dips around entry.\n"
+            "• Keep total risk **under 3%** of your account.\n"
+            "• You may add if it moves against you, but exit once risk hits 3%.\n"
+            "• If price spikes hard right after entry, treat the move as done and step aside.\n"
+            "*TPs:* Gold PA **10 / 15 / 25 $** — tp is more discretionary; exit sooner if "
+            "the setup looks weak."
         ),
         inline=False,
     )
-    embed.add_field(name="🗓️ Validity & Expiry", value=_VALIDITY, inline=False)
-    embed.add_field(name="⚠️ Risk Management", value=_RISK_MANAGEMENT, inline=False)
-    embed.add_field(name="🔔 Alert Markers & Terms", value=_MARKERS_AND_TERMS, inline=False)
-    embed.add_field(name="🛡️ Stay Safe", value=_STAY_SAFE, inline=False)
     return embed
 
 
 def _build_gold_toll_embed() -> discord.Embed:
     embed = _base_embed(
-        "👑 Gold Tolls — How This Channel Works",
-        "Gold toll-map signals — a ladder of limits with tight stops. Each signal is "
-        "**one live embed** that updates as price approaches, hits and closes. A quiet "
-        "channel just means nothing is active right now.",
+        "🪙 Gold Tolls",
+        "A collection of gold scalps mapped across a range of limits — one of our "
+        "**fan favorites**.",
         0xF1C40F,
     )
     embed.add_field(
-        name="🛑 Stop Loss",
+        name="What's included",
         value=(
-            "Default stop is **$5**. In extreme volatility (e.g. $20 one-minute candles) "
-            "it widens to **$10–15** — drop your position size to match. Never trade a "
-            "$5 stop into a $20 candle."
+            "Gold scalp limits with a default **$5 stop** (widens to $10–15 in extreme "
+            "volatility — drop size to match). Valid **all week**. Win rate ~**90%**. "
+            "Monitor the channel for updates, as levels may change."
         ),
         inline=False,
     )
     embed.add_field(
-        name="💸 Taking Profit",
+        name="🎯 How to take it",
         value=(
-            "• Impulse limits — **3–5 $**\n"
-            "• Runners — **7–10 $**\n"
-            "Profit is the basket average across whatever limits hit. Close lower entries "
-            "first at breakeven/small profit; hold runners for the larger gains."
+            "Average the basket across whatever limits hit — close lower entries first "
+            "at breakeven/small profit, hold runners at your discretion. Equal lots is "
+            "simplest.\n"
+            "*TPs:* impulse limits **3–5 $** · runners **7–10 $**."
         ),
         inline=False,
     )
-    embed.add_field(
-        name="🔥 HOT / POC Limits",
-        value=(
-            "**HOT** trades and **POC** limits are the high-conviction levels — size up "
-            "there. A toll map lays out a ladder of limits; only the ones price reaches "
-            "are worked."
-        ),
-        inline=False,
-    )
-    embed.add_field(name="🗓️ Validity & Expiry", value=_VALIDITY, inline=False)
-    embed.add_field(name="🔔 Alert Markers & Terms", value=_MARKERS_AND_TERMS, inline=False)
-    embed.add_field(name="🛡️ Stay Safe", value=_STAY_SAFE, inline=False)
     return embed
 
 
 def _build_general_toll_embed() -> discord.Embed:
     embed = _base_embed(
-        "🛢️ Tolls — How This Channel Works",
-        "Non-gold toll maps (forex, indices and oil). Each signal is **one live embed** "
-        "that updates as price approaches, hits and closes. A quiet channel just means "
-        "nothing is active right now.",
+        "Tolls",
+        "Non-gold toll maps — forex, indices and oil. One live embed per signal.",
         0xE67E22,
     )
     embed.add_field(
-        name="📐 Prices & Charts",
+        name="What's included",
         value=(
-            "Always reconcile your broker's price with the reference chart — oil and "
-            "indices usually need adjusting:\n"
-            "• Oil — https://www.tradingview.com/symbols/USOILSPOT/\n"
-            "• Indices — OANDA spot\n"
-            "• Gold / forex — FXCM chart"
+            "Toll **maps** on forex, indices and oil. Only the limits price reaches get "
+            "worked. Valid **all week**."
         ),
         inline=False,
     )
     embed.add_field(
-        name="💸 Taking Profit",
+        name="🎯 How to take it",
         value=(
-            "Profit is the basket average across whatever limits hit. Close lower entries "
-            "first at breakeven/small profit; hold runners for the larger gains. These "
-            "are guides — exit sooner if the setup turns."
+            "• Always reconcile your broker's price with the reference chart — oil and "
+            "indices usually need adjusting:\n"
+            "  ◦ Oil → TradingView USOILSPOT\n"
+            "  ◦ Indices → OANDA spot\n"
+            "  ◦ Gold/forex → FXCM\n"
+            "• Average the basket across whatever limits hit — close lower entries first, "
+            "hold runners."
         ),
         inline=False,
     )
-    embed.add_field(name="🗓️ Validity & Expiry", value=_VALIDITY, inline=False)
-    embed.add_field(name="⚠️ Risk Management", value=_RISK_MANAGEMENT, inline=False)
-    embed.add_field(name="🔔 Alert Markers & Terms", value=_MARKERS_AND_TERMS, inline=False)
-    embed.add_field(name="🛡️ Stay Safe", value=_STAY_SAFE, inline=False)
     return embed
 
 
 def _build_legends_embed() -> discord.Embed:
     embed = _base_embed(
-        "⭐ Legends Trades — How This Channel Works",
-        "Trades shared by TM-trained community members. Each signal is **one live embed** "
-        "that updates as price approaches, hits and closes. A quiet channel just means "
-        "nothing is active right now.",
+        "⭐ Legends Trades",
+        "Trades shared by TM-trained community members. One live embed per signal.",
         0x1ABC9C,
     )
     embed.add_field(
-        name="🧭 What to Expect",
+        name="What's included",
         value=(
-            "These are trades from TM-trained community members, across a range of "
-            "instruments and styles. Quality is high, but each caller runs their own "
-            "plan — follow the **SL and targets on the individual call** and size to "
-            "your own risk tolerance."
+            "Calls from TM-trained members across a range of instruments and styles. "
+            "Quality is high, but each caller runs their own plan."
         ),
         inline=False,
     )
     embed.add_field(
-        name="💸 Taking Profit",
+        name="🎯 How to take it",
         value=(
-            "Take profit on overall basket average. As a rough guide: scalps 5–10 pips, "
-            "daily forex 10–20 pips + runners, swings 50–150 pips, indices per the "
-            "standard point targets. Protect equity over chasing pips."
+            "• Follow the **SL and targets on the individual call** — they vary by caller.\n"
+            "• Size to your own risk tolerance and average the basket as usual."
         ),
         inline=False,
     )
-    embed.add_field(name="🗓️ Validity & Expiry", value=_VALIDITY, inline=False)
-    embed.add_field(name="⚠️ Risk Management", value=_RISK_MANAGEMENT, inline=False)
-    embed.add_field(name="🔔 Alert Markers & Terms", value=_MARKERS_AND_TERMS, inline=False)
-    embed.add_field(name="🛡️ Stay Safe", value=_STAY_SAFE, inline=False)
     return embed
 
 
