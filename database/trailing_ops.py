@@ -59,6 +59,23 @@ class TrailingDatabase:
                 ),
             )
 
+    async def reanchor_level(
+        self, signal_id: int, level: str, price: float, ts: datetime
+    ) -> None:
+        """Move a still-open level's anchor onto a newly-hit deeper limit.
+
+        Resets both anchor_price (the P&L baseline) and high_water_mark to the
+        deeper fill so the trail measures the runner from the deepest entry.
+        """
+        await self.db.execute(
+            """
+            UPDATE trailing_simulations
+            SET anchor_price = $1, high_water_mark = $1, hwm_updated_at = $2
+            WHERE signal_id = $3 AND level = $4 AND stopped_out = FALSE
+            """,
+            (price, ts, signal_id, level),
+        )
+
     async def update_high_water_mark(
         self, signal_id: int, level: str, price: float, ts: datetime
     ) -> None:

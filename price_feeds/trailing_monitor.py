@@ -58,11 +58,10 @@ class TrailingStopMonitor:
         if not hit_limits:
             return
 
-        first_limit = sorted(hit_limits, key=lambda lim: lim["sequence_number"])[0]
-        anchor_price = first_limit.get("hit_price") or first_limit["price_level"]
+        direction = signal["direction"].lower()
+        anchor_price = self._deepest_hit_price(hit_limits, direction)
 
         symbol = signal["instrument"]
-        direction = signal["direction"].lower()
         signal_type = signal.get("type") or "standard"
 
         levels = self._config.get_levels(symbol, signal_type)
@@ -131,6 +130,8 @@ class TrailingStopMonitor:
         if state is None:
             return False
 
+        await self._maybe_reanchor(signal, state)
+
         close_price = bid if state.direction == "long" else ask
         now = datetime.now(timezone.utc)
 
@@ -161,6 +162,47 @@ class TrailingStopMonitor:
             self._tracking.pop(signal_id, None)
             return True
         return False
+
+    @staticmethod
+    def _deepest_hit_price(hit_limits: List[Dict], direction: str) -> float:
+        """Anchor on the deepest fill — the runner the TP strategy trails.
+
+        Long: lowest hit price; short: highest. Earlier (shallower) limits
+        exit at breakeven, so both P&L and the trail are measured from the
+        deepest entry rather than the first one hit.
+        """
+        prices = [lim.get("hit_price") or lim["price_level"] for lim in hit_limits]
+        return min(prices) if direction == "long" else max(prices)
+
+    async def _maybe_reanchor(self, signal: Dict, state: TrailingState) -> None:
+        """Move the anchor onto a newly-hit deeper limit.
+
+        Tracking starts on the FIRST limit hit (signal → HIT); deeper limits
+        fill on later ticks. Each time a deeper fill appears, re-anchor P&L to
+        it and reset every open level's high-water-mark to that price, so the
+        trail measures the runner from the deepest entry and the scale-in dip
+        can't trip a tier.
+        """
+        hit_limits = signal.get("hit_limits") or []
+        if not hit_limits:
+            return
+
+        deepest = self._deepest_hit_price(hit_limits, state.direction)
+        is_deeper = (
+            deepest < state.anchor_price
+            if state.direction == "long"
+            else deepest > state.anchor_price
+        )
+        if not is_deeper:
+            return
+
+        state.anchor_price = deepest
+        now = datetime.now(timezone.utc)
+        for level in LEVELS:
+            if state.stopped[level]:
+                continue
+            state.high_water_mark[level] = deepest
+            await self._db.reanchor_level(state.signal_id, level, deepest, now)
 
     async def finalize_with_price(self, signal_id: int, price: float, reason: str) -> None:
         """Close out any still-open levels at `price` (real SL / manual close / cancel / expiry)."""
