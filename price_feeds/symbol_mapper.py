@@ -84,7 +84,9 @@ class SymbolMapper:
                 "US2000",
                 "RUSSEL",
                 "GER30",
+                "GER40",
                 "DE30",
+                "DE40",
                 "JP225",
                 "NIKKEI",
             ]
