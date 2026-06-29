@@ -22,12 +22,14 @@ class TrailingDatabase:
     async def create_tracking_rows(self, signal_id: int, levels: Dict[str, Dict[str, Any]]) -> None:
         """Insert one row per level for a signal that just went HIT.
 
-        levels: {level_name: {distance_value, distance_type, anchor_price}}
+        levels: {level_name: {distance_value, distance_type, anchor_price,
+        high_water_mark}}. anchor_price is the deepest fill (P&L baseline);
+        high_water_mark seeds at the TP price where trailing begins.
 
         A (signal_id, level) row can already exist if this signal was
-        reactivated after a prior HIT cycle finished tracking — upsert resets
-        it to a fresh open row instead of silently no-opping, otherwise the
-        unique constraint would block the insert and every later
+        reactivated after a prior cycle finished tracking — upsert resets it to
+        a fresh open row instead of silently no-opping, otherwise the unique
+        constraint would block the insert and every later
         update_high_water_mark/finalize_level call would match zero rows.
         """
         for level, cfg in levels.items():
@@ -37,7 +39,7 @@ class TrailingDatabase:
                     signal_id, level, distance_value, distance_type,
                     anchor_price, high_water_mark, hwm_updated_at
                 )
-                VALUES ($1, $2, $3, $4, $5, $5, NOW())
+                VALUES ($1, $2, $3, $4, $5, $6, NOW())
                 ON CONFLICT (signal_id, level) DO UPDATE SET
                     distance_value = EXCLUDED.distance_value,
                     distance_type = EXCLUDED.distance_type,
@@ -56,25 +58,9 @@ class TrailingDatabase:
                     cfg["distance_value"],
                     cfg["distance_type"],
                     cfg["anchor_price"],
+                    cfg["high_water_mark"],
                 ),
             )
-
-    async def reanchor_level(
-        self, signal_id: int, level: str, price: float, ts: datetime
-    ) -> None:
-        """Move a still-open level's anchor onto a newly-hit deeper limit.
-
-        Resets both anchor_price (the P&L baseline) and high_water_mark to the
-        deeper fill so the trail measures the runner from the deepest entry.
-        """
-        await self.db.execute(
-            """
-            UPDATE trailing_simulations
-            SET anchor_price = $1, high_water_mark = $1, hwm_updated_at = $2
-            WHERE signal_id = $3 AND level = $4 AND stopped_out = FALSE
-            """,
-            (price, ts, signal_id, level),
-        )
 
     async def update_high_water_mark(
         self, signal_id: int, level: str, price: float, ts: datetime
@@ -113,24 +99,6 @@ class TrailingDatabase:
             (signal_id,),
         )
         return [r["level"] for r in rows]
-
-    async def get_levels_for_signal(self, signal_id: int) -> List[Dict[str, Any]]:
-        """All tracking rows for a signal, any state.
-
-        Used to resume a signal that's still HIT (real position not yet
-        closed) across a restart, so its high-water-mark progress isn't
-        wiped back to the anchor price.
-        """
-        rows = await self.db.fetch_all(
-            """
-            SELECT level, distance_value, distance_type, anchor_price,
-                   high_water_mark, stopped_out
-            FROM trailing_simulations
-            WHERE signal_id = $1
-            """,
-            (signal_id,),
-        )
-        return rows
 
     async def get_incomplete_shadow_signals(self) -> List[Dict[str, Any]]:
         """Signals closed via auto-TP that still have at least one open trail level.

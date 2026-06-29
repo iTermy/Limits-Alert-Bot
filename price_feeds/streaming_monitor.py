@@ -330,19 +330,6 @@ class StreamingPriceMonitor:
                             f"Failed to load hit limits for signal {signal_id}: {_hit_err}"
                         )
 
-                    # Resume trailing-stop shadow tracking from its persisted
-                    # high-water-mark if this signal was already being tracked
-                    # before the restart — otherwise the next tick's lazy
-                    # start() would reset progress back to the anchor price.
-                    try:
-                        await self.trailing_monitor.resume_if_tracked(
-                            self.active_signals[signal_id]
-                        )
-                    except Exception as _resume_err:
-                        logger.error(
-                            f"Failed to resume trailing tracking for signal {signal_id}: {_resume_err}"
-                        )
-
             # Re-hydrate excursion tracking (approach + in-trade) from any open
             # rows so a restart mid-signal keeps accumulating MFE/MAE instead of
             # restarting from scratch.
@@ -583,17 +570,20 @@ class StreamingPriceMonitor:
             )
 
             signal_id = signal["signal_id"]
-            if not self.trailing_monitor.is_tracking(signal_id):
-                await self.trailing_monitor.start(signal)
-            await self.trailing_monitor.update(signal, price_data["bid"], price_data["ask"])
 
             # Excursion entry is set lazily from the first hit limit (no-op once
-            # entered), then MFE/MAE advances each tick alongside trailing.
+            # entered), then MFE/MAE advances each tick.
             await self.excursion_monitor.mark_entry(signal)
             await self.excursion_monitor.update(signal, price_data["bid"], price_data["ask"])
 
             if tp_triggered:
                 close_price = price_data["bid"] if direction == "long" else price_data["ask"]
+                # Trailing begins here, at the TP price — the what-if is whether
+                # trailing the runner beats taking this fixed auto-TP.
+                await self.trailing_monitor.start(signal, close_price)
+                await self.trailing_monitor.update(
+                    signal, price_data["bid"], price_data["ask"]
+                )
                 await self.excursion_monitor.finalize(signal_id, close_price, "auto_tp")
                 self._apply_status_to_signal(signal, "profit")
                 self._react_async(signal, "💰")
