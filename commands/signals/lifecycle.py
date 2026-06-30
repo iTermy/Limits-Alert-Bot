@@ -205,17 +205,45 @@ class LifecycleCog(BaseCog):
             tp_value = "N/A"
         embed.add_field(name="TP Price", value=tp_value, inline=True)
 
-        # Limits info
+        # Limits info — show per-limit P&L when a close price is known.
+        # Profit closures use the manual override (if set) or the recorded TP
+        # price; stop-loss closures use the SL price (yielding negative values).
         if signal["limits"]:
-            limits_str = "\n".join(
-                [
-                    f"• ~~{format_price(l['price_level'], signal['instrument'])}~~ ✅"
-                    if l["status"] == "hit"
-                    else f"• {format_price(l['price_level'], signal['instrument'])}"
-                    for l in signal["limits"]
-                ]
+            close_price = signal.get("manual_tp_price")
+            if close_price is None:
+                close_price = signal.get("tp_price")
+            if close_price is None and signal["status"] == "stop_loss":
+                close_price = signal.get("stop_loss")
+
+            instrument = signal["instrument"]
+            direction = (signal.get("direction") or "long").lower()
+            signal_type = (signal.get("type") or "standard").lower()
+
+            limit_lines = []
+            for l in sorted(signal["limits"], key=lambda x: x.get("sequence_number", 0)):
+                seq = l.get("sequence_number", "?")
+                price = format_price(l["price_level"], instrument)
+                if l["status"] == "hit":
+                    pnl_str = ""
+                    entry = l.get("hit_price") or l["price_level"]
+                    if close_price is not None:
+                        try:
+                            pnl_val = self.tp_config.calculate_pnl(
+                                instrument, direction, entry, float(close_price),
+                                signal_type=signal_type,
+                            )
+                            sign = "+" if pnl_val >= 0 else "-"
+                            pnl_str = f"  {sign}{self.tp_config.format_value(instrument, abs(pnl_val))}"
+                        except Exception:
+                            pnl_str = ""
+                    limit_lines.append(f"Limit #{seq}: {price} ✅{pnl_str}")
+                else:
+                    limit_lines.append(f"Limit #{seq}: {price}")
+            embed.add_field(
+                name=f"Limits ({len(signal['limits'])})",
+                value="\n".join(limit_lines),
+                inline=False,
             )
-            embed.add_field(name=f"Limits ({len(signal['limits'])})", value=limits_str, inline=False)
 
         # Progress
         embed.add_field(
