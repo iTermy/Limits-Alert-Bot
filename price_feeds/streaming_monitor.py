@@ -662,6 +662,18 @@ class StreamingPriceMonitor:
                 return
 
             if is_spread_hour and not self._is_crypto_signal(signal):
+                # An already-HIT signal rides out spread hour: this limit hit is
+                # ignored for now and will be marked normally once spread hour
+                # ends. Only signals with no hits yet are cancelled.
+                if signal.get("status") == "hit":
+                    logger.info(
+                        f"Spread hour: ignoring limit hit for already-HIT signal "
+                        f"{signal['signal_id']} limit #{limit['sequence_number']} "
+                        f"({signal['instrument']} @ {current_price:.5f}) — "
+                        f"will re-evaluate after spread hour"
+                    )
+                    return
+
                 logger.info(
                     f"Spread hour: suppressing limit hit for signal "
                     f"{signal['signal_id']} limit #{limit['sequence_number']} "
@@ -787,6 +799,17 @@ class StreamingPriceMonitor:
 
         if is_hit:
             if is_spread_hour and not self._is_crypto_signal(signal):
+                # An already-HIT signal rides out spread hour: this SL hit is
+                # ignored for now and will be marked normally once spread hour
+                # ends. Only signals with no hits yet are cancelled.
+                if signal.get("status") == "hit":
+                    logger.info(
+                        f"Spread hour: ignoring stop loss hit for already-HIT signal "
+                        f"{signal['signal_id']} ({signal['instrument']} @ {current_price:.5f}) — "
+                        f"will re-evaluate after spread hour"
+                    )
+                    return
+
                 logger.info(
                     f"Spread hour: suppressing stop loss hit for signal "
                     f"{signal['signal_id']} ({signal['instrument']} @ {current_price:.5f})"
