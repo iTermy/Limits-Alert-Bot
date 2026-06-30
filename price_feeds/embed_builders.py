@@ -248,7 +248,11 @@ def _build_profit_archive_embed(
     sid = sig_data.get("signal_id") or sig_data.get("id", signal_id)
     closed_reason = sig_data.get("closed_reason") or ""
     is_auto_tp = closed_reason == "automatic"
-    tp_price = sig_data.get("tp_price")
+    # Effective close price: a retrospective manual override wins over the
+    # close recorded at profit time.
+    tp_price = sig_data.get("manual_tp_price")
+    if tp_price is None:
+        tp_price = sig_data.get("tp_price")
 
     all_limits = sorted(sig_data.get("limits", []), key=lambda l: l.get("sequence_number", 0))
     hit_limits = [l for l in all_limits if l.get("status") == "hit" or l.get("hit_alert_sent")]
@@ -297,7 +301,7 @@ def _build_profit_archive_embed(
     if sig_data.get("stop_loss"):
         embed.add_field(name="Stop Loss", value=_fmt(sig_data["stop_loss"]), inline=True)
 
-    if is_auto_tp and tp_price is not None:
+    if tp_price is not None:
         embed.add_field(name="TP Price", value=f"**{_fmt(float(tp_price))}**", inline=True)
 
     msg_id = sig_data.get("message_id")
