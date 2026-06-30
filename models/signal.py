@@ -64,6 +64,7 @@ class SignalData(BaseModel):
     closed_at: Optional[datetime] = None
     closed_reason: Optional[str] = None
     tp_price: Optional[float] = None
+    manual_tp_price: Optional[float] = None
     total_limits: int = 0
     limits_hit: int = 0
     alert_message_id: Optional[int] = None

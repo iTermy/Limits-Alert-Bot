@@ -423,8 +423,25 @@ class LifecycleCog(BaseCog):
 
     # Shortcut commands for status changes
     @commands.command(name="profit", aliases=[], description="Mark signal as profit")
-    async def set_profit(self, ctx: commands.Context, signal_id: int):
+    async def set_profit(
+        self, ctx: commands.Context, signal_id: int, tp_price: float = None
+    ):
+        """Mark a signal as profit. An optional tp_price sets a retrospective
+        manual TP price (stored separately from the recorded close price) that
+        the report uses for P&L."""
         await self.set_signal_status(ctx, signal_id, "profit")
+        if tp_price is None:
+            return
+        signal = await self.signal_db.get_signal_with_limits(signal_id)
+        if not signal:
+            return
+        if await self.signal_db.set_manual_tp_price(signal_id, tp_price):
+            await ctx.send(
+                f"✅ Manual TP price for signal #{signal_id} set to "
+                f"{format_price(tp_price, signal['instrument'])}"
+            )
+        else:
+            await ctx.send(f"❌ Failed to set manual TP price for signal #{signal_id}")
 
     @commands.command(name="hit", description="Mark signal as hit")
     async def set_hit(self, ctx: commands.Context, signal_id: int):

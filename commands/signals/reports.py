@@ -56,10 +56,12 @@ class ReportsCog(BaseCog):
     def _tp_distance_raw(self, signal):
         """
         Cumulative profit distance (native units): the sum, over every hit
-        limit, of that limit's P&L to the take-profit. For auto-TP closures the
-        target is the recorded tp_price; for manual profit each limit's P&L is
-        measured to a fraction (MANUAL_PROFIT_TP_FRACTION) of the configured
-        auto-TP target from the last hit limit.
+        limit, of that limit's P&L to the take-profit. The exit price is the
+        recorded close: a retrospective manual_tp_price override wins, otherwise
+        tp_price (set by both auto-TP and manual profit). Only when neither is
+        present (pre-2026-06 manual closes) does each limit's P&L fall back to a
+        fraction (MANUAL_PROFIT_TP_FRACTION) of the configured auto-TP target
+        measured from the last hit limit.
         Returns None if the signal has no hit limits.
         """
         hit = self._hit_limits(signal)
@@ -69,9 +71,10 @@ class ReportsCog(BaseCog):
         instrument = signal["instrument"]
         signal_type = (signal.get("type") or "standard").lower()
 
-        closed_reason = (signal.get("closed_reason") or "").lower()
-        tp_price = signal.get("tp_price")
-        if closed_reason == "automatic" and tp_price is not None:
+        tp_price = signal.get("manual_tp_price")
+        if tp_price is None:
+            tp_price = signal.get("tp_price")
+        if tp_price is not None:
             return sum(
                 self.tp_config.calculate_pnl(
                     instrument, direction, l["price_level"], float(tp_price),
@@ -79,9 +82,9 @@ class ReportsCog(BaseCog):
                 )
                 for l in hit
             )
-        # Manual profit (or missing tp_price): each limit's P&L measured to a
-        # fraction of the configured auto-TP target distance from the last hit
-        # limit, since a manual close didn't ride all the way to auto-TP.
+        # No recorded exit price: each limit's P&L measured to a fraction of the
+        # configured auto-TP target distance from the last hit limit, since a
+        # manual close didn't ride all the way to auto-TP.
         target = (
             self.tp_config.get_tp_value(instrument, signal_type=signal_type)
             * MANUAL_PROFIT_TP_FRACTION

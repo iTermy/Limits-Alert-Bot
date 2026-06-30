@@ -781,6 +781,23 @@ class SignalDatabase:
             logger.error(f"Error manually setting signal status: {e}", exc_info=True)
             return False
 
+    async def set_manual_tp_price(self, signal_id: int, manual_tp_price: float) -> bool:
+        """Set the retrospective manual TP price for a signal.
+
+        Stored in its own column so the original tp_price (the close price
+        captured at profit time) is preserved. The report prefers this value
+        over tp_price when computing P&L. Returns False if the signal is absent.
+        """
+        try:
+            affected = await self.db.execute(
+                "UPDATE signals SET manual_tp_price = $1, updated_at = $2 WHERE id = $3",
+                (manual_tp_price, datetime.now(pytz.UTC), signal_id),
+            )
+            return affected > 0
+        except Exception as e:
+            logger.error(f"Error setting manual_tp_price for signal {signal_id}: {e}")
+            return False
+
     async def manually_set_signal_to_hit(self, signal_id: int, reason: str) -> bool:
         """
         Manually mark a signal as HIT by marking its first pending limit as hit.

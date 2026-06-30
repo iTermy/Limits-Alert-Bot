@@ -50,6 +50,7 @@ async def initialize_database(db_manager):
                 closed_at            TIMESTAMPTZ,
                 closed_reason        TEXT,
                 tp_price             DOUBLE PRECISION,
+                manual_tp_price      DOUBLE PRECISION,
 
                 total_limits INTEGER DEFAULT 0,
                 limits_hit   INTEGER DEFAULT 0,
@@ -422,6 +423,11 @@ async def _run_migrations(conn):
         """,
         """
         ALTER TABLE signals ADD COLUMN IF NOT EXISTS finished_channel_id BIGINT;
+        """,
+        # Retrospective manual TP price override, kept separate from tp_price so
+        # the close price captured at profit time is preserved.
+        """
+        ALTER TABLE signals ADD COLUMN IF NOT EXISTS manual_tp_price DOUBLE PRECISION;
         """,
     ]
 
