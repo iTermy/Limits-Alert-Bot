@@ -4,6 +4,10 @@ Monitors all feeds (ICMarkets, OANDA, Binance) for stale data and connection iss
 """
 
 import asyncio
+import logging
+import os
+import threading
+import time
 from collections import defaultdict
 from datetime import datetime, timedelta
 from datetime import time as dtime
@@ -23,6 +27,16 @@ MAX_RECONNECT_ATTEMPTS = 3
 RECONNECT_DELAY_SECONDS = 10
 ALERT_COOLDOWN_MINUTES = 15
 STARTUP_GRACE_PERIOD_SECONDS = 120
+
+# Loop-liveness watchdog: an async heartbeat stamps a monotonic timestamp while
+# the event loop is healthy; a daemon thread (which survives a frozen loop)
+# hard-exits the process if that stamp stops advancing. This is the only backstop
+# that works when a synchronous call wedges the loop itself (e.g. a blocking
+# subprocess spawn) — at that point graceful shutdown is impossible, so we exit
+# and let the main.py supervisor relaunch a fresh instance.
+LOOP_HEARTBEAT_INTERVAL_SECONDS = 10
+LOOP_WATCHDOG_POLL_SECONDS = 15
+LOOP_FREEZE_RESTART_SECONDS = 120
 
 # Price-flow watchdog: when at least one subscribed symbol's market should be
 # open but ZERO ticks have arrived across EVERY feed for this long, the bot is
@@ -101,6 +115,16 @@ class FeedHealthMonitor:
         # Set once the watchdog has initiated a restart, so it never fires twice.
         self._watchdog_fired = False
 
+        # Reconnects run off the monitoring loop as tasks, keyed by feed, so a
+        # slow or wedged reconnect can never block health checks or the watchdog.
+        self._reconnect_tasks: Dict[str, asyncio.Task] = {}
+
+        # Loop-liveness watchdog state (see module constants).
+        self._loop_heartbeat = time.monotonic()
+        self._heartbeat_task = None
+        self._loop_watchdog_thread = None
+        self._loop_watchdog_stop = threading.Event()
+
         # Track last update times: feed -> symbol -> timestamp
         self.last_seen: Dict[str, Dict[str, datetime]] = defaultdict(dict)
 
@@ -146,18 +170,56 @@ class FeedHealthMonitor:
         # Start monitoring task
         self.monitor_task = asyncio.create_task(self._monitoring_loop())
 
+        # Start the loop-liveness heartbeat + the out-of-loop watchdog thread.
+        self._loop_heartbeat = time.monotonic()
+        self._heartbeat_task = asyncio.create_task(self._loop_heartbeat_beat())
+        self._loop_watchdog_stop.clear()
+        self._loop_watchdog_thread = threading.Thread(
+            target=self._loop_watchdog_run, name="loop-watchdog", daemon=True
+        )
+        self._loop_watchdog_thread.start()
+
         logger.info("Feed health monitoring started")
+
+    async def _loop_heartbeat_beat(self):
+        """Stamp a monotonic heartbeat while the event loop is servicing tasks."""
+        while self.running:
+            self._loop_heartbeat = time.monotonic()
+            await asyncio.sleep(LOOP_HEARTBEAT_INTERVAL_SECONDS)
+
+    def _loop_watchdog_run(self):
+        """Daemon thread: hard-restart the process if the event loop freezes.
+
+        Runs off the event loop, so it keeps ticking even when the loop is
+        blocked by a synchronous call. If the heartbeat stops advancing for
+        LOOP_FREEZE_RESTART_SECONDS the loop is wedged and no in-loop recovery
+        (timeouts, tasks, bot.close()) can fire — so we flush logs and exit hard
+        for the supervisor to relaunch.
+        """
+        while not self._loop_watchdog_stop.wait(LOOP_WATCHDOG_POLL_SECONDS):
+            stalled = time.monotonic() - self._loop_heartbeat
+            if stalled > LOOP_FREEZE_RESTART_SECONDS:
+                logger.critical(
+                    "Event loop frozen for %.0fs (heartbeat stalled) — forcing hard restart",
+                    stalled,
+                )
+                logging.shutdown()
+                os._exit(1)
 
     async def stop_monitoring(self):
         """Stop the health monitoring loop"""
         self.running = False
 
-        if self.monitor_task:
-            self.monitor_task.cancel()
-            try:
-                await self.monitor_task
-            except asyncio.CancelledError:
-                pass
+        self._loop_watchdog_stop.set()
+
+        for task in [self.monitor_task, self._heartbeat_task, *self._reconnect_tasks.values()]:
+            if task:
+                task.cancel()
+                try:
+                    await task
+                except asyncio.CancelledError:
+                    pass
+        self._reconnect_tasks.clear()
 
         logger.info("Feed health monitoring stopped")
 
@@ -371,20 +433,32 @@ class FeedHealthMonitor:
             logger.debug(f"Alert cooldown active for {feed_name}, skipping")
             return
 
-        # Attempt reconnection
-        if self.reconnect_attempts[feed_name] < MAX_RECONNECT_ATTEMPTS:
-            success = await self.attempt_reconnection(feed_name)
+        # Run reconnect + alert off the monitoring loop so a slow or wedged
+        # reconnect can't block health checks or the price-flow watchdog. Never
+        # stack a second attempt for the same feed while one is in flight.
+        existing = self._reconnect_tasks.get(feed_name)
+        if existing and not existing.done():
+            logger.debug(f"Reconnection already in progress for {feed_name}")
+            return
 
-            if success:
-                logger.info(f"{feed_name} reconnection successful")
-                return  # Don't alert if reconnection worked
-        else:
-            logger.error(
-                f"{feed_name} max reconnection attempts reached ({MAX_RECONNECT_ATTEMPTS})"
-            )
+        self._reconnect_tasks[feed_name] = asyncio.create_task(
+            self._reconnect_and_alert(feed_name, stale_symbols)
+        )
 
-        # Send admin alert
-        await self._send_feed_failure_alert(feed_name, stale_symbols)
+    async def _reconnect_and_alert(self, feed_name: str, stale_symbols: list):
+        """Attempt reconnection and, if it fails, DM the admin. Runs as a task."""
+        try:
+            if self.reconnect_attempts[feed_name] < MAX_RECONNECT_ATTEMPTS:
+                if await self.attempt_reconnection(feed_name):
+                    return  # Don't alert if reconnection worked
+            else:
+                logger.error(
+                    f"{feed_name} max reconnection attempts reached ({MAX_RECONNECT_ATTEMPTS})"
+                )
+
+            await self._send_feed_failure_alert(feed_name, stale_symbols)
+        finally:
+            self._reconnect_tasks.pop(feed_name, None)
 
     async def _handle_feed_recovery(self, feed_name: str):
         """Handle feed recovery"""

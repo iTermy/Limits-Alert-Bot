@@ -13,6 +13,9 @@ from price_feeds.symbol_mapper import SymbolMapper
 
 logger = logging.getLogger(__name__)
 
+# Hard ceiling on a single feed reconnect (teardown + respawn + resubscribe).
+RECONNECT_TIMEOUT_SECONDS = 45
+
 # ICMarkets symbols subscribed unconditionally at startup so that last_prices
 # always has reference prices for the execution-bot offset calculation,
 # independent of which signals happen to be active.
@@ -499,7 +502,9 @@ class PriceStreamManager:
             return False
         try:
             logger.info(f"Reconnecting {feed_name}...")
-            await feed.reconnect()
+            # Bound the reconnect: a feed teardown/respawn that hangs (e.g. a
+            # stuck MT5 child-process spawn) must fail, not wedge the caller.
+            await asyncio.wait_for(feed.reconnect(), timeout=RECONNECT_TIMEOUT_SECONDS)
             self.feed_status[feed_name] = feed.connected
             self.stats["reconnections"] += 1
             if feed.connected:
@@ -507,6 +512,12 @@ class PriceStreamManager:
             else:
                 logger.warning(f"{feed_name} reconnect did not restore connection")
             return feed.connected
+        except asyncio.TimeoutError:
+            logger.error(
+                f"{feed_name} reconnect timed out after {RECONNECT_TIMEOUT_SECONDS}s"
+            )
+            self.feed_status[feed_name] = False
+            return False
         except Exception as e:
             logger.error(f"Failed to reconnect {feed_name}: {e}")
             self.feed_status[feed_name] = False

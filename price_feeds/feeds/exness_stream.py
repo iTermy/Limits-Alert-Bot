@@ -20,6 +20,11 @@ logger = logging.getLogger(__name__)
 
 _WORKER_PATH = str(Path(__file__).resolve().parent / "exness_worker.py")
 _CONNECT_TIMEOUT = 30
+# Bounds on child-process spawn and kill/reap. On Windows the Proactor loop can
+# wedge on subprocess machinery; without a ceiling a stuck spawn or reap hangs
+# the whole event loop indefinitely.
+_SPAWN_TIMEOUT = 15
+_KILL_TIMEOUT = 5
 
 
 class ExnessStream:
@@ -47,16 +52,19 @@ class ExnessStream:
         )
 
         try:
-            self._process = await asyncio.create_subprocess_exec(
-                sys.executable,
-                _WORKER_PATH,
-                self.mt5_path,
-                self.login,
-                self.password,
-                self.server,
-                stdin=asyncio.subprocess.PIPE,
-                stdout=asyncio.subprocess.PIPE,
-                stderr=asyncio.subprocess.PIPE,
+            self._process = await asyncio.wait_for(
+                asyncio.create_subprocess_exec(
+                    sys.executable,
+                    _WORKER_PATH,
+                    self.mt5_path,
+                    self.login,
+                    self.password,
+                    self.server,
+                    stdin=asyncio.subprocess.PIPE,
+                    stdout=asyncio.subprocess.PIPE,
+                    stderr=asyncio.subprocess.PIPE,
+                ),
+                timeout=_SPAWN_TIMEOUT,
             )
 
             first_line = await asyncio.wait_for(
@@ -184,4 +192,7 @@ class ExnessStream:
     async def _kill_process(self):
         if self._process and self._process.returncode is None:
             self._process.kill()
-            await self._process.wait()
+            try:
+                await asyncio.wait_for(self._process.wait(), timeout=_KILL_TIMEOUT)
+            except asyncio.TimeoutError:
+                logger.error("Exness worker did not exit after kill within %ss", _KILL_TIMEOUT)
