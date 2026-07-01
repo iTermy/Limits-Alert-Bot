@@ -1214,6 +1214,7 @@ class SignalDatabase:
         """
         Get the date range for the current trading period.
         Trading week starts Sunday 6:00 PM UTC and ends Sunday 5:59 PM UTC.
+        'month' covers a rolling window of the past 30 days.
         """
         now = datetime.now(pytz.UTC)
 
@@ -1236,14 +1237,8 @@ class SignalDatabase:
             }
 
         if period == "month":
-            month_start = now.replace(day=1, hour=0, minute=0, second=0, microsecond=0)
-
-            if now.month == 12:
-                next_month = month_start.replace(year=now.year + 1, month=1)
-            else:
-                next_month = month_start.replace(month=now.month + 1)
-
-            month_end = next_month - timedelta(seconds=1)
+            month_end = now
+            month_start = now - timedelta(days=30)
 
             return {
                 "start": month_start,

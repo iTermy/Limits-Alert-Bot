@@ -153,6 +153,8 @@ class ReportsCog(BaseCog):
             await ctx.send("❌ Period must be 'day', 'week', or 'month'")
             return
 
+        period_label = "past 30 days" if period.lower() == "month" else f"current {period}"
+
         # Normalize filter type
         filter_normalized = None
         if filter_type:
@@ -211,7 +213,7 @@ class ReportsCog(BaseCog):
             if not signals:
                 embed = discord.Embed(
                     title=f"📊 {period.title()} Trading Report",
-                    description=f"No signals found for the current {period}",
+                    description=f"No signals found for the {period_label}",
                     color=0xFFA500,
                 )
                 await loading_msg.edit(content=None, embed=embed)
@@ -318,7 +320,7 @@ class ReportsCog(BaseCog):
                 filter_label = "stop loss" if filter_normalized == "stoploss" else "profit"
                 embed = discord.Embed(
                     title=f"📊 {period.title()} Trading Report - {filter_label.title()} Only",
-                    description=f"No {filter_label} signals found for the current {period}",
+                    description=f"No {filter_label} signals found for the {period_label}",
                     color=0xFFA500,
                 )
                 await loading_msg.edit(content=None, embed=embed)
