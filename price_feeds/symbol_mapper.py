@@ -77,6 +77,7 @@ class SymbolMapper:
                 "NAS",
                 "DOW",
                 "DAX",
+                "UK100",
                 "CHINA50",
                 "US500",
                 "USTEC",
