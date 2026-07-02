@@ -362,7 +362,7 @@ class BotManagementCog(BaseCog):
 
         confirm_msg = await ctx.send(
             "⚠️ **WARNING**: Run the full weekly purge for the past **7 days**?\n"
-            "• Alert channels: `alert`, `pa-alert`, `toll-alert`, `general-tolls-alert`, `legends-trade-alert` "
+            "• Alert channels: `alert`, `pa-alert`, `toll-alert`, `general-tolls-alert`, `legends-trade-alert`, `risky-gold-alert` "
             "(all messages deleted)\n"
             "• Monitored channels (except `price-action-trades`): orphans + non-active signal messages deleted\n"
             "React with ✅ to confirm or ❌ to cancel (30s timeout)"
@@ -462,15 +462,23 @@ class BotManagementCog(BaseCog):
             monitor = getattr(self.bot, "monitor", None)
             alert_system = monitor.alert_system if monitor else None
 
+            # Risky-gold shares the same offset and last-limit SL rule as the
+            # gold tolls, so its active signals are recomputed alongside them.
             toll_channel_ids: set = set()
             if alert_system and hasattr(alert_system, "toll_channel_ids"):
-                toll_channel_ids = alert_system.toll_channel_ids
+                toll_channel_ids = set(alert_system.toll_channel_ids)
+                toll_channel_ids |= getattr(alert_system, "risky_channel_ids", set())
 
             if not toll_channel_ids:
                 channels_cfg = load_channels_config()
                 monitored = channels_cfg.get("monitored_channels", {})
                 for ch_name, ch_id in monitored.items():
-                    if ch_id and "toll" in ch_name.lower() and ch_name.lower() != "general-tolls":
+                    if not ch_id:
+                        continue
+                    name_lower = ch_name.lower()
+                    if name_lower == "risky-gold" or (
+                        "toll" in name_lower and name_lower != "general-tolls"
+                    ):
                         toll_channel_ids.add(str(ch_id))
 
             if toll_channel_ids:

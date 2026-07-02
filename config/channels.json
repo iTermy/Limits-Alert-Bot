@@ -19,13 +19,15 @@
     "oil-tolls": "1484316173515489392",
     "legends-trades": "1500246110491639818",
     "lc-calls": "1516192183126855832",
-    "gold-1-1-rr": "REPLACE_WITH_CHANNEL_ID"
+    "gold-1-1-rr": "REPLACE_WITH_CHANNEL_ID",
+    "risky-gold": "REPLACE_WITH_CHANNEL_ID"
   },
   "alert_channel": "1402971805890773005",
   "pa-alert-channel": "1442668785990631435",
   "toll-alert-channel": "1472685910549332113",
   "general-tolls-alert": "1477339631900168284",
   "legends-trade-alert": "1500246110491639818",
+  "risky-gold-alert": "REPLACE_WITH_CHANNEL_ID",
   "vol-guard-alert": "",
   "command_channel": "1402971848731398174",
   "profit_channel": "1414288228206514279",
@@ -92,6 +94,10 @@
       "default_expiry": "week_end"
     },
     "gold-1-1-rr": {
+      "default_instrument": "XAUUSD",
+      "default_expiry": "week_end"
+    },
+    "risky-gold": {
       "default_instrument": "XAUUSD",
       "default_expiry": "week_end"
     },

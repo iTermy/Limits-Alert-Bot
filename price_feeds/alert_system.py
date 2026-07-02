@@ -63,6 +63,7 @@ class AlertSystem:
         self.toll_alert_channel = None
         self.general_toll_alert_channel = None
         self.legends_alert_channel = None
+        self.risky_alert_channel = None
         self.bot = bot
         self.stream_manager = stream_manager
         self.alert_config = alert_config
@@ -336,6 +337,10 @@ class AlertSystem:
         self.legends_alert_channel = channel
         logger.info(f"Legends alert channel set: #{channel.name} ({channel.id})")
 
+    def set_risky_channel(self, channel: discord.TextChannel):
+        self.risky_alert_channel = channel
+        logger.info(f"Risky alert channel set: #{channel.name} ({channel.id})")
+
     def _load_channels_config(self):
         """Load channels.json once and cache all derived channel ID sets and role mention."""
         config_path = Path(__file__).parent.parent / "config" / "channels.json"
@@ -356,6 +361,7 @@ class AlertSystem:
         self.general_toll_channel_ids = set()
         self.oil_toll_channel_ids = set()
         self.legends_channel_ids = set()
+        self.risky_channel_ids = set()
         for channel_name, channel_id in monitored.items():
             if not channel_id:
                 continue
@@ -367,6 +373,8 @@ class AlertSystem:
                 self.toll_channel_ids.add(str(channel_id))
             elif name_lower == "legends-trades":
                 self.legends_channel_ids.add(str(channel_id))
+            elif name_lower == "risky-gold":
+                self.risky_channel_ids.add(str(channel_id))
             elif "toll" in name_lower:
                 self.toll_channel_ids.add(str(channel_id))
 
@@ -391,6 +399,7 @@ class AlertSystem:
             f"(incl. {len(self.oil_toll_channel_ids)} oil-toll), "
             f"{len(self.general_toll_channel_ids)} general-toll, "
             f"{len(self.legends_channel_ids)} legends, "
+            f"{len(self.risky_channel_ids)} risky, "
             f"{len(self.auto_purge_channel_ids)} auto-purge"
         )
 
@@ -412,6 +421,9 @@ class AlertSystem:
 
     def is_legends_signal(self, signal: Dict) -> bool:
         return str(signal.get("channel_id", "")) in self.legends_channel_ids
+
+    def is_risky_signal(self, signal: Dict) -> bool:
+        return str(signal.get("channel_id", "")) in self.risky_channel_ids
 
     def is_auto_purge_channel(self, channel_id) -> bool:
         return str(channel_id) in self.auto_purge_channel_ids
@@ -435,6 +447,10 @@ class AlertSystem:
             if self.legends_alert_channel:
                 return self.legends_alert_channel
             logger.warning("Legends signal but no legends alert channel; falling back")
+        if self.is_risky_signal(signal):
+            if self.risky_alert_channel:
+                return self.risky_alert_channel
+            logger.warning("Risky signal but no risky alert channel; falling back")
         return self.alert_channel
 
     def _get_finished_channel(self):
@@ -1561,6 +1577,7 @@ class AlertSystem:
             self.toll_alert_channel,
             self.general_toll_alert_channel,
             self.legends_alert_channel,
+            self.risky_alert_channel,
         ]:
             if ch is not None and ch.id not in seen_ids:
                 channels.append(ch)

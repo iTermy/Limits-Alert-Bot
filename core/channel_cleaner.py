@@ -39,6 +39,7 @@ ALERT_CHANNEL_KEYS = [
     "toll-alert-channel",
     "general-tolls-alert",
     "legends-trade-alert",
+    "risky-gold-alert",
 ]
 
 # Monitored channels whose signal messages are preserved by the weekly purge.

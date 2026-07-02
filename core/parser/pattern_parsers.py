@@ -138,7 +138,25 @@ CHANNEL_TYPE_MAP = {
     "gold-pa-signals": "pa",
     "price-action-trades": "pa",
     "gold-1-1-rr": "1-1",
+    "risky-gold": "scalp",
 }
+
+# Channels that treat every number as a limit and derive the stop loss from the
+# gold-tolls offset (default $5 from the last limit) instead of reading an
+# explicit SL from the message. The toll channels (except general-tolls, which
+# has its own per-instrument auto-SL) match by substring; anything else is
+# listed here explicitly.
+_GOLD_TOLLS_SL_CHANNELS = {"risky-gold"}
+
+
+def uses_gold_tolls_sl(channel_name: Optional[str]) -> bool:
+    """True for channels that auto-derive SL from the gold-tolls offset."""
+    if not channel_name:
+        return False
+    name = channel_name.lower()
+    if name in _GOLD_TOLLS_SL_CHANNELS:
+        return True
+    return "toll" in name and name != "general-tolls"
 
 # Expiry patterns
 EXPIRY_PATTERNS = {
@@ -570,10 +588,8 @@ def determine_limits_and_stop(
     }
     _GENERAL_TOLLS_AUTO_SL_DEFAULT = 10.0
 
-    # Check if this is the gold tolls channel (auto-infers SL)
-    is_tolls_channel = (
-        channel_name and "toll" in channel_name.lower() and channel_name.lower() != "general-tolls"
-    )
+    # Check if this is a gold-tolls-style channel (auto-infers SL)
+    is_tolls_channel = uses_gold_tolls_sl(channel_name)
 
     # Check if this is the general-tolls channel
     is_general_tolls = channel_name and channel_name.lower() == "general-tolls"
@@ -735,13 +751,10 @@ class CorePatternParser:
             cleaned = clean_message(message)
             numbers = extract_numbers(cleaned)
 
-            is_gold_tolls_channel = (
-                channel_name
-                and "toll" in channel_name.lower()
-                and channel_name.lower() != "general-tolls"
-            )
             min_numbers = (
-                1 if (is_gold_tolls_channel or _general_tolls_auto_sl(channel_name, cleaned)) else 2
+                1
+                if (uses_gold_tolls_sl(channel_name) or _general_tolls_auto_sl(channel_name, cleaned))
+                else 2
             )
 
             if len(numbers) < min_numbers:

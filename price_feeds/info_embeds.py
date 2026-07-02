@@ -206,6 +206,32 @@ def _build_legends_embed() -> discord.Embed:
     return embed
 
 
+def _build_risky_embed() -> discord.Embed:
+    embed = _base_embed(
+        "🎲 Risky Gold",
+        "Higher-risk gold scalps mapped across a range of limits. One live embed per signal.",
+        0xE74C3C,
+    )
+    embed.add_field(
+        name="What's included",
+        value=(
+            "Gold scalp limits with a default **$5 stop** measured from the last limit. "
+            "Valid **all week**. Higher risk than the standard tolls — size down accordingly."
+        ),
+        inline=False,
+    )
+    embed.add_field(
+        name="🎯 How to take it",
+        value=(
+            "Average the basket across whatever limits hit — close lower entries first "
+            "at breakeven/small profit, hold runners at your discretion. Equal lots is "
+            "simplest."
+        ),
+        inline=False,
+    )
+    return embed
+
+
 class InfoEmbedManager:
     """Posts and maintains the pinned informational embed in each alert channel."""
 
@@ -222,6 +248,7 @@ class InfoEmbedManager:
             (self.alert_system.toll_alert_channel, _build_gold_toll_embed),
             (self.alert_system.general_toll_alert_channel, _build_general_toll_embed),
             (self.alert_system.legends_alert_channel, _build_legends_embed),
+            (self.alert_system.risky_alert_channel, _build_risky_embed),
         ]
         mapping: Dict[discord.TextChannel, Callable[[], discord.Embed]] = {}
         seen = set()

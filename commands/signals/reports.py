@@ -22,6 +22,10 @@ logger = get_logger("report_commands")
 # of signal type. Matched by their channels.json monitored-channel key.
 LEGENDS_CHANNEL_KEYS = {"legends-trades", "lc-calls"}
 
+# Channels whose signals are reported under the "Risky" section, regardless of
+# signal type. Matched by their channels.json monitored-channel key.
+RISKY_CHANNEL_KEYS = {"risky-gold"}
+
 # Manual-profit closures are credited a fraction of the configured auto-TP
 # target, since a manually closed signal didn't ride all the way to auto-TP.
 MANUAL_PROFIT_TP_FRACTION = 2 / 3
@@ -245,21 +249,27 @@ class ReportsCog(BaseCog):
                 monitored_channels = {}
                 channels_data = {}
 
-            # Legends are still channel-driven (these channels can host signals
-            # of any type), so collect their channel IDs from channels.json.
+            # Legends and Risky are channel-driven (these channels can host
+            # signals of any type), so collect their channel IDs from channels.json.
             legends_channel_ids = {
                 str(channel_id)
                 for name, channel_id in monitored_channels.items()
                 if name in LEGENDS_CHANNEL_KEYS
             }
+            risky_channel_ids = {
+                str(channel_id)
+                for name, channel_id in monitored_channels.items()
+                if name in RISKY_CHANNEL_KEYS
+            }
 
-            # Partition into 5 groups: Legends wins by channel; the rest map by type.
-            # standard / scalp / swing all fall under Regular.
+            # Partition into 6 groups: Legends and Risky win by channel; the rest
+            # map by type. standard / scalp / swing all fall under Regular.
             regular_signals = []
             tolls_signals = []
             pa_signals = []
             legends_signals = []
             one_to_one_signals = []
+            risky_signals = []
 
             for signal in signals:
                 channel_id = str(signal.get("channel_id", ""))
@@ -267,6 +277,8 @@ class ReportsCog(BaseCog):
 
                 if channel_id in legends_channel_ids:
                     legends_signals.append(signal)
+                elif channel_id in risky_channel_ids:
+                    risky_signals.append(signal)
                 elif signal_type == "toll":
                     tolls_signals.append(signal)
                 elif signal_type == "pa":
@@ -297,6 +309,7 @@ class ReportsCog(BaseCog):
                 ("PA", pa_signals),
                 ("Legends", legends_signals),
                 ("1-1", one_to_one_signals),
+                ("Risky", risky_signals),
             ]
 
             # Per-group stats: { label: {"profit": [...], "sl": [...], "total": N, "win_rate": x} }

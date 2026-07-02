@@ -167,6 +167,7 @@ class TradingBot(commands.Bot):
             "toll-alert-channel",
             "general-tolls-alert",
             "legends-trade-alert",
+            "risky-gold-alert",
             "finished_signals",
             "profit_channel",
         ):
@@ -431,6 +432,7 @@ class TradingBot(commands.Bot):
             "toll-alert-channel": alert_system.set_toll_channel,
             "general-tolls-alert": alert_system.set_general_toll_channel,
             "legends-trade-alert": alert_system.set_legends_channel,
+            "risky-gold-alert": alert_system.set_risky_channel,
         }
         for key, setter in channel_setters.items():
             channel_id = self.channels_config.get(key)
