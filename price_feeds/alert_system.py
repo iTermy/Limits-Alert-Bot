@@ -120,6 +120,7 @@ class AlertSystem:
             "stop_loss_sent": 0,
             "auto_tp_sent": 0,
             "spread_hour_cancelled": 0,
+            "late_market_cancelled": 0,
             "news_cancelled": 0,
             "nm_cancelled": 0,
             "total_alerts": 0,
@@ -1302,6 +1303,7 @@ class AlertSystem:
             "cancelled",
             "expired",
             "spread_hour_cancelled",
+            "late_market_cancelled",
             "near_miss_cancelled",
         }
         if event in _TERMINAL_EVENTS:
@@ -1389,6 +1391,29 @@ class AlertSystem:
             return True
         except Exception as e:
             logger.error(f"Failed to send spread hour cancel alert: {e}")
+            self.stats["errors"] += 1
+            return False
+
+    async def send_late_market_cancel_alert(self, signal: Dict, current_price: float) -> bool:
+        signal_id = signal.get("signal_id")
+        if signal_id not in self.signal_messages:
+            logger.debug(
+                f"Late market cancel for signal {signal_id}: no persistent embed, skipping alert"
+            )
+            await self._archive_manager.maybe_delete_original_message(signal, signal_id)
+            return True
+        try:
+            await self.update_signal_message(
+                signal=signal,
+                event="late_market_cancelled",
+                current_price=current_price,
+                ping_text="Signal cancelled — late market hours.",
+            )
+            self.stats["late_market_cancelled"] += 1
+            self.stats["total_alerts"] += 1
+            return True
+        except Exception as e:
+            logger.error(f"Failed to send late market cancel alert: {e}")
             self.stats["errors"] += 1
             return False
 

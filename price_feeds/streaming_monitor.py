@@ -147,6 +147,10 @@ class StreamingPriceMonitor:
         self._spread_hour_cached: bool = False
         self._spread_hour_cache_expires: float = 0.0
 
+        # Late market hour (the hour before spread hour) is cached the same way.
+        self._late_market_cached: bool = False
+        self._late_market_cache_expires: float = 0.0
+
         # Performance tracking
         self.stats = {
             "price_updates": 0,
@@ -213,6 +217,37 @@ class StreamingPriceMonitor:
 
         self._spread_hour_cached = result
         self._spread_hour_cache_expires = now_mono + cache_seconds
+        return result
+
+    def _is_late_market_hour(self) -> bool:
+        """
+        Check whether the current time falls within the final market hour —
+        the hour immediately before spread hour.
+
+        Late market hour runs from 4:00 PM to 5:00 PM US/Eastern
+        (America/New_York) on weekdays. Signals that get hit during this window
+        historically underperform, so a fresh entry here is cancelled rather than
+        tracked. Cached like _is_spread_hour, with the cache clamped to the
+        16:00 / 17:00 ET boundaries so a stale value never leaks across them.
+        """
+        now_mono = monotonic()
+        if now_mono < self._late_market_cache_expires:
+            return self._late_market_cached
+
+        now_est = datetime.now(_EST_TZ)
+        if now_est.weekday() >= 5:
+            result = False
+        else:
+            result = dtime(16, 0) <= now_est.time() < dtime(17, 0)
+
+        cache_seconds = _SPREAD_HOUR_CACHE_SECONDS
+        for hh in (16, 17):
+            boundary = now_est.replace(hour=hh, minute=0, second=0, microsecond=0)
+            if boundary > now_est:
+                cache_seconds = min(cache_seconds, (boundary - now_est).total_seconds())
+
+        self._late_market_cached = result
+        self._late_market_cache_expires = now_mono + cache_seconds
         return result
 
     def _is_crypto_signal(self, signal: Dict) -> bool:
@@ -485,6 +520,7 @@ class StreamingPriceMonitor:
             return
 
         spread_buffer_enabled = self._spread_buffer_enabled
+        now_in_late_market = self._is_late_market_hour()
 
         for signal_id in signal_ids:
             signal = self.active_signals.get(signal_id)
@@ -494,14 +530,21 @@ class StreamingPriceMonitor:
 
             try:
                 signal["current_spread"] = price_data.get("spread", 0.0)
-                await self._check_signal(signal, price_data, now_in_spread, spread_buffer_enabled)
+                await self._check_signal(
+                    signal, price_data, now_in_spread, now_in_late_market, spread_buffer_enabled
+                )
                 self.stats["signals_checked"] += 1
             except Exception as e:
                 logger.error(f"Error checking signal {signal_id}: {e}")
                 self.stats["errors"] += 1
 
     async def _check_signal(
-        self, signal: Dict, price_data: Dict, is_spread_hour: bool, spread_buffer_enabled: bool
+        self,
+        signal: Dict,
+        price_data: Dict,
+        is_spread_hour: bool,
+        is_late_market: bool,
+        spread_buffer_enabled: bool,
     ):
         """Check a signal against current price."""
         if signal.get("_shadow_only"):
@@ -536,7 +579,8 @@ class StreamingPriceMonitor:
 
         for limit in signal.get("pending_limits", []):
             await self._check_limit(
-                signal, limit, current_price, direction, is_spread_hour, spread_buffer_enabled
+                signal, limit, current_price, direction,
+                is_spread_hour, is_late_market, spread_buffer_enabled,
             )
 
         # Near-miss check: only for active signals (not hit) with approaching alert sent
@@ -559,7 +603,9 @@ class StreamingPriceMonitor:
 
         # Check stop loss
         if signal.get("stop_loss"):
-            await self._check_stop_loss(signal, current_price, direction, is_spread_hour)
+            await self._check_stop_loss(
+                signal, current_price, direction, is_spread_hour, is_late_market
+            )
 
         # Check auto take-profit (runs for any HIT signal that has hit limits cached)
         if signal.get("status") == "hit":
@@ -604,6 +650,7 @@ class StreamingPriceMonitor:
         current_price: float,
         direction: str,
         is_spread_hour: bool,
+        is_late_market: bool,
         spread_buffer_enabled: bool,
     ):
         """Check if a limit is approaching or hit; applies spread buffer."""
@@ -681,6 +728,21 @@ class StreamingPriceMonitor:
                 )
                 await self._cancel_signal_during_guard(signal, current_price, "spread_hour")
                 return
+
+            if is_late_market and not self._is_crypto_signal(signal):
+                # A fresh entry during the final market hour is cancelled. An
+                # already-HIT signal that rolled into the window keeps running
+                # normally — this limit hit is processed as usual below.
+                if signal.get("status") != "hit":
+                    logger.info(
+                        f"Late market hour: suppressing limit hit for signal "
+                        f"{signal['signal_id']} limit #{limit['sequence_number']} "
+                        f"({signal['instrument']} @ {current_price:.5f})"
+                    )
+                    await self._cancel_signal_during_guard(
+                        signal, current_price, "late_market"
+                    )
+                    return
 
             # Mark the limit hit in memory first so the embed edit and any
             # concurrent live-refresh render identical state — the embed updates
@@ -784,7 +846,12 @@ class StreamingPriceMonitor:
             logger.error(f"Failed to reset approaching_alert_sent for limit {limit_id}: {e}")
 
     async def _check_stop_loss(
-        self, signal: Dict, current_price: float, direction: str, is_spread_hour: bool
+        self,
+        signal: Dict,
+        current_price: float,
+        direction: str,
+        is_spread_hour: bool,
+        is_late_market: bool,
     ):
         """Check if stop loss is hit. Spread buffer is NOT applied."""
         stop_loss = signal["stop_loss"]
@@ -817,6 +884,19 @@ class StreamingPriceMonitor:
                 await self._cancel_signal_during_guard(signal, current_price, "spread_hour")
                 return
 
+            if is_late_market and not self._is_crypto_signal(signal):
+                # Only fresh entries are cancelled in the final market hour; an
+                # already-HIT signal takes its real stop loss below.
+                if signal.get("status") != "hit":
+                    logger.info(
+                        f"Late market hour: suppressing stop loss hit for signal "
+                        f"{signal['signal_id']} ({signal['instrument']} @ {current_price:.5f})"
+                    )
+                    await self._cancel_signal_during_guard(
+                        signal, current_price, "late_market"
+                    )
+                    return
+
             signal["sl_alert_sent"] = True
 
             await self.alert_system.send_stop_loss_alert(signal, current_price)
@@ -837,11 +917,15 @@ class StreamingPriceMonitor:
         await self.excursion_monitor.finalize(signal_id, current_price, reason)
         if reason == "news":
             await self.alert_system.send_news_cancel_alert(signal, current_price, news_event)
+        elif reason == "late_market":
+            await self.alert_system.send_late_market_cancel_alert(signal, current_price)
         else:
             await self.alert_system.send_spread_hour_cancel_alert(signal, current_price)
         self._react_async(signal, "❌")
         if reason == "news":
             await self._process_news_cancel(signal, news_event)
+        elif reason == "late_market":
+            await self._process_late_market_cancel(signal)
         else:
             await self._process_spread_hour_cancel(signal)
 
@@ -1108,6 +1192,27 @@ class StreamingPriceMonitor:
                 logger.error(f"Failed to cancel signal {signal_id} for spread hour")
         except Exception as e:
             logger.error(f"Error cancelling signal {signal_id} for spread hour: {e}")
+
+    async def _process_late_market_cancel(self, signal: Dict):
+        """Cancel a fresh entry that triggered during the final market hour."""
+        signal_id = signal["signal_id"]
+        try:
+            success = await self.signal_db.manually_set_signal_status(
+                signal_id,
+                "cancelled",
+                reason="late_market_auto_cancel",
+                closed_reason="late_market",
+            )
+            if success:
+                self.sync_signal_status_in_memory(signal_id, "cancelled")
+                logger.info(f"Signal {signal_id} cancelled due to late market hour hit")
+                self.tp_monitor.evict_signal(signal_id)
+                await self._maybe_unsubscribe_symbol(signal["instrument"], signal_id)
+                self.stats["late_market_cancels"] = self.stats.get("late_market_cancels", 0) + 1
+            else:
+                logger.error(f"Failed to cancel signal {signal_id} for late market hour")
+        except Exception as e:
+            logger.error(f"Error cancelling signal {signal_id} for late market hour: {e}")
 
     async def _process_news_cancel(self, signal: Dict, news_event) -> None:
         """Cancel a signal that was triggered during an active news window."""

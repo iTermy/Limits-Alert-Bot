@@ -95,6 +95,7 @@ def _build_signal_embed(
         "cancelled": (0x808080, "❌ Cancelled"),
         "expired": (0x808080, "⌛ Expired"),
         "spread_hour_cancelled": (0xFFA500, "🕔 Spread Hour — Cancelled"),
+        "late_market_cancelled": (0xFFA500, "🕓 Late Market Hours — Cancelled"),
         "near_miss_cancelled": (0x808080, "❌ Near-Miss — Cancelled"),
         "reactivated": (0x3498DB, "♻️ Reactivated"),
         "edited": (0x3498DB, "📝 Updated"),
@@ -176,11 +177,19 @@ def _build_signal_embed(
     cancel_type = signal.get("cancel_type") or signal.get("closed_reason") or ""
     is_expired = event == "expired" or cancel_type == "expiry"
 
-    if event in ("cancelled", "expired", "near_miss_cancelled", "spread_hour_cancelled"):
+    if event in (
+        "cancelled",
+        "expired",
+        "near_miss_cancelled",
+        "spread_hour_cancelled",
+        "late_market_cancelled",
+    ):
         if event == "near_miss_cancelled" or cancel_type == "near_miss":
             reason_text = "Auto near-miss"
         elif event == "spread_hour_cancelled" or cancel_type == "spread_hour":
             reason_text = "Auto spread hour"
+        elif event == "late_market_cancelled" or cancel_type == "late_market":
+            reason_text = "Auto late market hours"
         elif is_expired:
             reason_text = "Auto expiry"
         elif cancel_type.startswith("news"):
@@ -214,6 +223,10 @@ def _build_signal_embed(
     elif event == "spread_hour_cancelled" or cancel_type == "spread_hour":
         embed.set_footer(
             text=f"Signal #{signal_id} • Auto-cancelled (spread hour){_deletion_suffix}"
+        )
+    elif event == "late_market_cancelled" or cancel_type == "late_market":
+        embed.set_footer(
+            text=f"Signal #{signal_id} • Auto-cancelled (late market hours){_deletion_suffix}"
         )
     elif event == "near_miss_cancelled" or cancel_type == "near_miss":
         embed.set_footer(text=f"Signal #{signal_id} • Auto-cancelled (near-miss){_deletion_suffix}")
