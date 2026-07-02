@@ -157,6 +157,9 @@ INSTRUMENT_MAPPINGS = {
     "asx": "AUS2000",
     "f40": "F40",
     "cac": "F40",
+    "uk100": "UK100GBP",
+    "uk100gbp": "UK100GBP",
+    "ftse": "UK100GBP",
     # Crypto (keep main ones, alt coins handled by auto-append)
     "btc": "BTCUSDT",
     "bitcoin": "BTCUSDT",

@@ -11,7 +11,7 @@ from typing import Optional
 from utils.logger import get_logger
 
 # Import from parent package
-from . import ParsedSignal
+from . import INSTRUMENT_MAPPINGS, ParsedSignal
 from .pattern_parsers import get_signal_type
 from .validators import validate_signal
 
@@ -238,9 +238,18 @@ If unable to confidently parse even after correction attempts, return null.
                 logger.debug("AI returned null")
                 return None
 
+            # Canonicalize the model's instrument through the alias map so AI
+            # output matches the pattern parser (e.g. UK100 -> UK100GBP).
+            raw_instrument = data.get("instrument")
+            instrument = (
+                INSTRUMENT_MAPPINGS.get(raw_instrument.lower(), raw_instrument)
+                if raw_instrument
+                else raw_instrument
+            )
+
             # Create signal
             signal = ParsedSignal(
-                instrument=data.get("instrument"),
+                instrument=instrument,
                 direction=data.get("direction"),
                 limits=data.get("limits", []),
                 stop_loss=data.get("stop_loss"),
