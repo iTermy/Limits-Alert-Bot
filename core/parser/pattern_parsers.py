@@ -10,7 +10,7 @@ from typing import Dict, List, Optional, Set
 from utils.logger import get_logger
 
 from . import INSTRUMENT_MAPPINGS, ParsedSignal
-from .validators import INDEX_SYMBOL_BLACKLIST, validate_signal
+from .validators import INDEX_SYMBOL_BLACKLIST, uses_gold_tolls_sl, validate_signal
 
 logger = get_logger("parser.pattern_parsers")
 
@@ -140,23 +140,6 @@ CHANNEL_TYPE_MAP = {
     "gold-1-1-rr": "1-1",
     "risky-gold": "scalp",
 }
-
-# Channels that treat every number as a limit and derive the stop loss from the
-# gold-tolls offset (default $5 from the last limit) instead of reading an
-# explicit SL from the message. The toll channels (except general-tolls, which
-# has its own per-instrument auto-SL) match by substring; anything else is
-# listed here explicitly.
-_GOLD_TOLLS_SL_CHANNELS = {"risky-gold"}
-
-
-def uses_gold_tolls_sl(channel_name: Optional[str]) -> bool:
-    """True for channels that auto-derive SL from the gold-tolls offset."""
-    if not channel_name:
-        return False
-    name = channel_name.lower()
-    if name in _GOLD_TOLLS_SL_CHANNELS:
-        return True
-    return "toll" in name and name != "general-tolls"
 
 # Expiry patterns
 EXPIRY_PATTERNS = {
