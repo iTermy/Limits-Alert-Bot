@@ -7,6 +7,7 @@ import asyncio
 import logging
 import os
 from collections.abc import AsyncIterator
+from concurrent.futures import ThreadPoolExecutor
 from datetime import datetime, timezone
 from time import monotonic
 from typing import Callable, Dict, Optional, Set, Tuple
@@ -19,6 +20,15 @@ logger = logging.getLogger(__name__)
 # can be stamped for the execution bot's broker-offset calc) are polled at this
 # slower cadence instead of the 100 ms used for signal-bearing symbols.
 _REFERENCE_POLL_INTERVAL = 15 * 60  # seconds
+
+# The MetaTrader5 package makes blocking C calls. Running them on a dedicated
+# thread pool (rather than asyncio's shared default executor) keeps a hung MT5
+# terminal — common during the broker's spread-hour rollover — from starving the
+# machinery the rest of the loop depends on (DNS resolution, feed reconnects,
+# Discord I/O). A per-call timeout lets the poll loop abandon a wedged tick fetch
+# and keep serving the symbols that are still responding.
+_MT5_EXECUTOR_WORKERS = 4
+_MT5_CALL_TIMEOUT_SECONDS = 5
 
 
 class ICMarketsStream:
@@ -56,6 +66,12 @@ class ICMarketsStream:
         self.streaming = False
         self.stream_task = None
 
+        # Dedicated pool for MetaTrader5's blocking calls; recreated on each
+        # connect so threads leaked to a wedged terminal don't accumulate.
+        self._mt5_executor = ThreadPoolExecutor(
+            max_workers=_MT5_EXECUTOR_WORKERS, thread_name_prefix="mt5"
+        )
+
         # Optional callback invoked on every successful MT5 poll, regardless of
         # whether the price changed. Used by the health monitor to refresh its
         # last_seen timer so quiet periods (spread widening, illiquid windows)
@@ -64,25 +80,38 @@ class ICMarketsStream:
 
         logger.info("ICMarketsStream initialized")
 
+    async def _run_mt5(self, func, *args):
+        """Run a blocking MT5 call on the dedicated pool, never on the loop thread."""
+        loop = asyncio.get_running_loop()
+        return await loop.run_in_executor(self._mt5_executor, func, *args)
+
+    def _reset_mt5_executor(self):
+        """Swap in a fresh MT5 pool, abandoning any threads wedged on a hung
+        terminal (shutdown(wait=False) does not join them)."""
+        self._mt5_executor.shutdown(wait=False)
+        self._mt5_executor = ThreadPoolExecutor(
+            max_workers=_MT5_EXECUTOR_WORKERS, thread_name_prefix="mt5"
+        )
+
     async def connect(self) -> bool:
         """Initialize MT5 connection"""
         try:
-            loop = asyncio.get_event_loop()
+            self._reset_mt5_executor()
             mt5_path = os.getenv("MT5_PATH")
             if mt5_path:
-                result = await loop.run_in_executor(None, lambda: mt5.initialize(mt5_path))
+                result = await self._run_mt5(mt5.initialize, mt5_path)
             else:
-                result = await loop.run_in_executor(None, mt5.initialize)
+                result = await self._run_mt5(mt5.initialize)
 
             if result:
                 self.connected = True
 
-                terminal_info = mt5.terminal_info()
+                terminal_info = await self._run_mt5(mt5.terminal_info)
                 if terminal_info:
                     logger.info(f"Connected to MT5 - {terminal_info.name}")
 
                 return True
-            error = mt5.last_error()
+            error = await self._run_mt5(mt5.last_error)
             logger.error(f"MT5 initialization failed: {error}")
             return False
 
@@ -102,8 +131,7 @@ class ICMarketsStream:
                 pass
 
         if self.connected:
-            loop = asyncio.get_event_loop()
-            await loop.run_in_executor(None, mt5.shutdown)
+            await self._run_mt5(mt5.shutdown)
             self.connected = False
             logger.info("Disconnected from MT5")
 
@@ -140,14 +168,13 @@ class ICMarketsStream:
 
             # Validate symbol exists. Reference symbols are already validated
             # at subscribe_reference time, so skip here for the promotion case.
-            loop = asyncio.get_event_loop()
-            symbol_info = await loop.run_in_executor(None, mt5.symbol_info, symbol)
+            symbol_info = await self._run_mt5(mt5.symbol_info, symbol)
 
             if symbol_info is None:
                 raise Exception(f"Symbol {symbol} not found in MT5")
 
             if not symbol_info.visible:
-                await loop.run_in_executor(None, mt5.symbol_select, symbol, True)
+                await self._run_mt5(mt5.symbol_select, symbol, True)
 
         self.subscribed_symbols.add(symbol)
         # Promote a reference symbol to signal-bearing cadence immediately.
@@ -169,13 +196,12 @@ class ICMarketsStream:
         if symbol in self._stock_symbol_cache:
             return self._stock_symbol_cache[symbol]
 
-        loop = asyncio.get_event_loop()
-        if await loop.run_in_executor(None, mt5.symbol_info, symbol) is not None:
+        if await self._run_mt5(mt5.symbol_info, symbol) is not None:
             self._stock_symbol_cache[symbol] = symbol
             return symbol
 
         bare = symbol[:-3]
-        if await loop.run_in_executor(None, mt5.symbol_info, bare) is not None:
+        if await self._run_mt5(mt5.symbol_info, bare) is not None:
             logger.info("Stock %s has no 24-hour variant; using %s", symbol, bare)
             self._stock_symbol_cache[symbol] = bare
             return bare
@@ -196,14 +222,13 @@ class ICMarketsStream:
         if not self.connected:
             raise Exception("Not connected to MT5")
 
-        loop = asyncio.get_event_loop()
-        symbol_info = await loop.run_in_executor(None, mt5.symbol_info, symbol)
+        symbol_info = await self._run_mt5(mt5.symbol_info, symbol)
 
         if symbol_info is None:
             raise Exception(f"Symbol {symbol} not found in MT5")
 
         if not symbol_info.visible:
-            await loop.run_in_executor(None, mt5.symbol_select, symbol, True)
+            await self._run_mt5(mt5.symbol_select, symbol, True)
 
         self.reference_symbols.add(symbol)
         # Poll immediately on the first loop iteration so ic_bid/ic_ask is
@@ -244,7 +269,6 @@ class ICMarketsStream:
             raise Exception("Not connected to MT5")
 
         self.streaming = True
-        loop = asyncio.get_event_loop()
 
         while self.streaming:
             try:
@@ -260,8 +284,20 @@ class ICMarketsStream:
                         symbols_to_poll.add(ref_sym)
 
                 for symbol in symbols_to_poll:
-                    # Fetch current tick
-                    tick = await loop.run_in_executor(None, mt5.symbol_info_tick, symbol)
+                    # Fetch current tick. Bound the call so a wedged terminal
+                    # (e.g. spread-hour rollover) can't stall polling for the
+                    # symbols that are still responding.
+                    try:
+                        tick = await asyncio.wait_for(
+                            self._run_mt5(mt5.symbol_info_tick, symbol),
+                            timeout=_MT5_CALL_TIMEOUT_SECONDS,
+                        )
+                    except asyncio.TimeoutError:
+                        logger.warning(
+                            "MT5 tick fetch for %s timed out after %ss; skipping",
+                            symbol, _MT5_CALL_TIMEOUT_SECONDS,
+                        )
+                        continue
 
                     is_reference_only = (
                         symbol in self.reference_symbols

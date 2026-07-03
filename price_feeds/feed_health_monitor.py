@@ -4,6 +4,7 @@ Monitors all feeds (ICMarkets, OANDA, Binance) for stale data and connection iss
 """
 
 import asyncio
+import faulthandler
 import logging
 import os
 import threading
@@ -37,6 +38,9 @@ STARTUP_GRACE_PERIOD_SECONDS = 120
 LOOP_HEARTBEAT_INTERVAL_SECONDS = 10
 LOOP_WATCHDOG_POLL_SECONDS = 15
 LOOP_FREEZE_RESTART_SECONDS = 120
+
+# Where the watchdog writes all-thread stack dumps when it detects a freeze.
+FREEZE_DUMP_DIR = "data/logs"
 
 # Price-flow watchdog: when at least one subscribed symbol's market should be
 # open but ZERO ticks have arrived across EVERY feed for this long, the bot is
@@ -203,8 +207,24 @@ class FeedHealthMonitor:
                     "Event loop frozen for %.0fs (heartbeat stalled) — forcing hard restart",
                     stalled,
                 )
+                self._dump_all_thread_stacks()
                 logging.shutdown()
                 os._exit(1)
+
+    def _dump_all_thread_stacks(self):
+        """Write every thread's stack to a file before the hard exit.
+
+        A frozen loop means a synchronous call is blocking the loop thread; the
+        stack of that thread names the exact culprit. faulthandler runs from this
+        daemon thread even though the loop is wedged, so it always captures it.
+        """
+        try:
+            path = os.path.join(FREEZE_DUMP_DIR, "freeze_traceback.log")
+            with open(path, "a", encoding="utf-8") as fh:
+                fh.write(f"\n===== Event loop freeze at {datetime.now().isoformat()} =====\n")
+                faulthandler.dump_traceback(file=fh, all_threads=True)
+        except Exception as e:
+            logger.error("Failed to dump freeze traceback: %s", e)
 
     async def stop_monitoring(self):
         """Stop the health monitoring loop"""
