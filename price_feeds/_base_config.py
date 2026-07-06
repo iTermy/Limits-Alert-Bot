@@ -51,7 +51,7 @@ class BaseThresholdConfig:
 
     def _load_config(self) -> Dict:
         try:
-            with open(self.config_path) as f:
+            with open(self.config_path, encoding="utf-8") as f:
                 raw = json.load(f)
             return self._post_load(raw)
         except FileNotFoundError:
@@ -83,8 +83,8 @@ class BaseThresholdConfig:
             config = self.config
         try:
             self.config_path.parent.mkdir(parents=True, exist_ok=True)
-            with open(self.config_path, "w") as f:
-                json.dump(config, f, indent=2)
+            with open(self.config_path, "w", encoding="utf-8") as f:
+                json.dump(config, f, indent=2, ensure_ascii=False)
         except Exception as e:
             logger.error(f"Failed to save config to {self.config_path}: {e}")
             raise
