@@ -585,10 +585,15 @@ def determine_limits_and_stop(
       - LONG:  limits descending (e.g. 1.1820, 1.1810, 1.1800  → stop below all)
 
     Special handling for tolls channel:
-    - All numbers are treated as limits (no stop loss in the message)
-    - Stop loss is automatically set to ±5 from the appropriate limit:
-      * Long: min(limits) - 5 (5 below the lowest limit)
-      * Short: max(limits) + 5 (5 above the highest limit)
+    - If raw_text contains an explicit SL keyword (sl / stop / stops) and at
+      least two numbers are present, the last number is treated as the stop
+      loss, overriding the auto-calculated value.
+    - Otherwise all numbers are treated as limits (no stop loss in the message)
+      and the stop loss is automatically set to ±offset from the appropriate limit:
+      * Long: min(limits) - offset (offset below the lowest limit)
+      * Short: max(limits) + offset (offset above the highest limit)
+      The offset is the risky-gold offset for the risky-gold channel and the
+      gold-tolls offset for every other tolls-style channel.
     - Single-number messages are valid (one limit, no stop loss required)
 
     Special handling for general-tolls channel:
@@ -680,6 +685,37 @@ def determine_limits_and_stop(
     if is_tolls_channel:
         if len(numbers) < 1:
             return None, None
+
+        # Explicit SL: if the message contains an SL keyword (sl / stop / stops)
+        # and provides at least two numbers, the last number overrides the
+        # auto-calculated stop loss. Otherwise the SL is derived from the offset.
+        has_sl_keyword = bool(raw_text and _SL_KEYWORD_RE.search(raw_text))
+
+        if has_sl_keyword and len(numbers) >= 2:
+            stop_loss = numbers[-1]
+            limits = numbers[:-1]
+
+            if not validate_limits_and_stop(limits, stop_loss, direction):
+                # Try first number as stop loss (alternative convention)
+                stop_loss = numbers[0]
+                limits = numbers[1:]
+                if not validate_limits_and_stop(limits, stop_loss, direction):
+                    logger.debug(
+                        f"Tolls explicit stop loss validation failed for {direction} with numbers {numbers}"
+                    )
+                    return None, None
+
+            if len(limits) > 1 and not validate_limits_order(limits, direction):
+                from . import LimitsOrderError
+
+                raise LimitsOrderError(
+                    f"{direction} tolls limits not {'ascending' if direction == 'short' else 'descending'}: {limits}"
+                )
+
+            logger.debug(
+                f"Tolls channel (explicit SL): {len(limits)} limit(s), stop={stop_loss} ({direction})"
+            )
+            return limits, stop_loss
 
         limits = numbers
         # Risky-gold derives its SL from a separate, independently configurable
