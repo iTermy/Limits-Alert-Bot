@@ -77,7 +77,27 @@ class NMConfig(BaseThresholdConfig):
     # === Config defaults & migration ===
 
     def _post_load(self, raw: Dict) -> Dict:
-        return self._migrate_if_needed(raw)
+        raw = self._migrate_if_needed(raw)
+        if "type_overrides" not in raw:
+            raw["type_overrides"] = self._default_type_overrides()
+            self._save_config(raw)
+            logger.info("Seeded default NM type overrides (risky gold)")
+        return raw
+
+    @staticmethod
+    def _default_type_overrides() -> Dict:
+        """Per-signal-type NM overrides. Risky gold tracks wider and needs less
+        bounce than the standard metals default, so it near-misses more readily."""
+        return {
+            "risky": {
+                "metals": {
+                    "type": "dollars",
+                    "max_proximity": 8.0,
+                    "base_bounce": 1.5,
+                    "description": "Risky gold — more sensitive than standard metals",
+                }
+            }
+        }
 
     def _migrate_if_needed(self, config: Dict) -> Dict:
         """
@@ -145,15 +165,39 @@ class NMConfig(BaseThresholdConfig):
                 },
             },
             "overrides": {},
+            "type_overrides": self._default_type_overrides(),
         }
 
     # === Config entry lookup ===
 
-    def _get_config_entry(self, symbol: str) -> Dict:
-        overrides = self.config.get("overrides", {})
-        if symbol.upper() in overrides:
-            return overrides[symbol.upper()]
+    def _get_config_entry(self, symbol: str, signal_type: str = None) -> Dict:
+        """Resolve the NM entry for a symbol, optionally scoped to a signal type.
+
+        Resolution order (mirrors the TP config):
+          1. type_overrides[signal_type][SYMBOL]
+          2. overrides[SYMBOL]
+          3. type_overrides[signal_type][asset_class]
+          4. defaults[asset_class]
+          5. defaults[forex]
+        """
+        s = symbol.upper()
         asset_class = self.determine_asset_class(symbol)
+        typed = bool(signal_type) and signal_type != "standard"
+
+        if typed:
+            type_bucket = self.config.get("type_overrides", {}).get(signal_type, {})
+            if s in type_bucket:
+                return type_bucket[s]
+
+        overrides = self.config.get("overrides", {})
+        if s in overrides:
+            return overrides[s]
+
+        if typed:
+            type_bucket = self.config.get("type_overrides", {}).get(signal_type, {})
+            if asset_class in type_bucket:
+                return type_bucket[asset_class]
+
         defaults = self.config.get("defaults", {})
         return defaults.get(asset_class, defaults.get("forex", {}))
 
@@ -163,7 +207,11 @@ class NMConfig(BaseThresholdConfig):
         return self._get_config_entry(symbol).get("type", "pips")
 
     def _to_price_units(self, symbol: str, value: float) -> float:
-        """Convert a stored value (pips or dollars) to absolute price units."""
+        """Convert a stored value (pips or dollars) to absolute price units.
+
+        The unit (pips vs dollars) is a property of the asset class, so it does
+        not vary by signal type — no signal_type argument is needed here.
+        """
         entry = self._get_config_entry(symbol)
         if entry.get("type") == "pips":
             asset_class = self.determine_asset_class(symbol)
@@ -171,27 +219,29 @@ class NMConfig(BaseThresholdConfig):
             return value * pip_size
         return value
 
-    def get_max_proximity(self, symbol: str) -> float:
+    def get_max_proximity(self, symbol: str, signal_type: str = None) -> float:
         """
         Return max_proximity in absolute price units.
         Tracking only begins when price is closer than this to the first limit.
         """
-        entry = self._get_config_entry(symbol)
+        entry = self._get_config_entry(symbol, signal_type)
         return self._to_price_units(symbol, entry.get("max_proximity", 7.0))
 
-    def get_required_bounce(self, symbol: str, closest_distance_price_units: float) -> float:
+    def get_required_bounce(
+        self, symbol: str, closest_distance_price_units: float, signal_type: str = None
+    ) -> float:
         """
         Return the required bounce (absolute price units) given the closest approach.
 
         Formula:  required_bounce = closest_distance + base_bounce
         """
-        entry = self._get_config_entry(symbol)
+        entry = self._get_config_entry(symbol, signal_type)
         base_bounce_price = self._to_price_units(symbol, entry.get("base_bounce", 4.0))
         return closest_distance_price_units + base_bounce_price
 
-    def get_params_display(self, symbol: str) -> Dict:
+    def get_params_display(self, symbol: str, signal_type: str = None) -> Dict:
         """Return params in stored units (pips or dollars), for display."""
-        entry = self._get_config_entry(symbol)
+        entry = self._get_config_entry(symbol, signal_type)
         return {
             "max_proximity": entry.get("max_proximity", 7.0),
             "base_bounce": entry.get("base_bounce", 4.0),
@@ -209,12 +259,12 @@ class NMConfig(BaseThresholdConfig):
             return f"{pips:.1f} pips"
         return f"${value_price_units:.2f}"
 
-    def describe_curve(self, symbol: str, steps: int = 5) -> str:
+    def describe_curve(self, symbol: str, steps: int = 5, signal_type: str = None) -> str:
         """
         Return a human-readable table of the linear NM curve for a symbol.
         Used in !nmconfig show output.
         """
-        entry = self._get_config_entry(symbol)
+        entry = self._get_config_entry(symbol, signal_type)
         nm_type = entry.get("type", "pips")
         max_prox = entry.get("max_proximity", 7.0)
         base_b = entry.get("base_bounce", 4.0)
@@ -293,3 +343,52 @@ class NMConfig(BaseThresholdConfig):
 
     def get_all_overrides(self) -> Dict:
         return self.config.get("overrides", {})
+
+    # === Per-signal-type override management ===
+
+    def _type_key(self, target: str) -> str:
+        """An asset class stays lowercase; a symbol is uppercased."""
+        return target.lower() if target.lower() in self.ASSET_CLASS_TYPES else target.upper()
+
+    def set_type_override(
+        self,
+        signal_type: str,
+        target: str,
+        max_proximity: float,
+        base_bounce: float,
+        nm_type: str = None,
+        set_by: str = "system",
+    ) -> bool:
+        """Set an NM override scoped to a signal type (e.g. risky), keyed by
+        asset class or symbol."""
+        key = self._type_key(target)
+        if nm_type is None:
+            asset_class = key if key in self.ASSET_CLASS_TYPES else self.determine_asset_class(key)
+            nm_type = self.ASSET_CLASS_TYPES.get(asset_class, "pips")
+        bucket = self.config.setdefault("type_overrides", {}).setdefault(signal_type, {})
+        bucket[key] = {
+            "type": nm_type,
+            "max_proximity": max_proximity,
+            "base_bounce": base_bounce,
+            "set_by": set_by,
+            "set_at": datetime.now(timezone.utc).isoformat(),
+        }
+        self._save_config()
+        logger.info(
+            f"NM type override set [{signal_type}] {key}: "
+            f"max_proximity={max_proximity}, base_bounce={base_bounce} ({nm_type})"
+        )
+        return True
+
+    def remove_type_override(self, signal_type: str, target: str) -> bool:
+        key = self._type_key(target)
+        bucket = self.config.get("type_overrides", {}).get(signal_type, {})
+        if key in bucket:
+            del bucket[key]
+            self._save_config()
+            logger.info(f"NM type override removed [{signal_type}] {key}")
+            return True
+        return False
+
+    def get_type_overrides(self, signal_type: str) -> Dict:
+        return self.config.get("type_overrides", {}).get(signal_type, {})

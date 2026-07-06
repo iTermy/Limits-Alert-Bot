@@ -43,5 +43,15 @@
       "description": "Oil — track within $0.20; bounce = closest + $0.10"
     }
   },
-  "overrides": {}
+  "overrides": {},
+  "type_overrides": {
+    "risky": {
+      "metals": {
+        "type": "dollars",
+        "max_proximity": 8.0,
+        "base_bounce": 1.5,
+        "description": "Risky gold — more sensitive than standard metals"
+      }
+    }
+  }
 }

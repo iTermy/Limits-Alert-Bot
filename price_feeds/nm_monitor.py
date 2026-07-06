@@ -154,8 +154,10 @@ class NearMissMonitor:
         first_limit_price = first_limit["price_level"]
         current_distance = abs(current_price - first_limit_price)
 
-        # Get thresholds from config
-        max_proximity = self.nm_config.get_max_proximity(instrument)
+        # Get thresholds from config (scoped to the signal type, so risky gold
+        # can use its own more-sensitive params)
+        signal_type = signal.get("type")
+        max_proximity = self.nm_config.get_max_proximity(instrument, signal_type)
 
         # Get or create tracking state
         state = self._tracking.get(signal_id)
@@ -194,7 +196,9 @@ class NearMissMonitor:
         # Check the linear bounce condition:
         #   bounce_so_far >= closest_distance + base_bounce
         bounce_so_far = current_distance - state.closest_distance
-        required_bounce = self.nm_config.get_required_bounce(instrument, state.closest_distance)
+        required_bounce = self.nm_config.get_required_bounce(
+            instrument, state.closest_distance, signal_type
+        )
 
         if bounce_so_far >= required_bounce:
             logger.info(
@@ -221,6 +225,7 @@ class NearMissMonitor:
         """
         signal_id = signal["signal_id"]
         instrument = signal["instrument"]
+        signal_type = signal.get("type")
         state = self._tracking.get(signal_id)
 
         closest_str = (
@@ -228,7 +233,10 @@ class NearMissMonitor:
         )
         required_str = (
             self.nm_config.format_value(
-                instrument, self.nm_config.get_required_bounce(instrument, state.closest_distance)
+                instrument,
+                self.nm_config.get_required_bounce(
+                    instrument, state.closest_distance, signal_type
+                ),
             )
             if state
             else "N/A"

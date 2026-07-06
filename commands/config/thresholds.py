@@ -18,6 +18,8 @@ VALID_TP_TYPES = ["pips", "dollars"]
 VALID_DIST_TYPES = ["pips", "dollars", "percentage"]
 VALID_NM_TYPES = frozenset(["pips", "dollars"])
 SIGNAL_TYPE_SET = frozenset(VALID_SIGNAL_TYPES)
+# Command targets that map to the risky-gold NM type override (always metals).
+NM_RISKY_TARGETS = frozenset(["risky", "risky-gold"])
 
 
 def _extract_type_flag(args):
@@ -646,18 +648,21 @@ class ThresholdsCog(BaseCog):
         """
         Near-miss auto-cancel configuration (linear bounce model).
 
-          !nmconfig show [symbol]                                         — Show NM config
+          !nmconfig show [symbol|risky]                                   — Show NM config
           !nmconfig set <target> <max_proximity> <base_bounce> [pips|dollars]  — Set (admin)
-          !nmconfig remove <symbol>                                       — Remove override (admin)
+          !nmconfig remove <symbol|risky>                                 — Remove override (admin)
+
+        <target> is an asset class, a symbol, or `risky` (risky-gold signals).
 
         The required bounce scales linearly: required = closest_distance + base_bounce
         So price that got within 2 pips needs less bounce than one that stayed 6 pips away.
 
         Examples:
-          !nmconfig show XAUUSD
+          !nmconfig show risky
           !nmconfig set XAUUSD 6 3 dollars      (within $6; bounce = closest + $3)
           !nmconfig set forex 7 4 pips          (within 7 pips; bounce = closest + 4 pips)
-          !nmconfig remove XAUUSD
+          !nmconfig set risky 8 1.5             (risky gold: within $8; bounce = closest + $1.5)
+          !nmconfig remove risky
         """
         if subcommand is None:
             await ctx.send(
@@ -701,6 +706,33 @@ class ThresholdsCog(BaseCog):
 
     async def _nm_show(self, ctx: commands.Context, symbol: str = None):
         try:
+            if symbol and symbol.lower() in NM_RISKY_TARGETS:
+                info = self.nm_config.get_params_display("XAUUSD", signal_type="risky")
+                is_override = "metals" in self.nm_config.get_type_overrides("risky")
+                embed = discord.Embed(
+                    title="NM Config — Risky Gold",
+                    color=discord.Color.orange(),
+                    description=(
+                        "**Formula:** `required_bounce = closest_distance + base_bounce`\n"
+                        "Applies to `type=risky` signals (risky-gold channel)."
+                    ),
+                )
+                embed.add_field(name="Max Proximity", value=f"${info['max_proximity']}", inline=True)
+                embed.add_field(name="Base Bounce", value=f"${info['base_bounce']}", inline=True)
+                embed.add_field(
+                    name="Source",
+                    value="Type override" if is_override else "Metals default",
+                    inline=True,
+                )
+                embed.add_field(
+                    name="Curve Preview",
+                    value=f"```\n{self.nm_config.describe_curve('XAUUSD', signal_type='risky')}\n```",
+                    inline=False,
+                )
+                embed.set_footer(text="!nmconfig set risky <max_proximity> <base_bounce> to adjust")
+                await ctx.send(embed=embed)
+                return
+
             if symbol:
                 symbol = symbol.upper()
                 info = self.nm_config.get_params_display(symbol)
@@ -795,6 +827,17 @@ class ThresholdsCog(BaseCog):
                 else:
                     embed.add_field(name="Per-Symbol Overrides", value="None", inline=False)
 
+                risky = self.nm_config.get_type_overrides("risky")
+                if risky:
+                    risky_lines = []
+                    for key, ov in risky.items():
+                        p = ov.get("max_proximity", 0)
+                        b = ov.get("base_bounce", 0)
+                        risky_lines.append(f"**{key}**: ${p} / +${b} base")
+                    embed.add_field(
+                        name="Risky Gold", value="\n".join(risky_lines), inline=False
+                    )
+
                 embed.set_footer(
                     text="Use !nmconfig set <target> <max_proximity> <base_bounce> [pips|dollars]"
                 )
@@ -841,7 +884,13 @@ class ThresholdsCog(BaseCog):
             target_lower = target.lower()
             target_upper = target.upper()
 
-            if target_lower in ASSET_CLASSES:
+            if target_lower in NM_RISKY_TARGETS:
+                success = self.nm_config.set_type_override(
+                    "risky", "metals", max_proximity, base_bounce, nm_type or "dollars",
+                    set_by=ctx.author.name,
+                )
+                label = "**risky gold** (type override)"
+            elif target_lower in ASSET_CLASSES:
                 success = self.nm_config.set_default(
                     target_lower, max_proximity, base_bounce, nm_type, set_by=ctx.author.name
                 )
@@ -857,13 +906,19 @@ class ThresholdsCog(BaseCog):
                 self.services.nm_monitor.nm_config = self.services.nm_config
 
             unit = nm_type if nm_type else "?"
+            if target_lower in NM_RISKY_TARGETS:
+                curve = self.nm_config.describe_curve("XAUUSD", signal_type="risky")
+            elif target_lower in ASSET_CLASSES:
+                curve = self.nm_config.describe_curve("EURUSD")
+            else:
+                curve = self.nm_config.describe_curve(target_upper)
             embed = discord.Embed(title="NM Configuration Updated", color=discord.Color.green())
             embed.add_field(name="Target", value=label, inline=True)
             embed.add_field(name="Max Proximity", value=f"{max_proximity} {unit}", inline=True)
             embed.add_field(name="Base Bounce", value=f"{base_bounce} {unit}", inline=True)
             embed.add_field(
                 name="Curve Preview",
-                value=f"```\n{self.nm_config.describe_curve(target_upper if target_lower not in ASSET_CLASSES else 'EURUSD')}\n```",
+                value=f"```\n{curve}\n```",
                 inline=False,
             )
             embed.set_footer(
@@ -877,6 +932,29 @@ class ThresholdsCog(BaseCog):
 
     async def _nm_remove(self, ctx, symbol: str):
         try:
+            if symbol.lower() in NM_RISKY_TARGETS:
+                removed = self.nm_config.remove_type_override("risky", "metals")
+                if self.services.monitor:
+                    self.services.nm_config = NMConfig()
+                    self.services.nm_monitor.nm_config = self.services.nm_config
+                if removed:
+                    info = self.nm_config.get_params_display("XAUUSD", signal_type="risky")
+                    embed = discord.Embed(
+                        title="NM Override Removed", color=discord.Color.green()
+                    )
+                    embed.add_field(name="Target", value="risky gold", inline=True)
+                    embed.add_field(
+                        name="Now Using",
+                        value=f"metals default: ${info['max_proximity']} proximity, +${info['base_bounce']} base",
+                        inline=True,
+                    )
+                    await ctx.send(embed=embed)
+                else:
+                    await ctx.send(
+                        "No risky-gold NM override found. It was already using the metals default."
+                    )
+                return
+
             symbol_upper = symbol.upper()
             removed = self.nm_config.remove_override(symbol_upper)
 
