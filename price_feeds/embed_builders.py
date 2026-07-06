@@ -96,6 +96,7 @@ def _build_signal_embed(
         "expired": (0x808080, "⌛ Expired"),
         "spread_hour_cancelled": (0xFFA500, "🕔 Spread Hour — Cancelled"),
         "late_market_cancelled": (0xFFA500, "🕓 Late Market Hours — Cancelled"),
+        "risky_window_cancelled": (0xE74C3C, "🚫 Risky Disabled — Cancelled"),
         "near_miss_cancelled": (0x808080, "❌ Near-Miss — Cancelled"),
         "reactivated": (0x3498DB, "♻️ Reactivated"),
         "edited": (0x3498DB, "📝 Updated"),
@@ -183,6 +184,7 @@ def _build_signal_embed(
         "near_miss_cancelled",
         "spread_hour_cancelled",
         "late_market_cancelled",
+        "risky_window_cancelled",
     ):
         if event == "near_miss_cancelled" or cancel_type == "near_miss":
             reason_text = "Auto near-miss"
@@ -190,6 +192,8 @@ def _build_signal_embed(
             reason_text = "Auto spread hour"
         elif event == "late_market_cancelled" or cancel_type == "late_market":
             reason_text = "Auto late market hours"
+        elif event == "risky_window_cancelled" or cancel_type == "risky_window":
+            reason_text = "Auto risky disabled window"
         elif is_expired:
             reason_text = "Auto expiry"
         elif cancel_type.startswith("news"):
@@ -227,6 +231,10 @@ def _build_signal_embed(
     elif event == "late_market_cancelled" or cancel_type == "late_market":
         embed.set_footer(
             text=f"Signal #{signal_id} • Auto-cancelled (late market hours){_deletion_suffix}"
+        )
+    elif event == "risky_window_cancelled" or cancel_type == "risky_window":
+        embed.set_footer(
+            text=f"Signal #{signal_id} • Auto-cancelled (risky disabled){_deletion_suffix}"
         )
     elif event == "near_miss_cancelled" or cancel_type == "near_miss":
         embed.set_footer(text=f"Signal #{signal_id} • Auto-cancelled (near-miss){_deletion_suffix}")

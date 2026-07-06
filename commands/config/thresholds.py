@@ -46,7 +46,7 @@ class ThresholdsCog(BaseCog):
     @commands.command(name="tp")
     async def tp_command(self, ctx: commands.Context, subcommand: str = None, *args):
         """
-        Take-profit configuration (per signal type: standard, scalp, swing, toll, pa, 1-1).
+        Take-profit configuration (per signal type: standard, scalp, swing, toll, pa, 1-1, risky).
 
           !tp config                                   — Show all type defaults
           !tp config <symbol> [--type=X]               — Show effective config for a symbol

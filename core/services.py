@@ -24,6 +24,7 @@ if TYPE_CHECKING:
     from price_feeds.trailing_monitor import TrailingStopMonitor
     from price_feeds.excursion_monitor import ExcursionMonitor
     from price_feeds.vol_guard import VolatilityGuard
+    from price_feeds.risky_window import RiskyWindowAnnouncer
 
 
 class ServiceRegistry:
@@ -44,3 +45,4 @@ class ServiceRegistry:
         self.db: Optional[DatabaseManager] = None
         self.news_fetcher: Optional[NewsFetcher] = None
         self.vol_guard: Optional[VolatilityGuard] = None
+        self.risky_window_announcer: Optional[RiskyWindowAnnouncer] = None

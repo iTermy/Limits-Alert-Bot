@@ -52,6 +52,7 @@ class TradingBot(commands.Bot):
         self.channel_cleaner = None
         self.news_fetcher = None
         self.vol_guard = None
+        self.risky_window_announcer = None
         self._info_embeds_synced = False
 
         # Flat service registry — populated during setup_hook, injected into cogs/handlers
@@ -414,6 +415,10 @@ class TradingBot(commands.Bot):
             # stream and announces sharp moves per currency (gold flags "ALL").
             await self._start_vol_guard(stream_manager)
 
+            # Risky-window announcer — posts a "disabled/resumed" embed to the
+            # risky-gold alert channel around each scheduled disabled window.
+            self._start_risky_window_announcer(alert_system)
+
             self.logger.info("Price monitoring system initialized and started")
             self.logger.info(
                 f"Alert system created with {len(alert_system.alert_messages)} tracked messages"
@@ -468,6 +473,20 @@ class TradingBot(commands.Bot):
         self.vol_guard.start()
         self.logger.info(f"Volatility guard channel set: #{channel.name}")
 
+    def _start_risky_window_announcer(self, alert_system):
+        """Create and start the risky-window announcer, posting to the risky-gold
+        alert channel. No-op if that channel isn't configured."""
+        from price_feeds.risky_window import RiskyWindowAnnouncer
+
+        channel = getattr(alert_system, "risky_alert_channel", None)
+        if channel is None:
+            self.logger.warning("No risky-gold-alert channel — risky window announcer off")
+            return
+        self.risky_window_announcer = RiskyWindowAnnouncer(self, channel)
+        self.services.risky_window_announcer = self.risky_window_announcer
+        self.risky_window_announcer.start()
+        self.logger.info(f"Risky window announcer channel set: #{channel.name}")
+
     @tasks.loop(seconds=30)
     async def heartbeat(self):
         """Periodic heartbeat for monitoring"""
@@ -505,6 +524,9 @@ class TradingBot(commands.Bot):
 
         if self.vol_guard:
             self.vol_guard.stop()
+
+        if self.risky_window_announcer:
+            self.risky_window_announcer.stop()
 
         if self.monitor:
             await self.monitor.stop()

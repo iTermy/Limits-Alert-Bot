@@ -13,6 +13,7 @@ P&L is always calculated in the same native unit as the TP type:
   - dollars for everything else
 """
 
+import copy
 import logging
 from datetime import datetime, timezone
 from typing import Dict, Literal
@@ -23,7 +24,7 @@ logger = logging.getLogger(__name__)
 
 TPType = Literal["pips", "dollars"]
 
-VALID_SIGNAL_TYPES = ("standard", "scalp", "swing", "toll", "pa", "1-1")
+VALID_SIGNAL_TYPES = ("standard", "scalp", "swing", "toll", "pa", "1-1", "risky")
 
 
 class TPConfig(BaseThresholdConfig):
@@ -109,6 +110,7 @@ class TPConfig(BaseThresholdConfig):
                 "toll": self._scalp_defaults(),  # initialised from scalp; user-adjustable
                 "pa": self._standard_defaults(),  # initialised from standard; user-adjustable
                 "1-1": self._one_one_defaults(),
+                "risky": self._scalp_defaults(),  # initialised from scalp; user-adjustable
             },
             "type_overrides": {t: {} for t in VALID_SIGNAL_TYPES},
         }
@@ -155,6 +157,7 @@ class TPConfig(BaseThresholdConfig):
             migrated["type_defaults"]["toll"] = self._scalp_defaults()
 
         migrated["type_defaults"]["1-1"] = self._one_one_defaults()
+        migrated["type_defaults"]["risky"] = copy.deepcopy(migrated["type_defaults"]["scalp"])
 
         if legacy_overrides:
             migrated["type_overrides"]["standard"] = legacy_overrides
@@ -175,6 +178,17 @@ class TPConfig(BaseThresholdConfig):
         for t in VALID_SIGNAL_TYPES:
             self.config["type_defaults"].setdefault(t, {})
             self.config["type_overrides"].setdefault(t, {})
+
+        # Seed the risky config from the loaded scalp config for files written
+        # before the risky type existed, so risky signals keep the same TP they
+        # had when they were classified as scalp (rather than falling back to
+        # standard). Copies the on-disk scalp values, not the hardcoded defaults.
+        if not self.config["type_defaults"].get("risky"):
+            scalp_defaults = self.config["type_defaults"].get("scalp") or self._scalp_defaults()
+            self.config["type_defaults"]["risky"] = copy.deepcopy(scalp_defaults)
+            if not self.config["type_overrides"].get("risky"):
+                scalp_overrides = self.config["type_overrides"].get("scalp") or {}
+                self.config["type_overrides"]["risky"] = copy.deepcopy(scalp_overrides)
 
         # Fill in missing fields on each entry.
         for type_name, asset_classes in self.config["type_defaults"].items():

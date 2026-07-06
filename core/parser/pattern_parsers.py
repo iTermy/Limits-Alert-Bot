@@ -54,6 +54,44 @@ def invalidate_gold_tolls_sl_cache() -> None:
     _gold_tolls_sl_cache_ts = 0.0
 
 
+# ---------------------------------------------------------------------------
+# Risky-Gold SL offset — configurable independently of gold tolls via
+# !riskygoldsl, stored in settings.json → risky_gold_sl_offset
+# ---------------------------------------------------------------------------
+
+_RISKY_GOLD_SL_OFFSET_DEFAULT = 5.0
+_risky_gold_sl_cache: float = _RISKY_GOLD_SL_OFFSET_DEFAULT
+_risky_gold_sl_cache_ts: float = 0.0
+
+
+def get_risky_gold_sl_offset() -> float:
+    """
+    Return the current risky-gold SL offset (dollars from the nearest limit).
+
+    Read from settings.json → ``risky_gold_sl_offset`` and cached for 30 s.
+    Independent of the gold-tolls offset so the two can be tuned separately.
+    """
+    global _risky_gold_sl_cache, _risky_gold_sl_cache_ts
+    if time.monotonic() - _risky_gold_sl_cache_ts > _GOLD_TOLLS_SL_CACHE_TTL:
+        try:
+            from utils.config_loader import load_settings
+
+            settings = load_settings()
+            _risky_gold_sl_cache = float(settings.risky_gold_sl_offset)
+        except Exception as e:
+            logger.warning(
+                f"Could not load risky_gold_sl_offset from settings: {e}. Using {_risky_gold_sl_cache}."
+            )
+        _risky_gold_sl_cache_ts = time.monotonic()
+    return _risky_gold_sl_cache
+
+
+def invalidate_risky_gold_sl_cache() -> None:
+    """Force the next call to get_risky_gold_sl_offset() to re-read from disk."""
+    global _risky_gold_sl_cache_ts
+    _risky_gold_sl_cache_ts = 0.0
+
+
 # Optional import for stock parsing
 try:
     import MetaTrader5 as mt5
@@ -138,7 +176,7 @@ CHANNEL_TYPE_MAP = {
     "gold-pa-signals": "pa",
     "price-action-trades": "pa",
     "gold-1-1-rr": "1-1",
-    "risky-gold": "scalp",
+    "risky-gold": "risky",
 }
 
 # Expiry patterns
@@ -644,7 +682,12 @@ def determine_limits_and_stop(
             return None, None
 
         limits = numbers
-        sl_offset = get_gold_tolls_sl_offset()
+        # Risky-gold derives its SL from a separate, independently configurable
+        # offset; every other tolls-style channel uses the gold-tolls offset.
+        if channel_name and channel_name.lower() == "risky-gold":
+            sl_offset = get_risky_gold_sl_offset()
+        else:
+            sl_offset = get_gold_tolls_sl_offset()
         if direction == "long":
             lowest_limit = min(limits)
             stop_loss = lowest_limit - sl_offset

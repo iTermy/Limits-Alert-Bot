@@ -51,6 +51,7 @@ SIGNAL_TYPE_LABELS = {
     "toll": "💰 Toll",
     "pa": "🎯 PA",
     "1-1": "⚖️ 1:1 RR",
+    "risky": "🎲 Risky",
 }
 
 

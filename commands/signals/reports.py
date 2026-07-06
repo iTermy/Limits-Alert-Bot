@@ -143,41 +143,53 @@ class ReportsCog(BaseCog):
         return self._format_distance(signal["instrument"], signal_type, raw)
 
     @commands.command(name="report", description="Generate trading report")
-    async def generate_report(
-        self, ctx: commands.Context, period: str = "week", filter_type: str = None
-    ):
+    async def generate_report(self, ctx: commands.Context, *args):
         """
-        Generate a trading report for specified period
+        Generate a trading report for a period.
 
-        Args:
-            period: 'day', 'week', or 'month'
-            filter_type: Optional - 'stoploss', 'sl', 'profit', 'win' to filter results
+        Args (order-independent):
+            period: 'day', 'week', or 'month' (default 'week')
+            'risky': show ONLY risky-gold trades (excluded from the default report)
+            filter: 'stoploss'/'sl' or 'profit'/'win' to filter results
+
+        Examples:
+            !report                 — this week, excluding risky
+            !report month           — past 30 days, excluding risky
+            !report risky           — this week, risky only
+            !report risky months    — past 30 days, risky only
         """
-        if period.lower() not in ["day", "week", "month"]:
-            await ctx.send("❌ Period must be 'day', 'week', or 'month'")
-            return
+        tokens = [a.lower() for a in args]
 
-        period_label = "past 30 days" if period.lower() == "month" else f"current {period}"
+        # Risky is a mode toggle: excluded from the default report, shown alone
+        # when explicitly requested.
+        risky_mode = "risky" in tokens
+        tokens = [t for t in tokens if t != "risky"]
 
-        # Normalize filter type
+        period = "week"
         filter_normalized = None
-        if filter_type:
-            filter_lower = filter_type.lower()
-            if filter_lower in ["stoploss", "sl", "stop", "stop_loss"]:
+        for token in tokens:
+            if token in ("day", "week", "month", "months"):
+                period = "month" if token in ("month", "months") else token
+            elif token in ("stoploss", "sl", "stop", "stop_loss"):
                 filter_normalized = "stoploss"
-            elif filter_lower in ["profit", "win", "tp"]:
+            elif token in ("profit", "win", "tp"):
                 filter_normalized = "profit"
             else:
-                await ctx.send("❌ Filter must be 'stoploss'/'sl' or 'profit'/'win'")
+                await ctx.send(
+                    "❌ Unknown option. Usage: `!report [day/week/month] [risky] [stoploss/profit]`"
+                )
                 return
+
+        period_label = "past 30 days" if period == "month" else f"current {period}"
+        risky_note = " (risky only)" if risky_mode else ""
 
         # Update loading message based on filter
         if filter_normalized:
             loading_msg = await ctx.send(
-                f"📊 Generating {period} report ({filter_normalized} only)..."
+                f"📊 Generating {period} report{risky_note} ({filter_normalized} only)..."
             )
         else:
-            loading_msg = await ctx.send(f"📊 Generating {period} report...")
+            loading_msg = await ctx.send(f"📊 Generating {period} report{risky_note}...")
 
         def cap_field_value(lines: list, max_length: int = 1024) -> str:
             """
@@ -277,7 +289,7 @@ class ReportsCog(BaseCog):
 
                 if channel_id in legends_channel_ids:
                     legends_signals.append(signal)
-                elif channel_id in risky_channel_ids:
+                elif channel_id in risky_channel_ids or signal_type == "risky":
                     risky_signals.append(signal)
                 elif signal_type == "toll":
                     tolls_signals.append(signal)
@@ -303,14 +315,18 @@ class ReportsCog(BaseCog):
                     sl = []
                 return profit, sl
 
-            groups = [
-                ("Regular", regular_signals),
-                ("Tolls", tolls_signals),
-                ("PA", pa_signals),
-                ("Legends", legends_signals),
-                ("1-1", one_to_one_signals),
-                ("Risky", risky_signals),
-            ]
+            # Risky is reported only in risky mode; the default report omits it
+            # entirely (no Risky group, and risky signals excluded from totals).
+            if risky_mode:
+                groups = [("Risky", risky_signals)]
+            else:
+                groups = [
+                    ("Regular", regular_signals),
+                    ("Tolls", tolls_signals),
+                    ("PA", pa_signals),
+                    ("Legends", legends_signals),
+                    ("1-1", one_to_one_signals),
+                ]
 
             # Per-group stats: { label: {"profit": [...], "sl": [...], "total": N, "win_rate": x} }
             group_stats = {}
@@ -331,9 +347,19 @@ class ReportsCog(BaseCog):
             # Check if filter resulted in no signals
             if filter_normalized and total_signals == 0:
                 filter_label = "stop loss" if filter_normalized == "stoploss" else "profit"
+                kind = "Risky Trading Report" if risky_mode else "Trading Report"
                 embed = discord.Embed(
-                    title=f"📊 {period.title()} Trading Report - {filter_label.title()} Only",
+                    title=f"📊 {period.title()} {kind} - {filter_label.title()} Only",
                     description=f"No {filter_label} signals found for the {period_label}",
+                    color=0xFFA500,
+                )
+                await loading_msg.edit(content=None, embed=embed)
+                return
+
+            if risky_mode and not filter_normalized and total_signals == 0:
+                embed = discord.Embed(
+                    title=f"📊 {period.title()} Risky Trading Report",
+                    description=f"No risky signals found for the {period_label}",
                     color=0xFFA500,
                 )
                 await loading_msg.edit(content=None, embed=embed)
@@ -348,8 +374,9 @@ class ReportsCog(BaseCog):
             elif filter_normalized == "profit":
                 title_suffix = " - Profits Only"
 
+            report_kind = "Risky Trading Report" if risky_mode else "Trading Report"
             embed = discord.Embed(
-                title=f"📊 {period.title()} Trading Report{title_suffix}",
+                title=f"📊 {period.title()} {report_kind}{title_suffix}",
                 description=f"Date: {date_range['display_start']} - {date_range['display_end']}",
                 color=0x00FF00 if overall_win_rate >= 50 else 0xFF0000,
             )

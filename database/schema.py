@@ -22,6 +22,7 @@ _CHANNEL_NAME_TO_TYPE = {
     "gold-pa-signals": "pa",
     "price-action-trades": "pa",
     "gold-1-1-rr": "1-1",
+    "risky-gold": "risky",
 }
 
 
@@ -64,7 +65,7 @@ async def initialize_database(db_manager):
                 CONSTRAINT signals_direction_check
                     CHECK (direction IN ('long', 'short')),
                 CONSTRAINT signals_type_check
-                    CHECK (type IN ('standard', 'scalp', 'swing', 'toll', 'pa', '1-1'))
+                    CHECK (type IN ('standard', 'scalp', 'swing', 'toll', 'pa', '1-1', 'risky'))
             )
         """)
 
@@ -429,6 +430,14 @@ async def _run_migrations(conn):
         """
         ALTER TABLE signals ADD COLUMN IF NOT EXISTS manual_tp_price DOUBLE PRECISION;
         """,
+        # Widen the type CHECK constraint to include 'risky'. Runs every startup
+        # (drop-if-exists then re-add) so DBs migrated before the risky type
+        # existed pick up the new value without a manual step.
+        """
+        ALTER TABLE signals DROP CONSTRAINT IF EXISTS signals_type_check;
+        ALTER TABLE signals ADD CONSTRAINT signals_type_check
+            CHECK (type IN ('standard', 'scalp', 'swing', 'toll', 'pa', '1-1', 'risky'));
+        """,
     ]
 
     for migration in migrations:
@@ -437,6 +446,7 @@ async def _run_migrations(conn):
     logger.debug(f"Ran {len(migrations)} database migrations")
 
     await _migrate_scalp_to_type(conn)
+    await _migrate_risky_gold_type(conn)
 
 
 async def _migrate_scalp_to_type(conn):
@@ -507,7 +517,7 @@ async def _migrate_scalp_to_type(conn):
             ) THEN
                 ALTER TABLE signals
                 ADD CONSTRAINT signals_type_check
-                CHECK (type IN ('standard', 'scalp', 'swing', 'toll', 'pa', '1-1'));
+                CHECK (type IN ('standard', 'scalp', 'swing', 'toll', 'pa', '1-1', 'risky'));
             END IF;
         END $$;
         """
@@ -515,3 +525,35 @@ async def _migrate_scalp_to_type(conn):
 
     await conn.execute("ALTER TABLE signals DROP COLUMN scalp")
     logger.info("Migrated signals.scalp → signals.type and dropped scalp column")
+
+
+async def _migrate_risky_gold_type(conn):
+    """Backfill type='risky' for existing risky-gold signals.
+
+    The risky-gold channel was originally classified as 'scalp'; those rows are
+    retyped to 'risky' so reporting and per-type config treat them consistently
+    with newly parsed risky signals. Idempotent — only touches rows not already
+    'risky'.
+    """
+    try:
+        channels_path = Path(__file__).resolve().parent.parent / "config" / "channels.json"
+        channels = json.loads(channels_path.read_text(encoding="utf-8")).get(
+            "monitored_channels", {}
+        )
+    except Exception as e:
+        logger.warning(f"Could not load channels.json for risky-gold backfill: {e}")
+        return
+
+    risky_channel_id = channels.get("risky-gold")
+    if not risky_channel_id or not str(risky_channel_id).isdigit():
+        return
+
+    await conn.execute(
+        """
+        UPDATE signals
+        SET type = 'risky'
+        WHERE CAST(channel_id AS TEXT) = $1
+          AND type != 'risky'
+        """,
+        str(risky_channel_id),
+    )

@@ -122,6 +122,7 @@ class AlertSystem:
             "auto_tp_sent": 0,
             "spread_hour_cancelled": 0,
             "late_market_cancelled": 0,
+            "risky_window_cancelled": 0,
             "news_cancelled": 0,
             "nm_cancelled": 0,
             "total_alerts": 0,
@@ -1320,6 +1321,7 @@ class AlertSystem:
             "expired",
             "spread_hour_cancelled",
             "late_market_cancelled",
+            "risky_window_cancelled",
             "near_miss_cancelled",
         }
         if event in _TERMINAL_EVENTS:
@@ -1430,6 +1432,29 @@ class AlertSystem:
             return True
         except Exception as e:
             logger.error(f"Failed to send late market cancel alert: {e}")
+            self.stats["errors"] += 1
+            return False
+
+    async def send_risky_window_cancel_alert(self, signal: Dict, current_price: float) -> bool:
+        signal_id = signal.get("signal_id")
+        if signal_id not in self.signal_messages:
+            logger.debug(
+                f"Risky window cancel for signal {signal_id}: no persistent embed, skipping alert"
+            )
+            await self._archive_manager.maybe_delete_original_message(signal, signal_id)
+            return True
+        try:
+            await self.update_signal_message(
+                signal=signal,
+                event="risky_window_cancelled",
+                current_price=current_price,
+                ping_text="Signal cancelled — risky trades disabled.",
+            )
+            self.stats["risky_window_cancelled"] = self.stats.get("risky_window_cancelled", 0) + 1
+            self.stats["total_alerts"] += 1
+            return True
+        except Exception as e:
+            logger.error(f"Failed to send risky window cancel alert: {e}")
             self.stats["errors"] += 1
             return False
 

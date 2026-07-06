@@ -10,6 +10,7 @@ import discord
 import pytz
 
 from models.signal import LimitData
+from price_feeds.risky_window import is_risky_trading_disabled
 from utils.config_loader import load_settings
 from utils.logger import get_logger
 
@@ -708,6 +709,22 @@ class StreamingPriceMonitor:
                 await self._cancel_signal_during_guard(signal, current_price, "news", news_event)
                 return
 
+            # Risky-trading disabled window: fresh risky entries hit during a
+            # scheduled window are cancelled; an already-HIT risky signal rides
+            # the window out and takes its hit normally below.
+            if (
+                signal.get("type") == "risky"
+                and signal.get("status") != "hit"
+                and is_risky_trading_disabled()
+            ):
+                logger.info(
+                    f"Risky window: suppressing limit hit for signal "
+                    f"{signal['signal_id']} limit #{limit['sequence_number']} "
+                    f"({signal['instrument']} @ {current_price:.5f})"
+                )
+                await self._cancel_signal_during_guard(signal, current_price, "risky_window")
+                return
+
             if is_spread_hour and not self._is_crypto_signal(signal):
                 # An already-HIT signal rides out spread hour: this limit hit is
                 # ignored for now and will be marked normally once spread hour
@@ -865,6 +882,18 @@ class StreamingPriceMonitor:
             is_hit = current_price >= stop_loss
 
         if is_hit:
+            if (
+                signal.get("type") == "risky"
+                and signal.get("status") != "hit"
+                and is_risky_trading_disabled()
+            ):
+                logger.info(
+                    f"Risky window: suppressing stop loss hit for signal "
+                    f"{signal['signal_id']} ({signal['instrument']} @ {current_price:.5f})"
+                )
+                await self._cancel_signal_during_guard(signal, current_price, "risky_window")
+                return
+
             if is_spread_hour and not self._is_crypto_signal(signal):
                 # An already-HIT signal rides out spread hour: this SL hit is
                 # ignored for now and will be marked normally once spread hour
@@ -919,6 +948,8 @@ class StreamingPriceMonitor:
             await self.alert_system.send_news_cancel_alert(signal, current_price, news_event)
         elif reason == "late_market":
             await self.alert_system.send_late_market_cancel_alert(signal, current_price)
+        elif reason == "risky_window":
+            await self.alert_system.send_risky_window_cancel_alert(signal, current_price)
         else:
             await self.alert_system.send_spread_hour_cancel_alert(signal, current_price)
         self._react_async(signal, "❌")
@@ -926,6 +957,8 @@ class StreamingPriceMonitor:
             await self._process_news_cancel(signal, news_event)
         elif reason == "late_market":
             await self._process_late_market_cancel(signal)
+        elif reason == "risky_window":
+            await self._process_risky_window_cancel(signal)
         else:
             await self._process_spread_hour_cancel(signal)
 
@@ -1213,6 +1246,29 @@ class StreamingPriceMonitor:
                 logger.error(f"Failed to cancel signal {signal_id} for late market hour")
         except Exception as e:
             logger.error(f"Error cancelling signal {signal_id} for late market hour: {e}")
+
+    async def _process_risky_window_cancel(self, signal: Dict):
+        """Cancel a risky signal that triggered during a disabled window."""
+        signal_id = signal["signal_id"]
+        try:
+            success = await self.signal_db.manually_set_signal_status(
+                signal_id,
+                "cancelled",
+                reason="risky_window_auto_cancel",
+                closed_reason="risky_window",
+            )
+            if success:
+                self.sync_signal_status_in_memory(signal_id, "cancelled")
+                logger.info(f"Signal {signal_id} cancelled due to risky disabled window")
+                self.tp_monitor.evict_signal(signal_id)
+                await self._maybe_unsubscribe_symbol(signal["instrument"], signal_id)
+                self.stats["risky_window_cancels"] = (
+                    self.stats.get("risky_window_cancels", 0) + 1
+                )
+            else:
+                logger.error(f"Failed to cancel signal {signal_id} for risky window")
+        except Exception as e:
+            logger.error(f"Error cancelling signal {signal_id} for risky window: {e}")
 
     async def _process_news_cancel(self, signal: Dict, news_event) -> None:
         """Cancel a signal that was triggered during an active news window."""

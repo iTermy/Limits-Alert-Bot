@@ -28,6 +28,7 @@ _END_STATES = {
     "near_miss_cancelled",
     "spread_hour_cancelled",
     "late_market_cancelled",
+    "risky_window_cancelled",
     "expired",
     "breakeven",
 }
@@ -204,6 +205,8 @@ class ArchiveManager:
                                         rebuild_event = "spread_hour_cancelled"
                                     elif cancel_type_db == "late_market":
                                         rebuild_event = "late_market_cancelled"
+                                    elif cancel_type_db == "risky_window":
+                                        rebuild_event = "risky_window_cancelled"
 
                                 guild_id_val = sig_data.get("guild_id")
                                 if not guild_id_val and self.bot and self.bot.guilds:
