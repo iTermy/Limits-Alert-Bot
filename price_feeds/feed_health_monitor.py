@@ -7,6 +7,8 @@ import asyncio
 import faulthandler
 import logging
 import os
+import subprocess
+import sys
 import threading
 import time
 from collections import defaultdict
@@ -33,14 +35,34 @@ STARTUP_GRACE_PERIOD_SECONDS = 120
 # the event loop is healthy; a daemon thread (which survives a frozen loop)
 # hard-exits the process if that stamp stops advancing. This is the only backstop
 # that works when a synchronous call wedges the loop itself (e.g. a blocking
-# subprocess spawn) — at that point graceful shutdown is impossible, so we exit
-# and let the main.py supervisor relaunch a fresh instance.
+# subprocess spawn) — at that point graceful shutdown is impossible. os._exit
+# kills main.py's in-process supervisor too, so the watchdog first spawns a fresh
+# replacement (_relaunch_process) and then exits; no external wrapper is needed.
 LOOP_HEARTBEAT_INTERVAL_SECONDS = 10
 LOOP_WATCHDOG_POLL_SECONDS = 15
 LOOP_FREEZE_RESTART_SECONDS = 120
 
 # Where the watchdog writes all-thread stack dumps when it detects a freeze.
 FREEZE_DUMP_DIR = "data/logs"
+
+
+def _relaunch_process():
+    """Spawn a fresh copy of the bot before the caller hard-exits.
+
+    The loop-freeze watchdog exits from a daemon thread with os._exit, which
+    tears down main.py's in-process restart supervisor too — so without this a
+    wedged loop leaves nothing to relaunch the bot unless an external wrapper is
+    running. Spawning a replacement here lets a plain `python main.py` self-heal
+    on its own. The replacement inherits the current console so its output keeps
+    flowing to the same terminal.
+    """
+    try:
+        script = os.path.abspath(sys.argv[0])
+        cmd = [sys.executable, script, *sys.argv[1:]]
+        subprocess.Popen(cmd, cwd=os.path.dirname(script) or None)
+        logger.critical("Spawned replacement process: %s", " ".join(cmd))
+    except Exception as e:
+        logger.error("Failed to spawn replacement process: %s", e)
 
 # Price-flow watchdog: when at least one subscribed symbol's market should be
 # open but ZERO ticks have arrived across EVERY feed for this long, the bot is
@@ -208,6 +230,7 @@ class FeedHealthMonitor:
                     stalled,
                 )
                 self._dump_all_thread_stacks()
+                _relaunch_process()
                 logging.shutdown()
                 os._exit(1)
 

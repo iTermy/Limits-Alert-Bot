@@ -24,7 +24,14 @@ def _send(obj: dict):
 
 
 def _read_commands(subscribed: set, lock: threading.Lock, shutdown_event: threading.Event):
-    """Read JSON commands from stdin in a background thread."""
+    """Read JSON commands from stdin in a background thread.
+
+    Returns (setting shutdown_event) either on an explicit shutdown command or
+    when stdin reaches EOF — the latter means the parent process is gone. In
+    that case the worker must release its MT5 terminal and exit rather than
+    linger as an orphan; a relaunched parent spawns a fresh worker, and two
+    workers cannot share the same Exness terminal.
+    """
     for line in sys.stdin:
         line = line.strip()
         if not line:
@@ -51,6 +58,9 @@ def _read_commands(subscribed: set, lock: threading.Lock, shutdown_event: thread
         elif action == "shutdown":
             shutdown_event.set()
             return
+
+    # stdin closed — parent exited. Stop polling so the terminal is released.
+    shutdown_event.set()
 
 
 def main():
