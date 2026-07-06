@@ -225,7 +225,7 @@ class LifecycleCog(BaseCog):
                 price = format_price(l["price_level"], instrument)
                 if l["status"] == "hit":
                     pnl_str = ""
-                    entry = l.get("hit_price") or l["price_level"]
+                    entry = l["price_level"]
                     if close_price is not None:
                         try:
                             pnl_val = self.tp_config.calculate_pnl(

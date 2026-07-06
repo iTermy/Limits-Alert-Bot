@@ -123,7 +123,7 @@ def _build_signal_embed(
             if per_limit_pnl:
                 limit_lines.append(f"~~Limit #{seq}: {price}~~ ✅  +{per_limit_pnl}")
             elif current_price is not None and _tp_config is not None:
-                entry = lim.get("hit_price") or lim.get("price_level")
+                entry = lim.get("price_level")
                 if entry:
                     try:
                         pnl_val = _tp_config.calculate_pnl(
@@ -300,7 +300,7 @@ def _build_profit_archive_embed(
         for l in hit_limits:
             seq = l.get("sequence_number", "?")
             price = _fmt(l.get("price_level", 0))
-            entry = l.get("hit_price") or l.get("price_level")
+            entry = l.get("price_level")
             if close_price is not None and entry and _tp_config is not None:
                 try:
                     pnl_val = _tp_config.calculate_pnl(

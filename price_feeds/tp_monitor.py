@@ -6,7 +6,7 @@ one limit hit (status = HIT).
 
 Logic per price tick:
   - Identify the "last" hit limit (highest sequence_number).
-  - Calculate its P&L from hit_price → current price.
+  - Calculate its P&L from the limit price → current price.
   - If only 1 limit is hit: last_pnl >= tp_threshold → auto-profit.
   - If 2+ limits hit: last_pnl >= tp_threshold AND sum(pnl of all others) >= 0.
 
@@ -115,7 +115,7 @@ class AutoTPMonitor:
         close_price = current_bid if direction == "long" else current_ask
 
         # P&L for the last limit
-        last_entry = last_limit.get("hit_price") or last_limit.get("price_level")
+        last_entry = last_limit.get("price_level")
         if last_entry is None:
             logger.warning(f"Signal {signal_id}: last limit has no entry price, skipping TP check")
             return False
@@ -137,7 +137,7 @@ class AutoTPMonitor:
         if earlier_limits:
             combined_earlier_pnl = 0.0
             for lim in earlier_limits:
-                entry = lim.get("hit_price") or lim.get("price_level")
+                entry = lim.get("price_level")
                 if entry is None:
                     logger.warning(f"Signal {signal_id}: limit {lim.get('id')} has no entry price")
                     continue
@@ -152,7 +152,7 @@ class AutoTPMonitor:
         cumulative_pnl = last_pnl
         if earlier_limits:
             for lim in earlier_limits:
-                entry = lim.get("hit_price") or lim.get("price_level")
+                entry = lim.get("price_level")
                 if entry is not None:
                     cumulative_pnl += self.tp_config.calculate_pnl(
                         instrument, direction, entry, close_price, signal_type=signal_type
@@ -195,7 +195,7 @@ class AutoTPMonitor:
         if close_price is not None:
             for lim in hit_limits:
                 seq = lim.get("sequence_number")
-                entry = lim.get("hit_price") or lim.get("price_level")
+                entry = lim.get("price_level")
                 if seq is not None and entry is not None:
                     pnl = self.tp_config.calculate_pnl(
                         instrument, direction, entry, close_price, signal_type=signal_type
