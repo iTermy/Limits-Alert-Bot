@@ -352,7 +352,7 @@ class VolatilityGuard:
         title = "⚡ Volatility Guard — Market-Wide" if is_all else f"⚡ Volatility Guard — {key}"
         if is_all:
             description = (
-                f"Sharp move detected on **{symbol}** — flagging the whole board as volatile."
+                f"Sharp move detected on **{symbol}** — flagging market as volatile."
             )
         else:
             description = f"Sharp move detected on **{key}**."

@@ -803,6 +803,10 @@ class StreamingPriceMonitor:
             ):
                 return
 
+            # Suppress approaching alerts for risky signals during a disabled window
+            if signal.get("type") == "risky" and is_risky_trading_disabled():
+                return
+
             if limit["sequence_number"] == 1:
                 try:
                     approaching_distance = self.alert_config.get_approaching_distance(

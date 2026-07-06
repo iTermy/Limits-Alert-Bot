@@ -116,7 +116,7 @@ class RiskyWindowAnnouncer:
         embed = discord.Embed(
             title="🚫 Risky Trades Disabled",
             description=(
-                f"Risky-gold trading is paused during a scheduled low-liquidity window.\n"
+                f"Risky-gold trading is paused during a scheduled window.\n"
                 f"{end_line}"
                 f"Any risky signal hit or near-missed during this window is auto-cancelled."
             ),
