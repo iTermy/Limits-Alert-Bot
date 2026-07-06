@@ -907,6 +907,7 @@ class ThresholdsCog(BaseCog):
 
             unit = nm_type if nm_type else "?"
             if target_lower in NM_RISKY_TARGETS:
+                unit = nm_type or "dollars"
                 curve = self.nm_config.describe_curve("XAUUSD", signal_type="risky")
             elif target_lower in ASSET_CLASSES:
                 curve = self.nm_config.describe_curve("EURUSD")

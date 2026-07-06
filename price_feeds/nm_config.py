@@ -173,30 +173,28 @@ class NMConfig(BaseThresholdConfig):
     def _get_config_entry(self, symbol: str, signal_type: str = None) -> Dict:
         """Resolve the NM entry for a symbol, optionally scoped to a signal type.
 
-        Resolution order (mirrors the TP config):
+        A signal type's own config takes precedence over generic overrides, so a
+        risky-gold signal always uses the risky config even when a global XAUUSD
+        override exists. Resolution order:
           1. type_overrides[signal_type][SYMBOL]
-          2. overrides[SYMBOL]
-          3. type_overrides[signal_type][asset_class]
+          2. type_overrides[signal_type][asset_class]
+          3. overrides[SYMBOL]
           4. defaults[asset_class]
           5. defaults[forex]
         """
         s = symbol.upper()
         asset_class = self.determine_asset_class(symbol)
-        typed = bool(signal_type) and signal_type != "standard"
 
-        if typed:
+        if signal_type and signal_type != "standard":
             type_bucket = self.config.get("type_overrides", {}).get(signal_type, {})
             if s in type_bucket:
                 return type_bucket[s]
+            if asset_class in type_bucket:
+                return type_bucket[asset_class]
 
         overrides = self.config.get("overrides", {})
         if s in overrides:
             return overrides[s]
-
-        if typed:
-            type_bucket = self.config.get("type_overrides", {}).get(signal_type, {})
-            if asset_class in type_bucket:
-                return type_bucket[asset_class]
 
         defaults = self.config.get("defaults", {})
         return defaults.get(asset_class, defaults.get("forex", {}))
