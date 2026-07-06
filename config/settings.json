@@ -14,7 +14,7 @@
   },
   "license_role_name": "Signal Subscriber",
   "gold_tolls_sl_offset": 5.0,
-  "risky_gold_sl_offset": 5.0,
+  "risky_gold_sl_offset": 10.0,
   "news_autofetch": {
     "enabled": true,
     "impact_levels": [

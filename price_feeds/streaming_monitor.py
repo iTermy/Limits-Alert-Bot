@@ -578,6 +578,22 @@ class StreamingPriceMonitor:
                 )
                 return
 
+        # An already-HIT risky signal is cancelled outright the moment a disabled
+        # window is active — risky trades do not ride the window out. Active
+        # signals are handled by the per-hit / per-SL guards below (cancelled only
+        # if they actually trigger during the window).
+        if (
+            signal.get("status") == "hit"
+            and signal.get("type") == "risky"
+            and is_risky_trading_disabled()
+        ):
+            logger.info(
+                f"Risky window: cancelling open HIT signal "
+                f"{signal['signal_id']} ({signal['instrument']})"
+            )
+            await self._cancel_signal_during_guard(signal, current_price, "risky_window")
+            return
+
         for limit in signal.get("pending_limits", []):
             await self._check_limit(
                 signal, limit, current_price, direction,
@@ -709,9 +725,9 @@ class StreamingPriceMonitor:
                 await self._cancel_signal_during_guard(signal, current_price, "news", news_event)
                 return
 
-            # Risky-trading disabled window: fresh risky entries hit during a
-            # scheduled window are cancelled; an already-HIT risky signal rides
-            # the window out and takes its hit normally below.
+            # Risky-trading disabled window: an active risky entry hit during a
+            # scheduled window is cancelled. Already-HIT risky signals are
+            # cancelled outright in _check_signal before reaching this point.
             if (
                 signal.get("type") == "risky"
                 and signal.get("status") != "hit"

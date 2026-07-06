@@ -59,7 +59,7 @@ def invalidate_gold_tolls_sl_cache() -> None:
 # !riskygoldsl, stored in settings.json → risky_gold_sl_offset
 # ---------------------------------------------------------------------------
 
-_RISKY_GOLD_SL_OFFSET_DEFAULT = 5.0
+_RISKY_GOLD_SL_OFFSET_DEFAULT = 10.0
 _risky_gold_sl_cache: float = _RISKY_GOLD_SL_OFFSET_DEFAULT
 _risky_gold_sl_cache_ts: float = 0.0
 

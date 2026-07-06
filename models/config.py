@@ -36,7 +36,7 @@ class BotSettings(BaseModel):
     spread_buffer_config: SpreadBufferConfig = Field(default_factory=SpreadBufferConfig)
     license_role_name: str = "Signal Subscriber"
     gold_tolls_sl_offset: float = 5.0
-    risky_gold_sl_offset: float = 5.0
+    risky_gold_sl_offset: float = 10.0
     us_market_holidays: list[str] = Field(default_factory=list)
     news_autofetch: NewsAutofetchConfig = Field(default_factory=NewsAutofetchConfig)
 
