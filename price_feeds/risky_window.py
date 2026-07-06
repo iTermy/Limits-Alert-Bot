@@ -17,8 +17,10 @@ This module owns two things:
 from __future__ import annotations
 
 import asyncio
+import json
 from datetime import datetime, timezone
 from datetime import time as dtime
+from pathlib import Path
 from typing import List, Optional, Tuple
 
 import discord
@@ -26,6 +28,10 @@ import discord
 from utils.logger import get_logger
 
 logger = get_logger("risky_window")
+
+# Persisted reference to the currently-posted "disabled" embed, so a restart
+# mid-window reuses the existing embed instead of orphaning it.
+_STATE_PATH = Path(__file__).resolve().parent.parent / "data" / "risky_window_state.json"
 
 # Daily windows (UTC) during which risky-gold trading is disabled. None of these
 # cross midnight, so a simple ``start <= now < end`` check per window suffices.
@@ -68,6 +74,39 @@ def _windows_label() -> str:
     )
 
 
+def _save_state(message_id: int, channel_id: int, window_end: Optional[datetime]) -> None:
+    """Persist the posted disabled-embed reference so a restart can reattach."""
+    data = {
+        "message_id": message_id,
+        "channel_id": channel_id,
+        "window_end": window_end.isoformat() if window_end else None,
+    }
+    try:
+        _STATE_PATH.parent.mkdir(parents=True, exist_ok=True)
+        _STATE_PATH.write_text(json.dumps(data, indent=2), encoding="utf-8")
+    except Exception as e:
+        logger.error(f"Failed to save risky-window state: {e}")
+
+
+def _load_state() -> Optional[dict]:
+    """Read the persisted disabled-embed reference, or None if absent/unreadable."""
+    if not _STATE_PATH.exists():
+        return None
+    try:
+        return json.loads(_STATE_PATH.read_text(encoding="utf-8"))
+    except Exception as e:
+        logger.error(f"Failed to read risky-window state: {e}")
+        return None
+
+
+def _clear_state() -> None:
+    """Drop the persisted disabled-embed reference."""
+    try:
+        _STATE_PATH.unlink(missing_ok=True)
+    except Exception as e:
+        logger.warning(f"Failed to clear risky-window state: {e}")
+
+
 class RiskyWindowAnnouncer:
     """Announces the start/end of each risky-disabled window in the risky channel."""
 
@@ -91,12 +130,48 @@ class RiskyWindowAnnouncer:
             self._task = None
 
     async def _loop(self) -> None:
+        await self.bot.wait_until_ready()
+        await self._recover_persisted_message()
         while True:
             try:
                 await self._evaluate()
             except Exception as e:
                 logger.error(f"Risky window announcer error: {e}", exc_info=True)
             await asyncio.sleep(_CHECK_INTERVAL_SECONDS)
+
+    async def _recover_persisted_message(self) -> None:
+        """Reattach to a persisted "disabled" embed after a restart.
+
+        If a window is still active and the persisted embed belongs to it, reuse
+        it so no duplicate is posted. Otherwise the embed is stale (its window
+        ended while the bot was down) — delete it and start fresh.
+        """
+        state = _load_state()
+        message_id = state.get("message_id") if state else None
+        if not message_id:
+            return
+        try:
+            msg = await self.channel.fetch_message(message_id)
+        except discord.NotFound:
+            _clear_state()
+            return
+        except Exception as e:
+            logger.warning(f"Could not fetch persisted risky-window message: {e}")
+            return
+
+        end = current_window_end()
+        if end is not None and end.isoformat() == state.get("window_end"):
+            self._message = msg
+            self._active = True
+            logger.info("Recovered active risky-disabled embed after restart")
+            return
+
+        # Stale embed from an ended (or different) window — remove it and reset.
+        try:
+            await msg.delete()
+        except Exception:
+            pass
+        _clear_state()
 
     async def _evaluate(self) -> None:
         disabled = is_risky_trading_disabled()
@@ -126,12 +201,14 @@ class RiskyWindowAnnouncer:
         embed.set_footer(text=f"Disabled windows (UTC): {_windows_label()}")
         try:
             self._message = await self.channel.send(embed=embed)
+            _save_state(self._message.id, self.channel.id, end)
         except Exception as e:
             logger.error(f"Failed to send risky-disabled embed: {e}")
 
     async def _send_resumed(self) -> None:
         msg = self._message
         self._message = None
+        _clear_state()
         resumed_ts = int(datetime.now(timezone.utc).timestamp())
         embed = discord.Embed(
             title="✅ Risky Trades Resumed",

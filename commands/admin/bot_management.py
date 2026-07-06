@@ -653,6 +653,44 @@ class BotManagementCog(BaseCog):
         )
         await ctx.send(embed=embed)
 
+    @commands.command(name="deletemessage", aliases=["delmsg", "deletemsg"])
+    @commands.check(lambda ctx: ctx.cog.is_admin(ctx.author))
+    async def delete_message(self, ctx: commands.Context, message_id: int = None):
+        """Delete a message by ID (Admin only).
+
+        Searches the current channel first, then every text channel in the guild.
+        Usage:  !deletemessage <message_id>
+        """
+        if message_id is None:
+            await ctx.send("❌ Usage: `!deletemessage <message_id>`")
+            return
+
+        channels = [ctx.channel] + [
+            ch for ch in ctx.guild.text_channels if ch.id != ctx.channel.id
+        ]
+        for channel in channels:
+            try:
+                msg = await channel.fetch_message(message_id)
+            except (discord.NotFound, discord.Forbidden):
+                continue
+            except Exception as e:
+                self.logger.warning(f"Error fetching message {message_id} in #{channel.name}: {e}")
+                continue
+
+            try:
+                await msg.delete()
+            except Exception as e:
+                await ctx.send(f"❌ Found the message in #{channel.name} but could not delete it: {e}")
+                return
+
+            self.logger.info(
+                f"Message {message_id} in #{channel.name} deleted by {ctx.author}"
+            )
+            await ctx.send(f"✅ Deleted message `{message_id}` from #{channel.name}")
+            return
+
+        await ctx.send(f"❌ Message `{message_id}` not found in any channel.")
+
     @commands.command(name="admin")
     @commands.check(lambda ctx: ctx.cog.is_admin(ctx.author))
     async def admin_commands_list(self, ctx: commands.Context):
@@ -665,7 +703,9 @@ class BotManagementCog(BaseCog):
                 "`!goldtollssl [value]` — Get/set gold tolls SL offset ($)\n"
                 "  Aliases: `!gtsl`, `!goldtollsl`\n"
                 "`!riskygoldsl [value]` — Get/set risky-gold SL offset ($)\n"
-                "  Aliases: `!rgsl`, `!riskysl`"
+                "  Aliases: `!rgsl`, `!riskysl`\n"
+                "`!deletemessage <message_id>` — Delete a message by ID\n"
+                "  Aliases: `!delmsg`, `!deletemsg`"
             ),
             inline=False,
         )
