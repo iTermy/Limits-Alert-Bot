@@ -419,6 +419,18 @@ class FeedHealthMonitor:
         # Check each actively subscribed symbol
         stale_symbols = []
 
+        # Post-reopen grace: a feed is only "stale" if the market has been open
+        # for the entire preceding staleness window — not merely open at this
+        # instant. Right when a market reopens (spread-hour end at 18:00 ET, the
+        # daily forex break, Sunday open, post-holiday open) the last tick is
+        # still old because the feed was legitimately quiet while closed, and the
+        # persistent streams take a moment to deliver their first post-reopen
+        # tick. Flagging that gap as a failure fired an unnecessary reconnect —
+        # and the Exness MT5 subprocess reconnect wedges the Windows event loop,
+        # forcing the daily 6 PM hard restart. Requiring the market to have been
+        # open a full window ago removes that false positive uniformly.
+        reopen_grace_cutoff = datetime.now(self.est) - stale_threshold
+
         for symbol, last_update in feed_symbols.items():
             time_since_update = now - last_update
 
@@ -426,7 +438,9 @@ class FeedHealthMonitor:
                 # Check if market should be open for this symbol
                 asset_class = self.symbol_mapper.determine_asset_class(symbol)
 
-                if self.is_market_open(asset_class):
+                if self.is_market_open(asset_class) and self.is_market_open(
+                    asset_class, at=reopen_grace_cutoff
+                ):
                     stale_symbols.append(
                         {
                             "symbol": symbol,
@@ -650,9 +664,15 @@ class FeedHealthMonitor:
         except Exception as e:
             logger.error(f"Failed to send custom alert: {e}")
 
-    def is_market_open(self, asset_class: str) -> bool:
-        """Return True if the market is expected to be open (used to avoid false stale alerts)."""
-        now = datetime.now(self.est)
+    def is_market_open(self, asset_class: str, at: datetime = None) -> bool:
+        """Return True if the market is expected to be open at `at` (default: now).
+
+        Used both to avoid false stale alerts and to enforce a post-reopen
+        grace: callers pass a past `at` to ask "was the market already open a
+        full staleness window ago?". `at` should be timezone-aware; a naive
+        value is interpreted as system-local.
+        """
+        now = datetime.now(self.est) if at is None else at.astimezone(self.est)
 
         if asset_class == "forex_jpy":
             asset_class = "forex"
