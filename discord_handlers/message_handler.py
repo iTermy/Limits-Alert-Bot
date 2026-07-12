@@ -12,6 +12,7 @@ import pytz
 
 from core.parser import RejectedSignal, parse_signal
 from database import db
+from models.signal import SignalData
 from price_feeds.embed_builders import _build_signal_embed, _set_archive_footer
 from price_feeds.streaming_monitor import react_to_original_signal
 from price_feeds.tp_config import TPConfig
@@ -78,11 +79,11 @@ class MessageHandler:
         await self.check_signal_management_reply(message)
         await self.check_alert_management_reply(message)
 
-    async def _react_to_original_signal(self, signal: dict, action_taken: str):
+    async def _react_to_original_signal(self, signal: SignalData, action_taken: str):
         """Add a reaction to the original signal message based on the action taken."""
         try:
-            message_id = signal.get("message_id")
-            channel_id = signal.get("channel_id")
+            message_id = signal.message_id
+            channel_id = signal.channel_id
             if not message_id or not channel_id or str(message_id).startswith("manual_"):
                 self.logger.debug(
                     "Skipping original message reaction - manual signal or missing IDs"
@@ -198,16 +199,20 @@ class MessageHandler:
             if not await self.has_bot_success_reaction(referenced):
                 return
 
-            signal = await self.signal_db.get_signal_by_message_id(str(referenced.id))
-            if not signal:
+            row = await self.signal_db.get_signal_by_message_id(str(referenced.id))
+            if not row:
                 return
 
             if not is_signal_manager(self.bot, message.author):
                 await self._deny_signal_management(message)
                 return
 
+            signal = await self.signal_db.get_signal_with_limits(row["id"])
+            if not signal:
+                return
+
             await self._handle_reply_command(
-                message, referenced, signal, signal["id"], from_signal_reply=True
+                message, referenced, signal, signal.signal_id, from_signal_reply=True
             )
 
         except Exception as e:
@@ -217,7 +222,7 @@ class MessageHandler:
         self,
         message: discord.Message,
         referenced: discord.Message,
-        signal: dict,
+        signal: SignalData,
         signal_id: int,
         from_signal_reply: bool = False,
     ) -> None:
@@ -250,17 +255,16 @@ class MessageHandler:
 
             elif command in ("profit", "win", "tp"):
                 # Auto-hit first pending limit if no limits have been hit yet
-                if not signal.get("hit_limits"):
+                if not signal.hit_limits:
                     pending = sorted(
-                        signal.get("pending_limits") or [],
-                        key=lambda l: l.get("sequence_number", 999),
+                        signal.pending_limits, key=lambda l: l.sequence_number
                     )
                     if pending:
                         try:
-                            await db.mark_limit_hit(pending[0]["id"], pending[0]["price_level"])
+                            await db.mark_limit_hit(pending[0].id, pending[0].price_level)
                             if self.bot.services.monitor:
                                 self.bot.services.monitor._mutate_limit_hit_in_memory(
-                                    signal_id, pending[0]["id"], pending[0]["price_level"]
+                                    signal_id, pending[0].id, pending[0].price_level
                                 )
                             signal = (
                                 await self.signal_db.get_signal_with_limits(signal_id) or signal
@@ -283,7 +287,7 @@ class MessageHandler:
                 action_taken = "marked as PROFIT"
 
             elif command in ("hit",):
-                was_cancelled = signal.get("status") == "cancelled"
+                was_cancelled = signal.status == "cancelled"
                 transitioned = await asyncio.wait_for(
                     self.signal_db.manually_set_signal_to_hit(
                         signal_id, f"Set via {path} reply by {message.author.name}"
@@ -295,17 +299,15 @@ class MessageHandler:
                         monitor = self.bot.services.monitor
                         await self.bot.services.tp_monitor.refresh_hit_limits(signal_id)
                         if signal_id in monitor.active_signals:
-                            monitor.active_signals[signal_id]["status"] = "hit"
+                            monitor.active_signals[signal_id].status = "hit"
                             monitor.mark_first_pending_limit_hit_in_memory(signal_id)
                         elif was_cancelled:
                             reloaded = await self.signal_db.get_signal_with_limits(signal_id)
                             if reloaded:
-                                reloaded_for_monitor = dict(reloaded)
-                                reloaded_for_monitor["signal_id"] = signal_id
-                                reloaded_for_monitor["status"] = "hit"
-                                monitor.active_signals[signal_id] = reloaded_for_monitor
-                                monitor._annotate_asset_class(reloaded_for_monitor)
-                                sym = signal.get("instrument")
+                                reloaded.status = "hit"
+                                monitor.active_signals[signal_id] = reloaded
+                                monitor._annotate_asset_class(reloaded)
+                                sym = signal.instrument
                                 if sym:
                                     monitor.symbol_to_signals.setdefault(sym, [])
                                     if signal_id not in monitor.symbol_to_signals[sym]:
@@ -346,9 +348,9 @@ class MessageHandler:
                 action_taken = "marked as STOP LOSS"
 
             elif command in ("reactivate", "reopen", "active"):
-                if signal["status"] not in ("cancelled", "stop_loss"):
+                if signal.status not in ("cancelled", "stop_loss"):
                     await message.reply(
-                        f"❌ Signal is not reactivatable (current status: {signal['status']})",
+                        f"❌ Signal is not reactivatable (current status: {signal.status})",
                         delete_after=_REPLY_DELETE_AFTER,
                     )
                     await self._safe_delete(message)
@@ -385,17 +387,17 @@ class MessageHandler:
                         parsed = parse_signal(referenced.content, channel_name)
                     except Exception as e:
                         logger.debug(f"Could not parse referenced content for reactivate: {e}")
-                elif signal.get("message_id") and signal.get("channel_id"):
+                elif signal.message_id and signal.channel_id:
                     try:
-                        original_channel = self.bot.get_channel(int(signal["channel_id"]))
+                        original_channel = self.bot.get_channel(int(signal.channel_id))
                         if original_channel is None:
                             original_channel = await self.bot.fetch_channel(
-                                int(signal["channel_id"])
+                                int(signal.channel_id)
                             )
                         original_message = await original_channel.fetch_message(
-                            int(signal["message_id"])
+                            int(signal.message_id)
                         )
-                        channel_name = self.get_channel_name(int(signal["channel_id"]))
+                        channel_name = self.get_channel_name(int(signal.channel_id))
                         parsed = parse_signal(original_message.content, channel_name)
                     except Exception as e:
                         logger.info(
@@ -457,7 +459,7 @@ class MessageHandler:
             await self._safe_remove_reaction(referenced, "✅")
             await referenced.add_reaction("❌")
             if from_signal_reply:
-                sig_id = signal["signal_id"]
+                sig_id = signal.signal_id
                 has_embed = self.alert_system and sig_id in self.alert_system.signal_messages
                 if not has_embed:
                     is_purge_channel = (
@@ -479,16 +481,14 @@ class MessageHandler:
                         try:
                             finished_channel = self.alert_system._get_finished_channel()
                             if finished_channel:
-                                guild_id_val = signal.get("guild_id")
+                                guild_id_val = signal.guild_id
                                 if not guild_id_val and self.bot.guilds:
                                     guild_id_val = self.bot.guilds[0].id
-                                _embed_limits = (
-                                    signal.get("limits") or signal.get("pending_limits") or []
-                                )
+                                _embed_limits = signal.limits
                                 try:
                                     _full = await self.signal_db.get_signal_with_limits(sig_id)
                                     if _full:
-                                        _embed_limits = _full.get("limits") or _embed_limits
+                                        _embed_limits = _full.limits or _embed_limits
                                 except Exception as _lfe:
                                     self.logger.warning(
                                         f"Could not fetch limits for cancelled embed (signal {sig_id}): {_lfe}"
@@ -502,8 +502,8 @@ class MessageHandler:
                                 )
                                 _set_archive_footer(cancel_embed)
                                 ping_line = (
-                                    f"{self.alert_system.role_mention} ❌ **{signal['instrument']}** "
-                                    f"{signal['direction'].upper()} — cancelled by sender "
+                                    f"{self.alert_system.role_mention} ❌ **{signal.instrument}** "
+                                    f"{signal.direction.upper()} — cancelled by sender "
                                     f"(by {message.author.display_name})"
                                 )
                                 await finished_channel.send(ping_line)
@@ -579,7 +579,7 @@ class MessageHandler:
                 }
                 emoji = action_emoji_map.get(embed_event, "✅")
                 ping_text = (
-                    f"{emoji} **{signal['instrument']}** {signal['direction'].upper()} — "
+                    f"{emoji} **{signal.instrument}** {signal.direction.upper()} — "
                     f"manually {action_taken.lower()} (by {message.author.display_name})"
                 )
                 try:
@@ -873,7 +873,7 @@ class MessageHandler:
                             )
                             if updated_signal:
                                 ping_text = (
-                                    f"♻️ **{updated_signal['instrument']}** {updated_signal['direction'].upper()} — "
+                                    f"♻️ **{updated_signal.instrument}** {updated_signal.direction.upper()} — "
                                     f"signal reactivated by sender (edited)"
                                 )
                                 await self.alert_system.update_signal_message(
@@ -922,7 +922,7 @@ class MessageHandler:
                             )
                             if updated_signal:
                                 ping_text = (
-                                    f"📝 **{updated_signal['instrument']}** {updated_signal['direction'].upper()} — "
+                                    f"📝 **{updated_signal.instrument}** {updated_signal.direction.upper()} — "
                                     f"signal updated by sender"
                                 )
                                 await self.alert_system.update_signal_message(

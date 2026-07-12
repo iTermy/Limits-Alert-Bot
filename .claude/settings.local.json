@@ -69,7 +69,9 @@
       "Bash(./.venv/Scripts/python.exe -c \"import commands.views, price_feeds.embed_builders; print\\('OK'\\)\")",
       "Bash(./.venv/Scripts/python.exe -c \"import price_feeds.alert_system; print\\('OK'\\)\")",
       "Bash(./.venv/Scripts/python.exe -c \"import price_feeds.streaming_monitor; print\\('OK'\\)\")",
-      "Bash(./.venv/Scripts/python.exe -c \"import database.signal_ops; print\\('OK'\\)\")"
+      "Bash(./.venv/Scripts/python.exe -c \"import database.signal_ops; print\\('OK'\\)\")",
+      "Bash(./.venv/Scripts/python.exe \"C:/Users/ripyo/AppData/Local/Temp/claude/C--Python-Stuff-TM-Bot/77c48a67-df41-4245-b408-3ab81de98e68/scratchpad/mh_migrate.py\")",
+      "Bash(./.venv/Scripts/python.exe -c \"import discord_handlers.message_handler; print\\('OK'\\)\")"
     ],
     "additionalDirectories": [
       "C:\\Personal Projects\\MT5-Auto-Execution-Bot"
