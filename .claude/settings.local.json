@@ -73,7 +73,11 @@
       "Bash(./.venv/Scripts/python.exe \"C:/Users/ripyo/AppData/Local/Temp/claude/C--Python-Stuff-TM-Bot/77c48a67-df41-4245-b408-3ab81de98e68/scratchpad/mh_migrate.py\")",
       "Bash(./.venv/Scripts/python.exe -c \"import discord_handlers.message_handler; print\\('OK'\\)\")",
       "Bash(./.venv/Scripts/python.exe \"C:/Users/ripyo/AppData/Local/Temp/claude/C--Python-Stuff-TM-Bot/77c48a67-df41-4245-b408-3ab81de98e68/scratchpad/lc_migrate.py\")",
-      "Bash(./.venv/Scripts/python.exe -c \"import commands.signals.lifecycle; print\\('OK'\\)\")"
+      "Bash(./.venv/Scripts/python.exe -c \"import commands.signals.lifecycle; print\\('OK'\\)\")",
+      "Bash(./.venv/Scripts/python.exe \"C:/Users/ripyo/AppData/Local/Temp/claude/C--Python-Stuff-TM-Bot/77c48a67-df41-4245-b408-3ab81de98e68/scratchpad/rp_migrate.py\")",
+      "Bash(./.venv/Scripts/python.exe -c \"import commands.signals.reports; print\\('OK'\\)\")",
+      "Bash(./.venv/Scripts/python.exe \"C:/Users/ripyo/AppData/Local/Temp/claude/C--Python-Stuff-TM-Bot/77c48a67-df41-4245-b408-3ab81de98e68/scratchpad/final_migrate.py\")",
+      "Bash(./.venv/Scripts/python.exe -c \"import core.bot, core.expiry_manager, price_feeds.archive_manager, database.manager, database.signal_ops, discord_handlers.message_handler, commands.signals.reports; print\\('OK'\\)\")"
     ],
     "additionalDirectories": [
       "C:\\Personal Projects\\MT5-Auto-Execution-Bot"

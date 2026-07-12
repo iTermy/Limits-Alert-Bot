@@ -704,9 +704,9 @@ class MessageHandler:
 
             parts = []
             for sig in overlapping:
-                msg_id = str(sig["message_id"])
-                ch_id = sig["channel_id"]
-                label = f"Signal #{sig['id']} ({sig['instrument']} {sig['direction'].upper()})"
+                msg_id = str(sig.message_id)
+                ch_id = sig.channel_id
+                label = f"Signal #{sig.signal_id} ({sig.instrument} {sig.direction.upper()})"
                 if guild_id and not msg_id.startswith("manual_"):
                     url = f"https://discord.com/channels/{guild_id}/{ch_id}/{msg_id}"
                     label = f"[{label}]({url})"
@@ -747,7 +747,7 @@ class MessageHandler:
                     self.bot.services.alert_system if self.bot.services else None
                 )
                 for sig in overlapping:
-                    old_id = sig["id"]
+                    old_id = sig.signal_id
                     ok = await self.signal_db.manually_set_signal_status(
                         old_id,
                         "cancelled",
@@ -774,7 +774,7 @@ class MessageHandler:
                     if alert_system:
                         try:
                             ping = (
-                                f"❌ **{sig['instrument']}** {sig['direction'].upper()} — "
+                                f"❌ **{sig.instrument}** {sig.direction.upper()} — "
                                 f"cancelled (overlapped by signal #{new_signal_id})"
                             )
                             await alert_system.update_embed_for_signal_id(

@@ -100,8 +100,8 @@ class ArchiveManager:
         Delete the original signal message if its channel is in auto_purge_channel_ids.
         Safe to call on any signal — silently skips exempt channels and manual signals.
         """
-        src_channel_id = str(signal.get("channel_id", ""))
-        src_message_id = str(signal.get("message_id", ""))
+        src_channel_id = str(signal.channel_id or "")
+        src_message_id = str(signal.message_id or "")
         if (
             src_channel_id not in self.auto_purge_channel_ids
             or not src_message_id
@@ -185,8 +185,8 @@ class ArchiveManager:
                         new_embed = None
                         if sig_data:
                             try:
-                                db_status = sig_data.get("status", "")
-                                cancel_type_db = sig_data.get("closed_reason") or ""
+                                db_status = sig_data.status
+                                cancel_type_db = sig_data.closed_reason or ""
                                 _status_to_event = {
                                     "profit": "profit",
                                     "auto_tp": "auto_tp",
@@ -206,13 +206,13 @@ class ArchiveManager:
                                     elif cancel_type_db == "risky_window":
                                         rebuild_event = "risky_window_cancelled"
 
-                                guild_id_val = sig_data.get("guild_id")
+                                guild_id_val = sig_data.guild_id
                                 if not guild_id_val and self.bot and self.bot.guilds:
                                     guild_id_val = self.bot.guilds[0].id
 
                                 new_embed = _build_signal_embed(
                                     signal=sig_data,
-                                    limits=sig_data.get("limits", []),
+                                    limits=sig_data.limits,
                                     event=rebuild_event,
                                     guild_id=guild_id_val,
                                     bot=self.bot,

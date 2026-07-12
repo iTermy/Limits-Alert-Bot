@@ -52,10 +52,7 @@ class ReportsCog(BaseCog):
 
     @staticmethod
     def _hit_limits(signal):
-        return [
-            l for l in signal.get("limits", [])
-            if l.get("status") == "hit" or l.get("hit_alert_sent")
-        ]
+        return [l for l in signal.limits if l.status == "hit" or l.hit_alert_sent]
 
     def _tp_distance_raw(self, signal):
         """
@@ -71,17 +68,17 @@ class ReportsCog(BaseCog):
         hit = self._hit_limits(signal)
         if not hit:
             return None
-        direction = signal["direction"].lower()
-        instrument = signal["instrument"]
-        signal_type = (signal.get("type") or "standard").lower()
+        direction = signal.direction.lower()
+        instrument = signal.instrument
+        signal_type = signal.type.lower()
 
-        tp_price = signal.get("manual_tp_price")
+        tp_price = signal.manual_tp_price
         if tp_price is None:
-            tp_price = signal.get("tp_price")
+            tp_price = signal.tp_price
         if tp_price is not None:
             return sum(
                 self.tp_config.calculate_pnl(
-                    instrument, direction, l["price_level"], float(tp_price),
+                    instrument, direction, l.price_level, float(tp_price),
                     signal_type=signal_type,
                 )
                 for l in hit
@@ -93,11 +90,11 @@ class ReportsCog(BaseCog):
             self.tp_config.get_tp_value(instrument, signal_type=signal_type)
             * MANUAL_PROFIT_TP_FRACTION
         )
-        last_hit = max(hit, key=lambda l: l.get("sequence_number", 0))["price_level"]
+        last_hit = max(hit, key=lambda l: l.sequence_number).price_level
         return sum(
             target
             + self.tp_config.calculate_pnl(
-                instrument, direction, l["price_level"], last_hit,
+                instrument, direction, l.price_level, last_hit,
                 signal_type=signal_type,
             )
             for l in hit
@@ -108,8 +105,7 @@ class ReportsCog(BaseCog):
         raw = self._tp_distance_raw(signal)
         if raw is None:
             return ""
-        signal_type = (signal.get("type") or "standard").lower()
-        return self._format_distance(signal["instrument"], signal_type, raw)
+        return self._format_distance(signal.instrument, signal.type.lower(), raw)
 
     def _sl_distance_raw(self, signal):
         """
@@ -117,19 +113,16 @@ class ReportsCog(BaseCog):
         hit limit, of that limit's P&L to the stop loss. Returns None if the
         signal has no stop loss or no hit limits.
         """
-        sl = signal.get("stop_loss")
+        sl = signal.stop_loss
         if not sl:
             return None
         hit = self._hit_limits(signal)
         if not hit:
             return None
-        direction = signal["direction"].lower()
-        instrument = signal["instrument"]
-        signal_type = (signal.get("type") or "standard").lower()
         return sum(
             self.tp_config.calculate_pnl(
-                instrument, direction, l["price_level"], float(sl),
-                signal_type=signal_type,
+                signal.instrument, signal.direction.lower(), l.price_level, float(sl),
+                signal_type=signal.type.lower(),
             )
             for l in hit
         )
@@ -139,8 +132,7 @@ class ReportsCog(BaseCog):
         raw = self._sl_distance_raw(signal)
         if raw is None:
             return ""
-        signal_type = (signal.get("type") or "standard").lower()
-        return self._format_distance(signal["instrument"], signal_type, raw)
+        return self._format_distance(signal.instrument, signal.type.lower(), raw)
 
     @commands.command(name="report", description="Generate trading report")
     async def generate_report(self, ctx: commands.Context, *args):
@@ -237,13 +229,13 @@ class ReportsCog(BaseCog):
 
             # Fetch full signal details with limits for each signal
             enriched_signals = []
-            for signal in signals:
-                full_signal = await self.signal_db.get_signal_with_limits(signal["id"])
+            for period_row in signals:
+                full_signal = await self.signal_db.get_signal_with_limits(period_row["id"])
                 if full_signal:
                     # Merge the status and other info from period query
-                    full_signal["status"] = signal["status"]
-                    full_signal["channel_id"] = signal["channel_id"]
-                    full_signal["type"] = signal.get("type") or full_signal.get("type") or "standard"
+                    full_signal.status = period_row["status"]
+                    full_signal.channel_id = period_row["channel_id"]
+                    full_signal.type = period_row.get("type") or full_signal.type or "standard"
                     enriched_signals.append(full_signal)
 
             signals = enriched_signals
@@ -284,8 +276,8 @@ class ReportsCog(BaseCog):
             risky_signals = []
 
             for signal in signals:
-                channel_id = str(signal.get("channel_id", ""))
-                signal_type = (signal.get("type") or "standard").lower()
+                channel_id = str(signal.channel_id or "")
+                signal_type = signal.type.lower()
 
                 if channel_id in legends_channel_ids:
                     legends_signals.append(signal)
@@ -396,9 +388,9 @@ class ReportsCog(BaseCog):
                 )
 
             def trade_line(signal):
-                limits = signal.get("limits", [])
+                limits = signal.limits
                 if limits:
-                    first_limit = format_price(limits[0]["price_level"], signal["instrument"])
+                    first_limit = format_price(limits[0].price_level, signal.instrument)
                     limit_display = (
                         f"{first_limit}, +{len(limits) - 1} more"
                         if len(limits) > 1
@@ -407,26 +399,26 @@ class ReportsCog(BaseCog):
                 else:
                     limit_display = "N/A"
                 tp_label = self._tp_distance_label(signal)
-                direction_seg = signal["direction"].upper()
+                direction_seg = signal.direction.upper()
                 if tp_label:
                     direction_seg = f"{direction_seg} | {tp_label}"
                 return (
-                    f"#{signal['signal_id']} | {signal['instrument']} | "
+                    f"#{signal.signal_id} | {signal.instrument} | "
                     f"{limit_display} | {direction_seg} 🟢"
                 )
 
             def sl_line(signal):
                 sl_value = (
-                    format_price(signal.get("stop_loss"), signal["instrument"])
-                    if signal.get("stop_loss")
+                    format_price(signal.stop_loss, signal.instrument)
+                    if signal.stop_loss
                     else "N/A"
                 )
                 sl_label = self._sl_distance_label(signal)
-                direction_seg = signal["direction"].upper()
+                direction_seg = signal.direction.upper()
                 if sl_label:
                     direction_seg = f"{direction_seg} | {sl_label}"
                 return (
-                    f"#{signal['signal_id']} | {signal['instrument']} | "
+                    f"#{signal.signal_id} | {signal.instrument} | "
                     f"SL: {sl_value} | {direction_seg} 🛑"
                 )
 
@@ -455,7 +447,7 @@ class ReportsCog(BaseCog):
                     raw = self._tp_distance_raw(signal)
                     if raw is None:
                         continue
-                    asset_class = self.tp_config.determine_asset_class(signal["instrument"])
+                    asset_class = self.tp_config.determine_asset_class(signal.instrument)
                     if asset_class in ("forex", "forex_jpy"):
                         forex_pips += raw
                     elif asset_class == "metals":
@@ -464,7 +456,7 @@ class ReportsCog(BaseCog):
                     raw = self._sl_distance_raw(signal)
                     if raw is None:
                         continue
-                    asset_class = self.tp_config.determine_asset_class(signal["instrument"])
+                    asset_class = self.tp_config.determine_asset_class(signal.instrument)
                     if asset_class in ("forex", "forex_jpy"):
                         forex_pips += raw
                     elif asset_class == "metals":

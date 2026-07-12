@@ -563,7 +563,7 @@ class SignalDatabase:
 
     async def get_overlapping_signals(
         self, instrument: str, min_limit: float, max_limit: float, exclude_signal_id: int
-    ) -> List[Dict[str, Any]]:
+    ) -> List[SignalData]:
         """
         Return active/hit signals on the same instrument whose pending-limit price range
         intersects [min_limit, max_limit].  Used for overlap detection on new signal saves.
@@ -594,7 +594,7 @@ class SignalDatabase:
         rows = await self.db.fetch_all(
             query, (instrument.upper(), exclude_signal_id, float(min_limit), float(max_limit))
         )
-        return [dict(r) for r in rows]
+        return [SignalData.from_db_row(dict(r)) for r in rows]
 
     async def _get_live_price(self, instrument: str) -> Optional[Dict[str, Any]]:
         """Fetch current bid/ask/feed from live_prices table."""

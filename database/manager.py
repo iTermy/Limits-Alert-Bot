@@ -309,15 +309,15 @@ class DatabaseManager(BaseConnectionManager):
             logger.error(f"Invalid expiry type: {expiry_type}")
             return False
 
-        signal = await self.fetch_one("SELECT status FROM signals WHERE id = $1", (signal_id,))
+        row = await self.fetch_one("SELECT status FROM signals WHERE id = $1", (signal_id,))
 
-        if not signal:
+        if not row:
             logger.error(f"Signal {signal_id} not found")
             return False
 
-        if SignalStatus.is_final(signal["status"]):
+        if SignalStatus.is_final(row["status"]):
             logger.warning(
-                f"Cannot modify expiry for signal {signal_id} in final status {signal['status']}"
+                f"Cannot modify expiry for signal {signal_id} in final status {row['status']}"
             )
             return False
 
