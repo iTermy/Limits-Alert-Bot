@@ -122,7 +122,7 @@ class TestDetermineLimitsAndStop:
         assert stop == 3300.0  # min - 5.0 offset
 
     def test_gold_tolls_auto_sl_short(self, pinned_offsets):
-        limits, stop = determine_limits_and_stop(
+        _, stop = determine_limits_and_stop(
             [3305.0, 3310.0], "short", channel_name="gold-tolls-map", raw_text="gold short 3305 3310"
         )
         assert stop == 3315.0  # max + 5.0 offset
@@ -145,7 +145,7 @@ class TestDetermineLimitsAndStop:
         assert stop == 3290.0
 
     def test_risky_gold_uses_risky_offset(self, pinned_offsets):
-        limits, stop = determine_limits_and_stop(
+        _, stop = determine_limits_and_stop(
             [3310.0], "long", channel_name="risky-gold", raw_text="gold long 3310"
         )
         assert stop == 3300.0  # min - 10.0 risky offset
