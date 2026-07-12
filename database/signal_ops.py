@@ -147,10 +147,10 @@ class SignalDatabase:
     async def get_signal_by_message_id(self, message_id: str) -> Optional[Dict[str, Any]]:
         """Get signal by Discord message ID."""
         query = f"SELECT {SIGNAL_COLUMNS} FROM signals WHERE message_id = $1"
-        signal = await self.db.fetch_one(query, (message_id,))
-        if signal is not None:
-            signal["signal_id"] = signal["id"]
-        return signal
+        row = await self.db.fetch_one(query, (message_id,))
+        if row is not None:
+            row["signal_id"] = row["id"]
+        return row
 
     async def get_signal_with_limits(self, signal_id: int) -> Optional[SignalData]:
         """Get signal with all its limits (including hit ones)."""
@@ -354,42 +354,44 @@ class SignalDatabase:
         if limit:
             base_query += f" LIMIT {limit}"
 
-        signals = await self.db.fetch_all(base_query, tuple(params))
+        rows = await self.db.fetch_all(base_query, tuple(params))
 
-        for signal in signals:
-            signal["pending_limits"] = []
-            signal["hit_limits"] = []
+        # These are presentation dicts for the !active view, not SignalData
+        # models — pending_limits/hit_limits are plain float lists here.
+        for row in rows:
+            row["pending_limits"] = []
+            row["hit_limits"] = []
 
-            if signal.get("pending_limits_str"):
-                signal["pending_limits"] = [
-                    float(p) for p in signal["pending_limits_str"].split(",")
+            if row.get("pending_limits_str"):
+                row["pending_limits"] = [
+                    float(p) for p in row["pending_limits_str"].split(",")
                 ]
 
-            if signal.get("hit_limits_str"):
-                signal["hit_limits"] = [float(p) for p in signal["hit_limits_str"].split(",")]
+            if row.get("hit_limits_str"):
+                row["hit_limits"] = [float(p) for p in row["hit_limits_str"].split(",")]
 
-            signal.pop("pending_limits_str", None)
-            signal.pop("hit_limits_str", None)
+            row.pop("pending_limits_str", None)
+            row.pop("hit_limits_str", None)
 
-            if signal.get("expiry_time"):
-                expiry = _parse_dt(signal["expiry_time"])
+            if row.get("expiry_time"):
+                expiry = _parse_dt(row["expiry_time"])
                 now = datetime.now(pytz.UTC)
                 remaining = expiry - now
                 if remaining.total_seconds() > 0:
                     hours = int(remaining.total_seconds() // 3600)
                     minutes = int((remaining.total_seconds() % 3600) // 60)
-                    signal["time_remaining"] = f"{hours}h {minutes}m"
+                    row["time_remaining"] = f"{hours}h {minutes}m"
                 else:
-                    signal["time_remaining"] = "Expired"
+                    row["time_remaining"] = "Expired"
             else:
-                signal["time_remaining"] = "No expiry"
+                row["time_remaining"] = "No expiry"
 
-            signal["status_emoji"] = get_status_emoji(signal["status"])
-            signal["progress"] = (
-                f"{signal['hit_limit_count']}/{signal['total_limit_count']} limits hit"
+            row["status_emoji"] = get_status_emoji(row["status"])
+            row["progress"] = (
+                f"{row['hit_limit_count']}/{row['total_limit_count']} limits hit"
             )
 
-        return signals
+        return rows
 
     async def get_signals_for_tracking(self) -> List[Dict[str, Any]]:
         """Get all signals that need price tracking (wrapper for DB method)."""
@@ -417,23 +419,23 @@ class SignalDatabase:
         try:
             logger.debug(f"Starting cancel_signal_by_message for message {message_id}")
 
-            signal = await self.get_signal_by_message_id(message_id)
-            if not signal:
+            row = await self.get_signal_by_message_id(message_id)
+            if not row:
                 logger.warning(f"No signal found for message {message_id}")
                 return False
 
-            logger.debug(f"Found signal {signal['id']} with status {signal['status']}")
+            logger.debug(f"Found signal {row['id']} with status {row['status']}")
 
-            if signal["status"] == SignalStatus.CANCELLED:
-                logger.info(f"Signal {signal['id']} is already cancelled")
+            if row["status"] == SignalStatus.CANCELLED:
+                logger.info(f"Signal {row['id']} is already cancelled")
                 return True
 
             if (
-                SignalStatus.is_final(signal["status"])
-                and signal["status"] != SignalStatus.CANCELLED
+                SignalStatus.is_final(row["status"])
+                and row["status"] != SignalStatus.CANCELLED
             ):
                 logger.warning(
-                    f"Cannot cancel signal {signal['id']} in final status {signal['status']}"
+                    f"Cannot cancel signal {row['id']} in final status {row['status']}"
                 )
                 return False
 
@@ -450,7 +452,7 @@ class SignalDatabase:
                         SET status = 'cancelled'
                         WHERE signal_id = $1 AND status = 'pending'
                     """,
-                        signal["id"],
+                        row["id"],
                     )
                     await conn.execute(
                         """
@@ -462,21 +464,21 @@ class SignalDatabase:
                         now,
                         now,
                         "manual",
-                        signal["id"],
+                        row["id"],
                     )
                     await conn.execute(
                         """
                         INSERT INTO status_changes (signal_id, old_status, new_status, change_type, reason)
                         VALUES ($1, $2, $3, $4, $5)
                     """,
-                        signal["id"],
-                        signal["status"],
+                        row["id"],
+                        row["status"],
                         SignalStatus.CANCELLED,
                         "manual",
                         "User cancelled",
                     )
-                await self._snapshot_close_prices(signal["id"], signal["instrument"])
-                logger.info(f"Successfully cancelled signal {signal['id']}")
+                await self._snapshot_close_prices(row["id"], row["instrument"])
+                logger.info(f"Successfully cancelled signal {row['id']}")
                 return True
 
             except Exception as e:
@@ -495,22 +497,22 @@ class SignalDatabase:
             logger.debug(f"Attempting to reactivate signal {signal_id}")
 
             signal_query = f"SELECT {SIGNAL_COLUMNS} FROM signals WHERE id = $1"
-            signal = await self.db.fetch_one(signal_query, (signal_id,))
+            row = await self.db.fetch_one(signal_query, (signal_id,))
 
-            if not signal:
+            if not row:
                 logger.error(f"Signal {signal_id} not found")
                 return False
 
             reactivatable = (SignalStatus.CANCELLED, SignalStatus.STOP_LOSS)
-            if signal["status"] not in reactivatable:
+            if row["status"] not in reactivatable:
                 logger.warning(
-                    f"Signal {signal_id} is not reactivatable, status: {signal['status']}"
+                    f"Signal {signal_id} is not reactivatable, status: {row['status']}"
                 )
                 return False
 
-            old_status = signal["status"]
+            old_status = row["status"]
             new_status = (
-                SignalStatus.HIT if signal.get("limits_hit", 0) > 0 else SignalStatus.ACTIVE
+                SignalStatus.HIT if row.get("limits_hit", 0) > 0 else SignalStatus.ACTIVE
             )
 
             try:
@@ -643,11 +645,11 @@ class SignalDatabase:
           - instrument (str)
           - direction (str)
         """
-        signal = await self.db.fetch_one(
+        row = await self.db.fetch_one(
             "SELECT id, instrument, direction, status FROM signals WHERE id = $1",
             (signal_id,),
         )
-        if not signal or signal["status"] not in (
+        if not row or row["status"] not in (
             SignalStatus.CANCELLED,
             SignalStatus.STOP_LOSS,
         ):
@@ -665,15 +667,15 @@ class SignalDatabase:
         if not pending_limits:
             return None
 
-        price_data = await self._get_live_price(signal["instrument"])
+        price_data = await self._get_live_price(row["instrument"])
         if not price_data or price_data.get("bid") is None or price_data.get("ask") is None:
             logger.warning(
-                f"No live price for {signal['instrument']} — reactivation guard skipped"
+                f"No live price for {row['instrument']} — reactivation guard skipped"
             )
             return None
 
         mid = (float(price_data["bid"]) + float(price_data["ask"])) / 2
-        direction = signal["direction"]
+        direction = row["direction"]
 
         # A limit is "past" if the hit condition would fire immediately on reactivation:
         # long hits when price ≤ limit; short hits when price ≥ limit.
@@ -688,7 +690,7 @@ class SignalDatabase:
             "blocked": len(blocked) > 0,
             "blocked_limits": blocked,
             "current_price": mid,
-            "instrument": signal["instrument"],
+            "instrument": row["instrument"],
             "direction": direction,
         }
 
@@ -711,15 +713,15 @@ class SignalDatabase:
                 logger.error(f"Invalid status: {new_status}")
                 return False
 
-            signal = await self.db.fetch_one(
+            row = await self.db.fetch_one(
                 f"SELECT {SIGNAL_COLUMNS} FROM signals WHERE id = $1", (signal_id,)
             )
 
-            if not signal:
+            if not row:
                 logger.error(f"Signal {signal_id} not found")
                 return False
 
-            old_status = signal["status"]
+            old_status = row["status"]
 
             if old_status == new_status:
                 logger.info(f"Signal {signal_id} already has status {new_status}")
@@ -730,9 +732,9 @@ class SignalDatabase:
             # Record the market price at the time of a manual profit so the DB always
             # captures the close price (auto-TP supplies its own; manual paths fall here).
             if new_status == SignalStatus.PROFIT and tp_price is None:
-                price_data = await self._get_live_price(signal["instrument"])
+                price_data = await self._get_live_price(row["instrument"])
                 if price_data and price_data.get("bid") is not None and price_data.get("ask") is not None:
-                    direction = (signal["direction"] or "").lower()
+                    direction = (row["direction"] or "").lower()
                     tp_price = (
                         float(price_data["bid"])
                         if direction == "long"
@@ -740,7 +742,7 @@ class SignalDatabase:
                     )
                 else:
                     logger.warning(
-                        f"No live price for {signal['instrument']} — tp_price will be NULL "
+                        f"No live price for {row['instrument']} — tp_price will be NULL "
                         f"for manual profit on signal {signal_id}"
                     )
 
@@ -826,7 +828,7 @@ class SignalDatabase:
                         reason or "Manual override",
                     )
                 if SignalStatus.is_final(new_status):
-                    await self._snapshot_close_prices(signal_id, signal["instrument"])
+                    await self._snapshot_close_prices(signal_id, row["instrument"])
                 logger.info(
                     f"Successfully set signal {signal_id} status: {old_status} -> {new_status}"
                     + (f" (tp_price={tp_price:.5f})" if tp_price is not None else "")
@@ -979,9 +981,9 @@ class SignalDatabase:
             signal = await self.get_signal_with_limits(result["signal_id"])
             result["signal"] = signal
 
-            if signal and len(signal["hit_limits"]) == signal["total_limits"]:
+            if signal and len(signal.hit_limits) == signal.total_limits:
                 result["all_limits_hit"] = True
-                logger.info(f"All limits hit for signal {signal['signal_id']}")
+                logger.info(f"All limits hit for signal {signal.signal_id}")
             else:
                 result["all_limits_hit"] = False
 
@@ -1003,17 +1005,17 @@ class SignalDatabase:
                 logger.error("Custom expiry type requires datetime")
                 return False
 
-            signal = await self.db.fetch_one(
+            row = await self.db.fetch_one(
                 f"SELECT {SIGNAL_COLUMNS} FROM signals WHERE id = $1", (signal_id,)
             )
 
-            if not signal:
+            if not row:
                 logger.error(f"Signal {signal_id} not found")
                 return False
 
-            if SignalStatus.is_final(signal["status"]):
+            if SignalStatus.is_final(row["status"]):
                 logger.warning(
-                    f"Cannot modify expiry for signal {signal_id} in final status {signal['status']}"
+                    f"Cannot modify expiry for signal {signal_id} in final status {row['status']}"
                 )
                 return False
 
@@ -1043,13 +1045,13 @@ class SignalDatabase:
                         VALUES ($1, $2, $3, $4, $5)
                     """,
                         signal_id,
-                        signal["status"],
-                        signal["status"],
+                        row["status"],
+                        row["status"],
                         "manual",
-                        f"Expiry changed from {signal['expiry_type']} to {expiry_type}",
+                        f"Expiry changed from {row['expiry_type']} to {expiry_type}",
                     )
 
-                old_expiry = signal["expiry_type"] or "none"
+                old_expiry = row["expiry_type"] or "none"
                 if expiry_type == "no_expiry":
                     logger.info(f"Removed expiry for signal {signal_id} (was {old_expiry})")
                 elif expiry_type == "custom":
@@ -1088,10 +1090,10 @@ class SignalDatabase:
 
         # Each signal gets its own transaction so a single failure does not
         # roll back signals that were already successfully processed.
-        for signal in expired:
-            signal_id = signal["id"]
-            old_status = signal["status"]
-            instrument = signal.get("instrument") or ""
+        for row in expired:
+            signal_id = row["id"]
+            old_status = row["status"]
+            instrument = row.get("instrument") or ""
 
             # HIT signals normally roll over to the next expiry window. Non-crypto
             # HIT signals heading into the weekend gap (Fri ≥ 4:45 PM or Sat/Sun)
@@ -1103,7 +1105,7 @@ class SignalDatabase:
             )
 
             if should_rollover:
-                next_expiry = calculate_expiry(signal["expiry_type"])
+                next_expiry = calculate_expiry(row["expiry_type"])
                 if next_expiry is None:
                     continue
                 try:
