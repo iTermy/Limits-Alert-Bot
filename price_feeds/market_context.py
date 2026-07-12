@@ -144,6 +144,17 @@ class MarketContextProvider:
             "atr": self._atr(closed, _ATR_PERIOD),
         }
 
+    async def last_closed_m1(self, internal_symbol: str) -> Optional[Dict]:
+        """High/low/close of the last closed M1 bar; None when bars are unavailable."""
+        ic_symbol = self._ic_symbol(internal_symbol)
+        if ic_symbol is None:
+            return None
+        m1 = await self._copy_rates(ic_symbol, mt5.TIMEFRAME_M1, 3)
+        if not m1:
+            return None
+        last = m1[-2]  # [-1] is the forming bar
+        return {"high": last["high"], "low": last["low"], "close": last["close"]}
+
     async def _htf_trend(self, ic_symbol: str, direction: str):
         """H1 trend direction (-1/0/1) and whether it agrees with the signal."""
         h1 = await self._copy_rates(ic_symbol, mt5.TIMEFRAME_H1, _H1_BARS)

@@ -29,6 +29,15 @@ logger = logging.getLogger(__name__)
 _SAMPLE_INTERVAL_SECONDS = 60
 _MAX_SAMPLE_WINDOW_SECONDS = 90 * 60
 
+# MAE-vs-MFE ordering is decided when either excursion first exceeds this
+# fraction of the signal's TP threshold — deep enough to be meaningful, shallow
+# enough that nearly every entered signal gets a verdict.
+_ORDERING_BAR_FRACTION = 0.25
+
+# After close, keep measuring favourable follow-through from M1 bars for this
+# long — quantifies pips left on the table beyond the exit.
+_POST_EXIT_WINDOW_SECONDS = 60 * 60
+
 
 @dataclass
 class ExcursionState:
@@ -51,14 +60,30 @@ class ExcursionState:
     mae_pips: float = 0.0
     started_at: float = 0.0  # monotonic; bounds the volume sampler window
 
+    ordering_bar: Optional[float] = None  # price-unit bar for mae_before_mfe
+    ordering_decided: bool = False
+
+
+@dataclass
+class PostExitState:
+    signal_id: int
+    instrument: str
+    direction: str
+    pip_size: float
+    exit_price: float
+    started_at: float  # monotonic
+    best_pips: float = 0.0
+
 
 class ExcursionMonitor:
     """Tracks per-signal favourable/adverse excursions and market context."""
 
-    def __init__(self, excursion_db, market_context):
+    def __init__(self, excursion_db, market_context, tp_config=None):
         self._db = excursion_db
         self._context = market_context
+        self._tp_config = tp_config
         self._tracking: Dict[int, ExcursionState] = {}
+        self._post_exit: Dict[int, PostExitState] = {}
         self._snapshot_tasks: set = set()
         self._running = True
 
@@ -160,6 +185,7 @@ class ExcursionMonitor:
             entry_price=entry_price,
             entry_time=now,
             started_at=state.started_at if state else asyncio.get_event_loop().time(),
+            ordering_bar=self._ordering_bar(symbol, signal_type, pip_size),
         )
 
         try:
@@ -186,6 +212,20 @@ class ExcursionMonitor:
             favorable = state.entry_price - close_price
             adverse = close_price - state.entry_price
 
+        # First excursion past the ordering bar decides mae_before_mfe.
+        if not state.ordering_decided and state.ordering_bar:
+            mae_first = None
+            if favorable >= state.ordering_bar:
+                mae_first = False
+            elif adverse >= state.ordering_bar:
+                mae_first = True
+            if mae_first is not None:
+                state.ordering_decided = True
+                try:
+                    await self._db.set_mae_before_mfe(state.signal_id, mae_first)
+                except Exception as e:
+                    logger.debug("mae_before_mfe write failed for %s: %s", state.signal_id, e)
+
         now = datetime.now(timezone.utc)
         fav_pips = favorable / state.pip_size
         if fav_pips > state.mfe_pips:
@@ -208,17 +248,31 @@ class ExcursionMonitor:
                 logger.debug("mae update failed for %s: %s", state.signal_id, e)
 
     async def finalize(self, signal_id: int, exit_price: float, reason: str) -> None:
-        """Record the exit and stop tracking."""
-        if signal_id not in self._tracking:
+        """Record the exit, stop tracking, and start the post-exit window."""
+        state = self._tracking.get(signal_id)
+        if state is None:
             return
         try:
             await self._db.finalize(signal_id, exit_price, datetime.now(timezone.utc), reason)
         except Exception as e:
             logger.error("Failed to finalize excursion for %s: %s", signal_id, e)
+
+        # Entered signals keep a bounded post-exit watch to measure favourable
+        # follow-through beyond the exit (M1 bars — no tick feed dependency).
+        if state.entry_price is not None and exit_price is not None:
+            self._post_exit[signal_id] = PostExitState(
+                signal_id=signal_id,
+                instrument=state.instrument,
+                direction=state.direction,
+                pip_size=state.pip_size,
+                exit_price=exit_price,
+                started_at=asyncio.get_event_loop().time(),
+            )
         self._tracking.pop(signal_id, None)
 
     def evict_signal(self, signal_id: int) -> None:
         self._tracking.pop(signal_id, None)
+        self._post_exit.pop(signal_id, None)
 
     async def resume_if_tracked(self, signal: Dict) -> None:
         """Re-hydrate in-memory excursion state from its open DB row after a restart."""
@@ -249,6 +303,8 @@ class ExcursionMonitor:
             mfe_pips=row["mfe_pips"] or 0.0,
             mae_pips=row["mae_pips"] or 0.0,
             started_at=asyncio.get_event_loop().time(),
+            ordering_bar=self._ordering_bar(row["instrument"], row["signal_type"], row["pip_size"]),
+            ordering_decided=row["mae_before_mfe"] is not None,
         )
         logger.info("Resumed excursion tracking for signal %s (%s)", signal_id, row["phase"])
 
@@ -267,7 +323,7 @@ class ExcursionMonitor:
         self._running = False
 
     async def _sample_all(self) -> None:
-        if not self._tracking:
+        if not self._tracking and not self._post_exit:
             return
         now_mono = asyncio.get_event_loop().time()
 
@@ -291,7 +347,58 @@ class ExcursionMonitor:
             except Exception as e:
                 logger.debug("volume sample insert failed for %s: %s", state.signal_id, e)
 
+        await self._sample_post_exit(now_mono)
+
+    async def _sample_post_exit(self, now_mono: float) -> None:
+        """Ratchet post-exit favourable follow-through from the last closed M1 bar."""
+        if not self._post_exit:
+            return
+
+        expired = [
+            sid
+            for sid, st in self._post_exit.items()
+            if (now_mono - st.started_at) > _POST_EXIT_WINDOW_SECONDS
+        ]
+        for sid in expired:
+            self._post_exit.pop(sid, None)
+            try:
+                await self._db.set_post_exit_end(sid, datetime.now(timezone.utc))
+            except Exception as e:
+                logger.debug("post_exit end write failed for %s: %s", sid, e)
+
+        bars: Dict[str, Optional[Dict]] = {}
+        for state in list(self._post_exit.values()):
+            if state.instrument not in bars:
+                bars[state.instrument] = await self._context.last_closed_m1(state.instrument)
+            bar = bars[state.instrument]
+            if bar is None:
+                continue
+            if state.direction == "long":
+                favorable = bar["high"] - state.exit_price
+            else:
+                favorable = state.exit_price - bar["low"]
+            fav_pips = favorable / state.pip_size
+            if fav_pips > state.best_pips:
+                state.best_pips = fav_pips
+                try:
+                    await self._db.update_post_exit_mfe(state.signal_id, fav_pips)
+                except Exception as e:
+                    logger.debug("post_exit_mfe update failed for %s: %s", state.signal_id, e)
+
     # === Helpers ===
+
+    def _ordering_bar(self, symbol: str, signal_type: str, pip_size: float) -> Optional[float]:
+        """Price-unit bar (fraction of the TP threshold) for the mae_before_mfe verdict."""
+        if self._tp_config is None:
+            return None
+        try:
+            tp_value = self._tp_config.get_tp_value(symbol, signal_type=signal_type)
+            tp_type = self._tp_config.get_tp_type(symbol, signal_type=signal_type)
+            threshold_price = tp_value * pip_size if tp_type == "pips" else tp_value
+            return _ORDERING_BAR_FRACTION * threshold_price
+        except Exception as e:
+            logger.debug("ordering bar unavailable for %s/%s: %s", symbol, signal_type, e)
+            return None
 
     def _schedule_context_snapshot(
         self, signal_id: int, symbol: str, direction: str, spread: Optional[float]

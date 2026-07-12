@@ -7,6 +7,7 @@ from datetime import datetime
 import discord
 from discord.ext import commands
 
+from database.config_history_ops import log_config_change
 from price_feeds.alert_config import AlertDistanceConfig
 from price_feeds.nm_config import NMConfig
 from price_feeds.tp_config import VALID_SIGNAL_TYPES, TPConfig
@@ -256,6 +257,8 @@ class ThresholdsCog(BaseCog):
                     )
                     return
 
+                history_key = f"{signal_type}/{asset_class}"
+                old_value = self.tp_config.config.get("type_defaults", {}).get(signal_type, {}).get(asset_class)
                 success = self.tp_config.set_default(
                     asset_class, float_value, tp_type, set_by=ctx.author.name, signal_type=signal_type
                 )
@@ -289,6 +292,8 @@ class ThresholdsCog(BaseCog):
                     )
                     return
 
+                history_key = f"{signal_type}/{first}"
+                old_value = self.tp_config.config.get("type_defaults", {}).get(signal_type, {}).get(first)
                 success = self.tp_config.set_default(
                     first, float_value, tp_type, set_by=ctx.author.name, signal_type=signal_type
                 )
@@ -323,6 +328,8 @@ class ThresholdsCog(BaseCog):
                     )
                     return
 
+                history_key = f"{signal_type}/{symbol}"
+                old_value = self.tp_config.config.get("type_overrides", {}).get(signal_type, {}).get(symbol)
                 success = self.tp_config.set_override(
                     symbol, float_value, tp_type, set_by=ctx.author.name, signal_type=signal_type
                 )
@@ -334,6 +341,11 @@ class ThresholdsCog(BaseCog):
             if not success:
                 await ctx.send("❌ Failed to set TP. Check logs for details.")
                 return
+
+            await log_config_change(
+                self.signal_db.db, "tp", history_key, old_value,
+                {"value": float_value, "type": tp_type}, ctx.author.name,
+            )
 
             if self.services.monitor:
                 self.services.tp_config.reload_config()
@@ -359,7 +371,14 @@ class ThresholdsCog(BaseCog):
                 return
 
             symbol_upper = symbol.upper()
+            old_value = self.tp_config.config.get("type_overrides", {}).get(signal_type, {}).get(symbol_upper)
             removed = self.tp_config.remove_override(symbol_upper, signal_type=signal_type)
+
+            if removed:
+                await log_config_change(
+                    self.signal_db.db, "tp", f"{signal_type}/{symbol_upper}",
+                    old_value, None, ctx.author.name,
+                )
 
             if self.services.monitor:
                 self.services.tp_config.reload_config()
@@ -570,11 +589,15 @@ class ThresholdsCog(BaseCog):
                         f"❌ Unknown asset class `{target_lower}`. Valid: {', '.join(sorted(ASSET_CLASSES))}"
                     )
                     return
+                old_value = dict(self.alert_dist_config.config["defaults"][target_lower])
+                history_key = target_lower
                 self.alert_dist_config.config["defaults"][target_lower]["value"] = float_value
                 self.alert_dist_config.config["defaults"][target_lower]["type"] = dist_type_lower
                 self.alert_dist_config._save_config()
                 label = f"**{target_lower}** (default)"
             else:
+                old_value = self.alert_dist_config.config.get("overrides", {}).get(target_upper)
+                history_key = target_upper
                 success = self.alert_dist_config.set_override(
                     target_upper, float_value, dist_type_lower, set_by=ctx.author.name
                 )
@@ -582,6 +605,11 @@ class ThresholdsCog(BaseCog):
                     await ctx.send(f"❌ Failed to set alert distance for `{target}`. Check logs.")
                     return
                 label = f"**{target_upper}** (override)"
+
+            await log_config_change(
+                self.signal_db.db, "alertdist", history_key, old_value,
+                {"value": float_value, "type": dist_type_lower}, ctx.author.name,
+            )
 
             if dist_type_lower == "dollars":
                 val_display = f"${float_value}"
@@ -607,12 +635,16 @@ class ThresholdsCog(BaseCog):
     async def _adist_remove(self, ctx: commands.Context, symbol: str):
         try:
             symbol_upper = symbol.upper()
+            old_value = self.alert_dist_config.config.get("overrides", {}).get(symbol_upper)
             removed = self.alert_dist_config.remove_override(symbol_upper)
 
             if self.services.monitor:
                 self.services.alert_config.reload_config()
 
             if removed:
+                await log_config_change(
+                    self.signal_db.db, "alertdist", symbol_upper, old_value, None, ctx.author.name,
+                )
                 fallback_cfg = self.alert_dist_config._get_config_for_symbol(symbol_upper)
                 t = fallback_cfg["type"]
                 v = fallback_cfg["value"]
@@ -885,21 +917,34 @@ class ThresholdsCog(BaseCog):
             target_upper = target.upper()
 
             if target_lower in NM_RISKY_TARGETS:
+                history_key = "risky/metals"
+                old_value = self.nm_config.config.get("type_overrides", {}).get("risky", {}).get("metals")
                 success = self.nm_config.set_type_override(
                     "risky", "metals", max_proximity, base_bounce, nm_type or "dollars",
                     set_by=ctx.author.name,
                 )
                 label = "**risky gold** (type override)"
             elif target_lower in ASSET_CLASSES:
+                history_key = target_lower
+                old_value = self.nm_config.config.get("defaults", {}).get(target_lower)
                 success = self.nm_config.set_default(
                     target_lower, max_proximity, base_bounce, nm_type, set_by=ctx.author.name
                 )
                 label = f"**{target_lower}** (default)"
             else:
+                history_key = target_upper
+                old_value = self.nm_config.config.get("overrides", {}).get(target_upper)
                 success = self.nm_config.set_override(
                     target_upper, max_proximity, base_bounce, nm_type, set_by=ctx.author.name
                 )
                 label = f"**{target_upper}** (override)"
+
+            if success:
+                await log_config_change(
+                    self.signal_db.db, "nm", history_key, old_value,
+                    {"max_proximity": max_proximity, "base_bounce": base_bounce, "type": nm_type},
+                    ctx.author.name,
+                )
 
             if self.services.monitor:
                 self.services.nm_config = NMConfig()
@@ -934,7 +979,12 @@ class ThresholdsCog(BaseCog):
     async def _nm_remove(self, ctx, symbol: str):
         try:
             if symbol.lower() in NM_RISKY_TARGETS:
+                old_value = self.nm_config.config.get("type_overrides", {}).get("risky", {}).get("metals")
                 removed = self.nm_config.remove_type_override("risky", "metals")
+                if removed:
+                    await log_config_change(
+                        self.signal_db.db, "nm", "risky/metals", old_value, None, ctx.author.name,
+                    )
                 if self.services.monitor:
                     self.services.nm_config = NMConfig()
                     self.services.nm_monitor.nm_config = self.services.nm_config
@@ -957,6 +1007,7 @@ class ThresholdsCog(BaseCog):
                 return
 
             symbol_upper = symbol.upper()
+            old_value = self.nm_config.config.get("overrides", {}).get(symbol_upper)
             removed = self.nm_config.remove_override(symbol_upper)
 
             if self.services.monitor:
@@ -964,6 +1015,9 @@ class ThresholdsCog(BaseCog):
                 self.services.nm_monitor.nm_config = self.services.nm_config
 
             if removed:
+                await log_config_change(
+                    self.signal_db.db, "nm", symbol_upper, old_value, None, ctx.author.name,
+                )
                 info = self.nm_config.get_params_display(symbol_upper)
                 t = info["type"]
                 p, b = info["max_proximity"], info["base_bounce"]

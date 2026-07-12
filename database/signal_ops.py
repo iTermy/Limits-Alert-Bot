@@ -39,11 +39,21 @@ class SignalDatabase:
     # === CRUD ===
 
     async def save_signal(
-        self, parsed_signal: ParsedSignal, message_id: str, channel_id: str
+        self,
+        parsed_signal: ParsedSignal,
+        message_id: str,
+        channel_id: str,
+        context: Optional[Dict[str, Any]] = None,
     ) -> Tuple[bool, Optional[int]]:
-        """Save a parsed signal to the database."""
+        """
+        Save a parsed signal to the database.
+
+        `context` optionally carries save-time analysis stamps
+        (tp_threshold_used, tp_threshold_unit, minutes_to_news).
+        """
         try:
             expiry_time = calculate_expiry(parsed_signal.expiry_type)
+            context = context or {}
 
             existing_id = None
             existing_status = None
@@ -54,9 +64,10 @@ class SignalDatabase:
                     """
                     INSERT INTO signals (
                         message_id, channel_id, instrument, direction,
-                        stop_loss, expiry_type, expiry_time, total_limits, status, type
+                        stop_loss, expiry_type, expiry_time, total_limits, status, type,
+                        tp_threshold_used, tp_threshold_unit, minutes_to_news
                     )
-                    VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10)
+                    VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13)
                     ON CONFLICT (message_id) DO NOTHING
                     RETURNING id
                     """,
@@ -70,6 +81,9 @@ class SignalDatabase:
                     len(parsed_signal.limits) if parsed_signal.limits else 0,
                     SignalStatus.ACTIVE,
                     getattr(parsed_signal, "type", "standard"),
+                    context.get("tp_threshold_used"),
+                    context.get("tp_threshold_unit"),
+                    context.get("minutes_to_news"),
                 )
 
                 if signal_id is None:
@@ -448,6 +462,7 @@ class SignalDatabase:
                         "manual",
                         "User cancelled",
                     )
+                await self._snapshot_close_prices(signal["id"], signal["instrument"])
                 logger.info(f"Successfully cancelled signal {signal['id']}")
                 return True
 
@@ -567,12 +582,40 @@ class SignalDatabase:
         return [dict(r) for r in rows]
 
     async def _get_live_price(self, instrument: str) -> Optional[Dict[str, Any]]:
-        """Fetch current bid/ask from live_prices table."""
+        """Fetch current bid/ask/feed from live_prices table."""
         row = await self.db.fetch_one(
-            "SELECT bid, ask FROM live_prices WHERE symbol = $1",
+            "SELECT bid, ask, feed FROM live_prices WHERE symbol = $1",
             (instrument.upper(),),
         )
         return dict(row) if row else None
+
+    async def _snapshot_close_prices(self, signal_id: int, instrument: str) -> None:
+        """
+        Record live bid/ask/feed on a signal at close time.
+
+        Only applies to signals that entered a position (>=1 hit limit) — the
+        snapshot gives every such close a mark-to-market exit price, including
+        manual cancels and breakevens that otherwise record nothing. Failures
+        are logged and swallowed: a missing snapshot must never break a status
+        transition.
+        """
+        try:
+            has_hit = await self.db.fetch_one(
+                "SELECT 1 FROM limits WHERE signal_id = $1 AND status = 'hit' LIMIT 1",
+                (signal_id,),
+            )
+            if not has_hit:
+                return
+            price = await self._get_live_price(instrument)
+            if not price or price.get("bid") is None or price.get("ask") is None:
+                logger.warning(f"No live price for {instrument} — close snapshot skipped for signal {signal_id}")
+                return
+            await self.db.execute(
+                "UPDATE signals SET close_bid = $1, close_ask = $2, close_feed = $3 WHERE id = $4",
+                (float(price["bid"]), float(price["ask"]), price.get("feed"), signal_id),
+            )
+        except Exception as e:
+            logger.warning(f"Close-price snapshot failed for signal {signal_id}: {e}")
 
     async def check_reactivation_guard(self, signal_id: int) -> Optional[Dict[str, Any]]:
         """
@@ -767,6 +810,8 @@ class SignalDatabase:
                         effective_closed_reason,
                         reason or "Manual override",
                     )
+                if SignalStatus.is_final(new_status):
+                    await self._snapshot_close_prices(signal_id, signal["instrument"])
                 logger.info(
                     f"Successfully set signal {signal_id} status: {old_status} -> {new_status}"
                     + (f" (tp_price={tp_price:.5f})" if tp_price is not None else "")
@@ -1101,6 +1146,7 @@ class SignalDatabase:
                             "automatic",
                             "Expired",
                         )
+                    await self._snapshot_close_prices(signal_id, instrument)
                     count += 1
                 except Exception as e:
                     logger.error(f"Error expiring signal {signal_id}: {e}", exc_info=True)

@@ -159,9 +159,11 @@ class BaseThresholdConfig:
     def get_pip_size(symbol: str) -> float:
         """Return pip size in price units for the given symbol."""
         s = symbol.upper()
+        if s.endswith((".NAS", ".NYSE")):
+            return 0.01  # stocks: one cent — must precede the index keywords (".NAS" contains "NAS")
         if "JPY" in s:
             return 0.01
-        if any(x in s for x in ["XAU", "GOLD"]):
+        if any(x in s for x in ["XAU", "GOLD"]) or s.startswith("GC"):
             return 0.01
         if any(x in s for x in ["XAG", "SILVER"]):
             return 0.001
@@ -169,4 +171,11 @@ class BaseThresholdConfig:
             return 1.0
         if any(x in s for x in ["SPX", "NAS", "DOW", "DAX", "US500", "USTEC", "US30"]):
             return 1.0
+        if any(x in s for x in ["JP225", "NIKKEI", "DE30", "DE40", "GER", "US2000",
+                                "RUSSELL", "UK100", "FTSE", "HK50", "CHINA50"]):
+            return 1.0
+        if any(x in s for x in ["OIL", "XTI", "WTI", "BRENT", "BCO"]):
+            return 0.01
+        if any(x in s for x in ["ETH", "SOL", "XRP", "ADA", "DOGE", "DOT", "BNB"]) or s.endswith(("USDT", "USDC")):
+            return 0.1
         return 0.0001

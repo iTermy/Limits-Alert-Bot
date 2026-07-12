@@ -106,23 +106,6 @@ async def initialize_database(db_manager):
             )
         """)
 
-        # Create performance metrics table
-        await conn.execute("""
-            CREATE TABLE IF NOT EXISTS performance_metrics (
-                id           BIGINT GENERATED ALWAYS AS IDENTITY PRIMARY KEY,
-                date         DATE NOT NULL,
-                instrument   TEXT,
-                total_signals INTEGER DEFAULT 0,
-                profitable    INTEGER DEFAULT 0,
-                breakeven     INTEGER DEFAULT 0,
-                stop_loss     INTEGER DEFAULT 0,
-                cancelled     INTEGER DEFAULT 0,
-                win_rate      DOUBLE PRECISION,
-
-                CONSTRAINT perf_date_instrument_unique UNIQUE (date, instrument)
-            )
-        """)
-
         # Create live_prices table (written by LivePriceWriter, read by execution bot)
         await conn.execute("""
             CREATE TABLE IF NOT EXISTS live_prices (
@@ -227,6 +210,21 @@ async def initialize_database(db_manager):
             )
         """)
 
+        # Create config_history table — audit log of runtime config changes
+        # (!tp set, !alertdist set, !nmconfig set, !goldtollssl). Analysis needs
+        # config-at-time to interpret historical outcomes.
+        await conn.execute("""
+            CREATE TABLE IF NOT EXISTS config_history (
+                id            BIGINT GENERATED ALWAYS AS IDENTITY PRIMARY KEY,
+                changed_at    TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+                config_family TEXT NOT NULL,
+                key           TEXT NOT NULL,
+                old_value     TEXT,
+                new_value     TEXT,
+                set_by        TEXT
+            )
+        """)
+
         await _create_indexes(conn)
 
         # Run migrations for any new columns added to existing tables
@@ -251,7 +249,6 @@ async def _create_indexes(conn):
         "CREATE INDEX IF NOT EXISTS idx_limits_signal ON limits(signal_id)",
         "CREATE INDEX IF NOT EXISTS idx_limits_status ON limits(status)",
         "CREATE INDEX IF NOT EXISTS idx_status_changes_signal ON status_changes(signal_id)",
-        "CREATE INDEX IF NOT EXISTS idx_performance_date ON performance_metrics(date)",
         "CREATE INDEX IF NOT EXISTS idx_live_prices_updated ON live_prices(updated_at)",
         "CREATE INDEX IF NOT EXISTS idx_trailing_signal ON trailing_simulations(signal_id)",
         "CREATE INDEX IF NOT EXISTS idx_trailing_incomplete ON trailing_simulations(stopped_out) WHERE stopped_out = FALSE",
@@ -437,6 +434,56 @@ async def _run_migrations(conn):
         ALTER TABLE signals DROP CONSTRAINT IF EXISTS signals_type_check;
         ALTER TABLE signals ADD CONSTRAINT signals_type_check
             CHECK (type IN ('standard', 'scalp', 'swing', 'toll', 'pa', '1-1', 'risky'));
+        """,
+        # Close-price snapshot: live bid/ask/feed captured when a signal that
+        # entered a position (limits_hit > 0) reaches any terminal status.
+        """
+        ALTER TABLE signals ADD COLUMN IF NOT EXISTS close_bid DOUBLE PRECISION;
+        """,
+        """
+        ALTER TABLE signals ADD COLUMN IF NOT EXISTS close_ask DOUBLE PRECISION;
+        """,
+        """
+        ALTER TABLE signals ADD COLUMN IF NOT EXISTS close_feed TEXT;
+        """,
+        # Config-at-time stamps captured at signal save so analysis never has to
+        # guess which TP threshold or news backdrop applied historically.
+        """
+        ALTER TABLE signals ADD COLUMN IF NOT EXISTS tp_threshold_used DOUBLE PRECISION;
+        """,
+        """
+        ALTER TABLE signals ADD COLUMN IF NOT EXISTS tp_threshold_unit TEXT;
+        """,
+        """
+        ALTER TABLE signals ADD COLUMN IF NOT EXISTS minutes_to_news INTEGER;
+        """,
+        # Data-era marker: rows created before 2026-07-12 predate the clean-data
+        # instrumentation and are excluded from primary analysis (see DATA_ANALYSIS.md).
+        """
+        DO $$
+        BEGIN
+            IF NOT EXISTS (
+                SELECT 1 FROM information_schema.columns
+                WHERE table_name = 'signals' AND column_name = 'data_version'
+            ) THEN
+                ALTER TABLE signals ADD COLUMN data_version SMALLINT NOT NULL DEFAULT 2;
+                UPDATE signals SET data_version = 1;
+            END IF;
+        END $$;
+        """,
+        # Excursion additions: which extreme came first, and post-close follow-through.
+        """
+        ALTER TABLE signal_excursions ADD COLUMN IF NOT EXISTS mae_before_mfe BOOLEAN;
+        """,
+        """
+        ALTER TABLE signal_excursions ADD COLUMN IF NOT EXISTS post_exit_mfe_pips DOUBLE PRECISION;
+        """,
+        """
+        ALTER TABLE signal_excursions ADD COLUMN IF NOT EXISTS post_exit_end_time TIMESTAMPTZ;
+        """,
+        # performance_metrics was never written or read; dropped for schema clarity.
+        """
+        DROP TABLE IF EXISTS performance_metrics;
         """,
     ]
 

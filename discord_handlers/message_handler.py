@@ -4,9 +4,11 @@ Message Handler
 
 import asyncio
 import re
+from datetime import datetime
 from typing import Optional
 
 import discord
+import pytz
 
 from price_feeds.embed_builders import _build_signal_embed, _set_archive_footer
 from price_feeds.tp_config import TPConfig
@@ -593,6 +595,44 @@ class MessageHandler:
 
         logger.info(f"Signal {signal_id} {action_taken} via {path} reply by {message.author.name}")
 
+    def _build_save_context(self, parsed) -> dict:
+        """
+        Save-time analysis stamps: the TP threshold that applies to this signal
+        right now, and minutes until the next news event affecting its instrument.
+        Best-effort — signal saving must never fail because of this.
+        """
+        context = {}
+        try:
+            signal_type = getattr(parsed, "type", "standard")
+            tp_config = self.tp_config
+            services = getattr(self.bot, "services", None)
+            if services is not None and getattr(services, "tp_config", None) is not None:
+                tp_config = services.tp_config
+            context["tp_threshold_used"] = tp_config.get_tp_value(
+                parsed.instrument, signal_type=signal_type
+            )
+            context["tp_threshold_unit"] = tp_config.get_tp_type(
+                parsed.instrument, signal_type=signal_type
+            )
+        except Exception as e:
+            self.logger.warning(f"TP threshold stamp failed for {parsed.instrument}: {e}")
+        try:
+            news_manager = getattr(self.bot, "news_manager", None)
+            if news_manager is not None:
+                now = datetime.now(pytz.UTC)
+                upcoming = [
+                    e.news_time
+                    for e in news_manager.get_all_events()
+                    if e.news_time > now and e.instrument_affected(parsed.instrument)
+                ]
+                if upcoming:
+                    context["minutes_to_news"] = int(
+                        (min(upcoming) - now).total_seconds() // 60
+                    )
+        except Exception as e:
+            self.logger.warning(f"minutes_to_news stamp failed for {parsed.instrument}: {e}")
+        return context
+
     async def process_signal(self, message: discord.Message):
         """Process a potential trading signal with enhanced parsing"""
         try:
@@ -612,8 +652,9 @@ class MessageHandler:
                 return
 
             if parsed:
+                context = self._build_save_context(parsed)
                 success, signal_id = await self.signal_db.save_signal(
-                    parsed, str(message.id), str(message.channel.id)
+                    parsed, str(message.id), str(message.channel.id), context=context
                 )
 
                 if success:

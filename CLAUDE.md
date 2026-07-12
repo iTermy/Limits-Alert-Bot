@@ -69,7 +69,7 @@ database/
                                   update_signal_status (validates transitions), mark_limit_hit,
                                   get_active_signals_for_tracking (returns List[SignalData]),
                                   get_hit_limits_for_signal, expiry ops, bot_mode_status
-  schema.py                     DDL for all 7 tables + indexes + idempotent migrations
+  schema.py                     DDL for all tables + indexes + idempotent migrations
   signal_ops.py                 SignalDatabase — flattened CRUD + Lifecycle + Analytics in one file;
                                   get_signal_with_limits() returns Optional[SignalData];
                                   save_signal, cancel, reactivate, manually_set_signal_status,
@@ -313,6 +313,10 @@ All PKs: `BIGINT GENERATED ALWAYS AS IDENTITY`. Timestamps: `TIMESTAMPTZ`. RLS: 
 | finished_message_id | BIGINT (nullable); Discord message ID of the archived embed in `finished_signals` / `profit_channel`. Persisted so reply commands against archived embeds (e.g. `reactivate`) still resolve to a signal after restart. Cleared on `reactivate_embed` (which deletes the finished message). |
 | finished_channel_id | BIGINT (nullable); Discord channel ID where the archived embed lives. Used by `recover_finished_embeds` at startup to build a `PartialMessage` reference without an extra API fetch. |
 | total_limits / limits_hit | INTEGER |
+| close_bid / close_ask / close_feed | DOUBLE PRECISION ×2 / TEXT (nullable); live price snapshot taken by `_snapshot_close_prices` whenever a signal with ≥1 hit limit reaches ANY terminal status (auto-TP, SL, NM, news/spread, manual, expiry, message-delete). Gives every entered signal a mark-to-market exit even when `tp_price` is NULL. |
+| tp_threshold_used / tp_threshold_unit | DOUBLE PRECISION / TEXT (nullable); the TP threshold resolved via TPConfig at save time — config-at-time for analysis, immune to later `!tp set` drift. |
+| minutes_to_news | INTEGER (nullable); minutes until the next news event affecting this instrument at save time. |
+| data_version | SMALLINT NOT NULL DEFAULT 2; data-era marker. 1 = pre-2026-07-12 (dirty era), 2 = clean instrumentation. Primary analysis filters `data_version >= 2` (see DATA_ANALYSIS.md). |
 
 ### limits
 | Column | Notes |
@@ -329,8 +333,8 @@ All PKs: `BIGINT GENERATED ALWAYS AS IDENTITY`. Timestamps: `TIMESTAMPTZ`. RLS: 
 ### status_changes
 Audit trail: signal_id FK, old_status, new_status, change_type (`automatic`/`manual`), reason, changed_at.
 
-### performance_metrics
-Daily aggregates per instrument (total, profitable, breakeven, stop_loss, cancelled, win_rate). UNIQUE(date, instrument).
+### config_history
+Audit log of runtime config changes: `changed_at`, `config_family` (`tp` / `alertdist` / `nm` / `settings`), `key` (e.g. `toll/metals`, `XAUUSD`, `gold_tolls_sl_offset`), `old_value` / `new_value` (JSON text), `set_by`. Appended by the config cogs via `database/config_history_ops.py::log_config_change` (best-effort — a failed write never breaks the command).
 
 ### live_prices
 `symbol TEXT PK`, bid, ask, feed, updated_at. Written every 5 s by `LivePriceWriter` for every signal-bearing symbol, sourced from whichever feed serves it (icmarkets/oanda/binance/exness). The EX bot reads these prices and computes its broker offset against its own MT5 feed, so no ICMarkets reference price is stored.
@@ -578,6 +582,24 @@ IDs are cleared in `_clear_persisted_alert_ids` on live-update NotFound (`alert_
 
 ### Approaching alert retraction
 Once `limits.approaching_alert_sent=TRUE`, the embed used to linger until hit, SL, NM, expiry, or manual cancel. A new check in `streaming_monitor._check_limit` gated on `signal.status=='active' AND limit.sequence_number==1 AND limit.approaching_alert_sent` retracts the embed when `abs(distance) > _APPROACHING_RETRACTION_MULTIPLIER × alert_distance` (default `2.0`, module-level constant in `streaming_monitor.py`). `_retract_approaching_alert` calls `alert_system.retract_approaching_embed` (deletes embed + ping, removes from all dicts, clears persisted IDs), resets `approaching_alert_sent=FALSE` on the limit, evicts `nm_monitor` tracking state. Next time price re-enters the alert distance the approaching alert fires fresh. Applies to all signal types (no swing carve-out — retraction is cosmetic, not a cancel). NM tracking starts cleanly on re-approach because `nm_monitor.update` bails when `approaching_alert_sent` is False (`nm_monitor.py:151`).
+
+### Close-price snapshot on every terminal transition
+`signal_ops._snapshot_close_prices(signal_id, instrument)` writes `close_bid/close_ask/close_feed` from `live_prices` whenever a signal with ≥1 hit limit closes. Hooked in `manually_set_signal_status` (covers auto-TP, NM, news/spread/risky cancels, SL, admin commands), `cancel_signal_by_message`, and the cancel branch of `expire_old_signals`. Best-effort: wrapped in try/except; a missing live price logs a warning and skips.
+
+### Save-time context stamps
+`message_handler._build_save_context()` stamps `tp_threshold_used/tp_threshold_unit` (resolved TPConfig threshold) and `minutes_to_news` (next affecting news event) onto every new signal via `save_signal(..., context=)`. Best-effort; reactivated signals keep their original stamps.
+
+### config_history on every config command
+`!tp set/remove`, `!alertdist set/remove`, `!nmconfig set/remove`, `!goldtollssl`, `!riskygoldsl` append old/new values to `config_history`. When adding a new runtime-config command, hook `log_config_change` the same way.
+
+### Pip sizes are canonical in `BaseThresholdConfig.get_pip_size`
+Stocks (.NAS/.NYSE) 0.01, forex 0.0001 (JPY 0.01), XAU/GC futures 0.01, XAG 0.001, BTC 1.0, other crypto 0.1, indices 1.0, oil 0.01. The stock branch must stay ABOVE the index-keyword branch (".NAS" contains "NAS"). Unknown symbols fall back to 0.0001 — when adding a new asset class, add a branch here FIRST or `signal_excursions` pips will be wrong (this exact bug corrupted era-1 excursion rows; backfilled 2026-07-12).
+
+### Excursion ordering flag + post-exit window
+`ExcursionMonitor` (now constructed with `tp_config`) decides `mae_before_mfe` when either excursion first exceeds 25% of the TP threshold (`_ORDERING_BAR_FRACTION`). After close, entered signals move to a `_post_exit` dict sampled by the same 60 s loop: favorable follow-through beyond the exit price from M1 bars ratchets `post_exit_mfe_pips` for 60 min (`_POST_EXIT_WINDOW_SECONDS`), then `post_exit_end_time` is stamped. Post-exit state does not survive a restart.
+
+### Data-era marker
+`signals.data_version` = 1 for rows created before 2026-07-12, 2 for the clean-instrumentation era. Analysis conventions live in **DATA_ANALYSIS.md** — keep that file current when changing analytics-relevant schema or semantics.
 
 ---
 

@@ -8,6 +8,7 @@ from datetime import datetime
 import discord
 from discord.ext import commands
 
+from database.config_history_ops import log_config_change
 from utils.config_loader import load_channels_config
 
 from .._base import BaseCog
@@ -451,6 +452,9 @@ class BotManagementCog(BaseCog):
             return
 
         self.logger.info(f"gold_tolls_sl_offset changed {old_value} → {value} by {ctx.author}")
+        await log_config_change(
+            self.signal_db.db, "settings", "gold_tolls_sl_offset", old_value, value, ctx.author.name,
+        )
 
         loading_msg = await ctx.send("🔄 Updating active gold toll signals…")
 
@@ -579,6 +583,9 @@ class BotManagementCog(BaseCog):
             return
 
         self.logger.info(f"risky_gold_sl_offset changed {old_value} → {value} by {ctx.author}")
+        await log_config_change(
+            self.signal_db.db, "settings", "risky_gold_sl_offset", old_value, value, ctx.author.name,
+        )
 
         loading_msg = await ctx.send("🔄 Updating active risky-gold signals…")
 

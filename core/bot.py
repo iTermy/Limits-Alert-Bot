@@ -357,6 +357,7 @@ class TradingBot(commands.Bot):
             excursion_monitor = ExcursionMonitor(
                 excursion_db=ExcursionDatabase(db),
                 market_context=MarketContextProvider(stream_manager.symbol_mapper),
+                tp_config=tp_config,
             )
             live_price_writer = LivePriceWriter(
                 db_manager=db,

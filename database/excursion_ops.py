@@ -175,6 +175,29 @@ class ExcursionDatabase:
             (exit_price, exit_time, exit_reason, signal_id),
         )
 
+    async def set_mae_before_mfe(self, signal_id: int, mae_first: bool) -> None:
+        """One-shot ordering verdict; never overwrites an existing value."""
+        await self.db.execute(
+            """
+            UPDATE signal_excursions
+            SET mae_before_mfe = $1
+            WHERE signal_id = $2 AND mae_before_mfe IS NULL
+            """,
+            (mae_first, signal_id),
+        )
+
+    async def update_post_exit_mfe(self, signal_id: int, pips: float) -> None:
+        await self.db.execute(
+            "UPDATE signal_excursions SET post_exit_mfe_pips = $1 WHERE signal_id = $2",
+            (pips, signal_id),
+        )
+
+    async def set_post_exit_end(self, signal_id: int, end_time: datetime) -> None:
+        await self.db.execute(
+            "UPDATE signal_excursions SET post_exit_end_time = $1 WHERE signal_id = $2",
+            (end_time, signal_id),
+        )
+
     async def insert_volume_sample(
         self,
         signal_id: int,
@@ -198,7 +221,7 @@ class ExcursionDatabase:
             SELECT signal_id, instrument, direction, signal_type, pip_size, phase,
                    approach_start_price, approach_start_time, pre_hit_mae,
                    entry_price, entry_time, atr_at_hit,
-                   mfe_price, mfe_pips, mae_price, mae_pips
+                   mfe_price, mfe_pips, mae_price, mae_pips, mae_before_mfe
             FROM signal_excursions
             WHERE signal_id = $1 AND phase <> 'closed'
             """,
