@@ -38,12 +38,12 @@ async def react_to_original_signal(bot, signal: Dict, emoji: str):
 
     Args:
         bot: The Discord bot instance (used to fetch channels/messages).
-        signal: Signal dictionary containing message_id and channel_id.
+        signal: SignalData carrying message_id and channel_id.
         emoji: The emoji to add as a reaction.
     """
     try:
-        message_id = signal.get("message_id")
-        channel_id = signal.get("channel_id")
+        message_id = signal.message_id
+        channel_id = signal.channel_id
 
         if not message_id or not channel_id or str(message_id).startswith("manual_"):
             return
@@ -253,18 +253,18 @@ class StreamingPriceMonitor:
 
     def _is_crypto_signal(self, signal: Dict) -> bool:
         """Crypto signals run 24/7 and are exempt from spread-hour cancellation."""
-        return signal.get("asset_class") == "crypto"
+        return signal.asset_class == "crypto"
 
     def _annotate_asset_class(self, signal: Dict) -> None:
         """Cache asset_class on the signal so the hot path doesn't re-scan the symbol."""
-        if signal.get("asset_class"):
+        if signal.asset_class:
             return
         try:
-            signal["asset_class"] = self.stream_manager.symbol_mapper.determine_asset_class(
-                signal["instrument"]
+            signal.asset_class = self.stream_manager.symbol_mapper.determine_asset_class(
+                signal.instrument
             )
         except Exception:
-            signal["asset_class"] = None
+            signal.asset_class = None
 
     async def start(self):
         """Start the streaming monitor"""
@@ -327,12 +327,12 @@ class StreamingPriceMonitor:
                 logger.info("No active signals to monitor")
 
             for signal in signals:
-                signal_id = signal["signal_id"]
-                symbol = signal["instrument"]
+                signal_id = signal.signal_id
+                symbol = signal.instrument
 
                 self.active_signals[signal_id] = signal
                 if guild_id is not None:
-                    signal["guild_id"] = guild_id
+                    signal.guild_id = guild_id
                 self._annotate_asset_class(signal)
 
                 if symbol not in self.symbol_to_signals:
@@ -342,8 +342,8 @@ class StreamingPriceMonitor:
                 symbols_needed.add(symbol)
 
             for signal in signals:
-                if signal.get("status") == "hit":
-                    signal_id = signal["signal_id"]
+                if signal.status == "hit":
+                    signal_id = signal.signal_id
                     await self.tp_monitor.refresh_hit_limits(signal_id)
                     # Populate hit limits so embeds reconstruct with the full
                     # limit history (pending_limits alone is not enough for HIT).
@@ -363,7 +363,7 @@ class StreamingPriceMonitor:
                     await self.excursion_monitor.resume_if_tracked(signal)
                 except Exception as _exc_err:
                     logger.error(
-                        f"Failed to resume excursion for signal {signal['signal_id']}: {_exc_err}"
+                        f"Failed to resume excursion for signal {signal.signal_id}: {_exc_err}"
                     )
 
             # Hydrate alert embed references BEFORE the price stream starts —
@@ -384,8 +384,8 @@ class StreamingPriceMonitor:
             # price when the bot last stopped — these signals already closed
             # for real (auto-TP) so they're absent from the query above.
             for shadow_signal in await self.trailing_monitor.recover_incomplete_signals():
-                signal_id = shadow_signal["signal_id"]
-                symbol = shadow_signal["instrument"]
+                signal_id = shadow_signal.signal_id
+                symbol = shadow_signal.instrument
                 self.active_signals[signal_id] = shadow_signal
                 self.symbol_to_signals.setdefault(symbol, []).append(signal_id)
                 symbols_needed.add(symbol)
@@ -411,7 +411,7 @@ class StreamingPriceMonitor:
 
             try:
                 signals = await self.db.get_active_signals_for_tracking()
-                new_by_id = {s["signal_id"]: s for s in signals}
+                new_by_id = {s.signal_id: s for s in signals}
                 new_ids = set(new_by_id.keys())
                 old_ids = set(self.active_signals.keys())
 
@@ -428,12 +428,13 @@ class StreamingPriceMonitor:
                 # of relying on this 30s reconciliation.
                 removed_symbols: set = set()
                 for signal_id in ids_removed:
-                    if self.active_signals.get(signal_id, {}).get("_shadow_only"):
+                    old = self.active_signals.get(signal_id)
+                    if old is not None and old.shadow_only:
                         continue
                     old_signal = self.active_signals.pop(signal_id, None)
                     if old_signal is None:
                         continue
-                    symbol = old_signal.get("instrument")
+                    symbol = old_signal.instrument
                     if symbol and symbol in self.symbol_to_signals:
                         try:
                             self.symbol_to_signals[symbol].remove(signal_id)
@@ -447,16 +448,16 @@ class StreamingPriceMonitor:
                 added_symbols: set = set()
                 for signal_id in ids_added:
                     signal = new_by_id[signal_id]
-                    symbol = signal["instrument"]
+                    symbol = signal.instrument
                     if guild_id is not None:
-                        signal["guild_id"] = guild_id
+                        signal.guild_id = guild_id
                     self._annotate_asset_class(signal)
                     self.active_signals[signal_id] = signal
                     if symbol not in self.symbol_to_signals:
                         self.symbol_to_signals[symbol] = []
                         added_symbols.add(symbol)
                     self.symbol_to_signals[symbol].append(signal_id)
-                    if signal.get("status") == "hit":
+                    if signal.status == "hit":
                         await self.tp_monitor.refresh_hit_limits(signal_id)
 
                 # Subscribe/unsubscribe only the affected symbols.
@@ -519,7 +520,7 @@ class StreamingPriceMonitor:
                 continue
 
             try:
-                signal["current_spread"] = price_data.get("spread", 0.0)
+                signal.current_spread = price_data.get("spread", 0.0)
                 await self._check_signal(
                     signal, price_data, now_in_spread, now_in_late_market, spread_buffer_enabled
                 )
@@ -537,7 +538,7 @@ class StreamingPriceMonitor:
         spread_buffer_enabled: bool,
     ):
         """Check a signal against current price."""
-        if signal.get("_shadow_only"):
+        if signal.shadow_only:
             # Real position already closed via auto-TP; only the trailing-stop
             # shadow simulation is still watching this symbol. Skip every real
             # alert/status check entirely.
@@ -545,22 +546,22 @@ class StreamingPriceMonitor:
                 signal, price_data["bid"], price_data["ask"]
             )
             if all_done:
-                signal_id = signal["signal_id"]
+                signal_id = signal.signal_id
                 self.active_signals.pop(signal_id, None)
-                await self._maybe_unsubscribe_symbol(signal["instrument"], signal_id)
+                await self._maybe_unsubscribe_symbol(signal.instrument, signal_id)
             return
 
-        direction = signal["direction"].lower()
+        direction = signal.direction.lower()
         current_price = price_data["ask"] if direction == "long" else price_data["bid"]
 
         # An already-HIT signal sitting open when a news window opens is
         # cancelled outright — swings are exempt (they ride news out).
-        if signal.get("status") == "hit" and signal.get("type") != "swing" and self.bot.news_manager:
-            news_event = self.bot.news_manager.is_news_active_for(signal["instrument"])
+        if signal.status == "hit" and signal.type != "swing" and self.bot.news_manager:
+            news_event = self.bot.news_manager.is_news_active_for(signal.instrument)
             if news_event is not None:
                 logger.info(
-                    f"News mode: cancelling open HIT signal {signal['signal_id']} "
-                    f"({signal['instrument']}) — event: {news_event}"
+                    f"News mode: cancelling open HIT signal {signal.signal_id} "
+                    f"({signal.instrument}) — event: {news_event}"
                 )
                 await self._cancel_signal_during_guard(
                     signal, current_price, "news", news_event
@@ -572,29 +573,29 @@ class StreamingPriceMonitor:
         # signals are handled by the per-hit / per-SL guards below (cancelled only
         # if they actually trigger during the window).
         if (
-            signal.get("status") == "hit"
-            and signal.get("type") == "risky"
+            signal.status == "hit"
+            and signal.type == "risky"
             and is_risky_trading_disabled()
         ):
             logger.info(
                 f"Risky window: cancelling open HIT signal "
-                f"{signal['signal_id']} ({signal['instrument']})"
+                f"{signal.signal_id} ({signal.instrument})"
             )
             await self._cancel_signal_during_guard(signal, current_price, "risky_window")
             return
 
-        for limit in signal.get("pending_limits", []):
+        for limit in signal.pending_limits:
             await self._check_limit(
                 signal, limit, current_price, direction,
                 is_spread_hour, is_late_market, spread_buffer_enabled,
             )
 
         # Near-miss check: only for active signals (not hit) with approaching alert sent
-        if signal.get("status") in ("active", None):
+        if signal.status in ("active", None):
             await self.excursion_monitor.update_approach(signal, current_price)
             nm_triggered = self.nm_monitor.update(signal, current_price)
             if nm_triggered:
-                signal_id = signal["signal_id"]
+                signal_id = signal.signal_id
                 self.active_signals.pop(signal_id, None)
                 self._react_async(signal, "❌")
                 success = await self.nm_monitor.trigger_near_miss(signal)
@@ -603,25 +604,25 @@ class StreamingPriceMonitor:
                     self.nm_monitor.evict_signal(signal_id)
                     self.tp_monitor.evict_signal(signal_id)
                     await self.excursion_monitor.finalize(signal_id, current_price, "near_miss")
-                    await self._maybe_unsubscribe_symbol(signal["instrument"], signal_id)
+                    await self._maybe_unsubscribe_symbol(signal.instrument, signal_id)
                     self.stats["nm_cancels"] = self.stats.get("nm_cancels", 0) + 1
                 return
 
         # Check stop loss
-        if signal.get("stop_loss"):
+        if signal.stop_loss:
             await self._check_stop_loss(
                 signal, current_price, direction, is_spread_hour, is_late_market
             )
 
         # Check auto take-profit (runs for any HIT signal that has hit limits cached)
-        if signal.get("status") == "hit":
+        if signal.status == "hit":
             tp_triggered = await self.tp_monitor.check_signal(
                 signal,
                 current_bid=price_data["bid"],
                 current_ask=price_data["ask"],
             )
 
-            signal_id = signal["signal_id"]
+            signal_id = signal.signal_id
 
             # Excursion entry is set lazily from the first hit limit (no-op once
             # entered), then MFE/MAE advances each tick.
@@ -643,11 +644,11 @@ class StreamingPriceMonitor:
                 # keep this signal subscribed (shadow-only) so we can see how
                 # far price runs past this auto-TP — instead of fully evicting.
                 if self.trailing_monitor.has_open_levels(signal_id):
-                    signal["_shadow_only"] = True
+                    signal.shadow_only = True
                     self.tp_monitor.evict_signal(signal_id)
                     self.nm_monitor.evict_signal(signal_id)
                 else:
-                    await self._maybe_unsubscribe_symbol(signal["instrument"], signal_id)
+                    await self._maybe_unsubscribe_symbol(signal.instrument, signal_id)
 
     async def _check_limit(
         self,
@@ -660,10 +661,10 @@ class StreamingPriceMonitor:
         spread_buffer_enabled: bool,
     ):
         """Check if a limit is approaching or hit; applies spread buffer."""
-        limit_price = limit["price_level"]
-        symbol = signal["instrument"]
+        limit_price = limit.price_level
+        symbol = signal.instrument
 
-        spread = signal.get("current_spread", 0.0)
+        spread = signal.current_spread or 0.0
 
         if spread is None or spread < 0:
             logger.warning(f"Invalid spread for {symbol}: {spread}, using 0")
@@ -698,17 +699,17 @@ class StreamingPriceMonitor:
                 is_hit = current_price >= limit_price
 
         # Check if hit (with in-memory flag check)
-        if is_hit and not limit.get("hit_alert_sent", False):
+        if is_hit and not limit.hit_alert_sent:
             # News mode guard
             news_event = None
             if self.bot.news_manager:
-                news_event = self.bot.news_manager.is_news_active_for(signal["instrument"])
+                news_event = self.bot.news_manager.is_news_active_for(signal.instrument)
 
             if news_event is not None:
                 logger.info(
                     f"News mode: suppressing limit hit for signal "
-                    f"{signal['signal_id']} limit #{limit['sequence_number']} "
-                    f"({signal['instrument']} @ {current_price:.5f}) "
+                    f"{signal.signal_id} limit #{limit.sequence_number} "
+                    f"({signal.instrument} @ {current_price:.5f}) "
                     f"— event: {news_event}"
                 )
                 await self._cancel_signal_during_guard(signal, current_price, "news", news_event)
@@ -718,14 +719,14 @@ class StreamingPriceMonitor:
             # scheduled window is cancelled. Already-HIT risky signals are
             # cancelled outright in _check_signal before reaching this point.
             if (
-                signal.get("type") == "risky"
-                and signal.get("status") != "hit"
+                signal.type == "risky"
+                and signal.status != "hit"
                 and is_risky_trading_disabled()
             ):
                 logger.info(
                     f"Risky window: suppressing limit hit for signal "
-                    f"{signal['signal_id']} limit #{limit['sequence_number']} "
-                    f"({signal['instrument']} @ {current_price:.5f})"
+                    f"{signal.signal_id} limit #{limit.sequence_number} "
+                    f"({signal.instrument} @ {current_price:.5f})"
                 )
                 await self._cancel_signal_during_guard(signal, current_price, "risky_window")
                 return
@@ -734,19 +735,19 @@ class StreamingPriceMonitor:
                 # An already-HIT signal rides out spread hour: this limit hit is
                 # ignored for now and will be marked normally once spread hour
                 # ends. Only signals with no hits yet are cancelled.
-                if signal.get("status") == "hit":
+                if signal.status == "hit":
                     logger.info(
                         f"Spread hour: ignoring limit hit for already-HIT signal "
-                        f"{signal['signal_id']} limit #{limit['sequence_number']} "
-                        f"({signal['instrument']} @ {current_price:.5f}) — "
+                        f"{signal.signal_id} limit #{limit.sequence_number} "
+                        f"({signal.instrument} @ {current_price:.5f}) — "
                         f"will re-evaluate after spread hour"
                     )
                     return
 
                 logger.info(
                     f"Spread hour: suppressing limit hit for signal "
-                    f"{signal['signal_id']} limit #{limit['sequence_number']} "
-                    f"({signal['instrument']} @ {current_price:.5f})"
+                    f"{signal.signal_id} limit #{limit.sequence_number} "
+                    f"({signal.instrument} @ {current_price:.5f})"
                 )
                 await self._cancel_signal_during_guard(signal, current_price, "spread_hour")
                 return
@@ -755,11 +756,11 @@ class StreamingPriceMonitor:
                 # A fresh entry during the final market hour is cancelled. An
                 # already-HIT signal that rolled into the window keeps running
                 # normally — this limit hit is processed as usual below.
-                if signal.get("status") != "hit":
+                if signal.status != "hit":
                     logger.info(
                         f"Late market hour: suppressing limit hit for signal "
-                        f"{signal['signal_id']} limit #{limit['sequence_number']} "
-                        f"({signal['instrument']} @ {current_price:.5f})"
+                        f"{signal.signal_id} limit #{limit.sequence_number} "
+                        f"({signal.instrument} @ {current_price:.5f})"
                     )
                     await self._cancel_signal_during_guard(
                         signal, current_price, "late_market"
@@ -769,8 +770,8 @@ class StreamingPriceMonitor:
             # Mark the limit hit in memory first so the embed edit and any
             # concurrent live-refresh render identical state — the embed updates
             # in the same beat as the ping instead of briefly reverting.
-            limit["status"] = "hit"
-            limit["hit_alert_sent"] = True
+            limit.status = "hit"
+            limit.hit_alert_sent = True
 
             await self.alert_system.send_limit_hit_alert(
                 signal,
@@ -785,18 +786,18 @@ class StreamingPriceMonitor:
             self.stats["limits_hit"] += 1
 
         # Check if approaching (first limit only)
-        elif not is_hit and not limit.get("approaching_alert_sent", False):
+        elif not is_hit and not limit.approaching_alert_sent:
             # Suppress approaching alerts during active news windows
             if self.bot.news_manager and self.bot.news_manager.is_news_active_for(
-                signal["instrument"]
+                signal.instrument
             ):
                 return
 
             # Suppress approaching alerts for risky signals during a disabled window
-            if signal.get("type") == "risky" and is_risky_trading_disabled():
+            if signal.type == "risky" and is_risky_trading_disabled():
                 return
 
-            if limit["sequence_number"] == 1:
+            if limit.sequence_number == 1:
                 try:
                     approaching_distance = self.alert_config.get_approaching_distance(
                         symbol, current_price=current_price
@@ -820,17 +821,17 @@ class StreamingPriceMonitor:
                     )
 
                     if sent:
-                        await self._mark_approaching_sent(limit["id"])
-                        limit["approaching_alert_sent"] = True
+                        await self._mark_approaching_sent(limit.id)
+                        limit.approaching_alert_sent = True
                         await self.excursion_monitor.start_approach(signal, current_price)
 
         # Retraction: price has drifted past N x the alert threshold —
         # delete the embed and reset the flag so it can re-fire later.
         elif (
             not is_hit
-            and limit.get("approaching_alert_sent", False)
-            and limit["sequence_number"] == 1
-            and signal.get("status") in ("active", None)
+            and limit.approaching_alert_sent
+            and limit.sequence_number == 1
+            and signal.status in ("active", None)
         ):
             try:
                 approaching_distance = self.alert_config.get_approaching_distance(
@@ -847,17 +848,17 @@ class StreamingPriceMonitor:
         self, signal: Dict, limit: Dict, distance: float
     ) -> None:
         """Drop the approaching embed + reset the flag after a long drift."""
-        signal_id = signal["signal_id"]
+        signal_id = signal.signal_id
         await self.alert_system.retract_approaching_embed(signal_id)
-        await self._reset_approaching_sent(limit["id"])
-        limit["approaching_alert_sent"] = False
+        await self._reset_approaching_sent(limit.id)
+        limit.approaching_alert_sent = False
         self.nm_monitor.evict_signal(signal_id)
         # Drop approach-phase excursion state so a later re-approach measures
         # velocity/pre-hit behaviour fresh (the DB row resets on re-approach).
         self.excursion_monitor.evict_signal(signal_id)
         logger.info(
             f"Retracted approaching alert for signal {signal_id} "
-            f"({signal['instrument']}) — distance {distance:.5f} exceeded "
+            f"({signal.instrument}) — distance {distance:.5f} exceeded "
             f"{_APPROACHING_RETRACTION_MULTIPLIER}x threshold"
         )
 
@@ -880,9 +881,9 @@ class StreamingPriceMonitor:
         is_late_market: bool,
     ):
         """Check if stop loss is hit. Spread buffer is NOT applied."""
-        stop_loss = signal["stop_loss"]
+        stop_loss = signal.stop_loss
 
-        if signal.get("sl_alert_sent", False):
+        if signal.sl_alert_sent:
             return
 
         if direction == "long":
@@ -892,13 +893,13 @@ class StreamingPriceMonitor:
 
         if is_hit:
             if (
-                signal.get("type") == "risky"
-                and signal.get("status") != "hit"
+                signal.type == "risky"
+                and signal.status != "hit"
                 and is_risky_trading_disabled()
             ):
                 logger.info(
                     f"Risky window: suppressing stop loss hit for signal "
-                    f"{signal['signal_id']} ({signal['instrument']} @ {current_price:.5f})"
+                    f"{signal.signal_id} ({signal.instrument} @ {current_price:.5f})"
                 )
                 await self._cancel_signal_during_guard(signal, current_price, "risky_window")
                 return
@@ -907,17 +908,17 @@ class StreamingPriceMonitor:
                 # An already-HIT signal rides out spread hour: this SL hit is
                 # ignored for now and will be marked normally once spread hour
                 # ends. Only signals with no hits yet are cancelled.
-                if signal.get("status") == "hit":
+                if signal.status == "hit":
                     logger.info(
                         f"Spread hour: ignoring stop loss hit for already-HIT signal "
-                        f"{signal['signal_id']} ({signal['instrument']} @ {current_price:.5f}) — "
+                        f"{signal.signal_id} ({signal.instrument} @ {current_price:.5f}) — "
                         f"will re-evaluate after spread hour"
                     )
                     return
 
                 logger.info(
                     f"Spread hour: suppressing stop loss hit for signal "
-                    f"{signal['signal_id']} ({signal['instrument']} @ {current_price:.5f})"
+                    f"{signal.signal_id} ({signal.instrument} @ {current_price:.5f})"
                 )
                 await self._cancel_signal_during_guard(signal, current_price, "spread_hour")
                 return
@@ -925,17 +926,17 @@ class StreamingPriceMonitor:
             if is_late_market and not self._is_crypto_signal(signal):
                 # Only fresh entries are cancelled in the final market hour; an
                 # already-HIT signal takes its real stop loss below.
-                if signal.get("status") != "hit":
+                if signal.status != "hit":
                     logger.info(
                         f"Late market hour: suppressing stop loss hit for signal "
-                        f"{signal['signal_id']} ({signal['instrument']} @ {current_price:.5f})"
+                        f"{signal.signal_id} ({signal.instrument} @ {current_price:.5f})"
                     )
                     await self._cancel_signal_during_guard(
                         signal, current_price, "late_market"
                     )
                     return
 
-            signal["sl_alert_sent"] = True
+            signal.sl_alert_sent = True
 
             await self.alert_system.send_stop_loss_alert(signal, current_price)
             self._react_async(signal, "🛑")
@@ -946,7 +947,7 @@ class StreamingPriceMonitor:
         self, signal: Dict, current_price: float, reason: str, news_event=None
     ):
         """Shared evict-alert-react-process path for news and spread-hour guards."""
-        signal_id = signal["signal_id"]
+        signal_id = signal.signal_id
         if signal_id not in self.active_signals:
             return
         self.active_signals.pop(signal_id, None)
@@ -983,21 +984,21 @@ class StreamingPriceMonitor:
     async def _process_limit_hit(self, signal: Dict, limit: Dict, actual_price: float):
         """Process limit hit in database"""
         try:
-            result = await self.signal_db.process_limit_hit(limit["id"], actual_price)
+            result = await self.signal_db.process_limit_hit(limit.id, actual_price)
 
             now = datetime.now(timezone.utc)
-            limit["status"] = "hit"
-            limit["hit_time"] = now
-            limit["hit_price"] = actual_price
+            limit.status = "hit"
+            limit.hit_time = now
+            limit.hit_price = actual_price
 
-            await self.tp_monitor.refresh_hit_limits(signal["signal_id"])
-            signal["status"] = "hit"
-            self.nm_monitor.evict_signal(signal["signal_id"])
+            await self.tp_monitor.refresh_hit_limits(signal.signal_id)
+            signal.status = "hit"
+            self.nm_monitor.evict_signal(signal.signal_id)
 
             if result.get("all_limits_hit"):
                 logger.info(
                     "All limits hit for signal %s — continuing to watch for auto-TP",
-                    signal["signal_id"],
+                    signal.signal_id,
                 )
 
         except Exception as e:
@@ -1012,13 +1013,13 @@ class StreamingPriceMonitor:
         if not signal:
             return
         now = datetime.now(timezone.utc)
-        for limit in signal.get("limits") or []:
-            if limit.get("id") == limit_id:
-                limit["status"] = "hit"
-                limit["hit_alert_sent"] = True
-                limit["hit_time"] = now
+        for limit in signal.limits:
+            if limit.id == limit_id:
+                limit.status = "hit"
+                limit.hit_alert_sent = True
+                limit.hit_time = now
                 if hit_price is not None:
-                    limit["hit_price"] = hit_price
+                    limit.hit_price = hit_price
                 return
 
     def mark_first_pending_limit_hit_in_memory(
@@ -1028,10 +1029,10 @@ class StreamingPriceMonitor:
         signal = self.active_signals.get(signal_id)
         if not signal:
             return
-        pending = [l for l in (signal.get("limits") or []) if l.get("status") == "pending"]
+        pending = [l for l in signal.limits if l.status == "pending"]
         if not pending:
             return
-        first = min(pending, key=lambda l: l.get("sequence_number", 999))
+        first = min(pending, key=lambda l: l.sequence_number)
         now = datetime.now(timezone.utc)
         first["status"] = "hit"
         first["hit_alert_sent"] = True
@@ -1044,14 +1045,14 @@ class StreamingPriceMonitor:
     @staticmethod
     def _apply_status_to_signal(signal: Dict, new_status: str) -> None:
         """Mirror the DB-side limit-state side effects of manually_set_signal_status."""
-        signal["status"] = new_status
+        signal.status = new_status
         terminal = {"cancelled", "profit", "breakeven", "stop_loss"}
-        for limit in signal.get("limits") or []:
-            current = limit.get("status")
+        for limit in signal.limits:
+            current = limit.status
             if new_status in terminal and current == "pending":
-                limit["status"] = "cancelled"
+                limit.status = "cancelled"
             elif new_status in ("active", "hit") and current == "cancelled":
-                limit["status"] = "pending"
+                limit.status = "pending"
 
     def sync_signal_status_in_memory(self, signal_id: int, new_status: str) -> None:
         """Reflect a DB-side signal status change onto the in-memory signal +
@@ -1081,8 +1082,8 @@ class StreamingPriceMonitor:
             return
 
         signal = self.active_signals.get(signal_id)
-        instrument = signal.get("instrument") if signal else None
-        direction = (signal.get("direction") if signal else "") or ""
+        instrument = signal.instrument if signal else None
+        direction = (signal.direction if signal else "") or ""
 
         price = None
         if instrument:
@@ -1179,9 +1180,9 @@ class StreamingPriceMonitor:
         else:
             self.active_signals.pop(signal_id, None)
 
-        # The live-update loop reads signal["limits"] from this stored dict to
-        # avoid hitting the DB every 15 s. After an edit/reactivate that dict
-        # is stale, so swap it for the fresh fetch.
+        # The live-update loop reads signal.limits from this stored entry to
+        # avoid hitting the DB every 15 s. After an edit/reactivate the stored
+        # signal is stale, so swap it for the fresh fetch.
         if self.alert_system is not None:
             entry = self.alert_system._live_embeds.get(signal_id)
             if entry:
@@ -1193,30 +1194,30 @@ class StreamingPriceMonitor:
         """Process stop loss hit"""
         try:
             success = await self.signal_db.manually_set_signal_status(
-                signal["signal_id"],
+                signal.signal_id,
                 "stop_loss",
                 closed_reason="automatic",
             )
 
             if success:
-                self.sync_signal_status_in_memory(signal["signal_id"], "stop_loss")
-                logger.info(f"Signal {signal['signal_id']} marked as stop loss")
-                self.tp_monitor.evict_signal(signal["signal_id"])
+                self.sync_signal_status_in_memory(signal.signal_id, "stop_loss")
+                logger.info(f"Signal {signal.signal_id} marked as stop loss")
+                self.tp_monitor.evict_signal(signal.signal_id)
                 await self.trailing_monitor.finalize_with_price(
-                    signal["signal_id"], current_price, reason="real_sl"
+                    signal.signal_id, current_price, reason="real_sl"
                 )
-                self.trailing_monitor.evict_signal(signal["signal_id"])
+                self.trailing_monitor.evict_signal(signal.signal_id)
                 await self.excursion_monitor.finalize(
-                    signal["signal_id"], current_price, "real_sl"
+                    signal.signal_id, current_price, "real_sl"
                 )
-                await self._maybe_unsubscribe_symbol(signal["instrument"], signal["signal_id"])
+                await self._maybe_unsubscribe_symbol(signal.instrument, signal.signal_id)
 
         except Exception as e:
             logger.error(f"Failed to process stop loss: {e}")
 
     async def _process_spread_hour_cancel(self, signal: Dict):
         """Cancel a signal that was falsely triggered during spread hour."""
-        signal_id = signal["signal_id"]
+        signal_id = signal.signal_id
         try:
             success = await self.signal_db.manually_set_signal_status(
                 signal_id,
@@ -1228,7 +1229,7 @@ class StreamingPriceMonitor:
                 self.sync_signal_status_in_memory(signal_id, "cancelled")
                 logger.info(f"Signal {signal_id} cancelled due to spread hour hit")
                 self.tp_monitor.evict_signal(signal_id)
-                await self._maybe_unsubscribe_symbol(signal["instrument"], signal_id)
+                await self._maybe_unsubscribe_symbol(signal.instrument, signal_id)
                 self.stats["spread_hour_cancels"] = self.stats.get("spread_hour_cancels", 0) + 1
             else:
                 logger.error(f"Failed to cancel signal {signal_id} for spread hour")
@@ -1237,7 +1238,7 @@ class StreamingPriceMonitor:
 
     async def _process_late_market_cancel(self, signal: Dict):
         """Cancel a fresh entry that triggered during the final market hour."""
-        signal_id = signal["signal_id"]
+        signal_id = signal.signal_id
         try:
             success = await self.signal_db.manually_set_signal_status(
                 signal_id,
@@ -1249,7 +1250,7 @@ class StreamingPriceMonitor:
                 self.sync_signal_status_in_memory(signal_id, "cancelled")
                 logger.info(f"Signal {signal_id} cancelled due to late market hour hit")
                 self.tp_monitor.evict_signal(signal_id)
-                await self._maybe_unsubscribe_symbol(signal["instrument"], signal_id)
+                await self._maybe_unsubscribe_symbol(signal.instrument, signal_id)
                 self.stats["late_market_cancels"] = self.stats.get("late_market_cancels", 0) + 1
             else:
                 logger.error(f"Failed to cancel signal {signal_id} for late market hour")
@@ -1258,7 +1259,7 @@ class StreamingPriceMonitor:
 
     async def _process_risky_window_cancel(self, signal: Dict):
         """Cancel a risky signal that triggered during a disabled window."""
-        signal_id = signal["signal_id"]
+        signal_id = signal.signal_id
         try:
             success = await self.signal_db.manually_set_signal_status(
                 signal_id,
@@ -1270,7 +1271,7 @@ class StreamingPriceMonitor:
                 self.sync_signal_status_in_memory(signal_id, "cancelled")
                 logger.info(f"Signal {signal_id} cancelled due to risky disabled window")
                 self.tp_monitor.evict_signal(signal_id)
-                await self._maybe_unsubscribe_symbol(signal["instrument"], signal_id)
+                await self._maybe_unsubscribe_symbol(signal.instrument, signal_id)
                 self.stats["risky_window_cancels"] = (
                     self.stats.get("risky_window_cancels", 0) + 1
                 )
@@ -1281,7 +1282,7 @@ class StreamingPriceMonitor:
 
     async def _process_news_cancel(self, signal: Dict, news_event) -> None:
         """Cancel a signal that was triggered during an active news window."""
-        signal_id = signal["signal_id"]
+        signal_id = signal.signal_id
         try:
             success = await self.signal_db.manually_set_signal_status(
                 signal_id,
@@ -1293,7 +1294,7 @@ class StreamingPriceMonitor:
                 self.sync_signal_status_in_memory(signal_id, "cancelled")
                 logger.info(f"Signal {signal_id} cancelled due to news mode (event: {news_event})")
                 self.tp_monitor.evict_signal(signal_id)
-                await self._maybe_unsubscribe_symbol(signal["instrument"], signal_id)
+                await self._maybe_unsubscribe_symbol(signal.instrument, signal_id)
                 self.stats["news_cancelled"] += 1
             else:
                 logger.error(f"Failed to cancel signal {signal_id} for news mode")

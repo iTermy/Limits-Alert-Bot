@@ -67,7 +67,8 @@
       "Bash(./.venv/Scripts/python.exe -c \"import price_feeds.tp_monitor, price_feeds.streaming_monitor, database.manager, database.signal_ops; print\\('OK'\\)\")",
       "Bash(./.venv/Scripts/python.exe -c \"import price_feeds.nm_monitor, price_feeds.excursion_monitor, price_feeds.trailing_monitor; print\\('OK'\\)\")",
       "Bash(./.venv/Scripts/python.exe -c \"import commands.views, price_feeds.embed_builders; print\\('OK'\\)\")",
-      "Bash(./.venv/Scripts/python.exe -c \"import price_feeds.alert_system; print\\('OK'\\)\")"
+      "Bash(./.venv/Scripts/python.exe -c \"import price_feeds.alert_system; print\\('OK'\\)\")",
+      "Bash(./.venv/Scripts/python.exe -c \"import price_feeds.streaming_monitor; print\\('OK'\\)\")"
     ],
     "additionalDirectories": [
       "C:\\Personal Projects\\MT5-Auto-Execution-Bot"
