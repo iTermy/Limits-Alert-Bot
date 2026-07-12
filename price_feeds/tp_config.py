@@ -117,57 +117,6 @@ class TPConfig(BaseThresholdConfig):
         self._save_config(config)
         return config
 
-    def _post_load(self, raw: Dict) -> Dict:
-        """Migrate legacy {defaults, scalp_defaults, overrides, scalp_overrides} → new shape."""
-        if "type_defaults" in raw and "type_overrides" in raw:
-            return raw
-
-        migrated: Dict = {
-            "type_defaults": {t: {} for t in VALID_SIGNAL_TYPES},
-            "type_overrides": {t: {} for t in VALID_SIGNAL_TYPES},
-        }
-
-        legacy_defaults = raw.get("defaults") or {}
-        legacy_scalp_defaults = raw.get("scalp_defaults") or {}
-        legacy_overrides = raw.get("overrides") or {}
-        legacy_scalp_overrides = raw.get("scalp_overrides") or {}
-
-        if legacy_defaults:
-            migrated["type_defaults"]["standard"] = legacy_defaults
-            migrated["type_defaults"]["pa"] = dict(legacy_defaults)
-            # Swing = 3x standard.
-            swing = {}
-            for ac, cfg in legacy_defaults.items():
-                swing[ac] = {
-                    "type": cfg.get("type", "dollars"),
-                    "value": cfg.get("value", 5.0) * 3,
-                    "description": f"Swing - {ac}",
-                }
-            migrated["type_defaults"]["swing"] = swing
-        else:
-            migrated["type_defaults"]["standard"] = self._standard_defaults()
-            migrated["type_defaults"]["pa"] = self._standard_defaults()
-            migrated["type_defaults"]["swing"] = self._swing_defaults()
-
-        if legacy_scalp_defaults:
-            migrated["type_defaults"]["scalp"] = legacy_scalp_defaults
-            migrated["type_defaults"]["toll"] = dict(legacy_scalp_defaults)
-        else:
-            migrated["type_defaults"]["scalp"] = self._scalp_defaults()
-            migrated["type_defaults"]["toll"] = self._scalp_defaults()
-
-        migrated["type_defaults"]["1-1"] = self._one_one_defaults()
-        migrated["type_defaults"]["risky"] = copy.deepcopy(migrated["type_defaults"]["scalp"])
-
-        if legacy_overrides:
-            migrated["type_overrides"]["standard"] = legacy_overrides
-        if legacy_scalp_overrides:
-            migrated["type_overrides"]["scalp"] = legacy_scalp_overrides
-
-        self._save_config(migrated)
-        logger.info("Migrated TP config from legacy scalp shape to per-type shape")
-        return migrated
-
     def _validate_config(self):
         if "type_defaults" not in self.config or "type_overrides" not in self.config:
             logger.error("TP config missing type_defaults/type_overrides; resetting to defaults")

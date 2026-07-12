@@ -451,7 +451,7 @@ class BotManagementCog(BaseCog):
             self.logger.error(f"Failed to save gold_tolls_sl_offset: {e}", exc_info=True)
             return
 
-        self.logger.info(f"gold_tolls_sl_offset changed {old_value} → {value} by {ctx.author}")
+        self.logger.info(f"gold_tolls_sl_offset changed {old_value} to {value} by {ctx.author}")
         await log_config_change(
             self.signal_db.db, "settings", "gold_tolls_sl_offset", old_value, value, ctx.author.name,
         )
@@ -582,7 +582,7 @@ class BotManagementCog(BaseCog):
             self.logger.error(f"Failed to save risky_gold_sl_offset: {e}", exc_info=True)
             return
 
-        self.logger.info(f"risky_gold_sl_offset changed {old_value} → {value} by {ctx.author}")
+        self.logger.info(f"risky_gold_sl_offset changed {old_value} to {value} by {ctx.author}")
         await log_config_change(
             self.signal_db.db, "settings", "risky_gold_sl_offset", old_value, value, ctx.author.name,
         )

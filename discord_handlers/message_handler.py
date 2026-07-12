@@ -10,7 +10,10 @@ from typing import Optional
 import discord
 import pytz
 
+from core.parser import RejectedSignal, parse_signal
+from database import db
 from price_feeds.embed_builders import _build_signal_embed, _set_archive_footer
+from price_feeds.streaming_monitor import react_to_original_signal
 from price_feeds.tp_config import TPConfig
 from utils.formatting import format_price, get_channel_name as _get_channel_name
 from utils.logger import get_logger
@@ -254,9 +257,7 @@ class MessageHandler:
                     )
                     if pending:
                         try:
-                            from database import db as _db
-
-                            await _db.mark_limit_hit(pending[0]["id"], pending[0]["price_level"])
+                            await db.mark_limit_hit(pending[0]["id"], pending[0]["price_level"])
                             if self.bot.services.monitor:
                                 self.bot.services.monitor._mutate_limit_hit_in_memory(
                                     signal_id, pending[0]["id"], pending[0]["price_level"]
@@ -376,8 +377,6 @@ class MessageHandler:
                     )
                     await self._safe_delete(message)
                     return
-
-                from core.parser import parse_signal
 
                 parsed = None
                 if from_signal_reply:
@@ -636,8 +635,6 @@ class MessageHandler:
     async def process_signal(self, message: discord.Message):
         """Process a potential trading signal with enhanced parsing"""
         try:
-            from core.parser import RejectedSignal, parse_signal
-
             channel_name = self.get_channel_name(message.channel.id)
             parsed = parse_signal(message.content, channel_name)
 
@@ -770,7 +767,6 @@ class MessageHandler:
                             pass
 
                     try:
-                        from price_feeds.streaming_monitor import react_to_original_signal
                         await react_to_original_signal(self.bot, sig, "❌")
                     except Exception:
                         pass
@@ -838,8 +834,6 @@ class MessageHandler:
             await message.clear_reactions()
             await self.process_signal(message)
             return
-
-        from core.parser import RejectedSignal, parse_signal
 
         channel_name = self.get_channel_name(message.channel.id)
         parsed = parse_signal(message.content, channel_name)

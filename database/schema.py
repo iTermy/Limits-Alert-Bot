@@ -571,7 +571,7 @@ async def _migrate_scalp_to_type(conn):
     )
 
     await conn.execute("ALTER TABLE signals DROP COLUMN scalp")
-    logger.info("Migrated signals.scalp → signals.type and dropped scalp column")
+    logger.info("Migrated signals.scalp to signals.type and dropped scalp column")
 
 
 async def _migrate_risky_gold_type(conn):

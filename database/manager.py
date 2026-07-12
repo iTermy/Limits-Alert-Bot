@@ -362,7 +362,7 @@ class DatabaseManager(BaseConnectionManager):
                 """,
                 (value,),
             )
-            logger.debug(f"bot_mode_status.news_mode → {value!r}")
+            logger.debug(f"bot_mode_status.news_mode set to {value!r}")
         except Exception as e:
             logger.error(f"Failed to update news_mode status: {e}", exc_info=True)
 
@@ -383,7 +383,7 @@ class DatabaseManager(BaseConnectionManager):
                 """,
                 (value,),
             )
-            logger.debug(f"bot_mode_status.vol_guard → {value!r}")
+            logger.debug(f"bot_mode_status.vol_guard set to {value!r}")
         except Exception as e:
             logger.error(f"Failed to update vol_guard status: {e}", exc_info=True)
 
@@ -398,7 +398,7 @@ class DatabaseManager(BaseConnectionManager):
                 """,
                 (active,),
             )
-            logger.debug(f"bot_mode_status.spread_hour → {active}")
+            logger.debug(f"bot_mode_status.spread_hour set to {active}")
         except Exception as e:
             logger.error(f"Failed to update spread_hour status: {e}", exc_info=True)
 

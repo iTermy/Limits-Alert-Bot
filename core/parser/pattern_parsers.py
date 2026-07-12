@@ -347,7 +347,7 @@ def _extract_from_channel_name(
     if is_crypto_alt:
         alt_symbol = _extract_crypto_alt_symbol(text_lower)
         if alt_symbol:
-            logger.debug(f"Crypto-alt channel: {alt_symbol} → {alt_symbol}USDT")
+            logger.debug(f"Crypto-alt channel: {alt_symbol} maps to {alt_symbol}USDT")
             return f"{alt_symbol}USDT"
 
     # Gold channel - default to XAUUSD if no other instrument found
@@ -378,7 +378,7 @@ def _find_explicit_instrument(text_lower: str, is_crypto_alt: bool = False) -> O
     if is_crypto_alt:
         alt_symbol = _extract_crypto_alt_symbol(text_lower)
         if alt_symbol:
-            logger.debug(f"Crypto-alt auto-append: {alt_symbol} → {alt_symbol}USDT")
+            logger.debug(f"Crypto-alt auto-append: {alt_symbol} maps to {alt_symbol}USDT")
             return f"{alt_symbol}USDT"
 
     # Check for crypto first (standard mappings for BTC, ETH, etc.)

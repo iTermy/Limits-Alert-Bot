@@ -6,6 +6,16 @@ drift between the two entry points.
 """
 
 
+def is_admin(bot, user) -> bool:
+    """True if the user is a configured bot admin or a Discord server
+    administrator. Works for both guild members and DM users (who have no
+    guild_permissions)."""
+    if user.id in bot.admin_ids:
+        return True
+    perms = getattr(user, "guild_permissions", None)
+    return perms is not None and perms.administrator
+
+
 def is_signal_manager(bot, user) -> bool:
     """True if the user may manage signals (cancel / profit / news / etc.).
 
@@ -13,13 +23,9 @@ def is_signal_manager(bot, user) -> bool:
     administrator, a configured manager user ID, or a member holding any of the
     configured manager role IDs. Everyone else is read-only.
     """
-    if user.id in bot.admin_ids:
+    if is_admin(bot, user):
         return True
     if user.id in getattr(bot, "signal_manager_user_ids", set()):
-        return True
-
-    perms = getattr(user, "guild_permissions", None)
-    if perms is not None and perms.administrator:
         return True
 
     role_ids = getattr(bot, "signal_manager_role_ids", set())

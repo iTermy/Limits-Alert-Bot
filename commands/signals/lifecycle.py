@@ -261,7 +261,7 @@ class LifecycleCog(BaseCog):
                 embed.add_field(
                     name="First Hit", value=f"<t:{int(timestamp.timestamp())}:R>", inline=True
                 )
-            except:
+            except (ValueError, TypeError):
                 pass
 
         if signal.get("closed_at"):
@@ -272,7 +272,7 @@ class LifecycleCog(BaseCog):
                 embed.add_field(
                     name="Closed", value=f"<t:{int(timestamp.timestamp())}:R>", inline=True
                 )
-            except:
+            except (ValueError, TypeError):
                 pass
 
         # Link to original message
@@ -324,11 +324,7 @@ class LifecycleCog(BaseCog):
         # unless the admin explicitly requests --force.
         if status == "active" and signal["status"] in ("cancelled", "stop_loss"):
             if force:
-                is_admin = (
-                    hasattr(ctx.author, "guild_permissions")
-                    and ctx.author.guild_permissions.administrator
-                )
-                if not is_admin:
+                if not self.is_admin(ctx.author):
                     await ctx.send("❌ `--force` requires administrator permissions.")
                     return
             else:

@@ -8,7 +8,7 @@ def format_price(price: float, symbol: str = None) -> str:
 
     if price < 0.0001:
         formatted = f"{price:.8f}"
-    elif price < 0.01 or price < 10:
+    elif price < 10:
         formatted = f"{price:.5f}"
     elif price < 100:
         formatted = f"{price:.3f}"

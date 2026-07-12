@@ -73,7 +73,7 @@ class PriceStreamManager:
 
             # Start MT5 stream handler
             asyncio.create_task(self._handle_icmarkets_stream())
-            logger.info("✓ ICMarkets stream initialized")
+            logger.info("ICMarkets stream initialized")
         except Exception as e:
             logger.error(f"Failed to initialize ICMarkets stream: {e}")
             self.feed_status["icmarkets"] = False
@@ -98,7 +98,7 @@ class PriceStreamManager:
 
                 # Log which server we're connected to
                 server_type = "practice" if practice else "live"
-                logger.info(f"✓ OANDA stream initialized ({server_type} account)")
+                logger.info(f"OANDA stream initialized ({server_type} account)")
             else:
                 logger.info("OANDA credentials not configured, skipping")
         except Exception as e:
@@ -113,7 +113,7 @@ class PriceStreamManager:
 
             # Start Binance stream handler
             asyncio.create_task(self._handle_binance_stream())
-            logger.info("✓ Binance WebSocket initialized")
+            logger.info("Binance WebSocket initialized")
         except Exception as e:
             logger.error(f"Failed to initialize Binance stream: {e}")
             self.feed_status["binance"] = False
@@ -494,7 +494,7 @@ class PriceStreamManager:
             self.feed_status[feed_name] = feed.connected
             self.stats["reconnections"] += 1
             if feed.connected:
-                logger.info(f"✓ {feed_name} reconnected")
+                logger.info(f"{feed_name} reconnected")
             else:
                 logger.warning(f"{feed_name} reconnect did not restore connection")
             return feed.connected
@@ -522,7 +522,7 @@ class PriceStreamManager:
                 self.feed_status[feed_name] = feed.connected
                 reconnect_results[feed_name] = True
                 self.stats["reconnections"] += 1
-                logger.info(f"✓ {feed_name} reconnected")
+                logger.info(f"{feed_name} reconnected")
             except Exception as e:
                 logger.error(f"Failed to reconnect {feed_name}: {e}")
                 self.feed_status[feed_name] = False

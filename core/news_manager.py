@@ -845,9 +845,3 @@ def _parse_time(
         microsecond=0,
     )
     return result
-
-
-# Keep legacy name for any external callers
-def _parse_time_est(time_str: str) -> datetime:
-    """Legacy wrapper — parses time as EST for today."""
-    return _parse_time(time_str, EST)

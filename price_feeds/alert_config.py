@@ -28,7 +28,6 @@ class AlertDistanceConfig(BaseThresholdConfig):
     - Asset-specific defaults
     - Persistent manual overrides
     - Automatic JPY pair detection
-    - Config validation and migration from old formats
     """
 
     CONFIG_FILENAME = "alert_distances.json"
@@ -37,27 +36,7 @@ class AlertDistanceConfig(BaseThresholdConfig):
         super().__init__(config_path)
         logger.info("AlertDistanceConfig initialized")
 
-    # === Config defaults, migration & validation ===
-
-    def _post_load(self, raw: Dict) -> Dict:
-        if "defaults" not in raw or not self._is_new_format(raw):
-            logger.warning("Old config format detected, migrating...")
-            migrated = self._migrate_old_config(raw)
-            self._save_config(migrated)
-            return migrated
-        return raw
-
-    def _is_new_format(self, config: Dict) -> bool:
-        defaults = config.get("defaults")
-        if not isinstance(defaults, dict):
-            return False
-        for settings in defaults.values():
-            if isinstance(settings, dict):
-                if "type" in settings and "value" in settings:
-                    return True
-                if "approaching_pips" in settings or "approaching_distance" in settings:
-                    return False
-        return False
+    # === Config defaults & validation ===
 
     def _create_default_config(self) -> Dict:
         return {
@@ -76,99 +55,6 @@ class AlertDistanceConfig(BaseThresholdConfig):
             },
             "overrides": {},
         }
-
-    def _migrate_old_config(self, old_config: Dict) -> Dict:
-        """
-        Migrate old config to new nested structure.
-
-        Handles multiple old formats:
-        1. Flat format: {"forex": 10.0, "metals": 10.0}
-        2. Nested with approaching_pips: {"defaults": {"forex": {"approaching_pips": 10, ...}}}
-        3. Nested with approaching_distance: {"defaults": {"metals": {"approaching_distance": 10, ...}}}
-        """
-        logger.info("Starting config migration...")
-        new_config = self._create_default_config()
-
-        if "defaults" in old_config:
-            old_defaults = old_config["defaults"]
-
-            for asset_class, settings in old_defaults.items():
-                if not isinstance(settings, dict):
-                    continue
-
-                if asset_class in ["forex", "forex_jpy"]:
-                    distance_type = "pips"
-                elif asset_class in ["metals", "oil"]:
-                    distance_type = "dollars"
-                elif asset_class in ["indices", "stocks", "crypto"]:
-                    distance_type = "percentage"
-                else:
-                    distance_type = "pips"
-
-                value = None
-                if "approaching_pips" in settings:
-                    value = settings["approaching_pips"]
-                    distance_type = "pips"
-                elif "approaching_distance" in settings:
-                    value = settings["approaching_distance"]
-
-                if value is not None:
-                    if distance_type == "percentage" and value > 10:
-                        if asset_class == "indices":
-                            value = 1.0
-                        elif asset_class == "crypto":
-                            value = 0.5
-                        else:
-                            value = 1.0
-
-                    if asset_class in new_config["defaults"]:
-                        new_config["defaults"][asset_class]["value"] = value
-                        new_config["defaults"][asset_class]["type"] = distance_type
-        else:
-            for asset_class, value in old_config.items():
-                if asset_class in ["overrides", "dynamic_overrides"]:
-                    continue
-
-                if isinstance(value, (int, float)):
-                    if asset_class in ["forex", "forex_jpy"]:
-                        distance_type = "pips"
-                    elif asset_class in ["metals", "oil"]:
-                        distance_type = "dollars"
-                    elif asset_class in ["indices", "stocks", "crypto"]:
-                        distance_type = "percentage"
-                        if value > 10:
-                            value = 1.0 if asset_class != "crypto" else 0.5
-                    else:
-                        distance_type = "pips"
-
-                    if asset_class in new_config["defaults"]:
-                        new_config["defaults"][asset_class]["value"] = value
-                        new_config["defaults"][asset_class]["type"] = distance_type
-
-        for section_key in ("overrides", "dynamic_overrides"):
-            if section_key in old_config and isinstance(old_config[section_key], dict):
-                for symbol, settings in old_config[section_key].items():
-                    if not isinstance(settings, dict):
-                        continue
-                    if symbol in new_config["overrides"]:
-                        continue
-                    if "approaching_pips" in settings:
-                        new_config["overrides"][symbol] = {
-                            "type": "pips",
-                            "value": settings["approaching_pips"],
-                            "set_by": "Migration",
-                            "set_at": datetime.now(timezone.utc).isoformat(),
-                        }
-                    elif "approaching_distance" in settings:
-                        new_config["overrides"][symbol] = {
-                            "type": "dollars",
-                            "value": settings["approaching_distance"],
-                            "set_by": "Migration",
-                            "set_at": datetime.now(timezone.utc).isoformat(),
-                        }
-
-        logger.info("Configuration migrated successfully")
-        return new_config
 
     def _validate_config(self):
         super()._validate_config()
@@ -341,20 +227,3 @@ class AlertDistanceConfig(BaseThresholdConfig):
             return f"${distance:.2f}"
 
         return f"{distance:.5f}"
-
-    # Backward compatibility
-    def get_alert_config(self, symbol: str) -> Dict:
-        """BACKWARD COMPATIBILITY: Get alert config in old format."""
-        config = self._get_config_for_symbol(symbol)
-        distance_type = config["type"]
-        value = config["value"]
-        pip_size = self.get_pip_size(symbol)
-
-        if distance_type == "pips":
-            return {"approaching_pips": value, "pip_size": pip_size}
-        return {"approaching_distance": value, "pip_size": pip_size}
-
-
-def get_alert_config() -> AlertDistanceConfig:
-    """Get global alert config instance."""
-    return AlertDistanceConfig()

@@ -162,11 +162,9 @@ class ArchiveManager:
 
             if is_profit:
                 dest_channel = self._get_profit_channel()
-                archive_label = "📁 Profit Archived"
                 dest_name = "profit channel"
             else:
                 dest_channel = self._get_finished_channel()
-                archive_label = "📁 Archived"
                 dest_name = "finished-signals channel"
 
             finished_msg = None
