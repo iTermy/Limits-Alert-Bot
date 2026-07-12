@@ -224,9 +224,9 @@ class AlertSystem:
                 ]
                 if pending_limits:
                     nearest = min(
-                        pending_limits, key=lambda l: abs(current_price - l["price_level"])
+                        pending_limits, key=lambda l: abs(current_price - l.price_level)
                     )
-                    distance = abs(current_price - nearest["price_level"])
+                    distance = abs(current_price - nearest.price_level)
                     if self.alert_config:
                         distance_formatted = self.alert_config.format_distance_for_display(
                             instrument, distance, current_price
@@ -1002,10 +1002,7 @@ class AlertSystem:
                 for l in limits
                 if l.status == "hit"
                 or l.hit_alert_sent
-                or (
-                    isinstance(l.sequence_number, int)
-                    and l["sequence_number"] <= force_hit_up_to_seq
-                )
+                or l.sequence_number <= force_hit_up_to_seq
             )
 
             suffix = "🎯🎯 **FINAL**" if seq == total else "🎯"
@@ -1021,14 +1018,11 @@ class AlertSystem:
                 for l in limits
                 if l.status != "hit"
                 and not l.hit_alert_sent
-                and (
-                    not isinstance(l.sequence_number, int)
-                    or l["sequence_number"] > force_hit_up_to_seq
-                )
+                and l.sequence_number > force_hit_up_to_seq
             ]
             if pending_limits and current_price is not None:
-                nearest = min(pending_limits, key=lambda l: abs(current_price - l["price_level"]))
-                distance = abs(current_price - nearest["price_level"])
+                nearest = min(pending_limits, key=lambda l: abs(current_price - l.price_level))
+                distance = abs(current_price - nearest.price_level)
                 if self.alert_config:
                     distance_formatted = self.alert_config.format_distance_for_display(
                         signal.instrument, distance, current_price
@@ -1485,16 +1479,9 @@ class AlertSystem:
             news_ts = int(news_event.news_time.timestamp())
             all_limits = signal.limits
             if all_limits:
-                # Limits may be LimitData, dicts, or bare floats. LimitData and
-                # dicts both support item access; bare floats are used as-is.
-                def _limit_price(l):
-                    return l if isinstance(l, (int, float)) else l["price_level"]
-
-                def _limit_seq(l):
-                    return 0 if isinstance(l, (int, float)) else l["sequence_number"]
-
                 limit_prices = "  |  ".join(
-                    _fmt(_limit_price(l)) for l in sorted(all_limits, key=_limit_seq)
+                    _fmt(l.price_level)
+                    for l in sorted(all_limits, key=lambda l: l.sequence_number)
                 )
             else:
                 limit_prices = "—"
