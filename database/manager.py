@@ -308,7 +308,7 @@ class DatabaseManager(BaseConnectionManager):
             logger.error(f"Invalid expiry type: {expiry_type}")
             return False
 
-        signal = await self.fetch_one("SELECT * FROM signals WHERE id = $1", (signal_id,))
+        signal = await self.fetch_one("SELECT status FROM signals WHERE id = $1", (signal_id,))
 
         if not signal:
             logger.error(f"Signal {signal_id} not found")

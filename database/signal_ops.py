@@ -19,6 +19,21 @@ from .utils import _parse_dt, calculate_expiry, is_weekend_window
 
 logger = get_logger("signal_db")
 
+# Explicit column lists for single-signal fetches. Matches the SignalData /
+# LimitData model fields; analytics-only columns (close_*, tp_threshold_*,
+# minutes_to_news, data_version) are written but never read at runtime.
+SIGNAL_COLUMNS = (
+    "id, message_id, channel_id, instrument, direction, stop_loss, expiry_type, "
+    "expiry_time, status, type, first_limit_hit_time, closed_at, closed_reason, "
+    "tp_price, manual_tp_price, total_limits, limits_hit, alert_message_id, "
+    "alert_channel_id, ping_message_id, finished_message_id, finished_channel_id, "
+    "created_at, updated_at"
+)
+LIMIT_COLUMNS = (
+    "id, signal_id, price_level, sequence_number, status, hit_time, hit_price, "
+    "approaching_alert_sent, hit_alert_sent, created_at"
+)
+
 
 def _is_crypto_symbol(symbol: str) -> bool:
     """Lightweight crypto detector for DB-layer use (avoids importing the live mapper)."""
@@ -131,7 +146,7 @@ class SignalDatabase:
 
     async def get_signal_by_message_id(self, message_id: str) -> Optional[Dict[str, Any]]:
         """Get signal by Discord message ID."""
-        query = "SELECT * FROM signals WHERE message_id = $1"
+        query = f"SELECT {SIGNAL_COLUMNS} FROM signals WHERE message_id = $1"
         signal = await self.db.fetch_one(query, (message_id,))
         if signal is not None:
             signal["signal_id"] = signal["id"]
@@ -139,17 +154,15 @@ class SignalDatabase:
 
     async def get_signal_with_limits(self, signal_id: int) -> Optional[SignalData]:
         """Get signal with all its limits (including hit ones)."""
-        signal_query = "SELECT * FROM signals WHERE id = $1"
+        signal_query = f"SELECT {SIGNAL_COLUMNS} FROM signals WHERE id = $1"
         signal = await self.db.fetch_one(signal_query, (signal_id,))
 
         if not signal:
             return None
 
-        limits_query = """
-            SELECT * FROM limits
-            WHERE signal_id = $1
-            ORDER BY sequence_number
-        """
+        limits_query = (
+            f"SELECT {LIMIT_COLUMNS} FROM limits WHERE signal_id = $1 ORDER BY sequence_number"
+        )
         limits = await self.db.fetch_all(limits_query, (signal_id,))
 
         return SignalData.from_db_row(signal, limits)
@@ -481,7 +494,7 @@ class SignalDatabase:
         try:
             logger.debug(f"Attempting to reactivate signal {signal_id}")
 
-            signal_query = "SELECT * FROM signals WHERE id = $1"
+            signal_query = f"SELECT {SIGNAL_COLUMNS} FROM signals WHERE id = $1"
             signal = await self.db.fetch_one(signal_query, (signal_id,))
 
             if not signal:
@@ -698,7 +711,9 @@ class SignalDatabase:
                 logger.error(f"Invalid status: {new_status}")
                 return False
 
-            signal = await self.db.fetch_one("SELECT * FROM signals WHERE id = $1", (signal_id,))
+            signal = await self.db.fetch_one(
+                f"SELECT {SIGNAL_COLUMNS} FROM signals WHERE id = $1", (signal_id,)
+            )
 
             if not signal:
                 logger.error(f"Signal {signal_id} not found")
@@ -849,7 +864,7 @@ class SignalDatabase:
         This mimics the behavior of automatic hit detection.
         """
         try:
-            signal_query = "SELECT * FROM signals WHERE id = $1"
+            signal_query = f"SELECT {SIGNAL_COLUMNS} FROM signals WHERE id = $1"
             signal_row = await self.db.fetch_one(signal_query, (signal_id,))
 
             if not signal_row:
@@ -857,7 +872,8 @@ class SignalDatabase:
                 return False
 
             limits = await self.db.fetch_all(
-                "SELECT * FROM limits WHERE signal_id = $1 ORDER BY sequence_number", (signal_id,)
+                f"SELECT {LIMIT_COLUMNS} FROM limits WHERE signal_id = $1 ORDER BY sequence_number",
+                (signal_id,),
             )
 
             if signal_row["status"] == SignalStatus.HIT:
@@ -898,7 +914,7 @@ class SignalDatabase:
                         f"Reactivated as part of manual hit — {reason}",
                     )
                 limits = await self.db.fetch_all(
-                    "SELECT * FROM limits WHERE signal_id = $1 ORDER BY sequence_number",
+                    f"SELECT {LIMIT_COLUMNS} FROM limits WHERE signal_id = $1 ORDER BY sequence_number",
                     (signal_id,),
                 )
 
@@ -987,7 +1003,9 @@ class SignalDatabase:
                 logger.error("Custom expiry type requires datetime")
                 return False
 
-            signal = await self.db.fetch_one("SELECT * FROM signals WHERE id = $1", (signal_id,))
+            signal = await self.db.fetch_one(
+                f"SELECT {SIGNAL_COLUMNS} FROM signals WHERE id = $1", (signal_id,)
+            )
 
             if not signal:
                 logger.error(f"Signal {signal_id} not found")
