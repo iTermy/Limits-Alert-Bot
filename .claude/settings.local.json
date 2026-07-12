@@ -64,7 +64,8 @@
       "Bash(./.venv/Scripts/python.exe -m ruff check .)",
       "Bash(./.venv/Scripts/python.exe -m ruff --version)",
       "Bash(./.venv/Scripts/python.exe -c \"import database.signal_ops, database.manager; print\\('OK'\\)\")",
-      "Bash(./.venv/Scripts/python.exe -c \"import price_feeds.tp_monitor, price_feeds.streaming_monitor, database.manager, database.signal_ops; print\\('OK'\\)\")"
+      "Bash(./.venv/Scripts/python.exe -c \"import price_feeds.tp_monitor, price_feeds.streaming_monitor, database.manager, database.signal_ops; print\\('OK'\\)\")",
+      "Bash(./.venv/Scripts/python.exe -c \"import price_feeds.nm_monitor, price_feeds.excursion_monitor, price_feeds.trailing_monitor; print\\('OK'\\)\")"
     ],
     "additionalDirectories": [
       "C:\\Personal Projects\\MT5-Auto-Execution-Bot"

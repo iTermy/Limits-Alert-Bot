@@ -119,8 +119,8 @@ class NearMissMonitor:
             True if a near-miss is confirmed this tick (caller should cancel).
             False otherwise.
         """
-        signal_id = signal["signal_id"]
-        instrument = signal["instrument"]
+        signal_id = signal.signal_id
+        instrument = signal.instrument
 
         # Dedup guard
         if signal_id in self._processing:
@@ -131,11 +131,11 @@ class NearMissMonitor:
             return False
 
         # Swing signals are not subject to near-miss cancellation.
-        if signal.get("type") == "swing":
+        if signal.type == "swing":
             return False
 
         # Find the first pending limit
-        pending_limits = signal.get("pending_limits", [])
+        pending_limits = signal.pending_limits
         first_limit = next(
             (
                 l
@@ -148,15 +148,15 @@ class NearMissMonitor:
             return False
 
         # Only track if approaching alert was already sent
-        if not first_limit.get("approaching_alert_sent", False):
+        if not first_limit.approaching_alert_sent:
             return False
 
-        first_limit_price = first_limit["price_level"]
+        first_limit_price = first_limit.price_level
         current_distance = abs(current_price - first_limit_price)
 
         # Get thresholds from config (scoped to the signal type, so risky gold
         # can use its own more-sensitive params)
-        signal_type = signal.get("type")
+        signal_type = signal.type
         max_proximity = self.nm_config.get_max_proximity(instrument, signal_type)
 
         # Get or create tracking state
@@ -168,7 +168,7 @@ class NearMissMonitor:
             state = NMTrackingState(
                 signal_id=signal_id,
                 instrument=instrument,
-                direction=signal["direction"].lower(),
+                direction=signal.direction.lower(),
                 first_limit_price=first_limit_price,
                 in_proximity=True,
                 closest_distance=current_distance,
@@ -176,7 +176,7 @@ class NearMissMonitor:
             )
             self._tracking[signal_id] = state
             logger.info(
-                f"NM tracking started: signal {signal_id} ({instrument} {signal['direction'].upper()}) "
+                f"NM tracking started: signal {signal_id} ({instrument} {signal.direction.upper()}) "
                 f"limit @ {first_limit_price} | "
                 f"entered proximity at {self.nm_config.format_value(instrument, current_distance)} away"
             )
@@ -223,9 +223,9 @@ class NearMissMonitor:
 
         Returns True if successfully cancelled.
         """
-        signal_id = signal["signal_id"]
-        instrument = signal["instrument"]
-        signal_type = signal.get("type")
+        signal_id = signal.signal_id
+        instrument = signal.instrument
+        signal_type = signal.type
         state = self._tracking.get(signal_id)
 
         closest_str = (

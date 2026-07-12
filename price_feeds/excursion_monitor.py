@@ -94,14 +94,14 @@ class ExcursionMonitor:
 
     async def start_approach(self, signal: Dict, current_price: float) -> None:
         """Begin approach-phase tracking when the first approaching alert fires."""
-        signal_id = signal["signal_id"]
+        signal_id = signal.signal_id
         if signal_id in self._tracking:
             return
 
         now = datetime.now(timezone.utc)
-        symbol = signal["instrument"]
-        direction = signal["direction"].lower()
-        signal_type = signal.get("type") or "standard"
+        symbol = signal.instrument
+        direction = signal.direction.lower()
+        signal_type = signal.type
         pip_size = BaseThresholdConfig.get_pip_size(symbol)
 
         self._tracking[signal_id] = ExcursionState(
@@ -125,7 +125,7 @@ class ExcursionMonitor:
 
     async def update_approach(self, signal: Dict, current_price: float) -> None:
         """Track the worst move away from the limit before it's hit."""
-        state = self._tracking.get(signal["signal_id"])
+        state = self._tracking.get(signal.signal_id)
         if state is None or state.phase != "approach":
             return
 
@@ -146,7 +146,7 @@ class ExcursionMonitor:
 
     async def mark_entry(self, signal: Dict) -> None:
         """Transition to in_trade at the first hit limit's price. No-op if already entered."""
-        signal_id = signal["signal_id"]
+        signal_id = signal.signal_id
         state = self._tracking.get(signal_id)
         if state is not None and state.phase == "in_trade":
             return
@@ -156,9 +156,9 @@ class ExcursionMonitor:
             return
 
         now = datetime.now(timezone.utc)
-        symbol = signal["instrument"]
-        direction = signal["direction"].lower()
-        signal_type = signal.get("type") or "standard"
+        symbol = signal.instrument
+        direction = signal.direction.lower()
+        signal_type = signal.type
         pip_size = BaseThresholdConfig.get_pip_size(symbol)
 
         velocity = None
@@ -196,11 +196,11 @@ class ExcursionMonitor:
         except Exception as e:
             logger.error("Failed to set excursion entry for %s: %s", signal_id, e)
 
-        self._schedule_context_snapshot(signal_id, symbol, direction, signal.get("current_spread"))
+        self._schedule_context_snapshot(signal_id, symbol, direction, signal.current_spread)
 
     async def update(self, signal: Dict, bid: float, ask: float) -> None:
         """Per-tick MFE/MAE update for an in-trade signal."""
-        state = self._tracking.get(signal["signal_id"])
+        state = self._tracking.get(signal.signal_id)
         if state is None or state.phase != "in_trade":
             return
 
@@ -276,7 +276,7 @@ class ExcursionMonitor:
 
     async def resume_if_tracked(self, signal: Dict) -> None:
         """Re-hydrate in-memory excursion state from its open DB row after a restart."""
-        signal_id = signal["signal_id"]
+        signal_id = signal.signal_id
         if signal_id in self._tracking:
             return
         try:
@@ -432,8 +432,8 @@ class ExcursionMonitor:
 
     @staticmethod
     def _first_hit_price(signal: Dict) -> Optional[float]:
-        hit_limits = signal.get("hit_limits") or []
+        hit_limits = signal.hit_limits
         if not hit_limits:
             return None
-        first = sorted(hit_limits, key=lambda lim: lim["sequence_number"])[0]
+        first = sorted(hit_limits, key=lambda lim: lim.sequence_number)[0]
         return first.get("hit_price") or first.get("price_level")

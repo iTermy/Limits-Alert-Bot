@@ -16,6 +16,7 @@ from datetime import datetime, timezone
 from typing import Dict, List, Optional
 
 from database.trailing_ops import TrailingDatabase
+from models.signal import SignalData
 
 from .trailing_config import LEVELS, TrailingStopConfig
 
@@ -59,19 +60,19 @@ class TrailingStopMonitor:
         hit limit — the runner the strategy trails — so `pnl_at_stop` is the
         full trade result from entry, comparable to the fixed-TP outcome.
         """
-        signal_id = signal["signal_id"]
+        signal_id = signal.signal_id
         if signal_id in self._tracking:
             return
 
-        hit_limits = signal.get("hit_limits") or []
+        hit_limits = signal.hit_limits
         if not hit_limits:
             return
 
-        direction = signal["direction"].lower()
+        direction = signal.direction.lower()
         anchor_price = self._deepest_hit_price(hit_limits, direction)
 
-        symbol = signal["instrument"]
-        signal_type = signal.get("type") or "standard"
+        symbol = signal.instrument
+        signal_type = signal.type
 
         levels = self._config.get_levels(symbol, signal_type)
         distance_type = self._config.get_distance_type(symbol, signal_type)
@@ -106,7 +107,7 @@ class TrailingStopMonitor:
 
     async def update(self, signal: Dict, bid: float, ask: float) -> bool:
         """Advance shadow tracking on a price tick. Returns True once every level has stopped out."""
-        signal_id = signal["signal_id"]
+        signal_id = signal.signal_id
         state = self._tracking.get(signal_id)
         if state is None:
             return False
@@ -150,7 +151,7 @@ class TrailingStopMonitor:
         exit at breakeven, so both P&L and the trail are measured from the
         deepest entry rather than the first one hit.
         """
-        prices = [lim.get("hit_price") or lim["price_level"] for lim in hit_limits]
+        prices = [lim.hit_price or lim.price_level for lim in hit_limits]
         return min(prices) if direction == "long" else max(prices)
 
     async def finalize_with_price(self, signal_id: int, price: float, reason: str) -> None:
@@ -170,25 +171,26 @@ class TrailingStopMonitor:
     def evict_signal(self, signal_id: int) -> None:
         self._tracking.pop(signal_id, None)
 
-    async def recover_incomplete_signals(self) -> List[Dict]:
+    async def recover_incomplete_signals(self) -> List[SignalData]:
         """Re-hydrate shadow tracking after a restart.
 
-        Returns lightweight signal dicts (marked ``_shadow_only``) ready for
-        the caller to insert into its own active-signal/symbol routing.
+        Returns lightweight ``SignalData`` objects (marked ``shadow_only``)
+        ready for the caller to insert into its own active-signal/symbol
+        routing.
         """
         shadow_signals = await self._db.get_incomplete_shadow_signals()
         restored = []
         for shadow in shadow_signals:
             self.restore(shadow)
             restored.append(
-                {
-                    "signal_id": shadow["signal_id"],
-                    "instrument": shadow["instrument"],
-                    "direction": shadow["direction"],
-                    "type": shadow.get("type") or "standard",
-                    "status": "profit",
-                    "_shadow_only": True,
-                }
+                SignalData(
+                    signal_id=shadow["signal_id"],
+                    instrument=shadow["instrument"],
+                    direction=shadow["direction"],
+                    type=shadow.get("type") or "standard",
+                    status="profit",
+                    shadow_only=True,
+                )
             )
         if restored:
             logger.info(f"Recovered {len(restored)} shadow trailing simulation(s) after restart")
