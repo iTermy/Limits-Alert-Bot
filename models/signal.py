@@ -81,6 +81,8 @@ class SignalData(BaseModel):
     guild_id: Optional[int] = None
     current_spread: Optional[float] = None
     sl_alert_sent: bool = False
+    asset_class: Optional[str] = None
+    shadow_only: bool = False
 
     model_config = {"from_attributes": True}
 

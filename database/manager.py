@@ -7,7 +7,7 @@ from typing import Any, Dict, List, Optional
 
 import pytz
 
-from models.signal import SignalData
+from models.signal import LimitData, SignalData
 from utils.logger import get_logger
 
 from models.enums import ChangeType, LimitStatus, SignalStatus, StatusTransitions
@@ -233,10 +233,11 @@ class DatabaseManager(BaseConnectionManager):
 
         return [SignalData.model_validate(s) for s in signals.values()]
 
-    async def get_hit_limits_for_signal(self, signal_id: int) -> List[Dict[str, Any]]:
+    async def get_hit_limits_for_signal(self, signal_id: int) -> List[LimitData]:
         """Return all hit limits for a signal ordered by sequence_number."""
         query = """
             SELECT id AS limit_id,
+                   signal_id,
                    sequence_number,
                    price_level,
                    hit_price,
@@ -246,7 +247,7 @@ class DatabaseManager(BaseConnectionManager):
             ORDER BY sequence_number
         """
         rows = await self.fetch_all(query, (signal_id,))
-        return [dict(r) for r in rows]
+        return [LimitData.model_validate({**dict(r), "status": "hit"}) for r in rows]
 
     async def get_performance_stats(
         self, start_date: str = None, end_date: str = None, instrument: str = None

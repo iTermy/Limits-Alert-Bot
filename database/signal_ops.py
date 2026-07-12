@@ -9,7 +9,7 @@ from typing import Any, Dict, List, Optional, Tuple
 import pytz
 
 from core.parser import ParsedSignal
-from models.signal import SignalData
+from models.signal import LimitData, SignalData
 from utils.logger import get_logger
 
 from models.enums import LimitStatus, SignalStatus
@@ -395,7 +395,7 @@ class SignalDatabase:
         """Get all signals that need price tracking (wrapper for DB method)."""
         return await self.db.get_active_signals_for_tracking()
 
-    async def get_hit_limits_for_signal(self, signal_id: int) -> List[Dict[str, Any]]:
+    async def get_hit_limits_for_signal(self, signal_id: int) -> List[LimitData]:
         """Return all hit limits for a signal with hit_price for P&L calculations."""
         return await self.db.get_hit_limits_for_signal(signal_id)
 

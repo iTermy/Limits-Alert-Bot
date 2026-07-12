@@ -348,19 +348,8 @@ class StreamingPriceMonitor:
                     # Populate hit limits so embeds reconstruct with the full
                     # limit history (pending_limits alone is not enough for HIT).
                     try:
-                        hit_limit_rows = await self.signal_db.get_hit_limits_for_signal(signal_id)
-                        for row in hit_limit_rows:
-                            self.active_signals[signal_id].limits.append(
-                                LimitData(
-                                    id=row["limit_id"],
-                                    signal_id=signal_id,
-                                    price_level=row["price_level"],
-                                    sequence_number=row["sequence_number"],
-                                    status="hit",
-                                    hit_time=row.get("hit_time"),
-                                    hit_price=row.get("hit_price"),
-                                )
-                            )
+                        hit_limits = await self.signal_db.get_hit_limits_for_signal(signal_id)
+                        self.active_signals[signal_id].limits.extend(hit_limits)
                     except Exception as _hit_err:
                         logger.error(
                             f"Failed to load hit limits for signal {signal_id}: {_hit_err}"

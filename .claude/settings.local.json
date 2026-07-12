@@ -62,7 +62,9 @@
       "Bash(./.venv/Scripts/python.exe -c \"import core.news_manager, price_feeds.alert_config, price_feeds.tp_config, core.bot; print\\('imports OK'\\)\")",
       "Bash(./.venv/Scripts/python.exe -m ruff check price_feeds/alert_config.py price_feeds/tp_config.py core/news_manager.py utils/ commands/_base.py discord_handlers/message_handler.py)",
       "Bash(./.venv/Scripts/python.exe -m ruff check .)",
-      "Bash(./.venv/Scripts/python.exe -m ruff --version)"
+      "Bash(./.venv/Scripts/python.exe -m ruff --version)",
+      "Bash(./.venv/Scripts/python.exe -c \"import database.signal_ops, database.manager; print\\('OK'\\)\")",
+      "Bash(./.venv/Scripts/python.exe -c \"import price_feeds.tp_monitor, price_feeds.streaming_monitor, database.manager, database.signal_ops; print\\('OK'\\)\")"
     ],
     "additionalDirectories": [
       "C:\\Personal Projects\\MT5-Auto-Execution-Bot"
