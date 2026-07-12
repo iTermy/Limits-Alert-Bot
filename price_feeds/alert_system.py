@@ -201,26 +201,26 @@ class AlertSystem:
         spread_buffer_enabled = entry.get("spread_buffer_enabled", False)
 
         try:
-            instrument = signal["instrument"]
+            instrument = signal.instrument
             price_data = await self.stream_manager.get_latest_price(instrument)
             if not price_data:
                 return
 
-            direction = signal.get("direction", "long").lower()
+            direction = (signal.direction or "long").lower()
             current_price = price_data["ask"] if direction == "long" else price_data["bid"]
             spread = price_data.get("spread", 0.0)
 
             # In-memory limits are kept in lockstep with DB writes by
             # streaming_monitor mutations + the sync helpers called from every
             # command path, so this path no longer round-trips to Postgres.
-            limits = signal.get("limits") or []
+            limits = signal.limits
 
             distance_formatted = None
             if event in ("approaching", "hit"):
                 pending_limits = [
                     l
                     for l in limits
-                    if l.get("status") == "pending" and not l.get("hit_alert_sent")
+                    if l.status == "pending" and not l.hit_alert_sent
                 ]
                 if pending_limits:
                     nearest = min(
@@ -242,7 +242,7 @@ class AlertSystem:
             if not existing_msg:
                 return
 
-            guild_id = signal.get("guild_id")
+            guild_id = signal.guild_id
             if not guild_id and self.bot and self.bot.guilds:
                 guild_id = self.bot.guilds[0].id
 
@@ -290,7 +290,7 @@ class AlertSystem:
             logger.error(f"Live update failed for signal {signal_id}: {e}", exc_info=True)
 
     def _register_live_embed(self, signal: Dict, event: str, spread_buffer_enabled: bool = False):
-        signal_id = signal["signal_id"]
+        signal_id = signal.signal_id
         self._live_embeds[signal_id] = {
             "signal": signal,
             "event": event,
@@ -409,22 +409,22 @@ class AlertSystem:
         self._load_channels_config()
 
     def is_pa_signal(self, signal: Dict) -> bool:
-        return str(signal.get("channel_id", "")) in self.pa_channel_ids
+        return str(signal.channel_id or "") in self.pa_channel_ids
 
     def is_toll_signal(self, signal: Dict) -> bool:
-        return str(signal.get("channel_id", "")) in self.toll_channel_ids
+        return str(signal.channel_id or "") in self.toll_channel_ids
 
     def is_general_toll_signal(self, signal: Dict) -> bool:
-        return str(signal.get("channel_id", "")) in self.general_toll_channel_ids
+        return str(signal.channel_id or "") in self.general_toll_channel_ids
 
     def is_oil_toll_signal(self, signal: Dict) -> bool:
-        return str(signal.get("channel_id", "")) in self.oil_toll_channel_ids
+        return str(signal.channel_id or "") in self.oil_toll_channel_ids
 
     def is_legends_signal(self, signal: Dict) -> bool:
-        return str(signal.get("channel_id", "")) in self.legends_channel_ids
+        return str(signal.channel_id or "") in self.legends_channel_ids
 
     def is_risky_signal(self, signal: Dict) -> bool:
-        return str(signal.get("channel_id", "")) in self.risky_channel_ids
+        return str(signal.channel_id or "") in self.risky_channel_ids
 
     def is_auto_purge_channel(self, channel_id) -> bool:
         return str(channel_id) in self.auto_purge_channel_ids
@@ -581,7 +581,7 @@ class AlertSystem:
                 await self._hydrate_signal(signal)
             except Exception as e:
                 logger.error(
-                    f"Hydration failed for signal {signal.get('signal_id')}: {e}",
+                    f"Hydration failed for signal {signal.signal_id}: {e}",
                     exc_info=True,
                 )
 
@@ -711,11 +711,11 @@ class AlertSystem:
             logger.info(f"Re-registered {recovered} finished-channel embed(s) for reply lookup")
 
     async def _hydrate_signal(self, signal: Dict) -> None:
-        signal_id = signal["signal_id"]
-        status = signal.get("status")
-        alert_message_id = signal.get("alert_message_id")
-        alert_channel_id = signal.get("alert_channel_id")
-        ping_message_id = signal.get("ping_message_id")
+        signal_id = signal.signal_id
+        status = signal.status
+        alert_message_id = signal.alert_message_id
+        alert_channel_id = signal.alert_channel_id
+        ping_message_id = signal.ping_message_id
 
         if alert_message_id:
             channel = self._resolve_channel(signal, alert_channel_id)
@@ -772,8 +772,8 @@ class AlertSystem:
         Embed reference is gone. For HIT signals rebuild immediately; for ACTIVE
         signals reset approaching_alert_sent so the alert re-fires naturally.
         """
-        signal_id = signal["signal_id"]
-        status = signal.get("status")
+        signal_id = signal.signal_id
+        status = signal.status
 
         if status == "hit":
             rebuilt = await self.reactivate_embed(signal, ping_text=None)
@@ -783,12 +783,12 @@ class AlertSystem:
                 logger.warning(f"Could not rebuild embed for HIT signal {signal_id} on startup")
             return
 
-        limits = signal.get("limits") or []
-        if any(l.get("approaching_alert_sent") for l in limits):
+        limits = signal.limits
+        if any(l.approaching_alert_sent for l in limits):
             await self._reset_approaching_alert_sent(signal_id)
             for limit in limits:
-                if limit.get("status", "pending") == "pending":
-                    limit["approaching_alert_sent"] = False
+                if limit.status == "pending":
+                    limit.approaching_alert_sent = False
             logger.info(
                 f"Reset approaching_alert_sent for ACTIVE signal {signal_id} "
                 f"after losing embed reference"
@@ -806,18 +806,18 @@ class AlertSystem:
         only when the signal carries no limits (e.g. command paths that pass a
         bare signal).
         """
-        in_memory = signal.get("limits") or signal.get("pending_limits")
+        in_memory = signal.limits
         if in_memory:
             return in_memory
 
         if self.bot and self.bot.signal_db:
             try:
-                full = await self.bot.signal_db.get_signal_with_limits(signal["signal_id"])
+                full = await self.bot.signal_db.get_signal_with_limits(signal.signal_id)
                 if full:
-                    return full.get("limits", [])
+                    return full.limits
             except Exception as e:
                 logger.warning(
-                    f"Could not fetch limits from DB for signal {signal['signal_id']}: {e}"
+                    f"Could not fetch limits from DB for signal {signal.signal_id}: {e}"
                 )
         return []
 
@@ -841,13 +841,13 @@ class AlertSystem:
         """
         Send a ping then create or edit the persistent embed for this signal.
         """
-        signal_id = signal["signal_id"]
+        signal_id = signal.signal_id
         target_channel = self._get_alert_channel(signal)
         if not target_channel:
             logger.error("No alert channel configured")
             return None
 
-        guild_id = signal.get("guild_id")
+        guild_id = signal.guild_id
         if not guild_id and self.bot and self.bot.guilds:
             guild_id = self.bot.guilds[0].id
 
@@ -952,9 +952,9 @@ class AlertSystem:
         spread: float = None,
         spread_buffer_enabled: bool = False,
     ) -> bool:
-        if limit.get("sequence_number", 0) != 1:
+        if limit.sequence_number != 1:
             logger.debug(
-                f"Skipping approaching alert for limit #{limit['sequence_number']} (not first)"
+                f"Skipping approaching alert for limit #{limit.sequence_number} (not first)"
             )
             return False
         try:
@@ -993,25 +993,25 @@ class AlertSystem:
             limits = await self._fetch_limits(signal)
             if not limits:
                 limits = [limit]
-            seq = limit.get("sequence_number", "?")
+            seq = limit.sequence_number
             total = len(limits)
 
             force_hit_up_to_seq = seq if isinstance(seq, int) else 0
             hit_count = sum(
                 1
                 for l in limits
-                if l.get("status") == "hit"
-                or l.get("hit_alert_sent")
+                if l.status == "hit"
+                or l.hit_alert_sent
                 or (
-                    isinstance(l.get("sequence_number"), int)
+                    isinstance(l.sequence_number, int)
                     and l["sequence_number"] <= force_hit_up_to_seq
                 )
             )
 
             suffix = "🎯🎯 **FINAL**" if seq == total else "🎯"
             ping = (
-                f"{suffix} **{signal['instrument']}** {signal['direction'].upper()} — "
-                f"limit #{seq} hit @ {_fmt(limit['price_level'])} "
+                f"{suffix} **{signal.instrument}** {signal.direction.upper()} — "
+                f"limit #{seq} hit @ {_fmt(limit.price_level)} "
                 f"({hit_count}/{total} done)"
             )
 
@@ -1019,10 +1019,10 @@ class AlertSystem:
             pending_limits = [
                 l
                 for l in limits
-                if l.get("status") != "hit"
-                and not l.get("hit_alert_sent")
+                if l.status != "hit"
+                and not l.hit_alert_sent
                 and (
-                    not isinstance(l.get("sequence_number"), int)
+                    not isinstance(l.sequence_number, int)
                     or l["sequence_number"] > force_hit_up_to_seq
                 )
             ]
@@ -1031,7 +1031,7 @@ class AlertSystem:
                 distance = abs(current_price - nearest["price_level"])
                 if self.alert_config:
                     distance_formatted = self.alert_config.format_distance_for_display(
-                        signal["instrument"], distance, current_price
+                        signal.instrument, distance, current_price
                     )
                 else:
                     distance_formatted = f"{distance:.5f}".rstrip("0").rstrip(".")
@@ -1059,12 +1059,12 @@ class AlertSystem:
 
     async def send_stop_loss_alert(self, signal: Dict, current_price: float) -> bool:
         try:
-            signal_id = signal["signal_id"]
+            signal_id = signal.signal_id
             self._unregister_live_embed(signal_id)
             limits = await self._fetch_limits(signal)
             ping = (
-                f"🛑 **{signal['instrument']}** {signal['direction'].upper()} — "
-                f"stop loss hit @ {_fmt(current_price)} (SL: {_fmt(signal.get('stop_loss', 0))})"
+                f"🛑 **{signal.instrument}** {signal.direction.upper()} — "
+                f"stop loss hit @ {_fmt(current_price)} (SL: {_fmt(signal.stop_loss)})"
             )
             msg = await self._upsert_signal_message(
                 signal=signal,
@@ -1094,14 +1094,14 @@ class AlertSystem:
         limit_pnl_map: Optional[Dict] = None,
     ) -> bool:
         """Edit the persistent embed to show auto take-profit. Also posts to profit channel."""
-        instrument = signal["instrument"]
-        direction = signal["direction"].upper()
-        self._unregister_live_embed(signal["signal_id"])
+        instrument = signal.instrument
+        direction = signal.direction.upper()
+        self._unregister_live_embed(signal.signal_id)
         display_pnl = cumulative_pnl if cumulative_pnl is not None else last_pnl
         pnl_display = tp_config.format_value(instrument, display_pnl)
         num_hit = len(hit_limits)
 
-        hit_limit_ids = {lim.get("limit_id") or lim.get("id") for lim in hit_limits}
+        hit_limit_ids = {lim.id for lim in hit_limits}
         hit_limit_ids.discard(None)
 
         limits = await self._fetch_limits(signal)
@@ -1126,11 +1126,11 @@ class AlertSystem:
                 delete_after_minutes=END_STATE_DELETE_MINUTES,
             )
             if msg:
-                self._archive_manager.schedule_end_state_move(signal["signal_id"], event="auto_tp")
+                self._archive_manager.schedule_end_state_move(signal.signal_id, event="auto_tp")
                 self.stats["auto_tp_sent"] += 1
                 self.stats["total_alerts"] += 1
         except Exception as e:
-            logger.error(f"Failed to update embed for auto-TP signal {signal['signal_id']}: {e}")
+            logger.error(f"Failed to update embed for auto-TP signal {signal.signal_id}: {e}")
             self.stats["errors"] += 1
             return False
 
@@ -1145,7 +1145,7 @@ class AlertSystem:
         After a signal is reactivated from cancelled state, rebuild its embed.
         Re-registers the embed for live price updates.
         """
-        signal_id = signal["signal_id"]
+        signal_id = signal.signal_id
         if signal_id is None:
             return False
 
@@ -1187,11 +1187,11 @@ class AlertSystem:
         # would then render the embed with strikethrough/❌ rows on the next
         # 15s tick. Sync the dict before _register_live_embed stores it.
         try:
-            signal["limits"] = limits
+            signal.limits = limits
         except Exception:
             pass
 
-        hit_count = sum(1 for l in limits if l.get("status") == "hit" or l.get("hit_alert_sent"))
+        hit_count = sum(1 for l in limits if l.status == "hit" or l.hit_alert_sent)
         event = "hit" if hit_count > 0 else "approaching"
 
         current_price = None
@@ -1201,9 +1201,9 @@ class AlertSystem:
 
         if self.stream_manager:
             try:
-                price_data = await self.stream_manager.get_latest_price(signal["instrument"])
+                price_data = await self.stream_manager.get_latest_price(signal.instrument)
                 if price_data:
-                    direction = signal.get("direction", "long").lower()
+                    direction = (signal.direction or "long").lower()
                     current_price = price_data["ask"] if direction == "long" else price_data["bid"]
                     spread = price_data.get("spread", 0.0)
 
@@ -1213,18 +1213,16 @@ class AlertSystem:
 
                     if event == "approaching" and limits:
                         pending = [
-                            l
-                            for l in limits
-                            if l.get("status") != "hit" and not l.get("hit_alert_sent")
+                            l for l in limits if l.status != "hit" and not l.hit_alert_sent
                         ]
                         if pending:
                             nearest = min(
-                                pending, key=lambda l: abs(current_price - l["price_level"])
+                                pending, key=lambda l: abs(current_price - l.price_level)
                             )
-                            distance = abs(current_price - nearest["price_level"])
+                            distance = abs(current_price - nearest.price_level)
                             if self.alert_config:
                                 distance_formatted = self.alert_config.format_distance_for_display(
-                                    signal["instrument"], distance, current_price
+                                    signal.instrument, distance, current_price
                                 )
                             else:
                                 distance_formatted = f"{distance:.5f}".rstrip("0").rstrip(".")
@@ -1266,11 +1264,11 @@ class AlertSystem:
         error). Mirrors the success path of ``_hydrate_signal``. Returns True if
         the embed was re-attached and registered for live updates.
         """
-        signal_id = signal["signal_id"]
-        alert_message_id = signal.get("alert_message_id")
+        signal_id = signal.signal_id
+        alert_message_id = signal.alert_message_id
         if not alert_message_id:
             return False
-        channel = self._resolve_channel(signal, signal.get("alert_channel_id"))
+        channel = self._resolve_channel(signal, signal.alert_channel_id)
         if not channel:
             return False
         try:
@@ -1283,7 +1281,7 @@ class AlertSystem:
 
         self.signal_messages[signal_id] = embed_msg
         self.track_alert_message(embed_msg.id, signal_id)
-        event = "hit" if signal.get("status") == "hit" else "approaching"
+        event = "hit" if signal.status == "hit" else "approaching"
         self._register_live_embed(signal, event, spread_buffer_enabled=True)
         logger.info(f"Re-attached persistent embed for signal {signal_id} (msg={embed_msg.id})")
         return True
@@ -1299,7 +1297,7 @@ class AlertSystem:
         """
         Update the persistent embed after a manual command (profit, sl, cancel, etc.).
         """
-        signal_id = signal["signal_id"]
+        signal_id = signal.signal_id
 
         if event == "reactivated":
             return await self.reactivate_embed(signal=signal, ping_text=ping_text)
@@ -1344,7 +1342,7 @@ class AlertSystem:
             # just rendered, so the next 15s cycle does not re-render stale limits
             # after an edit. Terminal events are already unregistered above.
             if signal_id in self._live_embeds:
-                signal["limits"] = limits
+                signal.limits = limits
                 self._live_embeds[signal_id]["signal"] = signal
             if end_state:
                 self._archive_manager.schedule_end_state_move(signal_id, event=event)
@@ -1390,7 +1388,7 @@ class AlertSystem:
     # ── Spread hour / news cancel ────────────────────────────────────────────
 
     async def send_spread_hour_cancel_alert(self, signal: Dict, current_price: float) -> bool:
-        signal_id = signal.get("signal_id")
+        signal_id = signal.signal_id
         if signal_id not in self.signal_messages:
             logger.debug(
                 f"Spread hour cancel for signal {signal_id}: no persistent embed, skipping alert"
@@ -1413,7 +1411,7 @@ class AlertSystem:
             return False
 
     async def send_late_market_cancel_alert(self, signal: Dict, current_price: float) -> bool:
-        signal_id = signal.get("signal_id")
+        signal_id = signal.signal_id
         if signal_id not in self.signal_messages:
             logger.debug(
                 f"Late market cancel for signal {signal_id}: no persistent embed, skipping alert"
@@ -1436,7 +1434,7 @@ class AlertSystem:
             return False
 
     async def send_risky_window_cancel_alert(self, signal: Dict, current_price: float) -> bool:
-        signal_id = signal.get("signal_id")
+        signal_id = signal.signal_id
         if signal_id not in self.signal_messages:
             logger.debug(
                 f"Risky window cancel for signal {signal_id}: no persistent embed, skipping alert"
@@ -1459,13 +1457,13 @@ class AlertSystem:
             return False
 
     async def send_news_cancel_alert(self, signal: Dict, current_price: float, news_event) -> bool:
-        signal_id = signal.get("signal_id")
+        signal_id = signal.signal_id
         target_channel = self._get_alert_channel(signal)
         if not target_channel:
             return False
 
-        instrument = signal.get("instrument", "?")
-        direction = signal.get("direction", "").upper()
+        instrument = signal.instrument or "?"
+        direction = signal.direction.upper()
 
         if signal_id in self.signal_messages:
             try:
@@ -1485,7 +1483,7 @@ class AlertSystem:
 
         try:
             news_ts = int(news_event.news_time.timestamp())
-            all_limits = signal.get("limits", signal.get("pending_limits", []))
+            all_limits = signal.limits
             if all_limits:
                 # Limits may be LimitData, dicts, or bare floats. LimitData and
                 # dicts both support item access; bare floats are used as-is.
@@ -1503,7 +1501,7 @@ class AlertSystem:
             signal_summary = (
                 f"**{instrument}** {direction}\n"
                 f"Limits: {limit_prices}\n"
-                f"SL: {_fmt(signal.get('stop_loss', 0))}"
+                f"SL: {_fmt(signal.stop_loss)}"
             )
             embed = discord.Embed(
                 title="📰 Signal Cancelled — News",
@@ -1522,12 +1520,12 @@ class AlertSystem:
                     f"• 🗑️ Deletes in {END_STATE_DELETE_MINUTES} min"
                 )
             )
-            if signal.get("message_id") and signal.get("channel_id"):
-                if not str(signal["message_id"]).startswith("manual_"):
-                    guild_id = signal.get("guild_id")
+            if signal.message_id and signal.channel_id:
+                if not str(signal.message_id).startswith("manual_"):
+                    guild_id = signal.guild_id
                     if not guild_id and self.bot and self.bot.guilds:
                         guild_id = self.bot.guilds[0].id
-                    url = f"https://discord.com/channels/{guild_id}/{signal['channel_id']}/{signal['message_id']}"
+                    url = f"https://discord.com/channels/{guild_id}/{signal.channel_id}/{signal.message_id}"
                     embed.add_field(name="Source", value=url, inline=False)
             await target_channel.send(self.role_mention)
             message = await target_channel.send(embed=embed)
@@ -1545,9 +1543,9 @@ class AlertSystem:
             return False
 
     async def send_near_miss_cancel_alert(self, signal: Dict, nm_state=None) -> bool:
-        signal_id = signal["signal_id"]
-        instrument = signal["instrument"]
-        direction = signal["direction"].upper()
+        signal_id = signal.signal_id
+        instrument = signal.instrument
+        direction = signal.direction.upper()
 
         closest_str = "N/A"
         bounce_str = "N/A"
