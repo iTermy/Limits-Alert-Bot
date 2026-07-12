@@ -1128,14 +1128,14 @@ class StreamingPriceMonitor:
 
         guild_id = self.bot.guilds[0].id if self.bot.guilds else None
         if guild_id is not None:
-            fresh["guild_id"] = guild_id
+            fresh.guild_id = guild_id
         self._annotate_asset_class(fresh)
 
-        new_symbol = fresh.get("instrument")
-        new_status = fresh.get("status")
+        new_symbol = fresh.instrument
+        new_status = fresh.status
 
         old = self.active_signals.get(signal_id)
-        old_symbol = old.get("instrument") if old else None
+        old_symbol = old.instrument if old else None
 
         # Drop the old symbol bucket entry when the instrument changed or the
         # signal is no longer trackable. Unsubscribing the feed is fine here:

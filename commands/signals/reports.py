@@ -293,13 +293,11 @@ class ReportsCog(BaseCog):
                     regular_signals.append(signal)
 
             def split_profit_sl(group_signals):
-                profit = [
-                    s for s in group_signals if s.get("status", "").lower() == "profit"
-                ]
+                profit = [s for s in group_signals if s.status.lower() == "profit"]
                 sl = [
                     s
                     for s in group_signals
-                    if s.get("status", "").lower() in ("stoploss", "stop_loss")
+                    if s.status.lower() in ("stoploss", "stop_loss")
                 ]
                 if filter_normalized == "stoploss":
                     profit = []

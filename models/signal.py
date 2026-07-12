@@ -32,22 +32,6 @@ class LimitData(BaseModel):
             values["id"] = values.pop("limit_id")
         return values
 
-    # Dict-protocol methods for seamless transition from dict-based code.
-    def __getitem__(self, key: str) -> Any:
-        try:
-            return getattr(self, key)
-        except AttributeError:
-            raise KeyError(key)
-
-    def __setitem__(self, key: str, value: Any) -> None:
-        object.__setattr__(self, key, value)
-
-    def __contains__(self, key: str) -> bool:
-        return hasattr(self, key)
-
-    def get(self, key: str, default: Any = None) -> Any:
-        return getattr(self, key, default)
-
 
 class SignalData(BaseModel):
     signal_id: int = 0
@@ -143,23 +127,3 @@ class SignalData(BaseModel):
         if type_val is not None and type_val not in VALID_SIGNAL_TYPES:
             values["type"] = "standard"
         return values
-
-    # Dict-protocol methods for seamless transition from dict-based code.
-    def __getitem__(self, key: str) -> Any:
-        try:
-            return getattr(self, key)
-        except AttributeError:
-            raise KeyError(key)
-
-    def __setitem__(self, key: str, value: Any) -> None:
-        object.__setattr__(self, key, value)
-
-    def __contains__(self, key: str) -> bool:
-        return hasattr(self, key)
-
-    def get(self, key: str, default: Any = None) -> Any:
-        return getattr(self, key, default)
-
-    def pop(self, key: str, *args: Any) -> Any:
-        val = getattr(self, key, *args) if args else getattr(self, key)
-        return val
