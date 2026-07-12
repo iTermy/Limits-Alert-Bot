@@ -10,6 +10,7 @@ from pathlib import Path
 import discord
 from discord.ext import commands
 
+from database import db
 from price_feeds.alert_config import AlertDistanceConfig
 from price_feeds.tp_config import TPConfig
 from utils.formatting import format_price, format_signal_type, get_status_emoji
@@ -82,25 +83,26 @@ class LifecycleCog(BaseCog):
         # Add asset type flags and calculate distances
         mapper = self.services.stream_manager.symbol_mapper
         dollar_distance_classes = {"crypto", "indices", "metals", "oil"}
-        for signal in signals:
-            asset_class = mapper.determine_asset_class(signal["instrument"])
-            signal["is_crypto"] = asset_class == "crypto"
-            signal["is_index"] = asset_class == "indices"
+        # Rows are presentation dicts (pending_limits is a float list here).
+        for row in signals:
+            asset_class = mapper.determine_asset_class(row["instrument"])
+            row["is_crypto"] = asset_class == "crypto"
+            row["is_index"] = asset_class == "indices"
 
             # Calculate distance to next limit
-            if self.services.monitor and signal.get("pending_limits"):
+            if self.services.monitor and row.get("pending_limits"):
                 try:
                     alert_config = AlertDistanceConfig()
 
-                    symbol = signal["instrument"]
+                    symbol = row["instrument"]
                     cached_price = await self.services.stream_manager.get_latest_price(symbol)
 
                     if cached_price:
-                        direction = signal["direction"].lower()
+                        direction = row["direction"].lower()
                         current_price = (
                             cached_price["ask"] if direction == "long" else cached_price["bid"]
                         )
-                        limit_price = signal["pending_limits"][0]
+                        limit_price = row["pending_limits"][0]
 
                         # Calculate raw price distance
                         if direction == "long":
@@ -120,7 +122,7 @@ class LifecycleCog(BaseCog):
                             pip_size = alert_config.get_pip_size(symbol)
                             distance_value = abs(distance) / pip_size
 
-                        signal["distance_info"] = {
+                        row["distance_info"] = {
                             "distance": distance_value,
                             "current_price": current_price,
                             "formatted": formatted,
@@ -136,9 +138,9 @@ class LifecycleCog(BaseCog):
             signals.reverse()
         elif sort_method == "distance":
             # Sort by distance (closest first)
-            def get_distance_key(signal):
-                if signal.get("distance_info"):
-                    return signal["distance_info"]["distance"]
+            def get_distance_key(row):
+                if row.get("distance_info"):
+                    return row["distance_info"]["distance"]
                 return float("inf")  # Put signals without distance at the end
 
             signals.sort(key=get_distance_key)
@@ -175,32 +177,32 @@ class LifecycleCog(BaseCog):
             await ctx.send(f"❌ Signal #{signal_id} not found")
             return
 
-        status_emoji = get_status_emoji(signal["status"])
+        status_emoji = get_status_emoji(signal.status)
 
         embed = discord.Embed(
-            title=f"{status_emoji} Signal #{signal_id} - {signal['instrument']}", color=0x00BFFF
+            title=f"{status_emoji} Signal #{signal_id} - {signal.instrument}", color=0x00BFFF
         )
 
-        embed.add_field(name="Direction", value=signal["direction"].upper(), inline=True)
-        embed.add_field(name="Status", value=signal["status"].upper(), inline=True)
+        embed.add_field(name="Direction", value=signal.direction.upper(), inline=True)
+        embed.add_field(name="Status", value=signal.status.upper(), inline=True)
         embed.add_field(
             name="Type",
-            value=format_signal_type(signal.get("type", "standard")),
+            value=format_signal_type(signal.type),
             inline=True,
         )
 
         stop_loss_formatted = (
-            format_price(signal["stop_loss"], signal["instrument"])
-            if signal["stop_loss"]
+            format_price(signal.stop_loss, signal.instrument)
+            if signal.stop_loss
             else "N/A"
         )
         embed.add_field(name="Stop Loss", value=stop_loss_formatted, inline=True)
 
         # Take-profit price (manual closures show "Manual" instead of a price)
-        if signal.get("closed_reason") == "manual":
+        if signal.closed_reason == "manual":
             tp_value = "Manual"
-        elif signal.get("tp_price") is not None:
-            tp_value = format_price(signal["tp_price"], signal["instrument"])
+        elif signal.tp_price is not None:
+            tp_value = format_price(signal.tp_price, signal.instrument)
         else:
             tp_value = "N/A"
         embed.add_field(name="TP Price", value=tp_value, inline=True)
@@ -208,19 +210,19 @@ class LifecycleCog(BaseCog):
         # Limits info — show per-limit P&L when a close price is known.
         # Profit closures use the manual override (if set) or the recorded TP
         # price; stop-loss closures use the SL price (yielding negative values).
-        if signal["limits"]:
-            close_price = signal.get("manual_tp_price")
+        if signal.limits:
+            close_price = signal.manual_tp_price
             if close_price is None:
-                close_price = signal.get("tp_price")
-            if close_price is None and signal["status"] == "stop_loss":
-                close_price = signal.get("stop_loss")
+                close_price = signal.tp_price
+            if close_price is None and signal.status == "stop_loss":
+                close_price = signal.stop_loss
 
-            instrument = signal["instrument"]
-            direction = (signal.get("direction") or "long").lower()
-            signal_type = (signal.get("type") or "standard").lower()
+            instrument = signal.instrument
+            direction = (signal.direction or "long").lower()
+            signal_type = signal.type.lower()
 
             limit_lines = []
-            for l in sorted(signal["limits"], key=lambda x: x.get("sequence_number", 0)):
+            for l in sorted(signal.limits, key=lambda x: x.sequence_number):
                 seq = l.get("sequence_number", "?")
                 price = format_price(l["price_level"], instrument)
                 if l["status"] == "hit":
@@ -240,7 +242,7 @@ class LifecycleCog(BaseCog):
                 else:
                     limit_lines.append(f"Limit #{seq}: {price}")
             embed.add_field(
-                name=f"Limits ({len(signal['limits'])})",
+                name=f"Limits ({len(signal.limits)})",
                 value="\n".join(limit_lines),
                 inline=False,
             )
@@ -248,14 +250,14 @@ class LifecycleCog(BaseCog):
         # Progress
         embed.add_field(
             name="Progress",
-            value=f"{signal.get('limits_hit', 0)}/{signal.get('total_limits', 0)} limits hit",
+            value=f"{signal.limits_hit}/{signal.total_limits} limits hit",
             inline=True,
         )
 
         # Timestamps
-        if signal.get("first_limit_hit_time"):
+        if signal.first_limit_hit_time:
             try:
-                timestamp = signal["first_limit_hit_time"]
+                timestamp = signal.first_limit_hit_time
                 if isinstance(timestamp, str):
                     timestamp = datetime.fromisoformat(timestamp.replace("Z", "+00:00"))
                 embed.add_field(
@@ -264,9 +266,9 @@ class LifecycleCog(BaseCog):
             except (ValueError, TypeError):
                 pass
 
-        if signal.get("closed_at"):
+        if signal.closed_at:
             try:
-                timestamp = signal["closed_at"]
+                timestamp = signal.closed_at
                 if isinstance(timestamp, str):
                     timestamp = datetime.fromisoformat(timestamp.replace("Z", "+00:00"))
                 embed.add_field(
@@ -276,13 +278,13 @@ class LifecycleCog(BaseCog):
                 pass
 
         # Link to original message
-        if not str(signal["message_id"]).startswith("manual_"):
-            message_url = f"https://discord.com/channels/{ctx.guild.id}/{signal['channel_id']}/{signal['message_id']}"
+        if not str(signal.message_id).startswith("manual_"):
+            message_url = f"https://discord.com/channels/{ctx.guild.id}/{signal.channel_id}/{signal.message_id}"
             embed.add_field(name="Source", value=f"[Jump to message]({message_url})", inline=False)
         else:
             embed.add_field(name="Source", value="Manual Entry", inline=False)
 
-        created_at = signal["created_at"]
+        created_at = signal.created_at
         if hasattr(created_at, "strftime"):
             created_at = created_at.strftime("%Y-%m-%d %H:%M UTC")
         embed.set_footer(text=f"Created {created_at}")
@@ -322,7 +324,7 @@ class LifecycleCog(BaseCog):
 
         # Reactivation guard: block if current price has passed any pending limits,
         # unless the admin explicitly requests --force.
-        if status == "active" and signal["status"] in ("cancelled", "stop_loss"):
+        if status == "active" and signal.status in ("cancelled", "stop_loss"):
             if force:
                 if not self.is_admin(ctx.author):
                     await ctx.send("❌ `--force` requires administrator permissions.")
@@ -362,24 +364,18 @@ class LifecycleCog(BaseCog):
         if status == "profit":
             # If signal is approaching (no limits hit yet), mirror !hit behaviour:
             # mark the first pending limit as hit before setting status to profit.
-            current_hit_count = len(signal.get("hit_limits") or [])
-            if current_hit_count == 0:
-                pending_limits = signal.get("pending_limits") or []
+            if not signal.hit_limits:
+                pending_limits = signal.pending_limits
                 if pending_limits:
-                    sorted_pending = sorted(
-                        pending_limits, key=lambda l: l.get("sequence_number", 999)
-                    )
-                    first_limit = sorted_pending[0]
+                    first_limit = min(pending_limits, key=lambda l: l.sequence_number)
                     try:
-                        from database import db as _db
-
-                        await _db.mark_limit_hit(first_limit["id"], first_limit["price_level"])
+                        await db.mark_limit_hit(first_limit.id, first_limit.price_level)
                         if self.services.monitor:
                             self.services.monitor._mutate_limit_hit_in_memory(
-                                signal_id, first_limit["id"], first_limit["price_level"]
+                                signal_id, first_limit.id, first_limit.price_level
                             )
                         logger.info(
-                            f"Auto-hit limit #{first_limit.get('sequence_number')} "
+                            f"Auto-hit limit #{first_limit.sequence_number} "
                             f"for signal {signal_id} as part of manual profit (approaching→profit)"
                         )
                     except Exception as _hit_err:
@@ -405,8 +401,8 @@ class LifecycleCog(BaseCog):
                 description=f"Signal #{signal_id} status changed to **{status.upper()}**",
                 color=0x00FF00,
             )
-            embed.add_field(name="Instrument", value=signal["instrument"], inline=True)
-            embed.add_field(name="Previous Status", value=signal["status"], inline=True)
+            embed.add_field(name="Instrument", value=signal.instrument, inline=True)
+            embed.add_field(name="Previous Status", value=signal.status, inline=True)
             embed.set_footer(text=f"Changed by {ctx.author.name}")
 
             await ctx.send(embed=embed)
@@ -462,7 +458,7 @@ class LifecycleCog(BaseCog):
         if await self.signal_db.set_manual_tp_price(signal_id, tp_price):
             await ctx.send(
                 f"✅ Manual TP price for signal #{signal_id} set to "
-                f"{format_price(tp_price, signal['instrument'])}"
+                f"{format_price(tp_price, signal.instrument)}"
             )
         else:
             await ctx.send(f"❌ Failed to set manual TP price for signal #{signal_id}")
@@ -492,7 +488,7 @@ class LifecycleCog(BaseCog):
             if self.services.monitor:
                 await self.services.tp_monitor.refresh_hit_limits(signal_id)
                 if signal_id in self.services.monitor.active_signals:
-                    self.services.monitor.active_signals[signal_id]["status"] = "hit"
+                    self.services.monitor.active_signals[signal_id].status = "hit"
                     self.services.monitor.mark_first_pending_limit_hit_in_memory(signal_id)
             await ctx.send(f"✅ Signal {signal_id} marked as HIT (limit 1 hit, auto-TP active)")
 
@@ -505,7 +501,7 @@ class LifecycleCog(BaseCog):
         else:
             # Either already HIT or not in a valid state
             signal = await self.signal_db.get_signal_with_limits(signal_id)
-            if signal and signal.get("status") == "hit":
+            if signal and signal.status == "hit":
                 await ctx.send(f"ℹ️ Signal {signal_id} is already HIT — auto-TP is already active.")
             else:
                 await ctx.send(
@@ -626,8 +622,6 @@ class LifecycleCog(BaseCog):
 
     async def _get_active_signals_for_instrument(self, instrument: str):
         """Fetch all active/hit signals for an instrument (case-insensitive)."""
-        from database import db
-
         async with db.get_connection() as conn:
             rows = await conn.fetch(
                 """SELECT id, instrument, direction, channel_id
@@ -733,8 +727,6 @@ class LifecycleCog(BaseCog):
         channel_map = await self._load_channel_name_map()
 
         # Fetch all active gold signals
-        from database import db
-
         async with db.get_connection() as conn:
             rows = await conn.fetch(
                 """SELECT id, instrument, direction, channel_id, message_id
@@ -808,8 +800,6 @@ class LifecycleCog(BaseCog):
         Works for exact pairs (EURUSD) and currencies (EUR).
         """
         loading = await ctx.send(f"🔄 Finding signals for `{target}` to cancel...")
-
-        from database import db
 
         async with db.get_connection() as conn:
             rows = await conn.fetch(
@@ -901,7 +891,7 @@ class LifecycleCog(BaseCog):
                 description=f"Signal #{signal_id} expiry set to **{expiry_type}**",
                 color=0x00FF00,
             )
-            embed.add_field(name="Instrument", value=signal["instrument"], inline=True)
+            embed.add_field(name="Instrument", value=signal.instrument, inline=True)
             embed.set_footer(text=f"Set by {ctx.author.name}")
             await ctx.send(embed=embed)
         else:
