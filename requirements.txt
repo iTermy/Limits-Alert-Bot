@@ -4,4 +4,4 @@ aiohttp>=3.9.0
 pytz>=2023.3
 MetaTrader5>=5.0.45
 openai>=1.0.0
-asyncpg>=0.29.0
+asyncpg>=0.29.0pydantic>=2.0.0
