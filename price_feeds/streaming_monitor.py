@@ -278,7 +278,6 @@ class StreamingPriceMonitor:
         await self._load_and_subscribe_signals()
 
         asyncio.create_task(self._periodic_signal_refresh())
-        asyncio.create_task(self._spread_buffer_refresh_loop())
         asyncio.create_task(self.excursion_monitor.run_volume_sampler())
 
         self.live_price_writer.start()
@@ -292,12 +291,6 @@ class StreamingPriceMonitor:
             self._spread_buffer_enabled = settings.spread_buffer_enabled
         except Exception as e:
             logger.error("Error loading spread buffer setting: %s, keeping current value", e)
-
-    async def _spread_buffer_refresh_loop(self) -> None:
-        """Refresh the cached spread_buffer_enabled flag every 30 s. Decoupled from price ticks."""
-        while self.running:
-            await asyncio.sleep(30)
-            self._refresh_spread_buffer_setting()
 
     async def stop(self):
         """Stop the streaming monitor"""
@@ -408,6 +401,8 @@ class StreamingPriceMonitor:
         """
         while self.running:
             await asyncio.sleep(30)
+
+            self._refresh_spread_buffer_setting()
 
             try:
                 signals = await self.db.get_active_signals_for_tracking()

@@ -26,6 +26,9 @@ logger = get_logger("feed_health")
 # Monitoring knobs — not user-configurable
 CHECK_INTERVAL_SECONDS = 60
 STALE_THRESHOLD_SECONDS = 300
+# Re-write an unchanged feed_health row at most this often (liveness refresh
+# for humans inspecting the table; consumers only react to status changes).
+_HEALTH_REWRITE_SECONDS = 600
 MAX_RECONNECT_ATTEMPTS = 3
 RECONNECT_DELAY_SECONDS = 10
 ALERT_COOLDOWN_MINUTES = 15
@@ -140,6 +143,10 @@ class FeedHealthMonitor:
 
         # Set once the watchdog has initiated a restart, so it never fires twice.
         self._watchdog_fired = False
+
+        # feed -> (last written status, monotonic write time); gates DB writes
+        # so unchanged statuses aren't re-upserted every check cycle.
+        self._last_health_written: Dict[str, tuple] = {}
 
         # Reconnects run off the monitoring loop as tasks, keyed by feed, so a
         # slow or wedged reconnect can never block health checks or the watchdog.
@@ -733,8 +740,20 @@ class FeedHealthMonitor:
     async def _write_feed_health(
         self, feed_name: str, status: str, stale_seconds, last_seen_ts
     ) -> None:
+        """Upsert a feed's health row.
+
+        Writes only on status transitions (plus a periodic liveness refresh)
+        — the EX bot reads only the status column, so re-writing an unchanged
+        row every check cycle is wasted egress.
+        """
         if self.db is None:
             return
+
+        now_mono = time.monotonic()
+        last_status, last_written = self._last_health_written.get(feed_name, (None, 0.0))
+        if status == last_status and now_mono - last_written < _HEALTH_REWRITE_SECONDS:
+            return
+
         try:
             await self.db.execute(
                 """
@@ -748,6 +767,7 @@ class FeedHealthMonitor:
                 """,
                 (feed_name, status, stale_seconds, last_seen_ts),
             )
+            self._last_health_written[feed_name] = (status, now_mono)
         except Exception as e:
             logger.error("Failed to write feed_health for %s: %s", feed_name, e)
 

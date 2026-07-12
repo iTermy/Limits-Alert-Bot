@@ -21,6 +21,12 @@ TRACKED_FEEDS = {"icmarkets", "oanda", "binance", "exness"}
 # How often to flush the buffer to the DB (seconds)
 WRITE_INTERVAL = 5
 
+# Re-write an unchanged price at least this often. The EX bot treats a
+# live_prices row as dark when updated_at is older than its
+# feed_max_staleness_seconds (120 s) and anchors broker offsets to it, so
+# quiet markets must still heartbeat well inside that window.
+HEARTBEAT_SECONDS = 30
+
 
 class LivePriceWriter:
     """
@@ -37,9 +43,15 @@ class LivePriceWriter:
         self._db = db_manager
         self._stream = stream_manager
 
-        # Buffer: symbol -> latest price snapshot {bid, ask, feed, updated_at}
-        self._buffer: Dict[str, Dict] = {}
-        self._buffer_lock = asyncio.Lock()
+        # Latest price snapshot per symbol {bid, ask, feed, updated_at}.
+        # Not cleared on flush — kept so quiet symbols can still heartbeat.
+        self._latest: Dict[str, Dict] = {}
+        self._latest_lock = asyncio.Lock()
+
+        # Last successfully written (bid, ask) and monotonic write time per
+        # symbol — used to skip upserts for unchanged prices between heartbeats.
+        self._last_written: Dict[str, tuple] = {}
+        self._last_written_at: Dict[str, float] = {}
 
         self._task: Optional[asyncio.Task] = None
         self._running = False
@@ -95,12 +107,13 @@ class LivePriceWriter:
         if bid is None or ask is None:
             return
 
-        async with self._buffer_lock:
-            self._buffer[symbol] = {
+        async with self._latest_lock:
+            self._latest[symbol] = {
                 "bid": float(bid),
                 "ask": float(ask),
                 "feed": feed,
                 "updated_at": datetime.now(timezone.utc),
+                "tick_mono": asyncio.get_event_loop().time(),
             }
 
     async def _flush_loop(self):
@@ -113,17 +126,41 @@ class LivePriceWriter:
                 logger.error("LivePriceWriter flush error: %s", e)
 
     async def _flush_to_db(self):
-        """Upsert all buffered prices to live_prices in a single executemany call."""
-        async with self._buffer_lock:
-            if not self._buffer:
-                return
-            snapshot = dict(self._buffer)
-            self._buffer.clear()
+        """Upsert buffered prices to live_prices in a single executemany call.
 
-        rows = [
-            (symbol, data["bid"], data["ask"], data["feed"], data["updated_at"])
-            for symbol, data in snapshot.items()
-        ]
+        Unchanged prices are skipped until HEARTBEAT_SECONDS has elapsed since
+        the symbol's last write, cutting egress in quiet markets while keeping
+        updated_at fresh for the EX bot's staleness gate.
+        """
+        async with self._latest_lock:
+            if not self._latest:
+                return
+            snapshot = {symbol: dict(data) for symbol, data in self._latest.items()}
+
+        now_mono = asyncio.get_event_loop().time()
+        now_utc = datetime.now(timezone.utc)
+        rows = []
+        written_symbols = []
+        for symbol, data in snapshot.items():
+            price = (data["bid"], data["ask"])
+            unchanged = self._last_written.get(symbol) == price
+            fresh = now_mono - self._last_written_at.get(symbol, 0.0) < HEARTBEAT_SECONDS
+            if unchanged and fresh:
+                continue
+            if unchanged:
+                # Heartbeat: re-assert the last known price as still current —
+                # but only while ticks keep arriving. A silent feed must let
+                # updated_at age so the EX bot's staleness gate can fire.
+                if now_mono - data["tick_mono"] > HEARTBEAT_SECONDS:
+                    continue
+                updated_at = now_utc
+            else:
+                updated_at = data["updated_at"]
+            rows.append((symbol, data["bid"], data["ask"], data["feed"], updated_at))
+            written_symbols.append((symbol, price))
+
+        if not rows:
+            return
 
         query = """
             INSERT INTO live_prices (symbol, bid, ask, feed, updated_at)
@@ -138,6 +175,9 @@ class LivePriceWriter:
 
         try:
             await self._db.execute_many(query, rows)
+            for symbol, price in written_symbols:
+                self._last_written[symbol] = price
+                self._last_written_at[symbol] = now_mono
             logger.debug("LivePriceWriter flushed %d symbols", len(rows))
         except Exception as e:
             logger.error("LivePriceWriter DB write failed: %s", e)
