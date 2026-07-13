@@ -22,7 +22,7 @@ class SymbolMapper:
         if config_path is None:
             # Locate config folder relative to this file
             self.config_path = (
-                Path(__file__).resolve().parent.parent / "config" / "symbol_mappings.json"
+                Path(__file__).resolve().parent.parent.parent / "config" / "symbol_mappings.json"
             )
         else:
             self.config_path = Path(config_path)

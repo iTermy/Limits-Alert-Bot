@@ -14,13 +14,13 @@ from typing import Optional
 
 import discord
 
-from price_feeds.archive_manager import (
+from price_feeds.alerting.archive_manager import (
     END_STATE_DELETE_MINUTES,
     ArchiveManager,
     is_end_state,
 )
-from price_feeds.embed_builders import _build_signal_embed, _fmt
-from price_feeds.nm_config import NMConfig
+from price_feeds.alerting.embed_builders import _build_signal_embed, _fmt
+from price_feeds.config.nm_config import NMConfig
 from utils.logger import get_logger
 
 logger = get_logger("alert_system")
@@ -345,7 +345,7 @@ class AlertSystem:
 
     def _load_channels_config(self):
         """Load channels.json once and cache all derived channel ID sets and role mention."""
-        config_path = Path(__file__).parent.parent / "config" / "channels.json"
+        config_path = Path(__file__).parent.parent.parent / "config" / "channels.json"
         try:
             with open(config_path) as f:
                 cfg = json.load(f)

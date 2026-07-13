@@ -24,7 +24,7 @@ class BaseThresholdConfig:
             self.config_path = Path(config_path)
         else:
             self.config_path = (
-                Path(__file__).resolve().parent.parent / "config" / self.CONFIG_FILENAME
+                Path(__file__).resolve().parent.parent.parent / "config" / self.CONFIG_FILENAME
             )
 
         self.mapper = self._get_shared_mapper()
@@ -37,10 +37,10 @@ class BaseThresholdConfig:
     def _get_shared_mapper(cls):
         if BaseThresholdConfig._shared_mapper is None:
             try:
-                from price_feeds.symbol_mapper import SymbolMapper
+                from price_feeds.config.symbol_mapper import SymbolMapper
 
                 mapper_path = (
-                    Path(__file__).resolve().parent.parent / "config" / "symbol_mappings.json"
+                    Path(__file__).resolve().parent.parent.parent / "config" / "symbol_mappings.json"
                 )
                 BaseThresholdConfig._shared_mapper = SymbolMapper(str(mapper_path))
             except Exception as e:

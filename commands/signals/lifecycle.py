@@ -12,8 +12,8 @@ import discord
 from discord.ext import commands
 
 from database import db, report_queries
-from price_feeds.alert_config import AlertDistanceConfig
-from price_feeds.tp_config import TPConfig
+from price_feeds.config.alert_config import AlertDistanceConfig
+from price_feeds.config.tp_config import TPConfig
 from utils.formatting import format_price, format_signal_type, get_status_emoji
 from utils.logger import get_logger
 
@@ -681,7 +681,7 @@ class LifecycleCog(BaseCog):
             # 2. React to the original signal message
             if signal_dict and monitor:
                 try:
-                    from price_feeds.streaming_monitor import react_to_original_signal
+                    from price_feeds.monitors.streaming_monitor import react_to_original_signal
 
                     await react_to_original_signal(self.bot, signal_dict, "❌")
                 except Exception as _re:

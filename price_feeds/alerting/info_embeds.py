@@ -18,7 +18,7 @@ from utils.logger import get_logger
 
 logger = get_logger("info_embeds")
 
-_DATA_PATH = Path(__file__).resolve().parent.parent / "data" / "info_embeds.json"
+_DATA_PATH = Path(__file__).resolve().parent.parent.parent / "data" / "info_embeds.json"
 
 
 def info_embed_message_ids() -> set[str]:

@@ -9,9 +9,9 @@ import discord
 from discord.ext import commands
 
 from database.config_history_ops import log_config_change
-from price_feeds.alert_config import AlertDistanceConfig
-from price_feeds.nm_config import NMConfig
-from price_feeds.tp_config import VALID_SIGNAL_TYPES, TPConfig
+from price_feeds.config.alert_config import AlertDistanceConfig
+from price_feeds.config.nm_config import NMConfig
+from price_feeds.config.tp_config import VALID_SIGNAL_TYPES, TPConfig
 
 from .._base import BaseCog
 

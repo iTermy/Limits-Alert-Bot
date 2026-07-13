@@ -18,7 +18,7 @@ from typing import Optional
 from database.trailing_ops import TrailingDatabase
 from models.signal import SignalData
 
-from .trailing_config import LEVELS, TrailingStopConfig
+from price_feeds.config.trailing_config import LEVELS, TrailingStopConfig
 
 logger = logging.getLogger(__name__)
 

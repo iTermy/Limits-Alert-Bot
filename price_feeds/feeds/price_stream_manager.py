@@ -9,7 +9,7 @@ from typing import Callable, Optional
 from price_feeds.feeds.binance_stream import BinanceStream
 from price_feeds.feeds.icmarkets_stream import ICMarketsStream
 from price_feeds.feeds.oanda_stream import OANDAStream
-from price_feeds.symbol_mapper import SymbolMapper
+from price_feeds.config.symbol_mapper import SymbolMapper
 
 logger = logging.getLogger(__name__)
 

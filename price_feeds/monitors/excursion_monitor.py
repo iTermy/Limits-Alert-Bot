@@ -19,7 +19,7 @@ from dataclasses import dataclass
 from datetime import datetime, timezone
 from typing import Optional
 
-from price_feeds._base_config import BaseThresholdConfig
+from price_feeds.config._base_config import BaseThresholdConfig
 
 logger = logging.getLogger(__name__)
 

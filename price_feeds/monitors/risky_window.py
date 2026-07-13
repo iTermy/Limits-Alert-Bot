@@ -34,7 +34,7 @@ _EST_TZ = pytz.timezone("America/New_York")
 
 # Persisted reference to the currently-posted "disabled" embed, so a restart
 # mid-window reuses the existing embed instead of orphaning it.
-_STATE_PATH = Path(__file__).resolve().parent.parent / "data" / "risky_window_state.json"
+_STATE_PATH = Path(__file__).resolve().parent.parent.parent / "data" / "risky_window_state.json"
 
 # Daily windows (UTC) during which risky-gold trading is disabled. None of these
 # cross midnight, so a simple ``start <= now < end`` check per window suffices.

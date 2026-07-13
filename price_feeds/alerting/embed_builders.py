@@ -10,7 +10,7 @@ from typing import Optional
 import discord
 
 from models.signal import LimitData, SignalData
-from price_feeds.tp_config import TPConfig
+from price_feeds.config.tp_config import TPConfig
 from utils.logger import get_logger
 
 logger = get_logger("embed_builders")

@@ -14,9 +14,9 @@ import pytz
 from core.parser import RejectedSignal, parse_signal
 from database import db
 from models.signal import SignalData
-from price_feeds.embed_builders import _build_signal_embed, _set_archive_footer
-from price_feeds.streaming_monitor import react_to_original_signal
-from price_feeds.tp_config import TPConfig
+from price_feeds.alerting.embed_builders import _build_signal_embed, _set_archive_footer
+from price_feeds.monitors.streaming_monitor import react_to_original_signal
+from price_feeds.config.tp_config import TPConfig
 from utils.formatting import format_price
 from utils.formatting import get_channel_name as _get_channel_name
 from utils.logger import get_logger

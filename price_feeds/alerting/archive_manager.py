@@ -13,7 +13,7 @@ from typing import Optional
 
 import discord
 
-from price_feeds.embed_builders import (
+from price_feeds.alerting.embed_builders import (
     _build_profit_archive_embed,
     _build_signal_embed,
     _set_archive_footer,

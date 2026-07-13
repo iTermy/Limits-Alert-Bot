@@ -85,9 +85,10 @@ core/                    Bot wiring, signal parser, news manager, expiry manager
   parser/                Channel-aware pattern parsers + validators + AI fallback
 database/                asyncpg pool, schema/migrations, signal CRUD + lifecycle,
                          reporting queries, audit ops
-price_feeds/             Feed clients, streaming monitor (per-tick evaluation),
-                         alert system, TP/near-miss/excursion/trailing monitors,
-                         threshold configs, symbol mapper, health monitor
+price_feeds/             Grouped into feeds/ (feed clients + stream coordination),
+                         alerting/ (embeds + archiving), monitors/ (streaming
+                         evaluation, TP/near-miss/excursion/trailing, health, guards),
+                         and config/ (threshold configs + symbol mapper)
 discord_handlers/        Message intake: parsing, edits/deletes, reply commands
 commands/                Cogs: signal lifecycle, reports, news, config, admin
 models/                  Pydantic domain models + status enums

@@ -13,18 +13,18 @@ if TYPE_CHECKING:
     from core.news_fetcher import NewsFetcher
     from database import DatabaseManager
     from database.signal_ops import SignalDatabase
-    from price_feeds.alert_config import AlertDistanceConfig
-    from price_feeds.alert_system import AlertSystem
-    from price_feeds.excursion_monitor import ExcursionMonitor
-    from price_feeds.nm_config import NMConfig
-    from price_feeds.nm_monitor import NearMissMonitor
-    from price_feeds.price_stream_manager import PriceStreamManager
-    from price_feeds.risky_window import RiskyWindowAnnouncer
-    from price_feeds.streaming_monitor import StreamingPriceMonitor
-    from price_feeds.tp_config import TPConfig
-    from price_feeds.tp_monitor import AutoTPMonitor
-    from price_feeds.trailing_monitor import TrailingStopMonitor
-    from price_feeds.vol_guard import VolatilityGuard
+    from price_feeds.config.alert_config import AlertDistanceConfig
+    from price_feeds.alerting.alert_system import AlertSystem
+    from price_feeds.monitors.excursion_monitor import ExcursionMonitor
+    from price_feeds.config.nm_config import NMConfig
+    from price_feeds.monitors.nm_monitor import NearMissMonitor
+    from price_feeds.feeds.price_stream_manager import PriceStreamManager
+    from price_feeds.monitors.risky_window import RiskyWindowAnnouncer
+    from price_feeds.monitors.streaming_monitor import StreamingPriceMonitor
+    from price_feeds.config.tp_config import TPConfig
+    from price_feeds.monitors.tp_monitor import AutoTPMonitor
+    from price_feeds.monitors.trailing_monitor import TrailingStopMonitor
+    from price_feeds.monitors.vol_guard import VolatilityGuard
 
 
 class ServiceRegistry:

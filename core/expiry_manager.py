@@ -109,7 +109,7 @@ class ExpiryManager:
         # ── 3b. Add ❌ reaction to the original signal message ────────────────
         if monitor:
             try:
-                from price_feeds.streaming_monitor import react_to_original_signal
+                from price_feeds.monitors.streaming_monitor import react_to_original_signal
 
                 await react_to_original_signal(self.bot, signal, "❌")
             except Exception as _re:

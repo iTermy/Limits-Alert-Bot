@@ -4,7 +4,7 @@ mapping that requires both forward and reverse entries)."""
 
 import pytest
 
-from price_feeds.symbol_mapper import SymbolMapper
+from price_feeds.config.symbol_mapper import SymbolMapper
 
 
 @pytest.fixture(scope="module")

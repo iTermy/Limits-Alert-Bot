@@ -213,7 +213,7 @@ class TradingBot(commands.Bot):
         if self.monitor and self.monitor.alert_system and not self._info_embeds_synced:
             self._info_embeds_synced = True
             try:
-                from price_feeds.info_embeds import InfoEmbedManager
+                from price_feeds.alerting.info_embeds import InfoEmbedManager
 
                 await InfoEmbedManager(self, self.monitor.alert_system).sync()
             except Exception as e:
@@ -314,20 +314,20 @@ class TradingBot(commands.Bot):
         try:
             from database.excursion_ops import ExcursionDatabase
             from database.trailing_ops import TrailingDatabase
-            from price_feeds.alert_config import AlertDistanceConfig
-            from price_feeds.alert_system import AlertSystem
-            from price_feeds.excursion_monitor import ExcursionMonitor
-            from price_feeds.feed_health_monitor import FeedHealthMonitor
-            from price_feeds.live_price_writer import LivePriceWriter
-            from price_feeds.market_context import MarketContextProvider
-            from price_feeds.nm_config import NMConfig
-            from price_feeds.nm_monitor import NearMissMonitor
-            from price_feeds.price_stream_manager import PriceStreamManager
-            from price_feeds.streaming_monitor import StreamingPriceMonitor
-            from price_feeds.tp_config import TPConfig
-            from price_feeds.tp_monitor import AutoTPMonitor
-            from price_feeds.trailing_config import TrailingStopConfig
-            from price_feeds.trailing_monitor import TrailingStopMonitor
+            from price_feeds.config.alert_config import AlertDistanceConfig
+            from price_feeds.alerting.alert_system import AlertSystem
+            from price_feeds.monitors.excursion_monitor import ExcursionMonitor
+            from price_feeds.monitors.feed_health_monitor import FeedHealthMonitor
+            from price_feeds.monitors.live_price_writer import LivePriceWriter
+            from price_feeds.monitors.market_context import MarketContextProvider
+            from price_feeds.config.nm_config import NMConfig
+            from price_feeds.monitors.nm_monitor import NearMissMonitor
+            from price_feeds.feeds.price_stream_manager import PriceStreamManager
+            from price_feeds.monitors.streaming_monitor import StreamingPriceMonitor
+            from price_feeds.config.tp_config import TPConfig
+            from price_feeds.monitors.tp_monitor import AutoTPMonitor
+            from price_feeds.config.trailing_config import TrailingStopConfig
+            from price_feeds.monitors.trailing_monitor import TrailingStopMonitor
 
             # Create subsystems
             alert_config = AlertDistanceConfig()
@@ -455,7 +455,7 @@ class TradingBot(commands.Bot):
     async def _start_vol_guard(self, stream_manager):
         """Create and start the volatility guard, posting to its own channel
         (`vol-guard-alert` in channels.json) or the main alert channel as a fallback."""
-        from price_feeds.vol_guard import VolatilityGuard
+        from price_feeds.monitors.vol_guard import VolatilityGuard
 
         channel_id = self.channels_config.get("vol-guard-alert") or self.channels_config.get(
             "alert_channel"
@@ -477,7 +477,7 @@ class TradingBot(commands.Bot):
     def _start_risky_window_announcer(self, alert_system):
         """Create and start the risky-window announcer, posting to the risky-gold
         alert channel. No-op if that channel isn't configured."""
-        from price_feeds.risky_window import RiskyWindowAnnouncer
+        from price_feeds.monitors.risky_window import RiskyWindowAnnouncer
 
         channel = getattr(alert_system, "risky_alert_channel", None)
         if channel is None:

@@ -19,7 +19,7 @@ from typing import Optional
 
 import pytz
 
-from price_feeds.symbol_mapper import SymbolMapper
+from price_feeds.config.symbol_mapper import SymbolMapper
 from utils.logger import get_logger
 
 logger = get_logger("feed_health")

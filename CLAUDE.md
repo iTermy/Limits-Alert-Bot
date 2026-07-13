@@ -81,50 +81,11 @@ database/
   utils.py                      calculate_expiry() (day_end → 4:45 PM EST), _parse_dt()
 
 price_feeds/
-  price_stream_manager.py       Coordinates all four feeds; calculates spread if missing (ask − bid);
+  feeds/                        Feed clients + stream coordination
+    price_stream_manager.py     Coordinates all four feeds; calculates spread if missing (ask − bid);
                                   stamps price_data["updated_at"] (UTC) from broker tick time (ICMarkets/Exness)
                                   or wall-clock (OANDA/Binance) before calling subscribers;
                                   routes symbols to feeds via SymbolMapper; notifies all subscribers
-  streaming_monitor.py          Per-tick signal evaluation; receives all deps via constructor;
-                                  react_to_original_signal() as module-level function;
-                                  _MAX_TICK_AGE_SECONDS = 5 — drops stale ticks before signal evaluation;
-                                  refresh_signal_in_memory(signal_id) — re-fetches a single signal
-                                  from DB and syncs active_signals + alert_system._live_embeds
-                                  (called from edit / reactivate paths to avoid 30 s drift);
-                                  check order documented below
-  alert_system.py               Persistent embed orchestrator; 4 data dicts + _live_embeds;
-                                  5-channel routing; 15 s live-refresh background task;
-                                  hydrate_from_db / recover_pending_archives / recover_finished_embeds
-                                  re-attach existing embeds on restart; retract_approaching_embed
-                                  drops the embed when price drifts back past the alert window;
-                                  delegates embed building and archiving
-  embed_builders.py             Pure functions: _build_signal_embed(), _build_profit_archive_embed(),
-                                  _set_archive_footer() + formatting helpers
-  archive_manager.py            ArchiveManager — schedule_end_state_move(), cancel_pending_move(),
-                                  delayed move/delete for finished signals
-  _base_config.py               BaseThresholdConfig — shared JSON load/save/validate/override management;
-                                  shared SymbolMapper singleton across all config types
-  alert_config.py               AlertDistanceConfig(BaseThresholdConfig) — approaching distance thresholds
-  tp_config.py                  TPConfig(BaseThresholdConfig) — per-signal-type TP thresholds (type_defaults / type_overrides);
-                                  calculate_pnl(); accepts signal_type kwarg (or legacy scalp bool)
-  tp_monitor.py                 AutoTPMonitor — checks HIT-status signals per tick; per-signal limit cache
-  nm_config.py                  NMConfig(BaseThresholdConfig) — max_proximity + base_bounce per asset class
-  nm_monitor.py                 NearMissMonitor — in-memory NMTrackingState; _nm_immune set;
-                                  mark_immune(signal_id) called on every reactivation;
-                                  signal.type == "swing" short-circuits NM (swing is not near-missable)
-  feed_health_monitor.py        Stale threshold 300 s; 3 max reconnect attempts; 120 s startup grace;
-                                  15 min alert cooldown; DMs health_alert_admin_id from settings.json;
-                                  spread hour (17–18 ET) treated as market-closed for forex/metals/indices/oil;
-                                  first_stale_time tracks real stall start for accurate recovery downtime;
-                                  reconnects only the stale feed (reconnect_feed), never all feeds;
-                                  price-flow watchdog force-restarts the bot when a subscribed market is
-                                  open but no feed has ticked for WATCHDOG_SILENCE_SECONDS;
-                                  all knobs are module-level constants (no config file)
-  live_price_writer.py          Writes bid/ask/feed to live_prices table every 5 s for every signal-bearing
-                                  symbol (ICMarkets/OANDA/Binance/Exness); the EX bot derives its own broker
-                                  offset from its MT5 feed vs the stored price, so no IC reference price is written
-  symbol_mapper.py              Internal ↔ feed-specific symbol translation; always returns UPPERCASE
-  feeds/
     icmarkets_stream.py         MT5 polling 100 ms/symbol — Windows only;
                                   tick "timestamp" is UTC-aware (datetime.fromtimestamp(tick.time, tz=utc));
                                   on_poll callback fires on every successful tick fetch (price-change-agnostic)
@@ -136,6 +97,56 @@ price_feeds/
     exness_worker.py            Standalone child process; holds its own MT5 connection to Exness terminal;
                                   polls symbol_info_tick() at 100 ms; writes JSON price lines to stdout;
                                   reads subscribe/unsubscribe/shutdown commands from stdin
+  alerting/                     Persistent embed orchestration + archiving
+    alert_system.py             Persistent embed orchestrator; 4 data dicts + _live_embeds;
+                                  5-channel routing; 15 s live-refresh background task;
+                                  hydrate_from_db / recover_pending_archives / recover_finished_embeds
+                                  re-attach existing embeds on restart; retract_approaching_embed
+                                  drops the embed when price drifts back past the alert window;
+                                  delegates embed building and archiving
+    embed_builders.py           Pure functions: _build_signal_embed(), _build_profit_archive_embed(),
+                                  _set_archive_footer() + formatting helpers
+    archive_manager.py          ArchiveManager — schedule_end_state_move(), cancel_pending_move(),
+                                  delayed move/delete for finished signals
+    info_embeds.py              InfoEmbedManager — static per-channel info/risk embeds;
+                                  message IDs persisted to data/info_embeds.json
+  monitors/                     Per-tick evaluation, health, and market guards
+    streaming_monitor.py        Per-tick signal evaluation; receives all deps via constructor;
+                                  react_to_original_signal() as module-level function;
+                                  _MAX_TICK_AGE_SECONDS = 5 — drops stale ticks before signal evaluation;
+                                  refresh_signal_in_memory(signal_id) — re-fetches a single signal
+                                  from DB and syncs active_signals + alert_system._live_embeds
+                                  (called from edit / reactivate paths to avoid 30 s drift);
+                                  check order documented below
+    tp_monitor.py               AutoTPMonitor — checks HIT-status signals per tick; per-signal limit cache
+    nm_monitor.py               NearMissMonitor — in-memory NMTrackingState; _nm_immune set;
+                                  mark_immune(signal_id) called on every reactivation;
+                                  signal.type == "swing" short-circuits NM (swing is not near-missable)
+    trailing_monitor.py         TrailingStopMonitor — trailing-stop evaluation for HIT signals
+    excursion_monitor.py        ExcursionMonitor — MFE/MAE tracking + post-exit follow-through sampling
+    feed_health_monitor.py      Stale threshold 300 s; 3 max reconnect attempts; 120 s startup grace;
+                                  15 min alert cooldown; DMs health_alert_admin_id from settings.json;
+                                  spread hour (17–18 ET) treated as market-closed for forex/metals/indices/oil;
+                                  first_stale_time tracks real stall start for accurate recovery downtime;
+                                  reconnects only the stale feed (reconnect_feed), never all feeds;
+                                  price-flow watchdog force-restarts the bot when a subscribed market is
+                                  open but no feed has ticked for WATCHDOG_SILENCE_SECONDS;
+                                  all knobs are module-level constants (no config file)
+    vol_guard.py                VolatilityGuard — per-pair volatility pause; reconciles vol_guard bot_mode_status
+    risky_window.py             RiskyWindowAnnouncer — risky-window gating + is_risky_trading_disabled()
+    market_context.py           MarketContextProvider — market session / open-state context
+    live_price_writer.py        Writes bid/ask/feed to live_prices table every 5 s for every signal-bearing
+                                  symbol (ICMarkets/OANDA/Binance/Exness); the EX bot derives its own broker
+                                  offset from its MT5 feed vs the stored price, so no IC reference price is written
+  config/                       Threshold configs + symbol mapping
+    _base_config.py             BaseThresholdConfig — shared JSON load/save/validate/override management;
+                                  shared SymbolMapper singleton across all config types
+    alert_config.py             AlertDistanceConfig(BaseThresholdConfig) — approaching distance thresholds
+    tp_config.py                TPConfig(BaseThresholdConfig) — per-signal-type TP thresholds (type_defaults / type_overrides);
+                                  calculate_pnl(); accepts signal_type kwarg (or legacy scalp bool)
+    nm_config.py                NMConfig(BaseThresholdConfig) — max_proximity + base_bounce per asset class
+    trailing_config.py          TrailingStopConfig(BaseThresholdConfig) — trailing-stop LEVELS per asset class
+    symbol_mapper.py            Internal ↔ feed-specific symbol translation; always returns UPPERCASE
 
 discord_handlers/
   message_handler.py            Handles new/edited/deleted messages; dispatches reply commands for
@@ -534,7 +545,7 @@ When `cancel` is replied to the original signal message and no approaching/hit e
 Auto-TP fires when: **last hit limit's P&L ≥ threshold** AND (if 2+ limits hit) **sum of earlier limits' P&L ≥ 0** (epsilon tolerance 1e-9). It is not a simple cumulative P&L check across all limits.
 
 ### react_to_original_signal
-Module-level function in `price_feeds/streaming_monitor.py`. Called from `streaming_monitor`, `expiry_manager`, and `commands/signals/lifecycle.py` to add emoji reactions to original signal messages.
+Module-level function in `price_feeds/monitors/streaming_monitor.py`. Called from `streaming_monitor`, `expiry_manager`, and `commands/signals/lifecycle.py` to add emoji reactions to original signal messages.
 
 ### Overlap detection on signal save
 When a new signal is saved, `signal_ops.get_overlapping_signals()` queries for active/hit signals on the same instrument whose pending-limit price range (`[MIN, MAX]`) intersects the new signal's range. If any are found, `message_handler._handle_overlap_prompt()` is spawned as a background task (non-blocking): it posts a prompt in the same channel, waits up to 30 s for a ✅ (cancel old) or ❌ (keep both) reaction from the signal author or a guild admin. Timeout defaults to cancelling the old signal(s). The prompt is deleted after the outcome.

@@ -38,7 +38,7 @@ from time import monotonic
 import discord
 import pytz
 
-from price_feeds.symbol_mapper import SymbolMapper
+from price_feeds.config.symbol_mapper import SymbolMapper
 from utils.logger import get_logger
 
 logger = get_logger("vol_guard")
@@ -68,7 +68,7 @@ _EVAL_INTERVAL_SECONDS = 5
 # Edited "ended" embeds are removed after this delay to keep channels tidy.
 _ENDED_DELETE_AFTER_SECONDS = 300
 
-_CONFIG_PATH = Path(__file__).resolve().parent.parent / "config" / "vol_guard.json"
+_CONFIG_PATH = Path(__file__).resolve().parent.parent.parent / "config" / "vol_guard.json"
 
 
 def _load_config() -> dict:

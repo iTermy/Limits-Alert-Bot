@@ -11,7 +11,7 @@ import discord
 import pytz
 
 from models.signal import LimitData, SignalData
-from price_feeds.risky_window import is_risky_trading_disabled
+from price_feeds.monitors.risky_window import is_risky_trading_disabled
 from utils.config_loader import load_settings
 from utils.logger import get_logger
 

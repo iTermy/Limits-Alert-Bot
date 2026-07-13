@@ -6,7 +6,7 @@ silently corrupts analytics (this exact bug corrupted era-1 excursion rows).
 
 import pytest
 
-from price_feeds._base_config import BaseThresholdConfig
+from price_feeds.config._base_config import BaseThresholdConfig
 
 get_pip_size = BaseThresholdConfig.get_pip_size
 

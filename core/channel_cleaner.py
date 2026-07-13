@@ -22,7 +22,7 @@ from datetime import datetime, timedelta, timezone
 import discord
 from discord.ext import tasks
 
-from price_feeds.info_embeds import info_embed_message_ids
+from price_feeds.alerting.info_embeds import info_embed_message_ids
 from utils.logger import get_logger
 
 # ── tuneable constants ────────────────────────────────────────────────────────

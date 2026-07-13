@@ -6,7 +6,7 @@ tp_configuration.json is never touched.
 
 import pytest
 
-from price_feeds.tp_config import TPConfig
+from price_feeds.config.tp_config import TPConfig
 
 
 @pytest.fixture

@@ -11,7 +11,7 @@ import discord
 from discord.ext import commands
 
 from database import report_queries
-from price_feeds.tp_config import TPConfig
+from price_feeds.config.tp_config import TPConfig
 from utils.formatting import format_price
 from utils.logger import get_logger
 
