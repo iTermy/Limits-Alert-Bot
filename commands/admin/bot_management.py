@@ -3,15 +3,65 @@ Bot Management Commands - ping, help, health, feeds, price, reload, shutdown, cl
 """
 
 import asyncio
+from dataclasses import dataclass
 from datetime import datetime
+from typing import Callable
 
 import discord
 from discord.ext import commands
 
+from core.parser.pattern_parsers import (
+    get_gold_tolls_sl_offset,
+    get_risky_gold_sl_offset,
+    invalidate_gold_tolls_sl_cache,
+    invalidate_risky_gold_sl_cache,
+)
 from database.config_history_ops import log_config_change
-from utils.config_loader import load_channels_config
+from utils.config_loader import load_channels_config, load_settings, save_settings
 
 from .._base import BaseCog
+
+
+@dataclass(frozen=True)
+class _SlOffsetSpec:
+    """Everything that differs between the gold-tolls and risky-gold SL commands."""
+
+    label: str  # embed titles, e.g. "Gold Tolls"
+    icon: str  # embed emoji
+    command_name: str  # for the usage hint
+    settings_attr: str  # BotSettings attribute + config_history key
+    read_offset: Callable[[], float]
+    invalidate_cache: Callable[[], None]
+    channel_ids_attr: str  # AlertSystem attribute holding the channel-id set
+    channel_matches: Callable[[str], bool]  # fallback channels.json name predicate
+    empty_channels_note: str
+
+
+_GOLD_TOLLS_SL_SPEC = _SlOffsetSpec(
+    label="Gold Tolls",
+    icon="🛑",
+    command_name="goldtollssl",
+    settings_attr="gold_tolls_sl_offset",
+    read_offset=get_gold_tolls_sl_offset,
+    invalidate_cache=invalidate_gold_tolls_sl_cache,
+    channel_ids_attr="toll_channel_ids",
+    # Risky-gold has its own independent SL offset (!riskygoldsl), so it is
+    # deliberately excluded here — only true toll channels update.
+    channel_matches=lambda name: "toll" in name and name != "general-tolls",
+    empty_channels_note="No gold-toll channels found — offset saved but no signals updated.",
+)
+
+_RISKY_GOLD_SL_SPEC = _SlOffsetSpec(
+    label="Risky Gold",
+    icon="🎲",
+    command_name="riskygoldsl",
+    settings_attr="risky_gold_sl_offset",
+    read_offset=get_risky_gold_sl_offset,
+    invalidate_cache=invalidate_risky_gold_sl_cache,
+    channel_ids_attr="risky_channel_ids",
+    channel_matches=lambda name: name == "risky-gold",
+    empty_channels_note="No risky-gold channel found — offset saved but no signals updated.",
+)
 
 
 class BotManagementCog(BaseCog):
@@ -413,126 +463,7 @@ class BotManagementCog(BaseCog):
                 !goldtollssl 10       → set offset to $10
                 !goldtollssl 5        → reset to default $5
         """
-        from core.parser.pattern_parsers import (
-            get_gold_tolls_sl_offset,
-            invalidate_gold_tolls_sl_cache,
-        )
-        from utils.config_loader import load_settings, save_settings
-
-        if value is None:
-            current = get_gold_tolls_sl_offset()
-            embed = discord.Embed(
-                title="🛑 Gold Tolls SL Offset",
-                description=(
-                    f"**Current offset:** `${current:.2f}` from the nearest limit\n\n"
-                    "Gold-tolls stop losses are automatically placed this many dollars "
-                    "beyond the nearest limit.\n\n"
-                    f"**Long signals:** SL = lowest limit − `${current:.2f}`\n"
-                    f"**Short signals:** SL = highest limit + `${current:.2f}`\n\n"
-                    "_Use `!goldtollssl <value>` to change it._"
-                ),
-                color=discord.Color.blue(),
-            )
-            await ctx.send(embed=embed)
-            return
-
-        if value <= 0:
-            await ctx.send("❌ Offset must be a positive number.")
-            return
-
-        try:
-            settings = load_settings()
-            old_value = settings.gold_tolls_sl_offset
-            settings.gold_tolls_sl_offset = value
-            save_settings(settings)
-            invalidate_gold_tolls_sl_cache()
-        except Exception as e:
-            await ctx.send(f"❌ Failed to save setting: {e}")
-            self.logger.error(f"Failed to save gold_tolls_sl_offset: {e}", exc_info=True)
-            return
-
-        self.logger.info(f"gold_tolls_sl_offset changed {old_value} to {value} by {ctx.author}")
-        await log_config_change(
-            self.signal_db.db, "settings", "gold_tolls_sl_offset", old_value, value, ctx.author.name,
-        )
-
-        loading_msg = await ctx.send("🔄 Updating active gold toll signals…")
-
-        updated_count = 0
-        skipped_count = 0
-        error_count = 0
-
-        try:
-            monitor = getattr(self.bot, "monitor", None)
-            alert_system = monitor.alert_system if monitor else None
-
-            # Risky-gold has its own independent SL offset (!riskygoldsl), so it
-            # is deliberately excluded here — only true toll channels update.
-            toll_channel_ids: set = set()
-            if alert_system and hasattr(alert_system, "toll_channel_ids"):
-                toll_channel_ids = set(alert_system.toll_channel_ids)
-
-            if not toll_channel_ids:
-                channels_cfg = load_channels_config()
-                monitored = channels_cfg.get("monitored_channels", {})
-                for ch_name, ch_id in monitored.items():
-                    if not ch_id:
-                        continue
-                    name_lower = ch_name.lower()
-                    if "toll" in name_lower and name_lower != "general-tolls":
-                        toll_channel_ids.add(str(ch_id))
-
-            if toll_channel_ids:
-                toll_ch_list = list(toll_channel_ids)
-                updated_list, skipped_count, error_count = await self.signal_db.bulk_update_toll_sl(
-                    value, toll_ch_list
-                )
-                updated_count = len(updated_list)
-
-                for entry in updated_list:
-                    sig_id = entry["id"]
-                    if monitor and sig_id in monitor.active_signals:
-                        monitor.active_signals[sig_id]["stop_loss"] = entry["new_sl"]
-                    if alert_system:
-                        try:
-                            await alert_system.update_embed_for_signal_id(sig_id, "edited")
-                        except Exception as _ue:
-                            self.logger.warning(
-                                f"Could not update embed for toll signal {sig_id}: {_ue}"
-                            )
-
-                await loading_msg.delete()
-            else:
-                await loading_msg.edit(
-                    content="⚠️ No gold-toll channels found — offset saved but no signals updated."
-                )
-
-        except Exception as bulk_err:
-            self.logger.error(f"Retroactive gold-toll SL update failed: {bulk_err}", exc_info=True)
-            await loading_msg.edit(content=f"⚠️ Retroactive update encountered an error: {bulk_err}")
-
-        retro_lines = []
-        if updated_count:
-            retro_lines.append(f"✅ **{updated_count}** active signal(s) SL updated retroactively")
-        if skipped_count:
-            retro_lines.append(f"⏭️ **{skipped_count}** signal(s) skipped (no change / no limits)")
-        if error_count:
-            retro_lines.append(f"⚠️ **{error_count}** signal(s) failed to update (see logs)")
-        if not retro_lines:
-            retro_lines.append("ℹ️ No active gold-toll signals found to update")
-
-        embed = discord.Embed(
-            title="✅ Gold Tolls SL Offset Updated",
-            description=(
-                f"**Old offset:** `${old_value:.2f}`\n"
-                f"**New offset:** `${value:.2f}`\n\n"
-                f"**Long signals:** SL = lowest limit − `${value:.2f}`\n"
-                f"**Short signals:** SL = highest limit + `${value:.2f}`\n\n"
-                + "\n".join(retro_lines)
-            ),
-            color=discord.Color.green(),
-        )
-        await ctx.send(embed=embed)
+        await self._update_sl_offset(ctx, value, _GOLD_TOLLS_SL_SPEC)
 
     @commands.command(name="riskygoldsl", aliases=["rgsl", "riskysl"])
     @commands.check(lambda ctx: ctx.cog.is_admin(ctx.author))
@@ -544,23 +475,25 @@ class BotManagementCog(BaseCog):
                 !riskygoldsl 10       → set offset to $10
                 !riskygoldsl 5        → reset to default $5
         """
-        from core.parser.pattern_parsers import (
-            get_risky_gold_sl_offset,
-            invalidate_risky_gold_sl_cache,
-        )
-        from utils.config_loader import load_settings, save_settings
+        await self._update_sl_offset(ctx, value, _RISKY_GOLD_SL_SPEC)
 
+    async def _update_sl_offset(
+        self, ctx: commands.Context, value: float, spec: _SlOffsetSpec
+    ) -> None:
+        """Shared body for the auto-SL offset commands: show, persist, and
+        retroactively re-derive the SL of every active signal in the spec's
+        channels."""
         if value is None:
-            current = get_risky_gold_sl_offset()
+            current = spec.read_offset()
             embed = discord.Embed(
-                title="🎲 Risky Gold SL Offset",
+                title=f"{spec.icon} {spec.label} SL Offset",
                 description=(
                     f"**Current offset:** `${current:.2f}` from the nearest limit\n\n"
-                    "Risky-gold stop losses are automatically placed this many dollars "
+                    f"{spec.label} stop losses are automatically placed this many dollars "
                     "beyond the nearest limit.\n\n"
                     f"**Long signals:** SL = lowest limit − `${current:.2f}`\n"
                     f"**Short signals:** SL = highest limit + `${current:.2f}`\n\n"
-                    "_Use `!riskygoldsl <value>` to change it._"
+                    f"_Use `!{spec.command_name} <value>` to change it._"
                 ),
                 color=discord.Color.blue(),
             )
@@ -573,21 +506,21 @@ class BotManagementCog(BaseCog):
 
         try:
             settings = load_settings()
-            old_value = settings.risky_gold_sl_offset
-            settings.risky_gold_sl_offset = value
+            old_value = getattr(settings, spec.settings_attr)
+            setattr(settings, spec.settings_attr, value)
             save_settings(settings)
-            invalidate_risky_gold_sl_cache()
+            spec.invalidate_cache()
         except Exception as e:
             await ctx.send(f"❌ Failed to save setting: {e}")
-            self.logger.error(f"Failed to save risky_gold_sl_offset: {e}", exc_info=True)
+            self.logger.error(f"Failed to save {spec.settings_attr}: {e}", exc_info=True)
             return
 
-        self.logger.info(f"risky_gold_sl_offset changed {old_value} to {value} by {ctx.author}")
+        self.logger.info(f"{spec.settings_attr} changed {old_value} to {value} by {ctx.author}")
         await log_config_change(
-            self.signal_db.db, "settings", "risky_gold_sl_offset", old_value, value, ctx.author.name,
+            self.signal_db.db, "settings", spec.settings_attr, old_value, value, ctx.author.name,
         )
 
-        loading_msg = await ctx.send("🔄 Updating active risky-gold signals…")
+        loading_msg = await ctx.send(f"🔄 Updating active {spec.label.lower()} signals…")
 
         updated_count = 0
         skipped_count = 0
@@ -597,44 +530,45 @@ class BotManagementCog(BaseCog):
             monitor = getattr(self.bot, "monitor", None)
             alert_system = monitor.alert_system if monitor else None
 
-            risky_channel_ids: set = set()
-            if alert_system and hasattr(alert_system, "risky_channel_ids"):
-                risky_channel_ids = set(alert_system.risky_channel_ids)
+            channel_ids: set[str] = set()
+            if alert_system:
+                channel_ids = set(getattr(alert_system, spec.channel_ids_attr, set()))
 
-            if not risky_channel_ids:
+            if not channel_ids:
                 channels_cfg = load_channels_config()
                 monitored = channels_cfg.get("monitored_channels", {})
-                for ch_name, ch_id in monitored.items():
-                    if ch_id and ch_name.lower() == "risky-gold":
-                        risky_channel_ids.add(str(ch_id))
+                channel_ids = {
+                    str(ch_id)
+                    for ch_name, ch_id in monitored.items()
+                    if ch_id and spec.channel_matches(ch_name.lower())
+                }
 
-            if risky_channel_ids:
-                risky_ch_list = list(risky_channel_ids)
+            if channel_ids:
                 updated_list, skipped_count, error_count = await self.signal_db.bulk_update_toll_sl(
-                    value, risky_ch_list
+                    value, list(channel_ids)
                 )
                 updated_count = len(updated_list)
 
                 for entry in updated_list:
                     sig_id = entry["id"]
                     if monitor and sig_id in monitor.active_signals:
-                        monitor.active_signals[sig_id]["stop_loss"] = entry["new_sl"]
+                        monitor.active_signals[sig_id].stop_loss = entry["new_sl"]
                     if alert_system:
                         try:
                             await alert_system.update_embed_for_signal_id(sig_id, "edited")
                         except Exception as _ue:
                             self.logger.warning(
-                                f"Could not update embed for risky-gold signal {sig_id}: {_ue}"
+                                f"Could not update embed for signal {sig_id}: {_ue}"
                             )
 
                 await loading_msg.delete()
             else:
-                await loading_msg.edit(
-                    content="⚠️ No risky-gold channel found — offset saved but no signals updated."
-                )
+                await loading_msg.edit(content=f"⚠️ {spec.empty_channels_note}")
 
         except Exception as bulk_err:
-            self.logger.error(f"Retroactive risky-gold SL update failed: {bulk_err}", exc_info=True)
+            self.logger.error(
+                f"Retroactive {spec.label.lower()} SL update failed: {bulk_err}", exc_info=True
+            )
             await loading_msg.edit(content=f"⚠️ Retroactive update encountered an error: {bulk_err}")
 
         retro_lines = []
@@ -645,10 +579,10 @@ class BotManagementCog(BaseCog):
         if error_count:
             retro_lines.append(f"⚠️ **{error_count}** signal(s) failed to update (see logs)")
         if not retro_lines:
-            retro_lines.append("ℹ️ No active risky-gold signals found to update")
+            retro_lines.append(f"ℹ️ No active {spec.label.lower()} signals found to update")
 
         embed = discord.Embed(
-            title="✅ Risky Gold SL Offset Updated",
+            title=f"✅ {spec.label} SL Offset Updated",
             description=(
                 f"**Old offset:** `${old_value:.2f}`\n"
                 f"**New offset:** `${value:.2f}`\n\n"
