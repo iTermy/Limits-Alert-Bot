@@ -199,11 +199,12 @@ class LifecycleCog(BaseCog):
         )
         embed.add_field(name="Stop Loss", value=stop_loss_formatted, inline=True)
 
-        # Take-profit price (manual closures show "Manual" instead of a price)
-        if signal.closed_reason == "manual":
-            tp_value = "Manual"
-        elif signal.tp_price is not None:
-            tp_value = format_price(signal.tp_price, signal.instrument)
+        # Take-profit price — prefer the manual override, else the recorded close.
+        tp_price = signal.manual_tp_price
+        if tp_price is None:
+            tp_price = signal.tp_price
+        if tp_price is not None:
+            tp_value = format_price(tp_price, signal.instrument)
         else:
             tp_value = "N/A"
         embed.add_field(name="TP Price", value=tp_value, inline=True)

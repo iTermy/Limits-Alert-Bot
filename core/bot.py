@@ -207,7 +207,8 @@ class TradingBot(commands.Bot):
             self.monitor.alert_system.start_live_updates()
             self.logger.info("Live embed update loop started")
 
-        # Post/refresh the pinned informational embed in each alert channel.
+        # Post/refresh the pinned informational embeds in the alert channels and
+        # the reference notices in the monitored channels.
         # Guarded so reconnect-triggered on_ready calls don't re-run it.
         if self.monitor and self.monitor.alert_system and not self._info_embeds_synced:
             self._info_embeds_synced = True

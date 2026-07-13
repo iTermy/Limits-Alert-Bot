@@ -142,19 +142,20 @@ class ReportsCog(BaseCog):
 
         Args (order-independent):
             period: 'day', 'week', or 'month' (default 'week')
-            'risky': show ONLY risky-gold trades (excluded from the default report)
+            'risky': show ONLY risky-gold trades (the default report already
+                includes them as their own section)
             filter: 'stoploss'/'sl' or 'profit'/'win' to filter results
 
         Examples:
-            !report                 — this week, excluding risky
-            !report month           — past 30 days, excluding risky
+            !report                 — this week, all sections including risky
+            !report month           — past 30 days, all sections including risky
             !report risky           — this week, risky only
             !report risky months    — past 30 days, risky only
         """
         tokens = [a.lower() for a in args]
 
-        # Risky is a mode toggle: excluded from the default report, shown alone
-        # when explicitly requested.
+        # Risky is a mode toggle: the default report includes risky as its own
+        # section; risky mode shows only risky trades.
         risky_mode = "risky" in tokens
         tokens = [t for t in tokens if t != "risky"]
 
@@ -308,8 +309,8 @@ class ReportsCog(BaseCog):
                     sl = []
                 return profit, sl
 
-            # Risky is reported only in risky mode; the default report omits it
-            # entirely (no Risky group, and risky signals excluded from totals).
+            # Risky mode shows only risky trades; the default report includes them
+            # as their own section alongside the other groups.
             if risky_mode:
                 groups = [("Risky", risky_signals)]
             else:
@@ -319,6 +320,7 @@ class ReportsCog(BaseCog):
                     ("PA", pa_signals),
                     ("Legends", legends_signals),
                     ("1-1", one_to_one_signals),
+                    ("Risky", risky_signals),
                 ]
 
             # Per-group stats: { label: {"profit": [...], "sl": [...], "total": N, "win_rate": x} }

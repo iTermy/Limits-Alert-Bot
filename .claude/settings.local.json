@@ -97,7 +97,25 @@
       "Bash(./.venv/Scripts/python.exe -m ruff check . --select E741,B904,PLW2901,RUF012,E402 --output-format concise)",
       "Bash(./.venv/Scripts/python.exe \"C:/Users/ripyo/AppData/Local/Temp/claude/C--Python-Stuff-TM-Bot/77c48a67-df41-4245-b408-3ab81de98e68/scratchpad/lint_fixes.py\")",
       "Bash(./.venv/Scripts/python.exe -m ruff check . --select E741,F821 --output-format concise)",
-      "Bash(./.venv/Scripts/python.exe -m ruff check . --select SIM102,SIM117 --output-format concise)"
+      "Bash(./.venv/Scripts/python.exe -m ruff check . --select SIM102,SIM117 --output-format concise)",
+      "Bash(git rm *)",
+      "Bash(rm -rf supabase/supabase)",
+      "Bash(awk -F: '$1 > 400 && $1 < 1000')",
+      "Bash(./venv/Scripts/python.exe -m pyflakes bot/core/sync_cycle.py)",
+      "Bash(./venv/Scripts/python.exe -m ruff check bot/core/sync_cycle.py)",
+      "Bash(./venv/Scripts/python.exe -m ruff check bot/)",
+      "Bash(./venv/Scripts/python.exe -m ruff check bot/ --select I --fix)",
+      "Bash(./venv/Scripts/python.exe -m pytest tests/test_symbol_mapper.py -q)",
+      "Bash(./venv/Scripts/python.exe -m pytest tests/test_tp_outcomes_writer.py tests/ -q)",
+      "Bash(npm run *)",
+      "Bash(grep -n \"/\\\\* =\\\\|/\\\\* ---\\\\|^/\\\\*\" src/index.css)",
+      "Bash(./venv/Scripts/python.exe release.py 1.6.0-test --notes \"Internal cleanup build: sync-cycle restructure, unified force-exits, settings UI split\")",
+      "Bash(./MT5Bot.exe)",
+      "Bash(curl -s -m 5 http://127.0.0.1:8501/api/status)",
+      "Bash(curl -s -m 5 -o /dev/null -w \"frontend HTTP %{http_code}\\\\n\" http://127.0.0.1:8501/)",
+      "Bash(curl -s -m 5 -X POST http://127.0.0.1:8501/api/shutdown)",
+      "Bash(curl -s -m 3 http://127.0.0.1:8501/api/status)",
+      "Bash(curl -s -m 5 -X POST http://127.0.0.1:8501/api/engine/shutdown)"
     ],
     "additionalDirectories": [
       "C:\\Personal Projects\\MT5-Auto-Execution-Bot"

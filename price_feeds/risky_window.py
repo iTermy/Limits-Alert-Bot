@@ -24,10 +24,13 @@ from datetime import time as dtime
 from pathlib import Path
 
 import discord
+import pytz
 
 from utils.logger import get_logger
 
 logger = get_logger("risky_window")
+
+_EST_TZ = pytz.timezone("America/New_York")
 
 # Persisted reference to the currently-posted "disabled" embed, so a restart
 # mid-window reuses the existing embed instead of orphaning it.
@@ -41,6 +44,12 @@ RISKY_DISABLED_WINDOWS: list[tuple[dtime, dtime]] = [
     (dtime(12, 0), dtime(14, 0)),
 ]
 
+# Weekend market closure (EST): the gold market shuts Friday 17:00 EST and
+# reopens Sunday 18:00 EST. Risky windows do not apply while it is closed, so
+# the announcer stays silent over the weekend.
+_WEEKEND_CLOSE_TIME = dtime(17, 0)  # Friday
+_WEEKEND_REOPEN_TIME = dtime(18, 0)  # Sunday
+
 # How often the announcer re-checks the current window state.
 _CHECK_INTERVAL_SECONDS = 20
 
@@ -48,9 +57,30 @@ _CHECK_INTERVAL_SECONDS = 20
 _ENDED_DELETE_AFTER_SECONDS = 300
 
 
+def _is_weekend_closed(now: datetime) -> bool:
+    """True when the gold market is shut for the weekend (EST).
+
+    Closed from Friday 17:00 EST through Sunday 18:00 EST.
+    """
+    est = now.astimezone(_EST_TZ)
+    weekday = est.weekday()  # Mon=0 .. Sun=6
+    if weekday == 5:  # Saturday — closed all day
+        return True
+    if weekday == 4 and est.time() >= _WEEKEND_CLOSE_TIME:  # Friday after close
+        return True
+    if weekday == 6 and est.time() < _WEEKEND_REOPEN_TIME:  # Sunday before reopen
+        return True
+    return False
+
+
 def is_risky_trading_disabled(now: datetime | None = None) -> bool:
-    """True when the current UTC time falls inside a risky-disabled window."""
+    """True when the current UTC time falls inside a risky-disabled window.
+
+    Weekend closures take precedence: while the market is shut no window applies.
+    """
     now = now or datetime.now(timezone.utc)
+    if _is_weekend_closed(now):
+        return False
     t = now.time()
     return any(start <= t < end for start, end in RISKY_DISABLED_WINDOWS)
 
@@ -58,6 +88,8 @@ def is_risky_trading_disabled(now: datetime | None = None) -> bool:
 def current_window_end(now: datetime | None = None) -> datetime | None:
     """UTC datetime the active window ends, or None if not currently disabled."""
     now = now or datetime.now(timezone.utc)
+    if _is_weekend_closed(now):
+        return None
     t = now.time()
     for start, end in RISKY_DISABLED_WINDOWS:
         if start <= t < end:
