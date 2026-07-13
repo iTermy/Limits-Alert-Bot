@@ -39,3 +39,4 @@ config/local_settings.json
 
 # Local production bundles (contain credentials)
 dist/
+.env.testing-backup

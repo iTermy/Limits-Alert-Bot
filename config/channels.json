@@ -1,37 +1,37 @@
 {
   "monitored_channels": {
-    "daily-trade-setup": "1402971916339380244",
-    "scalps": "1402971964343320636",
-    "forex-exotics": "1402972132920787077",
-    "gold-swings": "1402972164256432220",
-    "oil-trades": "1402972289993019463",
-    "indices-trades": "1402972348193177745",
-    "crypto-trades": "1402972426014429254",
-    "stocks-trades": "1402972455990984774",
-    "swing-trades": "1402972635847200838",
-    "ot-trade-calls": "1402972674082476102",
-    "proper-calls": "1406127169448575098",
-    "crypto-alt-trades": "1403532013511905434",
-    "price-action-trades": "1402972075446239303",
-    "gold-pa-signals": "1402972221953019986",
-    "gold-tolls-map": "1472685381315989730",
-    "general-tolls": "1477339674166169911",
-    "oil-tolls": "1484316173515489392",
-    "legends-trades": "1500246110491639818",
-    "lc-calls": "1516192183126855832",
-    "gold-1-1-rr": "REPLACE_WITH_CHANNEL_ID",
-    "risky-gold": "REPLACE_WITH_CHANNEL_ID"
+    "daily-trade-setup": "1512881044938817576",
+    "scalps": "1512881096650391582",
+    "forex-exotics": "1512881161372962977",
+    "gold-swings": "1512881213017296906",
+    "oil-trades": "1512881837800947863",
+    "indices-trades": "1512881450414768210",
+    "crypto-trades": "1512882277062021240",
+    "stocks-trades": "1512881542702039231",
+    "swing-trades": "1512881710629523456",
+    "ot-trade-calls": "1512882437267390586",
+    "proper-calls": "1512882347052109855",
+    "crypto-alt-trades": "1347531759591358464",
+    "price-action-trades": "1162112450934612079",
+    "gold-pa-signals": "1512881345758757005",
+    "gold-tolls-map": "1512880961992396971",
+    "general-tolls": "1512882024145354833",
+    "oil-tolls": "1483856749936115742",
+    "legends-trades": "1512882497560645683",
+    "gold-1-1-rr": "1512882862494580797",
+    "lc-calls": "1514629669536665730",
+    "risky-gold": "1522144546299838524"
   },
-  "alert_channel": "1402971805890773005",
-  "pa-alert-channel": "1442668785990631435",
-  "toll-alert-channel": "1472685910549332113",
-  "general-tolls-alert": "1477339631900168284",
-  "legends-trade-alert": "1500246110491639818",
-  "risky-gold-alert": "REPLACE_WITH_CHANNEL_ID",
+  "alert_channel": "1512891614501011578",
+  "pa-alert-channel": "1512891709690740908",
+  "toll-alert-channel": "1479243482840301698",
+  "general-tolls-alert": "1512891971004399816",
+  "legends-trade-alert": "1512891813042720863",
+  "risky-gold-alert": "1522175718140674089",
   "vol-guard-alert": "",
-  "command_channel": "1402971848731398174",
-  "profit_channel": "1414288228206514279",
-  "finished_signals": "1479245676377407610",
+  "command_channel": "1343664061786755132",
+  "profit_channel": "1374755601992912916",
+  "finished_signals": "1479242305620934778",
   "alert_role_id": "1334203997107650662",
   "channel_settings": {
     "daily_trade_setup": {
@@ -48,11 +48,11 @@
     },
     "gold-swings": {
       "default_instrument": "XAUUSD",
-      "default_expiry": "month_end"
+      "default_expiry": "no_expiry"
     },
     "gold-pa-signals": {
       "default_instrument": "XAUUSD",
-      "default_expiry": "day_end"
+      "default_expiry": "week_end"
     },
     "oil-trades": {
       "default_instrument": "USOILSPOT",
@@ -68,7 +68,7 @@
       "default_expiry": "month_end"
     },
     "swing-trades": {
-      "default_expiry": "week_end"
+      "default_expiry": "no_expiry"
     },
     "ot-trade-calls": {
       "default_expiry": "day_end"
@@ -97,11 +97,11 @@
       "default_instrument": "XAUUSD",
       "default_expiry": "week_end"
     },
-    "risky-gold": {
-      "default_instrument": "XAUUSD",
+    "lc-calls": {
       "default_expiry": "week_end"
     },
-    "lc-calls": {
+    "risky-gold": {
+      "default_instrument": "XAUUSD",
       "default_expiry": "week_end"
     }
   }

@@ -193,6 +193,43 @@
         "value": 10.0,
         "description": "1-1 RR - metals"
       }
+    },
+    "risky": {
+      "forex": {
+        "type": "pips",
+        "value": 5.0,
+        "description": "Scalp - Standard forex pairs"
+      },
+      "forex_jpy": {
+        "type": "pips",
+        "value": 5.0,
+        "description": "Scalp - JPY pairs (auto-detected)"
+      },
+      "metals": {
+        "type": "dollars",
+        "value": 4.0,
+        "description": "Scalp - Gold, Silver, etc."
+      },
+      "indices": {
+        "type": "dollars",
+        "value": 10.0,
+        "description": "Scalp - Stock indices"
+      },
+      "stocks": {
+        "type": "dollars",
+        "value": 0.5,
+        "description": "Scalp - Individual stocks"
+      },
+      "crypto": {
+        "type": "dollars",
+        "value": 300.0,
+        "description": "Scalp - Cryptocurrencies"
+      },
+      "oil": {
+        "type": "dollars",
+        "value": 0.2,
+        "description": "Scalp - Oil commodities"
+      }
     }
   },
   "type_overrides": {
@@ -235,9 +272,9 @@
       },
       "JP225": {
         "type": "dollars",
-        "value": 250.0,
-        "set_by": "manual",
-        "set_at": "2026-06-06T00:00:00+00:00"
+        "value": 100.0,
+        "set_by": "itermy",
+        "set_at": "2026-06-08T15:02:34.769957+00:00"
       },
       "ETHUSDT": {
         "type": "dollars",
@@ -424,6 +461,12 @@
         "value": 1.5,
         "set_by": "manual",
         "set_at": "2026-06-06T00:00:00+00:00"
+      },
+      "XAUUSD": {
+        "type": "dollars",
+        "value": 5.0,
+        "set_by": "itermy",
+        "set_at": "2026-07-03T06:39:13.266288+00:00"
       }
     },
     "scalp": {
@@ -860,6 +903,12 @@
         "value": 4.5,
         "set_by": "manual",
         "set_at": "2026-06-06T00:00:00+00:00"
+      },
+      "XAUUSD": {
+        "type": "dollars",
+        "value": 100.0,
+        "set_by": "itermy",
+        "set_at": "2026-06-10T16:06:36.662142+00:00"
       }
     },
     "toll": {
@@ -877,6 +926,242 @@
       }
     },
     "pa": {},
-    "1-1": {}
+    "1-1": {},
+    "risky": {
+      "XAGUSD": {
+        "type": "dollars",
+        "value": 0.5,
+        "set_by": "manual",
+        "set_at": "2026-06-06T00:00:00+00:00"
+      },
+      "NAS100USD": {
+        "type": "dollars",
+        "value": 40.0,
+        "set_by": "manual",
+        "set_at": "2026-06-06T00:00:00+00:00"
+      },
+      "US30USD": {
+        "type": "dollars",
+        "value": 40.0,
+        "set_by": "manual",
+        "set_at": "2026-06-06T00:00:00+00:00"
+      },
+      "DE30EUR": {
+        "type": "dollars",
+        "value": 30.0,
+        "set_by": "manual",
+        "set_at": "2026-06-06T00:00:00+00:00"
+      },
+      "JP225": {
+        "type": "dollars",
+        "value": 125.0,
+        "set_by": "manual",
+        "set_at": "2026-06-06T00:00:00+00:00"
+      },
+      "ETHUSDT": {
+        "type": "dollars",
+        "value": 15.0,
+        "set_by": "manual",
+        "set_at": "2026-06-06T00:00:00+00:00"
+      },
+      "USOILSPOT": {
+        "type": "dollars",
+        "value": 0.3,
+        "set_by": "manual",
+        "set_at": "2026-06-06T00:00:00+00:00"
+      },
+      "XTIUSD": {
+        "type": "dollars",
+        "value": 0.3,
+        "set_by": "manual",
+        "set_at": "2026-06-06T00:00:00+00:00"
+      },
+      "WMT.NAS": {
+        "type": "dollars",
+        "value": 0.5,
+        "set_by": "manual",
+        "set_at": "2026-06-06T00:00:00+00:00"
+      },
+      "AAPL.NAS": {
+        "type": "dollars",
+        "value": 1.25,
+        "set_by": "manual",
+        "set_at": "2026-06-06T00:00:00+00:00"
+      },
+      "AMD.NAS": {
+        "type": "dollars",
+        "value": 2.5,
+        "set_by": "manual",
+        "set_at": "2026-06-06T00:00:00+00:00"
+      },
+      "AMZN.NAS": {
+        "type": "dollars",
+        "value": 1.0,
+        "set_by": "manual",
+        "set_at": "2026-06-06T00:00:00+00:00"
+      },
+      "AVGO.NAS": {
+        "type": "dollars",
+        "value": 2.5,
+        "set_by": "manual",
+        "set_at": "2026-06-06T00:00:00+00:00"
+      },
+      "BIDU.NAS": {
+        "type": "dollars",
+        "value": 0.75,
+        "set_by": "manual",
+        "set_at": "2026-06-06T00:00:00+00:00"
+      },
+      "CLSK.NAS": {
+        "type": "dollars",
+        "value": 0.25,
+        "set_by": "manual",
+        "set_at": "2026-06-06T00:00:00+00:00"
+      },
+      "COIN.NAS": {
+        "type": "dollars",
+        "value": 1.5,
+        "set_by": "manual",
+        "set_at": "2026-06-06T00:00:00+00:00"
+      },
+      "CSCO.NAS": {
+        "type": "dollars",
+        "value": 0.5,
+        "set_by": "manual",
+        "set_at": "2026-06-06T00:00:00+00:00"
+      },
+      "GILD.NAS": {
+        "type": "dollars",
+        "value": 0.25,
+        "set_by": "manual",
+        "set_at": "2026-06-06T00:00:00+00:00"
+      },
+      "GOOG.NAS": {
+        "type": "dollars",
+        "value": 1.5,
+        "set_by": "manual",
+        "set_at": "2026-06-06T00:00:00+00:00"
+      },
+      "INTC.NAS": {
+        "type": "dollars",
+        "value": 1.0,
+        "set_by": "manual",
+        "set_at": "2026-06-06T00:00:00+00:00"
+      },
+      "MARA.NAS": {
+        "type": "dollars",
+        "value": 0.15,
+        "set_by": "manual",
+        "set_at": "2026-06-06T00:00:00+00:00"
+      },
+      "MRNA.NAS": {
+        "type": "dollars",
+        "value": 0.5,
+        "set_by": "manual",
+        "set_at": "2026-06-06T00:00:00+00:00"
+      },
+      "MSFT.NAS": {
+        "type": "dollars",
+        "value": 2.5,
+        "set_by": "manual",
+        "set_at": "2026-06-06T00:00:00+00:00"
+      },
+      "MU.NAS": {
+        "type": "dollars",
+        "value": 10.0,
+        "set_by": "manual",
+        "set_at": "2026-06-06T00:00:00+00:00"
+      },
+      "NFLX.NAS": {
+        "type": "dollars",
+        "value": 0.2,
+        "set_by": "manual",
+        "set_at": "2026-06-06T00:00:00+00:00"
+      },
+      "NVDA.NAS": {
+        "type": "dollars",
+        "value": 1.0,
+        "set_by": "manual",
+        "set_at": "2026-06-06T00:00:00+00:00"
+      },
+      "PDD.NAS": {
+        "type": "dollars",
+        "value": 0.5,
+        "set_by": "manual",
+        "set_at": "2026-06-06T00:00:00+00:00"
+      },
+      "PLTR.NAS": {
+        "type": "dollars",
+        "value": 1.0,
+        "set_by": "manual",
+        "set_at": "2026-06-06T00:00:00+00:00"
+      },
+      "PTON.NAS": {
+        "type": "dollars",
+        "value": 0.1,
+        "set_by": "manual",
+        "set_at": "2026-06-06T00:00:00+00:00"
+      },
+      "PYPL.NAS": {
+        "type": "dollars",
+        "value": 0.25,
+        "set_by": "manual",
+        "set_at": "2026-06-06T00:00:00+00:00"
+      },
+      "QCOM.NAS": {
+        "type": "dollars",
+        "value": 3.0,
+        "set_by": "manual",
+        "set_at": "2026-06-06T00:00:00+00:00"
+      },
+      "QQQ.NAS": {
+        "type": "dollars",
+        "value": 1.0,
+        "set_by": "manual",
+        "set_at": "2026-06-06T00:00:00+00:00"
+      },
+      "RIVN.NAS": {
+        "type": "dollars",
+        "value": 0.2,
+        "set_by": "manual",
+        "set_at": "2026-06-06T00:00:00+00:00"
+      },
+      "RKLB.NAS": {
+        "type": "dollars",
+        "value": 1.5,
+        "set_by": "manual",
+        "set_at": "2026-06-06T00:00:00+00:00"
+      },
+      "SBUX.NAS": {
+        "type": "dollars",
+        "value": 0.25,
+        "set_by": "manual",
+        "set_at": "2026-06-06T00:00:00+00:00"
+      },
+      "SOFI.NAS": {
+        "type": "dollars",
+        "value": 0.15,
+        "set_by": "manual",
+        "set_at": "2026-06-06T00:00:00+00:00"
+      },
+      "TSLA.NAS": {
+        "type": "dollars",
+        "value": 2.0,
+        "set_by": "manual",
+        "set_at": "2026-06-06T00:00:00+00:00"
+      },
+      "UAL.NAS": {
+        "type": "dollars",
+        "value": 1.0,
+        "set_by": "manual",
+        "set_at": "2026-06-06T00:00:00+00:00"
+      },
+      "XAUUSD": {
+        "type": "dollars",
+        "value": 4.0,
+        "set_by": "itermy",
+        "set_at": "2026-07-08T00:47:52.149586+00:00"
+      }
+    }
   }
 }
