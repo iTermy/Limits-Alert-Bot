@@ -565,6 +565,132 @@ def validate_limits_order(limits: List[float], direction: str) -> bool:
     return all(limits[i] >= limits[i + 1] for i in range(len(limits) - 1))
 
 
+def _reject_out_of_order(limits: List[float], direction: str, label: str) -> None:
+    """Raise LimitsOrderError when multi-limit prices break the direction's
+    expected ordering (short ascending, long descending) — almost always a typo."""
+    if len(limits) > 1 and not validate_limits_order(limits, direction):
+        from . import LimitsOrderError
+
+        prefix = f"{direction} {label}".strip()
+        raise LimitsOrderError(
+            f"{prefix} limits not "
+            f"{'ascending' if direction == 'short' else 'descending'}: {limits}"
+        )
+
+
+def _split_explicit_stop(numbers: List[float], direction: str) -> tuple:
+    """Split numbers into (limits, stop_loss) trying the last number as the stop
+    first, then the first (alternative convention). Returns (None, None) when
+    neither placement validates against the direction."""
+    stop_loss = numbers[-1]
+    limits = numbers[:-1]
+    if validate_limits_and_stop(limits, stop_loss, direction):
+        return limits, stop_loss
+
+    stop_loss = numbers[0]
+    limits = numbers[1:]
+    if validate_limits_and_stop(limits, stop_loss, direction):
+        return limits, stop_loss
+
+    return None, None
+
+
+def _auto_stop(limits: List[float], direction: str, offset: float) -> float:
+    """Derive the stop loss from the outermost limit: offset below the lowest
+    limit for longs, offset above the highest for shorts."""
+    if direction == "long":
+        return min(limits) - offset
+    return max(limits) + offset
+
+
+def _general_tolls_limits_and_stop(
+    numbers: List[float], direction: str, raw_text: str, instrument: str
+) -> tuple:
+    """general-tolls: explicit SL keyword uses the standard last/first-number
+    convention; otherwise every number is a limit and the SL is derived from a
+    per-instrument dollar offset (single-number messages are valid)."""
+    auto_sl_offsets = {"SPX500USD": 10.0, "NAS100USD": 30.0}
+    auto_sl_default = 10.0
+
+    if raw_text and _SL_KEYWORD_RE.search(raw_text):
+        if len(numbers) < 2:
+            return None, None
+        limits, stop_loss = _split_explicit_stop(numbers, direction)
+        if limits is None:
+            logger.debug(
+                f"General tolls stop loss validation failed for {direction} with numbers {numbers}"
+            )
+            return None, None
+        _reject_out_of_order(limits, direction, "general-tolls")
+        logger.debug(
+            f"General tolls (explicit SL): {len(limits)} limit(s), stop={stop_loss} ({direction})"
+        )
+        return limits, stop_loss
+
+    if not numbers:
+        return None, None
+
+    limits = numbers
+    instr_upper = (instrument or "").upper()
+    sl_offset = auto_sl_offsets.get(instr_upper, auto_sl_default)
+    stop_loss = _auto_stop(limits, direction, sl_offset)
+    _reject_out_of_order(limits, direction, "general-tolls")
+    logger.debug(
+        f"General tolls (auto SL, offset={sl_offset}): {len(limits)} limit(s), "
+        f"stop={stop_loss} ({direction}, instrument={instr_upper})"
+    )
+    return limits, stop_loss
+
+
+def _tolls_limits_and_stop(numbers: List[float], direction: str, raw_text: str, channel_name: str) -> tuple:
+    """Gold-tolls-style channels: an explicit SL keyword (with 2+ numbers) makes
+    the last number the stop; otherwise every number is a limit and the SL is the
+    configured offset beyond the outermost limit (risky-gold has its own offset)."""
+    if not numbers:
+        return None, None
+
+    if raw_text and _SL_KEYWORD_RE.search(raw_text) and len(numbers) >= 2:
+        limits, stop_loss = _split_explicit_stop(numbers, direction)
+        if limits is None:
+            logger.debug(
+                f"Tolls explicit stop loss validation failed for {direction} with numbers {numbers}"
+            )
+            return None, None
+        _reject_out_of_order(limits, direction, "tolls")
+        logger.debug(
+            f"Tolls channel (explicit SL): {len(limits)} limit(s), stop={stop_loss} ({direction})"
+        )
+        return limits, stop_loss
+
+    limits = numbers
+    if channel_name and channel_name.lower() == "risky-gold":
+        sl_offset = get_risky_gold_sl_offset()
+    else:
+        sl_offset = get_gold_tolls_sl_offset()
+    stop_loss = _auto_stop(limits, direction, sl_offset)
+    _reject_out_of_order(limits, direction, "tolls")
+    logger.debug(
+        f"Tolls channel: Using all {len(limits)} number(s) as limits, "
+        f"auto-setting stop to {stop_loss} (offset={sl_offset}, {direction})"
+    )
+    return limits, stop_loss
+
+
+def _standard_limits_and_stop(numbers: List[float], direction: str) -> tuple:
+    """Regular channels: at least two numbers; the last (or first) is the stop,
+    the rest are limits, and multi-limit ordering must match the direction."""
+    if len(numbers) < 2:
+        return None, None
+
+    limits, stop_loss = _split_explicit_stop(numbers, direction)
+    if limits is None:
+        logger.debug(f"Stop loss validation failed for {direction} with numbers {numbers}")
+        return None, None
+
+    _reject_out_of_order(limits, direction, "")
+    return limits, stop_loss
+
+
 def determine_limits_and_stop(
     numbers: List[float],
     direction: str,
@@ -573,205 +699,26 @@ def determine_limits_and_stop(
     instrument: str = None,
 ) -> tuple:
     """
-    Determine which numbers are limits and which is stop loss.
+    Determine which numbers are limits and which is the stop loss.
 
-    Numbers are taken in the order provided — no reordering is performed.
-    If the limits are not in the expected order for the given direction, the
-    signal is rejected (returns None, None) to surface typos such as a
-    misplaced decimal point or a transposed digit.
+    Numbers are taken in the order provided — no reordering is performed. If the
+    limits are not in the expected order for the direction (short ascending,
+    long descending), LimitsOrderError is raised to surface typos such as a
+    misplaced decimal point.
 
-    Expected convention (how traders write signals):
-      - SHORT: limits ascending  (e.g. 1.1800, 1.1810, 1.1820  → stop above all)
-      - LONG:  limits descending (e.g. 1.1820, 1.1810, 1.1800  → stop below all)
-
-    Special handling for tolls channel:
-    - If raw_text contains an explicit SL keyword (sl / stop / stops) and at
-      least two numbers are present, the last number is treated as the stop
-      loss, overriding the auto-calculated value.
-    - Otherwise all numbers are treated as limits (no stop loss in the message)
-      and the stop loss is automatically set to ±offset from the appropriate limit:
-      * Long: min(limits) - offset (offset below the lowest limit)
-      * Short: max(limits) + offset (offset above the highest limit)
-      The offset is the risky-gold offset for the risky-gold channel and the
-      gold-tolls offset for every other tolls-style channel.
-    - Single-number messages are valid (one limit, no stop loss required)
-
-    Special handling for general-tolls channel:
-    - If raw_text contains an explicit SL keyword (sl / stop / stops), the last
-      number is treated as the stop loss (standard convention), requiring at
-      least 2 numbers.
-    - If no SL keyword is found, all numbers are treated as limits and the SL
-      is auto-calculated per instrument:
-        * SPX500USD → ±$10
-        * NAS100USD → ±$30
-        * anything else → ±$10 (safe default)
-      Single-number messages are valid in this auto-SL mode.
+    Channel routing:
+      - general-tolls: per-instrument auto-SL unless an SL keyword is present
+      - gold-tolls-style channels (incl. risky-gold): offset-derived auto-SL
+        unless an SL keyword provides one explicitly
+      - everything else: last (or first) number is the stop loss
     """
-    # Auto-SL offsets for general-tolls when no explicit SL keyword is found
-    _GENERAL_TOLLS_AUTO_SL = {
-        "SPX500USD": 10.0,
-        "NAS100USD": 30.0,
-    }
-    _GENERAL_TOLLS_AUTO_SL_DEFAULT = 10.0
+    if channel_name and channel_name.lower() == "general-tolls":
+        return _general_tolls_limits_and_stop(numbers, direction, raw_text, instrument)
 
-    # Check if this is a gold-tolls-style channel (auto-infers SL)
-    is_tolls_channel = uses_gold_tolls_sl(channel_name)
+    if uses_gold_tolls_sl(channel_name):
+        return _tolls_limits_and_stop(numbers, direction, raw_text, channel_name)
 
-    # Check if this is the general-tolls channel
-    is_general_tolls = channel_name and channel_name.lower() == "general-tolls"
-
-    if is_general_tolls:
-        # Decide whether the message contains an explicit SL keyword
-        has_sl_keyword = bool(raw_text and _SL_KEYWORD_RE.search(raw_text))
-
-        if has_sl_keyword:
-            # Explicit SL: last number is the stop loss — requires at least 2 numbers.
-            if len(numbers) < 2:
-                return None, None
-
-            # Last number is the stop loss (primary convention)
-            stop_loss = numbers[-1]
-            limits = numbers[:-1]
-
-            if not validate_limits_and_stop(limits, stop_loss, direction):
-                # Try first number as stop loss (alternative convention)
-                stop_loss = numbers[0]
-                limits = numbers[1:]
-                if not validate_limits_and_stop(limits, stop_loss, direction):
-                    logger.debug(
-                        f"General tolls stop loss validation failed for {direction} with numbers {numbers}"
-                    )
-                    return None, None
-
-            if not validate_limits_order(limits, direction):
-                from . import LimitsOrderError
-
-                raise LimitsOrderError(
-                    f"{direction} general-tolls limits not {'ascending' if direction == 'short' else 'descending'}: {limits}"
-                )
-
-            logger.debug(
-                f"General tolls (explicit SL): {len(limits)} limit(s), stop={stop_loss} ({direction})"
-            )
-            return limits, stop_loss
-
-        # No SL keyword — treat all numbers as limits and auto-calculate SL.
-        # Single-number messages are valid in this mode.
-        if len(numbers) < 1:
-            return None, None
-
-        limits = numbers
-        instr_upper = (instrument or "").upper()
-        sl_offset = _GENERAL_TOLLS_AUTO_SL.get(instr_upper, _GENERAL_TOLLS_AUTO_SL_DEFAULT)
-
-        if direction == "long":
-            stop_loss = min(limits) - sl_offset
-        else:  # short
-            stop_loss = max(limits) + sl_offset
-
-        if len(limits) > 1 and not validate_limits_order(limits, direction):
-            from . import LimitsOrderError
-
-            raise LimitsOrderError(
-                f"{direction} general-tolls limits not {'ascending' if direction == 'short' else 'descending'}: {limits}"
-            )
-
-        logger.debug(
-            f"General tolls (auto SL, offset={sl_offset}): {len(limits)} limit(s), "
-            f"stop={stop_loss} ({direction}, instrument={instr_upper})"
-        )
-        return limits, stop_loss
-
-    if is_tolls_channel:
-        if len(numbers) < 1:
-            return None, None
-
-        # Explicit SL: if the message contains an SL keyword (sl / stop / stops)
-        # and provides at least two numbers, the last number overrides the
-        # auto-calculated stop loss. Otherwise the SL is derived from the offset.
-        has_sl_keyword = bool(raw_text and _SL_KEYWORD_RE.search(raw_text))
-
-        if has_sl_keyword and len(numbers) >= 2:
-            stop_loss = numbers[-1]
-            limits = numbers[:-1]
-
-            if not validate_limits_and_stop(limits, stop_loss, direction):
-                # Try first number as stop loss (alternative convention)
-                stop_loss = numbers[0]
-                limits = numbers[1:]
-                if not validate_limits_and_stop(limits, stop_loss, direction):
-                    logger.debug(
-                        f"Tolls explicit stop loss validation failed for {direction} with numbers {numbers}"
-                    )
-                    return None, None
-
-            if len(limits) > 1 and not validate_limits_order(limits, direction):
-                from . import LimitsOrderError
-
-                raise LimitsOrderError(
-                    f"{direction} tolls limits not {'ascending' if direction == 'short' else 'descending'}: {limits}"
-                )
-
-            logger.debug(
-                f"Tolls channel (explicit SL): {len(limits)} limit(s), stop={stop_loss} ({direction})"
-            )
-            return limits, stop_loss
-
-        limits = numbers
-        # Risky-gold derives its SL from a separate, independently configurable
-        # offset; every other tolls-style channel uses the gold-tolls offset.
-        if channel_name and channel_name.lower() == "risky-gold":
-            sl_offset = get_risky_gold_sl_offset()
-        else:
-            sl_offset = get_gold_tolls_sl_offset()
-        if direction == "long":
-            lowest_limit = min(limits)
-            stop_loss = lowest_limit - sl_offset
-        else:  # short
-            highest_limit = max(limits)
-            stop_loss = highest_limit + sl_offset
-
-        # Validate order — tolls signals are subject to the same typo checks
-        if len(limits) > 1 and not validate_limits_order(limits, direction):
-            from . import LimitsOrderError
-
-            raise LimitsOrderError(
-                f"{direction} tolls limits not {'ascending' if direction == 'short' else 'descending'}: {limits}"
-            )
-
-        logger.debug(
-            f"Tolls channel: Using all {len(limits)} number(s) as limits, "
-            f"auto-setting stop to {stop_loss} (offset={sl_offset}, {direction})"
-        )
-        return limits, stop_loss
-
-    # Normal channel logic (requires at least 2 numbers)
-    if len(numbers) < 2:
-        return None, None
-
-    # Last number is the stop loss (primary convention)
-    stop_loss = numbers[-1]
-    limits = numbers[:-1]
-
-    if not validate_limits_and_stop(limits, stop_loss, direction):
-        # Try first number as stop loss (alternative convention)
-        stop_loss = numbers[0]
-        limits = numbers[1:]
-        if not validate_limits_and_stop(limits, stop_loss, direction):
-            logger.debug(f"Stop loss validation failed for {direction} with numbers {numbers}")
-            return None, None
-
-    # Validate that limits are in the expected order — no auto-sort fallback.
-    # Out-of-order limits almost always indicate a typo (e.g. missing decimal,
-    # wrong digit) rather than a valid signal.
-    if not validate_limits_order(limits, direction):
-        from . import LimitsOrderError
-
-        raise LimitsOrderError(
-            f"{direction} limits not {'ascending' if direction == 'short' else 'descending'}: {limits}"
-        )
-
-    return limits, stop_loss
+    return _standard_limits_and_stop(numbers, direction)
 
 
 def get_signal_type(text: str, channel_name: str = None) -> str:
