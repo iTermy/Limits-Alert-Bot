@@ -413,7 +413,7 @@ class TradingBot(commands.Bot):
                 self.logger.info("ForexFactory news fetcher started")
 
             # Volatility guard — informational only; subscribes to the same price
-            # stream and announces sharp moves per currency (gold flags "ALL").
+            # stream and announces sharp moves per pair (gold flags "ALL").
             await self._start_vol_guard(stream_manager)
 
             # Risky-window announcer — posts a "disabled/resumed" embed to the

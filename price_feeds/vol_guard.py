@@ -1,7 +1,7 @@
 """Volatility guard — informational alerts when a market moves sharply.
 
 Self-contained: registers as a price-stream subscriber, samples mid-price into a
-rolling window per subscribed symbol, and posts an embed when a currency (or the
+rolling window per subscribed symbol, and posts an embed when a pair (or the
 whole board, via gold) becomes volatile. It has no effect on signal processing —
 nothing is cancelled or paused; it only announces.
 
@@ -16,11 +16,12 @@ Guard lifecycle, per symbol:
     window; calm -> release.
 
 Reference counting, per key:
-  - A forex pair guards both of its currencies (EURUSD -> EUR, USD).
+  - A forex pair guards itself (EURUSD -> EURUSD), so only that pair is paused.
   - Gold (asset class "metals") guards the special key "ALL" (market-wide).
-  - A key stays guarded while at least one contributing symbol is guarded, so EUR
-    holds until both EURUSD and EURGBP have released. The activation embed fires
-    on the empty -> guarded transition; the ended embed on guarded -> empty.
+  - A key stays guarded while at least one contributing symbol is guarded (for a
+    forex pair that is the pair itself; "ALL" holds while any metal is guarded).
+    The activation embed fires on the empty -> guarded transition; the ended embed
+    on guarded -> empty.
 """
 
 from __future__ import annotations
@@ -92,7 +93,7 @@ def _load_config() -> dict:
 
 
 class VolatilityGuard:
-    """Watches subscribed-symbol ticks and announces volatility per currency."""
+    """Watches subscribed-symbol ticks and announces volatility per pair."""
 
     def __init__(self, bot, stream_manager, channel: discord.abc.Messageable, db=None):
         self.bot = bot
@@ -286,7 +287,7 @@ class VolatilityGuard:
     # ------------------------------------------------------------------
 
     def _compute_vol_guard_value(self) -> str | None:
-        """Comma-separated active keys (currencies and/or 'ALL'), or None if calm."""
+        """Comma-separated active keys (pairs and/or 'ALL'), or None if calm."""
         keys = [k for k, members in self._key_members.items() if members]
         if not keys:
             return None
@@ -326,8 +327,8 @@ class VolatilityGuard:
     def _keys_for(self, symbol: str) -> set[str]:
         """Guard keys a volatile symbol contributes to.
 
-        Gold (metals) flags the whole board as "ALL"; a forex pair flags both of
-        its currencies literally.
+        Gold (metals) flags the whole board as "ALL"; a forex pair flags itself,
+        so only that pair is paused (EURUSD volatility does not touch USDJPY).
         """
         asset_class = self.symbol_mapper.determine_asset_class(symbol)
         if asset_class == "metals":
@@ -335,7 +336,7 @@ class VolatilityGuard:
         if asset_class in ("forex", "forex_jpy"):
             clean = symbol.upper().replace("/", "")
             if len(clean) == 6:
-                return {clean[:3], clean[3:]}
+                return {clean}
         return set()
 
     # ------------------------------------------------------------------

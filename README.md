@@ -126,7 +126,7 @@ direct access to `licenses` or `users`.
 | `signals.type` | `standard`, `scalp`, `swing`, `toll`, `pa`, `1-1`, `risky` |
 | `signals.closed_reason` | `automatic`, `manual`, `expiry`, `near_miss`, `news:<CAT>`, `spread_hour`, `late_market`, `risky_window`, `real_sl` |
 | `feed_health.status` | `idle`, `healthy`, `down` |
-| `bot_mode_status.news_mode` / `vol_guard` | comma-separated currency tokens (e.g. `EUR, GOLD`) or `ALL`; `NULL` when inactive |
+| `bot_mode_status.news_mode` / `vol_guard` | comma-separated tokens or `ALL`; `NULL` when inactive. `news_mode` uses currency/asset tokens (e.g. `EUR, GOLD`); `vol_guard` uses full pairs (e.g. `EURUSD`) plus `ALL` for gold |
 
 **Invariants the execution bot depends on**
 

@@ -366,7 +366,7 @@ class DatabaseManager(BaseConnectionManager):
             logger.error(f"Failed to update news_mode status: {e}", exc_info=True)
 
     async def set_vol_guard_mode(self, value: Optional[str]) -> None:
-        """Set bot_mode_status.vol_guard to a currency list (e.g. 'EUR, USD'), 'ALL',
+        """Set bot_mode_status.vol_guard to a pair list (e.g. 'EURUSD, GBPUSD'), 'ALL',
         or NULL.
 
         A non-empty string marks the market as volatile; NULL marks it calm. Like

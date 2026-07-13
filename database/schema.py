@@ -304,9 +304,10 @@ async def _run_migrations(conn):
             CONSTRAINT licenses_status_check  CHECK (status IN ('active', 'revoked'))
         );
         """,
-        # Bot mode status — single-row table tracking active modes. news_mode and
-        # vol_guard are TEXT lists of currencies/categories currently active (e.g.
-        # 'EUR, GOLD' or 'ALL'), NULL when inactive. spread_hour stays a boolean.
+        # Bot mode status — single-row table tracking active modes. news_mode is a
+        # TEXT list of currencies/categories currently active (e.g. 'EUR, GOLD' or
+        # 'ALL'); vol_guard is a TEXT list of volatile pairs (e.g. 'EURUSD') or 'ALL'
+        # for gold. Both are NULL when inactive. spread_hour stays a boolean.
         # Updated in real-time.
         """
         CREATE TABLE IF NOT EXISTS bot_mode_status (
@@ -341,7 +342,7 @@ async def _run_migrations(conn):
         END $$;
         """,
         # Add vol_guard to existing installs (CREATE TABLE IF NOT EXISTS skips it).
-        # Mirrors news_mode: TEXT list of volatile currencies/'ALL', NULL when calm.
+        # Mirrors news_mode: TEXT list of volatile pairs/'ALL', NULL when calm.
         """
         ALTER TABLE bot_mode_status ADD COLUMN IF NOT EXISTS vol_guard TEXT;
         """,
