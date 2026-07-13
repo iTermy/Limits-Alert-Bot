@@ -45,6 +45,54 @@ def _is_crypto_symbol(symbol: str) -> bool:
     return s.endswith("USDT") or s.endswith("USDC")
 
 
+def _plan_limit_diff(existing_limits: List[Dict[str, Any]], new_levels: List[float]) -> Dict[str, Any]:
+    """Plan how an edited limit list maps onto the existing rows.
+
+    Matches edited levels to preservable rows (pending/hit) by exact price so
+    unchanged levels keep their limit_id — the execution bot keys pending
+    orders and filled positions off limit_id, so re-minting ids on every edit
+    would force it to cancel and re-place untouched limits.
+
+    Returns a dict with:
+      plan:              [(sequence_number, price_level, matched_row_or_None)]
+      matched_ids:       ids of rows kept in place
+      removed_rows:      rows deleted by the edit
+      hit_count:         how many kept rows are already hit
+      alert_invalidated: True when a removed row had already fired an alert
+                         (stale embed must be retracted by the caller)
+    """
+    preservable_by_price = defaultdict(list)
+    for r in existing_limits:
+        if r["status"] in ("pending", "hit"):
+            preservable_by_price[r["price_level"]].append(r)
+
+    plan = []
+    matched_ids = set()
+    hit_count = 0
+    for idx, level in enumerate(new_levels):
+        queue = preservable_by_price.get(level)
+        matched = queue.pop(0) if queue else None
+        if matched is not None:
+            matched_ids.add(matched["id"])
+            if matched["status"] == "hit":
+                hit_count += 1
+        plan.append((idx + 1, level, matched))
+
+    removed_rows = [r for r in existing_limits if r["id"] not in matched_ids]
+    alert_invalidated = any(
+        r["status"] == "hit" or r["hit_alert_sent"] or r["approaching_alert_sent"]
+        for r in removed_rows
+    )
+
+    return {
+        "plan": plan,
+        "matched_ids": matched_ids,
+        "removed_rows": removed_rows,
+        "hit_count": hit_count,
+        "alert_invalidated": alert_invalidated,
+    }
+
+
 class SignalDatabase:
     """Handles all signal-specific database operations."""
 
@@ -197,95 +245,18 @@ class SignalDatabase:
                 new_expiry_time = _parse_dt(calculate_expiry(parsed_signal.expiry_type))
 
             async with self.db.get_connection() as conn:
-                # Diff existing limits against the edited levels by price, preserving the
-                # limit_id of every unchanged level. The execution bot keys its pending
-                # orders and filled positions off limit_id; a DELETE-all + re-INSERT would
-                # mint fresh IDENTITY ids for every level on each edit, forcing the bot to
-                # cancel + re-place untouched limits — and, worse, drop limits that were
-                # already hit/filled because it can no longer correlate the new id. So we
-                # UPDATE matched levels in place, INSERT only genuinely new prices, and
-                # DELETE only removed ones. A matched 'hit' row keeps its fill price/time
-                # and alert flags untouched.
                 existing_limits = await conn.fetch(
                     "SELECT id, price_level, sequence_number, status, "
                     "approaching_alert_sent, hit_alert_sent FROM limits "
                     "WHERE signal_id = $1 ORDER BY sequence_number",
                     signal_id,
                 )
-                # Only pending/hit rows are preservable; cancelled rows are rebuilt fresh.
-                preservable_by_price = defaultdict(list)
-                for r in existing_limits:
-                    if r["status"] in ("pending", "hit"):
-                        preservable_by_price[r["price_level"]].append(r)
-
-                plan = []  # (sequence_number, price_level, matched_row_or_None)
-                matched_ids = set()
-                hit_count = 0
-                for idx, level in enumerate(parsed_signal.limits):
-                    queue = preservable_by_price.get(level)
-                    matched = queue.pop(0) if queue else None
-                    if matched is not None:
-                        matched_ids.add(matched["id"])
-                        if matched["status"] == "hit":
-                            hit_count += 1
-                    plan.append((idx + 1, level, matched))
-
-                removed_rows = [r for r in existing_limits if r["id"] not in matched_ids]
-                # A removed row that had already fired an alert means the alert we sent is
-                # now stale — typically a mistyped price that fired a false approaching/hit
-                # alert and is being corrected. Signal it so the caller retracts the embed
-                # and a corrected alert can fire fresh once the real level is reached.
-                alert_invalidated = any(
-                    r["status"] == "hit" or r["hit_alert_sent"] or r["approaching_alert_sent"]
-                    for r in removed_rows
-                )
-                if removed_rows:
-                    await conn.execute(
-                        "DELETE FROM limits WHERE id = ANY($1::bigint[])",
-                        [r["id"] for r in removed_rows],
-                    )
-
-                # Vacate the sequence space so kept rows can be renumbered without
-                # tripping the (signal_id, sequence_number) unique constraint mid-update.
-                kept_ids = list(matched_ids)
-                if kept_ids:
-                    await conn.execute(
-                        "UPDATE limits SET sequence_number = sequence_number + 100000 "
-                        "WHERE id = ANY($1::bigint[])",
-                        kept_ids,
-                    )
-
-                for seq, level, matched in plan:
-                    if matched is not None:
-                        await conn.execute(
-                            "UPDATE limits SET sequence_number = $1 WHERE id = $2",
-                            seq,
-                            matched["id"],
-                        )
-                    else:
-                        await conn.execute(
-                            """
-                            INSERT INTO limits (signal_id, price_level, sequence_number, status)
-                            VALUES ($1, $2, $3, 'pending')
-                            """,
-                            signal_id,
-                            level,
-                            seq,
-                        )
-
-                # When a stale alert was cleared above, let the surviving pending limits
-                # re-alert by clearing their approaching flag (the shared embed is retracted
-                # by the caller, so it must be re-established on re-approach).
-                if alert_invalidated:
-                    await conn.execute(
-                        "UPDATE limits SET approaching_alert_sent = FALSE "
-                        "WHERE signal_id = $1 AND status = 'pending'",
-                        signal_id,
-                    )
+                diff = _plan_limit_diff([dict(r) for r in existing_limits], parsed_signal.limits)
+                await self._apply_limit_diff(conn, signal_id, diff)
 
                 # A HIT signal whose hit limit(s) were edited away reverts to ACTIVE.
                 new_status = existing["status"]
-                if existing["status"] == SignalStatus.HIT and hit_count == 0:
+                if existing["status"] == SignalStatus.HIT and diff["hit_count"] == 0:
                     new_status = SignalStatus.ACTIVE
 
                 await conn.execute(
@@ -304,17 +275,66 @@ class SignalDatabase:
                     new_expiry_time,
                     len(parsed_signal.limits),
                     getattr(parsed_signal, "type", "standard"),
-                    hit_count,
+                    diff["hit_count"],
                     new_status,
                     signal_id,
                 )
 
             logger.info(f"Updated signal {signal_id} from edited message")
-            return True, alert_invalidated
+            return True, diff["alert_invalidated"]
 
         except Exception as e:
             logger.error(f"Error updating signal from edit: {e}", exc_info=True)
             return False, False
+
+    @staticmethod
+    async def _apply_limit_diff(conn, signal_id: int, diff: Dict[str, Any]) -> None:
+        """Apply a _plan_limit_diff result: delete removed rows, renumber kept
+        rows, insert new levels, and reset alert flags when a stale alert was
+        invalidated."""
+        if diff["removed_rows"]:
+            await conn.execute(
+                "DELETE FROM limits WHERE id = ANY($1::bigint[])",
+                [r["id"] for r in diff["removed_rows"]],
+            )
+
+        # Vacate the sequence space so kept rows can be renumbered without
+        # tripping the (signal_id, sequence_number) unique constraint mid-update.
+        kept_ids = list(diff["matched_ids"])
+        if kept_ids:
+            await conn.execute(
+                "UPDATE limits SET sequence_number = sequence_number + 100000 "
+                "WHERE id = ANY($1::bigint[])",
+                kept_ids,
+            )
+
+        for seq, level, matched in diff["plan"]:
+            if matched is not None:
+                await conn.execute(
+                    "UPDATE limits SET sequence_number = $1 WHERE id = $2",
+                    seq,
+                    matched["id"],
+                )
+            else:
+                await conn.execute(
+                    """
+                    INSERT INTO limits (signal_id, price_level, sequence_number, status)
+                    VALUES ($1, $2, $3, 'pending')
+                    """,
+                    signal_id,
+                    level,
+                    seq,
+                )
+
+        # When a stale alert was cleared, let the surviving pending limits
+        # re-alert by clearing their approaching flag (the shared embed is
+        # retracted by the caller, so it must be re-established on re-approach).
+        if diff["alert_invalidated"]:
+            await conn.execute(
+                "UPDATE limits SET approaching_alert_sent = FALSE "
+                "WHERE signal_id = $1 AND status = 'pending'",
+                signal_id,
+            )
 
     async def get_active_signals_detailed_sorted(
         self, instrument: str = None, sort_by: str = "recent", limit: int = None
