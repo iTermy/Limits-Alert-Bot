@@ -9,7 +9,7 @@ from typing import Dict, List, Optional
 import discord
 import pytz
 
-from models.signal import LimitData
+from models.signal import LimitData, SignalData
 from price_feeds.risky_window import is_risky_trading_disabled
 from utils.config_loader import load_settings
 from utils.logger import get_logger
@@ -645,199 +645,252 @@ class StreamingPriceMonitor:
                 else:
                     await self._maybe_unsubscribe_symbol(signal.instrument, signal_id)
 
+    def _hit_state(
+        self,
+        symbol: str,
+        direction: str,
+        current_price: float,
+        limit_price: float,
+        spread: float,
+        spread_buffer_enabled: bool,
+    ) -> tuple:
+        """Return (distance, is_hit) for a limit, applying the spread buffer.
+
+        Long hits when price falls to the limit; short hits when price rises to
+        it. With the buffer enabled the comparison window widens by the current
+        spread so a wide-spread broker doesn't miss fills.
+        """
+        if direction == "long":
+            distance = current_price - limit_price
+            if spread_buffer_enabled:
+                is_hit = current_price <= (limit_price + spread)
+                buffer_allowed = is_hit and current_price > limit_price
+            else:
+                is_hit = current_price <= limit_price
+                buffer_allowed = False
+        else:  # short
+            distance = limit_price - current_price
+            if spread_buffer_enabled:
+                is_hit = current_price >= (limit_price - spread)
+                buffer_allowed = is_hit and current_price < limit_price
+            else:
+                is_hit = current_price >= limit_price
+                buffer_allowed = False
+
+        if spread > 0 and buffer_allowed:
+            logger.debug(
+                "Spread buffer ALLOWED alert for %s: price=%.5f, limit=%.5f, spread=%.5f, within buffer",
+                symbol, current_price, limit_price, spread,
+            )
+            self.stats["buffer_allowed_alerts"] += 1
+
+        return distance, is_hit
+
     async def _check_limit(
         self,
-        signal: Dict,
-        limit: Dict,
+        signal: SignalData,
+        limit: LimitData,
         current_price: float,
         direction: str,
         is_spread_hour: bool,
         is_late_market: bool,
         spread_buffer_enabled: bool,
     ):
-        """Check if a limit is approaching or hit; applies spread buffer."""
-        limit_price = limit.price_level
+        """Check if a limit is approaching, hit, or due for retraction."""
         symbol = signal.instrument
-
         spread = signal.current_spread or 0.0
-
-        if spread is None or spread < 0:
+        if spread < 0:
             logger.warning(f"Invalid spread for {symbol}: {spread}, using 0")
             spread = 0.0
 
-        if direction == "long":
-            distance = current_price - limit_price
+        distance, is_hit = self._hit_state(
+            symbol, direction, current_price, limit.price_level, spread, spread_buffer_enabled
+        )
 
-            if spread_buffer_enabled:
-                is_hit = current_price <= (limit_price + spread)
-                if spread > 0 and is_hit and current_price > limit_price:
-                    logger.debug(
-                        "Spread buffer ALLOWED alert for %s: ask=%.5f, limit=%.5f, spread=%.5f, within buffer",
-                        symbol, current_price, limit_price, spread,
-                    )
-                    self.stats["buffer_allowed_alerts"] += 1
-            else:
-                is_hit = current_price <= limit_price
-
-        else:  # short
-            distance = limit_price - current_price
-
-            if spread_buffer_enabled:
-                is_hit = current_price >= (limit_price - spread)
-                if spread > 0 and is_hit and current_price < limit_price:
-                    logger.debug(
-                        "Spread buffer ALLOWED alert for %s: bid=%.5f, limit=%.5f, spread=%.5f, within buffer",
-                        symbol, current_price, limit_price, spread,
-                    )
-                    self.stats["buffer_allowed_alerts"] += 1
-            else:
-                is_hit = current_price >= limit_price
-
-        # Check if hit (with in-memory flag check)
         if is_hit and not limit.hit_alert_sent:
-            # News mode guard
-            news_event = None
-            if self.bot.news_manager:
-                news_event = self.bot.news_manager.is_news_active_for(signal.instrument)
-
-            if news_event is not None:
-                logger.info(
-                    f"News mode: suppressing limit hit for signal "
-                    f"{signal.signal_id} limit #{limit.sequence_number} "
-                    f"({signal.instrument} @ {current_price:.5f}) "
-                    f"— event: {news_event}"
-                )
-                await self._cancel_signal_during_guard(signal, current_price, "news", news_event)
-                return
-
-            # Risky-trading disabled window: an active risky entry hit during a
-            # scheduled window is cancelled. Already-HIT risky signals are
-            # cancelled outright in _check_signal before reaching this point.
-            if (
-                signal.type == "risky"
-                and signal.status != "hit"
-                and is_risky_trading_disabled()
-            ):
-                logger.info(
-                    f"Risky window: suppressing limit hit for signal "
-                    f"{signal.signal_id} limit #{limit.sequence_number} "
-                    f"({signal.instrument} @ {current_price:.5f})"
-                )
-                await self._cancel_signal_during_guard(signal, current_price, "risky_window")
-                return
-
-            if is_spread_hour and not self._is_crypto_signal(signal):
-                # An already-HIT signal rides out spread hour: this limit hit is
-                # ignored for now and will be marked normally once spread hour
-                # ends. Only signals with no hits yet are cancelled.
-                if signal.status == "hit":
-                    logger.info(
-                        f"Spread hour: ignoring limit hit for already-HIT signal "
-                        f"{signal.signal_id} limit #{limit.sequence_number} "
-                        f"({signal.instrument} @ {current_price:.5f}) — "
-                        f"will re-evaluate after spread hour"
-                    )
-                    return
-
-                logger.info(
-                    f"Spread hour: suppressing limit hit for signal "
-                    f"{signal.signal_id} limit #{limit.sequence_number} "
-                    f"({signal.instrument} @ {current_price:.5f})"
-                )
-                await self._cancel_signal_during_guard(signal, current_price, "spread_hour")
-                return
-
-            if is_late_market and not self._is_crypto_signal(signal):
-                # A fresh entry during the final market hour is cancelled. An
-                # already-HIT signal that rolled into the window keeps running
-                # normally — this limit hit is processed as usual below.
-                if signal.status != "hit":
-                    logger.info(
-                        f"Late market hour: suppressing limit hit for signal "
-                        f"{signal.signal_id} limit #{limit.sequence_number} "
-                        f"({signal.instrument} @ {current_price:.5f})"
-                    )
-                    await self._cancel_signal_during_guard(
-                        signal, current_price, "late_market"
-                    )
-                    return
-
-            # Mark the limit hit in memory first so the embed edit and any
-            # concurrent live-refresh render identical state — the embed updates
-            # in the same beat as the ping instead of briefly reverting.
-            limit.status = "hit"
-            limit.hit_alert_sent = True
-
-            await self.alert_system.send_limit_hit_alert(
-                signal,
-                limit,
-                current_price,
-                spread=spread,
-                spread_buffer_enabled=spread_buffer_enabled,
+            await self._handle_limit_hit(
+                signal, limit, current_price, is_spread_hour, is_late_market,
+                spread, spread_buffer_enabled,
             )
-            self._react_async(signal, "🎯")
-            await self._process_limit_hit(signal, limit, current_price)
-
-            self.stats["limits_hit"] += 1
-
-        # Check if approaching (first limit only)
         elif not is_hit and not limit.approaching_alert_sent:
-            # Suppress approaching alerts during active news windows
-            if self.bot.news_manager and self.bot.news_manager.is_news_active_for(
-                signal.instrument
-            ):
-                return
-
-            # Suppress approaching alerts for risky signals during a disabled window
-            if signal.type == "risky" and is_risky_trading_disabled():
-                return
-
-            if limit.sequence_number == 1:
-                try:
-                    approaching_distance = self.alert_config.get_approaching_distance(
-                        symbol, current_price=current_price
-                    )
-                except Exception as e:
-                    logger.error(f"Error getting approaching distance for {symbol}: {e}")
-                    approaching_distance = 0.0010
-
-                if abs(distance) <= approaching_distance:
-                    formatted_distance = self.alert_config.format_distance_for_display(
-                        symbol, abs(distance), current_price
-                    )
-
-                    sent = await self.alert_system.send_approaching_alert(
-                        signal,
-                        limit,
-                        current_price,
-                        formatted_distance,
-                        spread=spread,
-                        spread_buffer_enabled=spread_buffer_enabled,
-                    )
-
-                    if sent:
-                        await self._mark_approaching_sent(limit.id)
-                        limit.approaching_alert_sent = True
-                        await self.excursion_monitor.start_approach(signal, current_price)
-
-        # Retraction: price has drifted past N x the alert threshold —
-        # delete the embed and reset the flag so it can re-fire later.
+            await self._handle_approaching(
+                signal, limit, current_price, distance, spread, spread_buffer_enabled
+            )
         elif (
             not is_hit
             and limit.approaching_alert_sent
             and limit.sequence_number == 1
             and signal.status in ("active", None)
         ):
-            try:
-                approaching_distance = self.alert_config.get_approaching_distance(
-                    symbol, current_price=current_price
+            await self._maybe_retract_approaching(signal, limit, current_price, distance)
+
+    async def _handle_limit_hit(
+        self,
+        signal: SignalData,
+        limit: LimitData,
+        current_price: float,
+        is_spread_hour: bool,
+        is_late_market: bool,
+        spread: float,
+        spread_buffer_enabled: bool,
+    ) -> None:
+        """Run the guard gates for a hit limit, then mark it and alert."""
+        # News mode guard
+        news_event = None
+        if self.bot.news_manager:
+            news_event = self.bot.news_manager.is_news_active_for(signal.instrument)
+
+        if news_event is not None:
+            logger.info(
+                f"News mode: suppressing limit hit for signal "
+                f"{signal.signal_id} limit #{limit.sequence_number} "
+                f"({signal.instrument} @ {current_price:.5f}) "
+                f"— event: {news_event}"
+            )
+            await self._cancel_signal_during_guard(signal, current_price, "news", news_event)
+            return
+
+        # Risky-trading disabled window: an active risky entry hit during a
+        # scheduled window is cancelled. Already-HIT risky signals are
+        # cancelled outright in _check_signal before reaching this point.
+        if (
+            signal.type == "risky"
+            and signal.status != "hit"
+            and is_risky_trading_disabled()
+        ):
+            logger.info(
+                f"Risky window: suppressing limit hit for signal "
+                f"{signal.signal_id} limit #{limit.sequence_number} "
+                f"({signal.instrument} @ {current_price:.5f})"
+            )
+            await self._cancel_signal_during_guard(signal, current_price, "risky_window")
+            return
+
+        if is_spread_hour and not self._is_crypto_signal(signal):
+            # An already-HIT signal rides out spread hour: this limit hit is
+            # ignored for now and will be marked normally once spread hour
+            # ends. Only signals with no hits yet are cancelled.
+            if signal.status == "hit":
+                logger.info(
+                    f"Spread hour: ignoring limit hit for already-HIT signal "
+                    f"{signal.signal_id} limit #{limit.sequence_number} "
+                    f"({signal.instrument} @ {current_price:.5f}) — "
+                    f"will re-evaluate after spread hour"
                 )
-            except Exception as e:
-                logger.error(f"Error getting approaching distance for {symbol}: {e}")
                 return
 
-            if abs(distance) > approaching_distance * _APPROACHING_RETRACTION_MULTIPLIER:
-                await self._retract_approaching_alert(signal, limit, abs(distance))
+            logger.info(
+                f"Spread hour: suppressing limit hit for signal "
+                f"{signal.signal_id} limit #{limit.sequence_number} "
+                f"({signal.instrument} @ {current_price:.5f})"
+            )
+            await self._cancel_signal_during_guard(signal, current_price, "spread_hour")
+            return
+
+        if is_late_market and not self._is_crypto_signal(signal):
+            # A fresh entry during the final market hour is cancelled. An
+            # already-HIT signal that rolled into the window keeps running
+            # normally — this limit hit is processed as usual below.
+            if signal.status != "hit":
+                logger.info(
+                    f"Late market hour: suppressing limit hit for signal "
+                    f"{signal.signal_id} limit #{limit.sequence_number} "
+                    f"({signal.instrument} @ {current_price:.5f})"
+                )
+                await self._cancel_signal_during_guard(
+                    signal, current_price, "late_market"
+                )
+                return
+
+        # Mark the limit hit in memory first so the embed edit and any
+        # concurrent live-refresh render identical state — the embed updates
+        # in the same beat as the ping instead of briefly reverting.
+        limit.status = "hit"
+        limit.hit_alert_sent = True
+
+        await self.alert_system.send_limit_hit_alert(
+            signal,
+            limit,
+            current_price,
+            spread=spread,
+            spread_buffer_enabled=spread_buffer_enabled,
+        )
+        self._react_async(signal, "🎯")
+        await self._process_limit_hit(signal, limit, current_price)
+
+        self.stats["limits_hit"] += 1
+
+    async def _handle_approaching(
+        self,
+        signal: SignalData,
+        limit: LimitData,
+        current_price: float,
+        distance: float,
+        spread: float,
+        spread_buffer_enabled: bool,
+    ) -> None:
+        """Fire the approaching alert when the first pending limit enters range."""
+        symbol = signal.instrument
+
+        # Suppress approaching alerts during active news windows
+        if self.bot.news_manager and self.bot.news_manager.is_news_active_for(signal.instrument):
+            return
+
+        # Suppress approaching alerts for risky signals during a disabled window
+        if signal.type == "risky" and is_risky_trading_disabled():
+            return
+
+        if limit.sequence_number != 1:
+            return
+
+        try:
+            approaching_distance = self.alert_config.get_approaching_distance(
+                symbol, current_price=current_price
+            )
+        except Exception as e:
+            logger.error(f"Error getting approaching distance for {symbol}: {e}")
+            approaching_distance = 0.0010
+
+        if abs(distance) > approaching_distance:
+            return
+
+        formatted_distance = self.alert_config.format_distance_for_display(
+            symbol, abs(distance), current_price
+        )
+
+        sent = await self.alert_system.send_approaching_alert(
+            signal,
+            limit,
+            current_price,
+            formatted_distance,
+            spread=spread,
+            spread_buffer_enabled=spread_buffer_enabled,
+        )
+
+        if sent:
+            await self._mark_approaching_sent(limit.id)
+            limit.approaching_alert_sent = True
+            await self.excursion_monitor.start_approach(signal, current_price)
+
+    async def _maybe_retract_approaching(
+        self,
+        signal: SignalData,
+        limit: LimitData,
+        current_price: float,
+        distance: float,
+    ) -> None:
+        """Retract the approaching embed once price drifts past N x the threshold,
+        so a later re-approach fires a fresh alert."""
+        try:
+            approaching_distance = self.alert_config.get_approaching_distance(
+                signal.instrument, current_price=current_price
+            )
+        except Exception as e:
+            logger.error(f"Error getting approaching distance for {signal.instrument}: {e}")
+            return
+
+        if abs(distance) > approaching_distance * _APPROACHING_RETRACTION_MULTIPLIER:
+            await self._retract_approaching_alert(signal, limit, abs(distance))
 
     async def _retract_approaching_alert(
         self, signal: Dict, limit: Dict, distance: float
