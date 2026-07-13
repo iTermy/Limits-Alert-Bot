@@ -707,7 +707,9 @@ class StreamingPriceMonitor:
             )
         elif not is_hit and not limit.approaching_alert_sent:
             await self._handle_approaching(
-                signal, limit, current_price, distance, spread, spread_buffer_enabled
+                signal, limit, current_price, distance,
+                is_spread_hour, is_late_market,
+                spread, spread_buffer_enabled,
             )
         elif (
             not is_hit
@@ -820,6 +822,8 @@ class StreamingPriceMonitor:
         limit: LimitData,
         current_price: float,
         distance: float,
+        is_spread_hour: bool,
+        is_late_market: bool,
         spread: float,
         spread_buffer_enabled: bool,
     ) -> None:
@@ -828,6 +832,12 @@ class StreamingPriceMonitor:
 
         # Suppress approaching alerts during active news windows
         if self.bot.news_manager and self.bot.news_manager.is_news_active_for(signal.instrument):
+            return
+
+        # Suppress approaching alerts for non-crypto signals during the late
+        # market (4-5 PM ET) and spread (5-6 PM ET) hours — a fresh hit in
+        # either window is cancelled anyway.
+        if (is_late_market or is_spread_hour) and not self._is_crypto_signal(signal):
             return
 
         # Suppress approaching alerts for risky signals during a disabled window
