@@ -3,6 +3,7 @@ Config Commands — runtime configuration for TP, alert distances, and near-miss
 """
 
 from datetime import datetime
+from typing import Optional
 
 import discord
 from discord.ext import commands
@@ -47,7 +48,7 @@ class ThresholdsCog(BaseCog):
     # ── Take-Profit commands ───────────────────────────────────────────────────
 
     @commands.command(name="tp")
-    async def tp_command(self, ctx: commands.Context, subcommand: str = None, *args):
+    async def tp_command(self, ctx: commands.Context, subcommand: Optional[str] = None, *args):
         """
         Take-profit configuration (per signal type: standard, scalp, swing, toll, pa, 1-1, risky).
 
@@ -99,7 +100,7 @@ class ThresholdsCog(BaseCog):
             else f"${cfg.get('value', 0):.2f}"
         )
 
-    async def _tp_show(self, ctx: commands.Context, target: str = None, signal_type: str = None):
+    async def _tp_show(self, ctx: commands.Context, target: Optional[str] = None, signal_type: Optional[str] = None):
         try:
             info = self.tp_config.get_display_info()
             type_defaults = info["type_defaults"]
@@ -207,7 +208,7 @@ class ThresholdsCog(BaseCog):
             self.logger.error(f"Error in tp config: {e}", exc_info=True)
             await ctx.send(f"❌ Error fetching TP config: {e}")
 
-    async def _tp_set(self, ctx: commands.Context, args, signal_type_flag: str = None):
+    async def _tp_set(self, ctx: commands.Context, args, signal_type_flag: Optional[str] = None):
         """
         !tp set <type> <asset_class> <value> [pips|dollars]
         !tp set <asset_class> <value> [pips|dollars]                  # implies type=standard
@@ -414,7 +415,7 @@ class ThresholdsCog(BaseCog):
         aliases=["alertdistance", "adist"],
         description="View or manage approaching-alert distance configuration",
     )
-    async def alertdist_command(self, ctx: commands.Context, subcommand: str = None, *args):
+    async def alertdist_command(self, ctx: commands.Context, subcommand: Optional[str] = None, *args):
         """
         View and manage alert distance thresholds.
 
@@ -465,7 +466,7 @@ class ThresholdsCog(BaseCog):
                 f"❌ Unknown subcommand `{subcommand}`. See `!help alertdist` for usage."
             )
 
-    async def _adist_show(self, ctx: commands.Context, symbol: str = None):
+    async def _adist_show(self, ctx: commands.Context, symbol: Optional[str] = None):
         try:
             if symbol:
                 symbol_upper = symbol.upper()
@@ -553,7 +554,7 @@ class ThresholdsCog(BaseCog):
             await ctx.send(f"❌ Error fetching alert distance config: {e}")
 
     async def _adist_set(
-        self, ctx: commands.Context, target: str, value: str, dist_type: str = None
+        self, ctx: commands.Context, target: str, value: str, dist_type: Optional[str] = None
     ):
         try:
             try:
@@ -676,7 +677,7 @@ class ThresholdsCog(BaseCog):
     # ── Near-Miss (NM) configuration commands ─────────────────────────────────
 
     @commands.command(name="nmconfig", aliases=["nmc", "nm_config"])
-    async def nm_config_command(self, ctx: commands.Context, subcommand: str = None, *args):
+    async def nm_config_command(self, ctx: commands.Context, subcommand: Optional[str] = None, *args):
         """
         Near-miss auto-cancel configuration (linear bounce model).
 
@@ -736,7 +737,7 @@ class ThresholdsCog(BaseCog):
         else:
             await ctx.send(f"❌ Unknown subcommand `{subcommand}`. Use `show`, `set`, or `remove`.")
 
-    async def _nm_show(self, ctx: commands.Context, symbol: str = None):
+    async def _nm_show(self, ctx: commands.Context, symbol: Optional[str] = None):
         try:
             if symbol and symbol.lower() in NM_RISKY_TARGETS:
                 info = self.nm_config.get_params_display("XAUUSD", signal_type="risky")
@@ -880,7 +881,7 @@ class ThresholdsCog(BaseCog):
             await ctx.send(f"❌ Error fetching NM config: {e}")
 
     async def _nm_set(
-        self, ctx, target: str, proximity_str: str, bounce_str: str = None, nm_type: str = None
+        self, ctx, target: str, proximity_str: str, bounce_str: Optional[str] = None, nm_type: Optional[str] = None
     ):
         try:
             try:

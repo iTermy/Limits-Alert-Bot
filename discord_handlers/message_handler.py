@@ -3,9 +3,10 @@ Message Handler
 """
 
 import asyncio
+import contextlib
 import re
 from datetime import datetime
-from typing import Optional
+from typing import ClassVar, Optional
 
 import discord
 import pytz
@@ -16,7 +17,8 @@ from models.signal import SignalData
 from price_feeds.embed_builders import _build_signal_embed, _set_archive_footer
 from price_feeds.streaming_monitor import react_to_original_signal
 from price_feeds.tp_config import TPConfig
-from utils.formatting import format_price, get_channel_name as _get_channel_name
+from utils.formatting import format_price
+from utils.formatting import get_channel_name as _get_channel_name
 from utils.logger import get_logger
 from utils.permissions import is_signal_manager
 
@@ -47,16 +49,12 @@ class MessageHandler:
         return channel_id in self.bot.allowed_channel_ids
 
     async def _safe_remove_reaction(self, message: discord.Message, emoji: str) -> None:
-        try:
+        with contextlib.suppress(Exception):
             await message.remove_reaction(emoji, self.bot.user)
-        except Exception:
-            pass
 
     async def _safe_delete(self, message: discord.Message) -> None:
-        try:
+        with contextlib.suppress(Exception):
             await message.delete()
-        except Exception:
-            pass
 
     async def _deny_signal_management(self, message: discord.Message) -> None:
         """Delete an unauthorized management reply and DM the user why."""
@@ -220,7 +218,7 @@ class MessageHandler:
 
     # Reply commands that map straight onto a manual status change:
     # command aliases -> (new status, action label)
-    _REPLY_STATUS_COMMANDS = {
+    _REPLY_STATUS_COMMANDS: ClassVar[dict] = {
         "cancel": ("cancelled", "cancelled"),
         "nm": ("cancelled", "cancelled"),
         "cancelled": ("cancelled", "cancelled"),
@@ -344,7 +342,7 @@ class MessageHandler:
         pending limit hit so P&L has an entry price. Returns the refreshed signal."""
         if signal.hit_limits or not signal.pending_limits:
             return signal
-        first = min(signal.pending_limits, key=lambda l: l.sequence_number)
+        first = min(signal.pending_limits, key=lambda lim: lim.sequence_number)
         try:
             await db.mark_limit_hit(first.id, first.price_level)
             if self.bot.services.monitor:
@@ -804,10 +802,8 @@ class MessageHandler:
                         except Exception:
                             pass
 
-                    try:
+                    with contextlib.suppress(Exception):
                         await react_to_original_signal(self.bot, sig, "❌")
-                    except Exception:
-                        pass
 
                     if alert_system:
                         try:
@@ -827,10 +823,8 @@ class MessageHandler:
                     f"Cancelled {len(overlapping)} overlapping signal(s) for new signal {new_signal_id}"
                 )
 
-            try:
+            with contextlib.suppress(Exception):
                 await prompt_msg.delete()
-            except Exception:
-                pass
 
         except Exception as e:
             self.logger.error(f"Error in overlap prompt for signal {new_signal_id}: {e}", exc_info=True)

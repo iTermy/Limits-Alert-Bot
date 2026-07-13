@@ -17,7 +17,7 @@ import asyncio
 import logging
 from dataclasses import dataclass
 from datetime import datetime, timezone
-from typing import Dict, Optional
+from typing import Optional
 
 from price_feeds._base_config import BaseThresholdConfig
 
@@ -82,8 +82,8 @@ class ExcursionMonitor:
         self._db = excursion_db
         self._context = market_context
         self._tp_config = tp_config
-        self._tracking: Dict[int, ExcursionState] = {}
-        self._post_exit: Dict[int, PostExitState] = {}
+        self._tracking: dict[int, ExcursionState] = {}
+        self._post_exit: dict[int, PostExitState] = {}
         self._snapshot_tasks: set = set()
         self._running = True
 
@@ -92,7 +92,7 @@ class ExcursionMonitor:
 
     # === Lifecycle ===
 
-    async def start_approach(self, signal: Dict, current_price: float) -> None:
+    async def start_approach(self, signal: dict, current_price: float) -> None:
         """Begin approach-phase tracking when the first approaching alert fires."""
         signal_id = signal.signal_id
         if signal_id in self._tracking:
@@ -123,7 +123,7 @@ class ExcursionMonitor:
         except Exception as e:
             logger.error("Failed to start approach excursion for %s: %s", signal_id, e)
 
-    async def update_approach(self, signal: Dict, current_price: float) -> None:
+    async def update_approach(self, signal: dict, current_price: float) -> None:
         """Track the worst move away from the limit before it's hit."""
         state = self._tracking.get(signal.signal_id)
         if state is None or state.phase != "approach":
@@ -144,7 +144,7 @@ class ExcursionMonitor:
             except Exception as e:
                 logger.debug("pre_hit_mae update failed for %s: %s", state.signal_id, e)
 
-    async def mark_entry(self, signal: Dict) -> None:
+    async def mark_entry(self, signal: dict) -> None:
         """Transition to in_trade at the first hit limit's price. No-op if already entered."""
         signal_id = signal.signal_id
         state = self._tracking.get(signal_id)
@@ -198,7 +198,7 @@ class ExcursionMonitor:
 
         self._schedule_context_snapshot(signal_id, symbol, direction, signal.current_spread)
 
-    async def update(self, signal: Dict, bid: float, ask: float) -> None:
+    async def update(self, signal: dict, bid: float, ask: float) -> None:
         """Per-tick MFE/MAE update for an in-trade signal."""
         state = self._tracking.get(signal.signal_id)
         if state is None or state.phase != "in_trade":
@@ -274,7 +274,7 @@ class ExcursionMonitor:
         self._tracking.pop(signal_id, None)
         self._post_exit.pop(signal_id, None)
 
-    async def resume_if_tracked(self, signal: Dict) -> None:
+    async def resume_if_tracked(self, signal: dict) -> None:
         """Re-hydrate in-memory excursion state from its open DB row after a restart."""
         signal_id = signal.signal_id
         if signal_id in self._tracking:
@@ -333,7 +333,7 @@ class ExcursionMonitor:
             for s in self._tracking.values()
             if (now_mono - s.started_at) <= _MAX_SAMPLE_WINDOW_SECONDS
         ]
-        samples: Dict[str, Optional[Dict]] = {}
+        samples: dict[str, Optional[dict]] = {}
         for state in states:
             if state.instrument not in samples:
                 samples[state.instrument] = await self._context.sample_volume(state.instrument)
@@ -366,7 +366,7 @@ class ExcursionMonitor:
             except Exception as e:
                 logger.debug("post_exit end write failed for %s: %s", sid, e)
 
-        bars: Dict[str, Optional[Dict]] = {}
+        bars: dict[str, Optional[dict]] = {}
         for state in list(self._post_exit.values()):
             if state.instrument not in bars:
                 bars[state.instrument] = await self._context.last_closed_m1(state.instrument)
@@ -431,7 +431,7 @@ class ExcursionMonitor:
         return price_distance / state.atr_at_hit
 
     @staticmethod
-    def _first_hit_price(signal: Dict) -> Optional[float]:
+    def _first_hit_price(signal: dict) -> Optional[float]:
         hit_limits = signal.hit_limits
         if not hit_limits:
             return None

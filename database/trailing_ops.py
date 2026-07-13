@@ -6,7 +6,7 @@ lifecycle code. See TrailingStopMonitor for the in-memory side.
 """
 
 from datetime import datetime
-from typing import Any, Dict, List
+from typing import Any
 
 from utils.logger import get_logger
 
@@ -19,7 +19,7 @@ class TrailingDatabase:
     def __init__(self, db_manager):
         self.db = db_manager
 
-    async def create_tracking_rows(self, signal_id: int, levels: Dict[str, Dict[str, Any]]) -> None:
+    async def create_tracking_rows(self, signal_id: int, levels: dict[str, dict[str, Any]]) -> None:
         """Insert one row per level for a signal that just went HIT.
 
         levels: {level_name: {distance_value, distance_type, anchor_price,
@@ -93,14 +93,14 @@ class TrailingDatabase:
             (stop_price, stop_time, stop_reason, pnl_at_stop, signal_id, level),
         )
 
-    async def get_open_levels_for_signal(self, signal_id: int) -> List[str]:
+    async def get_open_levels_for_signal(self, signal_id: int) -> list[str]:
         rows = await self.db.fetch_all(
             "SELECT level FROM trailing_simulations WHERE signal_id = $1 AND stopped_out = FALSE",
             (signal_id,),
         )
         return [r["level"] for r in rows]
 
-    async def get_incomplete_shadow_signals(self) -> List[Dict[str, Any]]:
+    async def get_incomplete_shadow_signals(self) -> list[dict[str, Any]]:
         """Signals closed via auto-TP that still have at least one open trail level.
 
         Used at startup to re-hydrate shadow tracking after a restart.
@@ -121,7 +121,7 @@ class TrailingDatabase:
             """
         )
 
-        signals: Dict[int, Dict[str, Any]] = {}
+        signals: dict[int, dict[str, Any]] = {}
         for row in rows:
             signal_id = row["signal_id"]
             if signal_id not in signals:

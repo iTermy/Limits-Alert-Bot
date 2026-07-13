@@ -11,7 +11,7 @@ Supported types:
 
 import logging
 from datetime import datetime, timezone
-from typing import Dict, Literal
+from typing import Literal, Optional
 
 from ._base_config import BaseThresholdConfig
 
@@ -32,13 +32,13 @@ class AlertDistanceConfig(BaseThresholdConfig):
 
     CONFIG_FILENAME = "alert_distances.json"
 
-    def __init__(self, config_path: str = None):
+    def __init__(self, config_path: Optional[str] = None):
         super().__init__(config_path)
         logger.info("AlertDistanceConfig initialized")
 
     # === Config defaults & validation ===
 
-    def _create_default_config(self) -> Dict:
+    def _create_default_config(self) -> dict:
         return {
             "defaults": {
                 "forex": {"type": "pips", "value": 10.0, "description": "Standard forex pairs"},
@@ -77,7 +77,7 @@ class AlertDistanceConfig(BaseThresholdConfig):
 
     # === Public API ===
 
-    def get_approaching_distance(self, symbol: str, current_price: float = None) -> float:
+    def get_approaching_distance(self, symbol: str, current_price: Optional[float] = None) -> float:
         """
         Get approaching alert distance for a symbol in absolute price units.
 
@@ -108,7 +108,7 @@ class AlertDistanceConfig(BaseThresholdConfig):
         logger.error(f"Unknown distance type: {distance_type}")
         return self._get_fallback_distance(symbol)
 
-    def _get_config_for_symbol(self, symbol: str) -> Dict:
+    def _get_config_for_symbol(self, symbol: str) -> dict:
         symbol_upper = symbol.upper()
 
         if symbol_upper in self.config["overrides"]:
@@ -175,7 +175,7 @@ class AlertDistanceConfig(BaseThresholdConfig):
         logger.warning(f"No override found for: {symbol_upper}")
         return False
 
-    def get_config_display(self, symbol: str = None) -> Dict:
+    def get_config_display(self, symbol: Optional[str] = None) -> dict:
         """Get configuration for display purposes."""
         if symbol:
             symbol_upper = symbol.upper()
@@ -206,7 +206,7 @@ class AlertDistanceConfig(BaseThresholdConfig):
         }
 
     def format_distance_for_display(
-        self, symbol: str, distance: float, current_price: float = None
+        self, symbol: str, distance: float, current_price: Optional[float] = None
     ) -> str:
         """Format distance for user-friendly display."""
         config = self._get_config_for_symbol(symbol)

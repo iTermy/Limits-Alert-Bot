@@ -2,8 +2,6 @@
 
 from __future__ import annotations
 
-from typing import Optional
-
 from pydantic import BaseModel, Field
 
 
@@ -31,7 +29,7 @@ class BotSettings(BaseModel):
     admin_ids: list[int] = Field(default_factory=list)
     signal_manager_role_ids: list[int] = Field(default_factory=list)
     signal_manager_user_ids: list[int] = Field(default_factory=list)
-    health_alert_admin_id: Optional[int] = None
+    health_alert_admin_id: int | None = None
     spread_buffer_enabled: bool = True
     spread_buffer_config: SpreadBufferConfig = Field(default_factory=SpreadBufferConfig)
     license_role_name: str = "Signal Subscriber"
@@ -44,8 +42,8 @@ class BotSettings(BaseModel):
 
 
 class ChannelSettings(BaseModel):
-    default_expiry: Optional[str] = None
-    default_instrument: Optional[str] = None
+    default_expiry: str | None = None
+    default_instrument: str | None = None
 
     model_config = {"extra": "allow"}
 
@@ -54,11 +52,11 @@ class ThresholdEntry(BaseModel):
     """Single threshold entry used by TP, alert distance, and NM configs."""
 
     type: str
-    value: Optional[float] = None
-    max_proximity: Optional[float] = None
-    base_bounce: Optional[float] = None
-    description: Optional[str] = None
-    set_by: Optional[str] = None
-    set_at: Optional[str] = None
+    value: float | None = None
+    max_proximity: float | None = None
+    base_bounce: float | None = None
+    description: str | None = None
+    set_by: str | None = None
+    set_at: str | None = None
 
     model_config = {"extra": "allow"}

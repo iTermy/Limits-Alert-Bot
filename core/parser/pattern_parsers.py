@@ -5,7 +5,7 @@ Channel-specific pattern-based parsers for trading signals
 
 import re
 import time
-from typing import Dict, List, Optional, Set
+from typing import Optional
 
 from utils.logger import get_logger
 
@@ -250,7 +250,7 @@ def clean_message(message: str) -> str:
     return cleaned.strip()
 
 
-def extract_numbers(text: str) -> List[float]:
+def extract_numbers(text: str) -> list[float]:
     """Extract all numbers from text, excluding numbers inside blacklisted terms"""
     for word in INDEX_SYMBOL_BLACKLIST:
         text = re.sub(re.escape(word), "", text, flags=re.IGNORECASE)
@@ -261,7 +261,7 @@ def extract_numbers(text: str) -> List[float]:
         return []
 
 
-def scale_forex_numbers(numbers: List[float], instrument: str) -> List[float]:
+def scale_forex_numbers(numbers: list[float], instrument: str) -> list[float]:
     """Scale down large forex numbers if needed"""
     if instrument not in FOREX_PAIRS or instrument in HIGH_VALUE_INSTRUMENTS:
         return numbers
@@ -275,12 +275,12 @@ def scale_forex_numbers(numbers: List[float], instrument: str) -> List[float]:
     return numbers
 
 
-def extract_words_with_boundaries(text: str) -> List[str]:
+def extract_words_with_boundaries(text: str) -> list[str]:
     """Extract words from text including alphanumeric patterns"""
     return re.findall(r"\b[a-z0-9]+\b", text.lower())
 
 
-def validate_limits_and_stop(limits: List[float], stop_loss: float, direction: str) -> bool:
+def validate_limits_and_stop(limits: list[float], stop_loss: float, direction: str) -> bool:
     """Validate that limits and stop loss make sense for the direction"""
     if not limits:
         return False
@@ -399,10 +399,9 @@ def _find_explicit_instrument(text_lower: str, is_crypto_alt: bool = False) -> O
 
     # Check for full instrument names (6+ characters like 'eurusd')
     for pattern, instrument in INSTRUMENT_MAPPINGS.items():
-        if len(pattern) >= 6:  # Full names
-            if pattern in text_lower:
-                logger.debug(f"Found full instrument: {pattern} -> {instrument}")
-                return instrument
+        if len(pattern) >= 6 and pattern in text_lower:  # Full names
+            logger.debug(f"Found full instrument: {pattern} -> {instrument}")
+            return instrument
 
     return None
 
@@ -518,7 +517,7 @@ def extract_expiry(text: str, channel_name: str, channel_config: dict) -> str:
     return "day_end"
 
 
-def extract_keywords(text: str) -> List[str]:
+def extract_keywords(text: str) -> list[str]:
     """Extract special keywords from text"""
     text_lower = text.lower()
     keywords = []
@@ -540,7 +539,7 @@ def extract_keywords(text: str) -> List[str]:
     return keywords
 
 
-def validate_limits_order(limits: List[float], direction: str) -> bool:
+def validate_limits_order(limits: list[float], direction: str) -> bool:
     """
     Validate that limits are in the expected order for the given direction.
 
@@ -565,7 +564,7 @@ def validate_limits_order(limits: List[float], direction: str) -> bool:
     return all(limits[i] >= limits[i + 1] for i in range(len(limits) - 1))
 
 
-def _reject_out_of_order(limits: List[float], direction: str, label: str) -> None:
+def _reject_out_of_order(limits: list[float], direction: str, label: str) -> None:
     """Raise LimitsOrderError when multi-limit prices break the direction's
     expected ordering (short ascending, long descending) — almost always a typo."""
     if len(limits) > 1 and not validate_limits_order(limits, direction):
@@ -578,7 +577,7 @@ def _reject_out_of_order(limits: List[float], direction: str, label: str) -> Non
         )
 
 
-def _split_explicit_stop(numbers: List[float], direction: str) -> tuple:
+def _split_explicit_stop(numbers: list[float], direction: str) -> tuple:
     """Split numbers into (limits, stop_loss) trying the last number as the stop
     first, then the first (alternative convention). Returns (None, None) when
     neither placement validates against the direction."""
@@ -595,7 +594,7 @@ def _split_explicit_stop(numbers: List[float], direction: str) -> tuple:
     return None, None
 
 
-def _auto_stop(limits: List[float], direction: str, offset: float) -> float:
+def _auto_stop(limits: list[float], direction: str, offset: float) -> float:
     """Derive the stop loss from the outermost limit: offset below the lowest
     limit for longs, offset above the highest for shorts."""
     if direction == "long":
@@ -604,7 +603,7 @@ def _auto_stop(limits: List[float], direction: str, offset: float) -> float:
 
 
 def _general_tolls_limits_and_stop(
-    numbers: List[float], direction: str, raw_text: str, instrument: str
+    numbers: list[float], direction: str, raw_text: str, instrument: str
 ) -> tuple:
     """general-tolls: explicit SL keyword uses the standard last/first-number
     convention; otherwise every number is a limit and the SL is derived from a
@@ -642,7 +641,7 @@ def _general_tolls_limits_and_stop(
     return limits, stop_loss
 
 
-def _tolls_limits_and_stop(numbers: List[float], direction: str, raw_text: str, channel_name: str) -> tuple:
+def _tolls_limits_and_stop(numbers: list[float], direction: str, raw_text: str, channel_name: str) -> tuple:
     """Gold-tolls-style channels: an explicit SL keyword (with 2+ numbers) makes
     the last number the stop; otherwise every number is a limit and the SL is the
     configured offset beyond the outermost limit (risky-gold has its own offset)."""
@@ -676,7 +675,7 @@ def _tolls_limits_and_stop(numbers: List[float], direction: str, raw_text: str, 
     return limits, stop_loss
 
 
-def _standard_limits_and_stop(numbers: List[float], direction: str) -> tuple:
+def _standard_limits_and_stop(numbers: list[float], direction: str) -> tuple:
     """Regular channels: at least two numbers; the last (or first) is the stop,
     the rest are limits, and multi-limit ordering must match the direction."""
     if len(numbers) < 2:
@@ -692,11 +691,11 @@ def _standard_limits_and_stop(numbers: List[float], direction: str) -> tuple:
 
 
 def determine_limits_and_stop(
-    numbers: List[float],
+    numbers: list[float],
     direction: str,
-    channel_name: str = None,
-    raw_text: str = None,
-    instrument: str = None,
+    channel_name: Optional[str] = None,
+    raw_text: Optional[str] = None,
+    instrument: Optional[str] = None,
 ) -> tuple:
     """
     Determine which numbers are limits and which is the stop loss.
@@ -721,7 +720,7 @@ def determine_limits_and_stop(
     return _standard_limits_and_stop(numbers, direction)
 
 
-def get_signal_type(text: str, channel_name: str = None) -> str:
+def get_signal_type(text: str, channel_name: Optional[str] = None) -> str:
     """
     Determine the signal type from the channel and message body.
 
@@ -750,11 +749,11 @@ class CorePatternParser:
     This is the main parser used for most channels.
     """
 
-    def __init__(self, channel_config: dict = None):
+    def __init__(self, channel_config: Optional[dict] = None):
         self.channel_config = channel_config or {}
         logger.info("Initialized CorePatternParser")
 
-    def parse(self, message: str, channel_name: str = None) -> Optional[ParsedSignal]:
+    def parse(self, message: str, channel_name: Optional[str] = None) -> Optional[ParsedSignal]:
         """Parse using pattern matching for core instruments"""
         try:
             cleaned = clean_message(message)
@@ -844,10 +843,10 @@ class StockPatternParser:
     # genuinely has no stocks.
     _SYMBOL_REFRESH_MIN_INTERVAL = 60.0
 
-    def __init__(self, channel_config: dict = None):
+    def __init__(self, channel_config: Optional[dict] = None):
         self.channel_config = channel_config or {}
         self.mt5_initialized = False
-        self.available_symbols: Set[str] = set()
+        self.available_symbols: set[str] = set()
         self._last_symbol_refresh: float = 0.0
         self._initialize_mt5()
         logger.info("Initialized StockPatternParser")
@@ -891,7 +890,7 @@ class StockPatternParser:
         except Exception as e:
             logger.debug(f"Symbol refresh failed: {e}")
 
-    def parse(self, message: str, channel_name: str = None) -> Optional[ParsedSignal]:
+    def parse(self, message: str, channel_name: Optional[str] = None) -> Optional[ParsedSignal]:
         """
         Parse a stock trading signal
 
@@ -1035,7 +1034,7 @@ class StockPatternParser:
 
         return None
 
-    def _find_by_description(self, text: str, stock_symbols: List[str]) -> List[Dict]:
+    def _find_by_description(self, text: str, stock_symbols: list[str]) -> list[dict]:
         """Find stocks by description matching"""
         # Get meaningful words for search
         words_lower = [
@@ -1077,7 +1076,7 @@ class StockPatternParser:
 
         return matches
 
-    def _select_best_match(self, matches: List[Dict]) -> Optional[Dict]:
+    def _select_best_match(self, matches: list[dict]) -> Optional[dict]:
         """Select the best match from multiple candidates"""
         if not matches:
             return None

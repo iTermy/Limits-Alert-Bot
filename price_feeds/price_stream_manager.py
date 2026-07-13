@@ -4,7 +4,7 @@ import asyncio
 import logging
 from collections import defaultdict
 from datetime import datetime, timezone
-from typing import Callable, Dict, List, Optional, Set
+from typing import Callable, Optional
 
 from price_feeds.feeds.binance_stream import BinanceStream
 from price_feeds.feeds.icmarkets_stream import ICMarketsStream
@@ -34,19 +34,19 @@ class PriceStreamManager:
         self.symbol_mapper = SymbolMapper()
 
         # Initialize streaming feeds
-        self.feeds: Dict[str, any] = {}
-        self.feed_status: Dict[str, bool] = {}
+        self.feeds: dict[str, any] = {}
+        self.feed_status: dict[str, bool] = {}
 
         # Symbol tracking
-        self.subscribed_symbols: Set[str] = set()
-        self.symbol_to_feed: Dict[str, str] = {}  # Maps symbol to feed name
+        self.subscribed_symbols: set[str] = set()
+        self.symbol_to_feed: dict[str, str] = {}  # Maps symbol to feed name
 
         # Price storage (latest prices only)
-        self.latest_prices: Dict[str, Dict] = {}
+        self.latest_prices: dict[str, dict] = {}
         self.price_lock = asyncio.Lock()
 
         # Subscribers (callbacks to notify on price updates)
-        self.subscribers: List[Callable] = []
+        self.subscribers: list[Callable] = []
 
         # Start health monitor
         self.health_monitor = None
@@ -204,7 +204,7 @@ class PriceStreamManager:
         if self.health_monitor:
             self.health_monitor.clear_symbol(symbol)
 
-    async def bulk_subscribe(self, symbols: List[str]):
+    async def bulk_subscribe(self, symbols: list[str]):
         """
         Subscribe to multiple symbols at once
 
@@ -214,7 +214,7 @@ class PriceStreamManager:
         logger.info(f"Bulk subscribing to {len(symbols)} symbols")
 
         # Group by feed
-        feed_symbols: Dict[str, List[tuple]] = defaultdict(list)
+        feed_symbols: dict[str, list[tuple]] = defaultdict(list)
 
         for symbol in symbols:
             if symbol in self.subscribed_symbols:
@@ -239,7 +239,7 @@ class PriceStreamManager:
                 await self.feeds[feed_name].bulk_subscribe(feed_syms)
 
                 # Track subscriptions
-                for internal, feed_sym in symbol_pairs:
+                for internal, _feed_sym in symbol_pairs:
                     self.subscribed_symbols.add(internal)
                     self.symbol_to_feed[internal] = feed_name
 
@@ -381,7 +381,7 @@ class PriceStreamManager:
                     logger.error(f"Exness reconnection failed: {e2}")
                     await asyncio.sleep(30)
 
-    async def _process_price_update(self, symbol: str, price_data: Dict, feed: str):
+    async def _process_price_update(self, symbol: str, price_data: dict, feed: str):
         """Process a price update, compute spread if absent, and notify subscribers."""
         # Calculate spread if not already present
         if "spread" not in price_data and "bid" in price_data and "ask" in price_data:
@@ -423,7 +423,7 @@ class PriceStreamManager:
             except Exception as e:
                 logger.error(f"Subscriber {subscriber.__name__} failed: {e}")
 
-    async def get_latest_price(self, symbol: str) -> Optional[Dict]:
+    async def get_latest_price(self, symbol: str) -> Optional[dict]:
         """
         Get the latest cached price for a symbol
 
@@ -535,7 +535,7 @@ class PriceStreamManager:
 
         return reconnect_results
 
-    def get_stats(self) -> Dict:
+    def get_stats(self) -> dict:
         """Get streaming statistics"""
         return {
             **self.stats,

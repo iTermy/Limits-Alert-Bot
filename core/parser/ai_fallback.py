@@ -30,7 +30,7 @@ class AIFallbackParser:
     - Unusual spacing or ordering
     """
 
-    def __init__(self, channel_config: dict = None):
+    def __init__(self, channel_config: Optional[dict] = None):
         self.channel_config = channel_config or {}
         self.api_key = os.getenv("OPENAI_API_KEY")
         self.model = os.getenv("OPENAI_MODEL", "gpt-4o-mini")
@@ -41,7 +41,7 @@ class AIFallbackParser:
         else:
             logger.info(f"Initialized AIFallbackParser with model {self.model}")
 
-    def parse(self, message: str, channel_name: str = None) -> Optional[ParsedSignal]:
+    def parse(self, message: str, channel_name: Optional[str] = None) -> Optional[ParsedSignal]:
         """
         Parse using AI
 
@@ -122,10 +122,10 @@ Extract:
 
 Guidelines for Robust Parsing:
 - Treat this as an **edge case cleanup job**, not normal parsing.
-- Look for relative absurdities:  
-  * If one limit is hundreds of pips away while others are close together, it may be a typo – try to fix.  
-  * If decimal placement seems off compared to other numbers in the same message, adjust accordingly.  
-  * If one digit seems extra or missing and fixing it would make the set consistent, fix it.  
+- Look for relative absurdities:
+  * If one limit is hundreds of pips away while others are close together, it may be a typo – try to fix.
+  * If decimal placement seems off compared to other numbers in the same message, adjust accordingly.
+  * If one digit seems extra or missing and fixing it would make the set consistent, fix it.
 - Prefer internal consistency over absolute market knowledge (data may be outdated).
 - If instrument is unclear but price pattern clearly matches a known instrument in context, infer it.
 - If expiry keywords are slightly misspelled, correct them.

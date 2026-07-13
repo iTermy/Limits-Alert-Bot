@@ -221,7 +221,7 @@ class SignalParser:
             logger.warning(f"Could not load channel configuration: {e}")
             return {}
 
-    def parse(self, message: str, channel_name: str = None) -> Optional[ParsedSignal]:
+    def parse(self, message: str, channel_name: Optional[str] = None) -> Optional[ParsedSignal]:
         """
         Parse a trading signal with channel-aware routing
 
@@ -350,7 +350,7 @@ def get_parser() -> SignalParser:
     return _parser_instance
 
 
-def parse_signal(message: str, channel_name: str = None) -> Optional[ParsedSignal]:
+def parse_signal(message: str, channel_name: Optional[str] = None) -> Optional[ParsedSignal]:
     """
     Main entry point for signal parsing.
 

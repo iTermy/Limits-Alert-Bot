@@ -5,7 +5,7 @@ Bot Management Commands - ping, help, health, feeds, price, reload, shutdown, cl
 import asyncio
 from dataclasses import dataclass
 from datetime import datetime
-from typing import Callable
+from typing import Callable, Optional
 
 import discord
 from discord.ext import commands
@@ -300,7 +300,7 @@ class BotManagementCog(BaseCog):
     # ==================== GENERAL COMMANDS ====================
 
     @commands.command(name="help")
-    async def help_command(self, ctx: commands.Context, *, topic: str = None):
+    async def help_command(self, ctx: commands.Context, *, topic: Optional[str] = None):
         """Show available commands, or detailed help for a topic (e.g. !help cancel)"""
         if topic:
             builder = _HELP_TOPICS.get(topic.lower())
@@ -475,7 +475,7 @@ class BotManagementCog(BaseCog):
 
     @commands.command(name="goldtollssl", aliases=["gtsl", "goldtollsl"])
     @commands.check(lambda ctx: ctx.cog.is_admin(ctx.author))
-    async def gold_tolls_sl(self, ctx: commands.Context, value: float = None):
+    async def gold_tolls_sl(self, ctx: commands.Context, value: Optional[float] = None):
         """
         Get or set the gold-tolls stop-loss offset (dollars from the nearest limit).
         Usage:  !goldtollssl          → show current value
@@ -486,7 +486,7 @@ class BotManagementCog(BaseCog):
 
     @commands.command(name="riskygoldsl", aliases=["rgsl", "riskysl"])
     @commands.check(lambda ctx: ctx.cog.is_admin(ctx.author))
-    async def risky_gold_sl(self, ctx: commands.Context, value: float = None):
+    async def risky_gold_sl(self, ctx: commands.Context, value: Optional[float] = None):
         """
         Get or set the risky-gold stop-loss offset (dollars from the nearest limit).
         Independent of the gold-tolls offset.
@@ -615,7 +615,7 @@ class BotManagementCog(BaseCog):
 
     @commands.command(name="deletemessage", aliases=["delmsg", "deletemsg"])
     @commands.check(lambda ctx: ctx.cog.is_admin(ctx.author))
-    async def delete_message(self, ctx: commands.Context, message_id: int = None):
+    async def delete_message(self, ctx: commands.Context, message_id: Optional[int] = None):
         """Delete a message by ID (Admin only).
 
         Searches the current channel first, then every text channel in the guild.

@@ -3,14 +3,13 @@ DatabaseManager — integrates connection and core signal/limit operations
 """
 
 from datetime import datetime
-from typing import Any, Dict, List, Optional
+from typing import Any, Optional
 
 import pytz
 
+from models.enums import ChangeType, LimitStatus, SignalStatus, StatusTransitions
 from models.signal import LimitData, SignalData
 from utils.logger import get_logger
-
-from models.enums import ChangeType, LimitStatus, SignalStatus, StatusTransitions
 
 from .connection import DatabaseManager as BaseConnectionManager
 from .schema import initialize_database
@@ -30,7 +29,7 @@ class DatabaseManager(BaseConnectionManager):
     # === Signal Status Operations ===
 
     async def update_signal_status(
-        self, signal_id: int, new_status: str, change_type: str = "automatic", reason: str = None
+        self, signal_id: int, new_status: str, change_type: str = "automatic", reason: Optional[str] = None
     ) -> bool:
         """Update signal status with proper lifecycle management."""
         async with self.get_connection() as conn:
@@ -87,10 +86,9 @@ class DatabaseManager(BaseConnectionManager):
             logger.info(f"Updated signal {signal_id}: {old_status} -> {new_status} ({change_type})")
             return True
 
-    async def mark_limit_hit(self, limit_id: int, hit_price: float = None) -> Dict[str, Any]:
+    async def mark_limit_hit(self, limit_id: int, hit_price: Optional[float] = None) -> dict[str, Any]:
         """Mark a limit as hit and update signal status if needed."""
-        async with self.get_connection() as conn:
-            async with conn.transaction():
+        async with self.get_connection() as conn, conn.transaction():
                 limit_data = await conn.fetchrow(
                     """
                     SELECT l.*, s.status as signal_status, s.id as signal_id
@@ -168,7 +166,7 @@ class DatabaseManager(BaseConnectionManager):
                     else limit_data["signal_status"],
                 }
 
-    async def get_active_signals_for_tracking(self) -> List[SignalData]:
+    async def get_active_signals_for_tracking(self) -> list[SignalData]:
         """Get all signals that need price tracking (ACTIVE or HIT status)."""
         query = """
             SELECT
@@ -199,7 +197,7 @@ class DatabaseManager(BaseConnectionManager):
             query, (LimitStatus.PENDING, SignalStatus.ACTIVE, SignalStatus.HIT)
         )
 
-        signals: Dict[int, dict] = {}
+        signals: dict[int, dict] = {}
         for row in rows:
             signal_id = row["signal_id"]
             if signal_id not in signals:
@@ -233,7 +231,7 @@ class DatabaseManager(BaseConnectionManager):
 
         return [SignalData.model_validate(s) for s in signals.values()]
 
-    async def get_hit_limits_for_signal(self, signal_id: int) -> List[LimitData]:
+    async def get_hit_limits_for_signal(self, signal_id: int) -> list[LimitData]:
         """Return all hit limits for a signal ordered by sequence_number."""
         query = """
             SELECT id AS limit_id,
@@ -250,8 +248,8 @@ class DatabaseManager(BaseConnectionManager):
         return [LimitData.model_validate({**dict(r), "status": "hit"}) for r in rows]
 
     async def get_performance_stats(
-        self, start_date: str = None, end_date: str = None, instrument: str = None
-    ) -> Dict[str, Any]:
+        self, start_date: Optional[str] = None, end_date: Optional[str] = None, instrument: Optional[str] = None
+    ) -> dict[str, Any]:
         """Get performance statistics for closed signals."""
         conditions = ["status IN ('profit', 'breakeven', 'stop_loss')"]
         params = []

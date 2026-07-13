@@ -10,9 +10,9 @@ from pathlib import Path
 import discord
 from discord.ext import commands
 
+from database import report_queries
 from price_feeds.tp_config import TPConfig
 from utils.formatting import format_price
-from database import report_queries
 from utils.logger import get_logger
 
 from .._base import BaseCog
@@ -53,7 +53,7 @@ class ReportsCog(BaseCog):
 
     @staticmethod
     def _hit_limits(signal):
-        return [l for l in signal.limits if l.status == "hit" or l.hit_alert_sent]
+        return [lim for lim in signal.limits if lim.status == "hit" or lim.hit_alert_sent]
 
     def _tp_distance_raw(self, signal):
         """
@@ -79,10 +79,10 @@ class ReportsCog(BaseCog):
         if tp_price is not None:
             return sum(
                 self.tp_config.calculate_pnl(
-                    instrument, direction, l.price_level, float(tp_price),
+                    instrument, direction, lim.price_level, float(tp_price),
                     signal_type=signal_type,
                 )
-                for l in hit
+                for lim in hit
             )
         # No recorded exit price: each limit's P&L measured to a fraction of the
         # configured auto-TP target distance from the last hit limit, since a
@@ -91,14 +91,14 @@ class ReportsCog(BaseCog):
             self.tp_config.get_tp_value(instrument, signal_type=signal_type)
             * MANUAL_PROFIT_TP_FRACTION
         )
-        last_hit = max(hit, key=lambda l: l.sequence_number).price_level
+        last_hit = max(hit, key=lambda lim: lim.sequence_number).price_level
         return sum(
             target
             + self.tp_config.calculate_pnl(
-                instrument, direction, l.price_level, last_hit,
+                instrument, direction, lim.price_level, last_hit,
                 signal_type=signal_type,
             )
-            for l in hit
+            for lim in hit
         )
 
     def _tp_distance_label(self, signal) -> str:
@@ -122,10 +122,10 @@ class ReportsCog(BaseCog):
             return None
         return sum(
             self.tp_config.calculate_pnl(
-                signal.instrument, signal.direction.lower(), l.price_level, float(sl),
+                signal.instrument, signal.direction.lower(), lim.price_level, float(sl),
                 signal_type=signal.type.lower(),
             )
-            for l in hit
+            for lim in hit
         )
 
     def _sl_distance_label(self, signal) -> str:

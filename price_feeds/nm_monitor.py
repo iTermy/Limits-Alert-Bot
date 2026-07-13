@@ -22,7 +22,7 @@ since those are the only ones the bot has an embed for.
 
 import asyncio
 from dataclasses import dataclass
-from typing import Dict, Optional
+from typing import Optional
 
 from utils.logger import get_logger
 
@@ -64,7 +64,7 @@ class NearMissMonitor:
         self.alert_system = alert_system
 
         # signal_id -> NMTrackingState
-        self._tracking: Dict[int, NMTrackingState] = {}
+        self._tracking: dict[int, NMTrackingState] = {}
 
         # Signals currently being processed (dedup guard against rapid ticks)
         self._processing: set = set()
@@ -108,7 +108,7 @@ class NearMissMonitor:
     # Core evaluation
     # ------------------------------------------------------------------
 
-    def update(self, signal: Dict, current_price: float) -> bool:
+    def update(self, signal: dict, current_price: float) -> bool:
         """
         Update NM tracking state for a signal on a price tick.
 
@@ -138,9 +138,9 @@ class NearMissMonitor:
         pending_limits = signal.pending_limits
         first_limit = next(
             (
-                l
-                for l in sorted(pending_limits, key=lambda x: x.get("sequence_number", 99))
-                if l.get("sequence_number") == 1
+                lim
+                for lim in sorted(pending_limits, key=lambda x: x.get("sequence_number", 99))
+                if lim.get("sequence_number") == 1
             ),
             None,
         )
@@ -217,7 +217,7 @@ class NearMissMonitor:
     # Trigger
     # ------------------------------------------------------------------
 
-    async def trigger_near_miss(self, signal: Dict) -> bool:
+    async def trigger_near_miss(self, signal: dict) -> bool:
         """
         Cancel a signal due to near-miss, update embed, send ping.
 

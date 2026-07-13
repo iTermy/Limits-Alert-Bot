@@ -15,7 +15,7 @@ Uses bid price for long P&L (what you could close at), ask for short.
 """
 
 import asyncio
-from typing import Dict, List
+from typing import Optional
 
 from models.signal import LimitData, SignalData
 from utils.logger import get_logger
@@ -46,7 +46,7 @@ class AutoTPMonitor:
         self.alert_system = alert_system
 
         # signal_id -> hit limits (with hit_price, ordered by sequence_number)
-        self._hit_limits_cache: Dict[int, List[LimitData]] = {}
+        self._hit_limits_cache: dict[int, list[LimitData]] = {}
 
     # ------------------------------------------------------------------
     # Cache management
@@ -155,11 +155,11 @@ class AutoTPMonitor:
     async def _trigger_auto_profit(
         self,
         signal: SignalData,
-        hit_limits: List[LimitData],
+        hit_limits: list[LimitData],
         last_pnl: float,
         limits_hit: int,
-        cumulative_pnl: float = None,
-        close_price: float = None,
+        cumulative_pnl: Optional[float] = None,
+        close_price: Optional[float] = None,
     ) -> bool:
         """
         Mark signal as profit, send alerts, and clean up.

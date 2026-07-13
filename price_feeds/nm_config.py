@@ -28,7 +28,7 @@ Supported types:
 
 import logging
 from datetime import datetime, timezone
-from typing import Dict, Literal
+from typing import ClassVar, Literal, Optional
 
 from ._base_config import BaseThresholdConfig
 
@@ -50,7 +50,7 @@ class NMConfig(BaseThresholdConfig):
 
     CONFIG_FILENAME = "nm_configuration.json"
 
-    ASSET_CLASS_TYPES: Dict[str, NMType] = {
+    ASSET_CLASS_TYPES: ClassVar[dict[str, NMType]] = {
         "forex": "pips",
         "forex_jpy": "pips",
         "metals": "dollars",
@@ -60,7 +60,7 @@ class NMConfig(BaseThresholdConfig):
         "oil": "dollars",
     }
 
-    PIP_SIZES: Dict[str, float] = {
+    PIP_SIZES: ClassVar[dict[str, float]] = {
         "forex": 0.0001,
         "forex_jpy": 0.01,
         "metals": 1.0,
@@ -70,13 +70,13 @@ class NMConfig(BaseThresholdConfig):
         "oil": 1.0,
     }
 
-    def __init__(self, config_path: str = None):
+    def __init__(self, config_path: Optional[str] = None):
         super().__init__(config_path)
         logger.info("NMConfig initialised (linear bounce model)")
 
     # === Config defaults & migration ===
 
-    def _post_load(self, raw: Dict) -> Dict:
+    def _post_load(self, raw: dict) -> dict:
         raw = self._migrate_if_needed(raw)
         if "type_overrides" not in raw:
             raw["type_overrides"] = self._default_type_overrides()
@@ -85,7 +85,7 @@ class NMConfig(BaseThresholdConfig):
         return raw
 
     @staticmethod
-    def _default_type_overrides() -> Dict:
+    def _default_type_overrides() -> dict:
         """Per-signal-type NM overrides. Risky gold tracks wider and needs less
         bounce than the standard metals default, so it near-misses more readily."""
         return {
@@ -99,14 +99,14 @@ class NMConfig(BaseThresholdConfig):
             }
         }
 
-    def _migrate_if_needed(self, config: Dict) -> Dict:
+    def _migrate_if_needed(self, config: dict) -> dict:
         """
         Migrate from old proximity_threshold/bounce_threshold format to
         max_proximity/base_bounce format.
         """
         migrated = False
         for section in ("defaults", "overrides"):
-            for key, entry in config.get(section, {}).items():
+            for _key, entry in config.get(section, {}).items():
                 if "proximity_threshold" in entry and "max_proximity" not in entry:
                     old_prox = entry.pop("proximity_threshold")
                     old_bounce = entry.pop("bounce_threshold", old_prox + 4.0)
@@ -118,7 +118,7 @@ class NMConfig(BaseThresholdConfig):
             self._save_config(config)
         return config
 
-    def _create_default_config(self) -> Dict:
+    def _create_default_config(self) -> dict:
         return {
             "defaults": {
                 "forex": {
@@ -170,7 +170,7 @@ class NMConfig(BaseThresholdConfig):
 
     # === Config entry lookup ===
 
-    def _get_config_entry(self, symbol: str, signal_type: str = None) -> Dict:
+    def _get_config_entry(self, symbol: str, signal_type: Optional[str] = None) -> dict:
         """Resolve the NM entry for a symbol, optionally scoped to a signal type.
 
         A signal type's own config takes precedence over generic overrides, so a
@@ -217,7 +217,7 @@ class NMConfig(BaseThresholdConfig):
             return value * pip_size
         return value
 
-    def get_max_proximity(self, symbol: str, signal_type: str = None) -> float:
+    def get_max_proximity(self, symbol: str, signal_type: Optional[str] = None) -> float:
         """
         Return max_proximity in absolute price units.
         Tracking only begins when price is closer than this to the first limit.
@@ -226,7 +226,7 @@ class NMConfig(BaseThresholdConfig):
         return self._to_price_units(symbol, entry.get("max_proximity", 7.0))
 
     def get_required_bounce(
-        self, symbol: str, closest_distance_price_units: float, signal_type: str = None
+        self, symbol: str, closest_distance_price_units: float, signal_type: Optional[str] = None
     ) -> float:
         """
         Return the required bounce (absolute price units) given the closest approach.
@@ -237,7 +237,7 @@ class NMConfig(BaseThresholdConfig):
         base_bounce_price = self._to_price_units(symbol, entry.get("base_bounce", 4.0))
         return closest_distance_price_units + base_bounce_price
 
-    def get_params_display(self, symbol: str, signal_type: str = None) -> Dict:
+    def get_params_display(self, symbol: str, signal_type: Optional[str] = None) -> dict:
         """Return params in stored units (pips or dollars), for display."""
         entry = self._get_config_entry(symbol, signal_type)
         return {
@@ -257,7 +257,7 @@ class NMConfig(BaseThresholdConfig):
             return f"{pips:.1f} pips"
         return f"${value_price_units:.2f}"
 
-    def describe_curve(self, symbol: str, steps: int = 5, signal_type: str = None) -> str:
+    def describe_curve(self, symbol: str, steps: int = 5, signal_type: Optional[str] = None) -> str:
         """
         Return a human-readable table of the linear NM curve for a symbol.
         Used in !nmconfig show output.
@@ -285,7 +285,7 @@ class NMConfig(BaseThresholdConfig):
         symbol: str,
         max_proximity: float,
         base_bounce: float,
-        nm_type: str = None,
+        nm_type: Optional[str] = None,
         set_by: str = "system",
     ) -> bool:
         symbol = symbol.upper()
@@ -310,7 +310,7 @@ class NMConfig(BaseThresholdConfig):
         asset_class: str,
         max_proximity: float,
         base_bounce: float,
-        nm_type: str = None,
+        nm_type: Optional[str] = None,
         set_by: str = "system",
     ) -> bool:
         if nm_type is None:
@@ -336,10 +336,10 @@ class NMConfig(BaseThresholdConfig):
             return True
         return False
 
-    def get_all_defaults(self) -> Dict:
+    def get_all_defaults(self) -> dict:
         return self.config.get("defaults", {})
 
-    def get_all_overrides(self) -> Dict:
+    def get_all_overrides(self) -> dict:
         return self.config.get("overrides", {})
 
     # === Per-signal-type override management ===
@@ -354,7 +354,7 @@ class NMConfig(BaseThresholdConfig):
         target: str,
         max_proximity: float,
         base_bounce: float,
-        nm_type: str = None,
+        nm_type: Optional[str] = None,
         set_by: str = "system",
     ) -> bool:
         """Set an NM override scoped to a signal type (e.g. risky), keyed by
@@ -388,5 +388,5 @@ class NMConfig(BaseThresholdConfig):
             return True
         return False
 
-    def get_type_overrides(self, signal_type: str) -> Dict:
+    def get_type_overrides(self, signal_type: str) -> dict:
         return self.config.get("type_overrides", {}).get(signal_type, {})

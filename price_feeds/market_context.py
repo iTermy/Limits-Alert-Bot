@@ -16,7 +16,7 @@ MFE/MAE still works for it, only the bar-derived context is skipped.
 
 import asyncio
 from datetime import datetime, timezone
-from typing import Dict, List, Optional
+from typing import Optional
 
 from utils.logger import get_logger
 
@@ -57,7 +57,7 @@ class MarketContextProvider:
             return None
         return self._mapper.get_feed_symbol(internal_symbol, "icmarkets")
 
-    async def _copy_rates(self, ic_symbol: str, timeframe, count: int) -> Optional[List[Dict]]:
+    async def _copy_rates(self, ic_symbol: str, timeframe, count: int) -> Optional[list[dict]]:
         """Fetch `count` recent bars as plain dicts, or None on failure."""
         loop = asyncio.get_event_loop()
         try:
@@ -82,7 +82,7 @@ class MarketContextProvider:
 
     async def snapshot(
         self, internal_symbol: str, direction: str, spread: Optional[float] = None
-    ) -> Optional[Dict]:
+    ) -> Optional[dict]:
         """Context features at limit-hit. Returns None if no bars are available."""
         ic_symbol = self._ic_symbol(internal_symbol)
         if ic_symbol is None:
@@ -128,7 +128,7 @@ class MarketContextProvider:
             "session": self.current_session(),
         }
 
-    async def sample_volume(self, internal_symbol: str) -> Optional[Dict]:
+    async def sample_volume(self, internal_symbol: str) -> Optional[dict]:
         """Latest closed M1 bar price/volume + short M1 ATR, for the time series."""
         ic_symbol = self._ic_symbol(internal_symbol)
         if ic_symbol is None:
@@ -144,7 +144,7 @@ class MarketContextProvider:
             "atr": self._atr(closed, _ATR_PERIOD),
         }
 
-    async def last_closed_m1(self, internal_symbol: str) -> Optional[Dict]:
+    async def last_closed_m1(self, internal_symbol: str) -> Optional[dict]:
         """High/low/close of the last closed M1 bar; None when bars are unavailable."""
         ic_symbol = self._ic_symbol(internal_symbol)
         if ic_symbol is None:
@@ -168,21 +168,18 @@ class MarketContextProvider:
             return None, None
 
         last_close = closes[-1]
-        if last_close > ema_now and ema_now > ema_prev:
+        if last_close > ema_now > ema_prev:
             trend = 1
-        elif last_close < ema_now and ema_now < ema_prev:
+        elif last_close < ema_now < ema_prev:
             trend = -1
         else:
             trend = 0
 
-        if direction.lower() == "long":
-            aligned = trend > 0
-        else:
-            aligned = trend < 0
+        aligned = trend > 0 if direction.lower() == "long" else trend < 0
         return trend, aligned
 
     @staticmethod
-    def _wick_rejection(bar: Dict, direction: str) -> Optional[float]:
+    def _wick_rejection(bar: dict, direction: str) -> Optional[float]:
         """Rejection-wick ratio of a candle, on the side the signal expects a bounce.
 
         Long bounces off support reject lower (long lower wick); shorts off
@@ -193,14 +190,11 @@ class MarketContextProvider:
             return None
         body_top = max(bar["open"], bar["close"])
         body_bottom = min(bar["open"], bar["close"])
-        if direction.lower() == "long":
-            wick = body_bottom - bar["low"]
-        else:
-            wick = bar["high"] - body_top
+        wick = body_bottom - bar["low"] if direction.lower() == "long" else bar["high"] - body_top
         return wick / rng
 
     @staticmethod
-    def _atr(bars: List[Dict], period: int) -> Optional[float]:
+    def _atr(bars: list[dict], period: int) -> Optional[float]:
         if len(bars) < period + 1:
             return None
         trs = []
@@ -212,7 +206,7 @@ class MarketContextProvider:
         return sum(trs[-period:]) / period
 
     @staticmethod
-    def _rsi(closes: List[float], period: int) -> Optional[float]:
+    def _rsi(closes: list[float], period: int) -> Optional[float]:
         if len(closes) < period + 1:
             return None
         gains = 0.0
@@ -231,7 +225,7 @@ class MarketContextProvider:
         return 100.0 - (100.0 / (1.0 + rs))
 
     @staticmethod
-    def _ema(values: List[float], period: int) -> Optional[float]:
+    def _ema(values: list[float], period: int) -> Optional[float]:
         if len(values) < period:
             return None
         k = 2.0 / (period + 1)

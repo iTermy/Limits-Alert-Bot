@@ -18,7 +18,6 @@ window.
 
 import asyncio
 from datetime import datetime, timedelta, timezone
-from typing import Set
 
 import discord
 from discord.ext import tasks
@@ -168,7 +167,7 @@ class ChannelCleaner:
         self,
         channel: discord.TextChannel,
         cutoff: datetime,
-        preserve_ids: Set[str],
+        preserve_ids: set[str],
     ):
         """Bulk-delete messages newer than *cutoff* in *channel*, skipping
         messages whose ID is in *preserve_ids* (e.g. active/hit signal posts)."""

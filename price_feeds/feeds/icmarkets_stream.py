@@ -4,12 +4,13 @@ Uses continuous tick polling with asyncio for real-time price updates
 """
 
 import asyncio
+import contextlib
 import logging
 import os
 from collections.abc import AsyncIterator
 from concurrent.futures import ThreadPoolExecutor
 from datetime import datetime, timezone
-from typing import Callable, Dict, Optional, Set, Tuple
+from typing import Callable, Optional
 
 import MetaTrader5 as mt5
 
@@ -36,15 +37,15 @@ class ICMarketsStream:
     def __init__(self):
         """Initialize MT5 stream"""
         self.connected = False
-        self.subscribed_symbols: Set[str] = set()
+        self.subscribed_symbols: set[str] = set()
 
         # Resolved MT5 name per requested stock "-24" symbol. Some stocks have
         # no 24-hour variant on this broker, so we fall back to the bare symbol
         # and cache the result to avoid re-probing on every subscribe.
-        self._stock_symbol_cache: Dict[str, str] = {}
+        self._stock_symbol_cache: dict[str, str] = {}
 
         # Price cache to detect changes
-        self.last_prices: Dict[str, Dict] = {}
+        self.last_prices: dict[str, dict] = {}
 
         # Stream control
         self.streaming = False
@@ -109,10 +110,8 @@ class ICMarketsStream:
 
         if self.stream_task:
             self.stream_task.cancel()
-            try:
+            with contextlib.suppress(asyncio.CancelledError):
                 await self.stream_task
-            except asyncio.CancelledError:
-                pass
 
         if self.connected:
             await self._run_mt5(mt5.shutdown)
@@ -201,7 +200,7 @@ class ICMarketsStream:
             except Exception as e:
                 logger.error(f"Failed to subscribe to {symbol}: {e}")
 
-    async def stream_prices(self) -> AsyncIterator[Tuple[str, Dict]]:
+    async def stream_prices(self) -> AsyncIterator[tuple[str, dict]]:
         """
         Stream price updates for all subscribed symbols
 
@@ -274,6 +273,6 @@ class ICMarketsStream:
                 logger.error(f"Error in MT5 stream: {e}")
                 await asyncio.sleep(1)
 
-    def get_subscribed_symbols(self) -> Set[str]:
+    def get_subscribed_symbols(self) -> set[str]:
         """Get set of currently subscribed symbols"""
         return self.subscribed_symbols.copy()

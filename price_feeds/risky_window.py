@@ -17,11 +17,11 @@ This module owns two things:
 from __future__ import annotations
 
 import asyncio
+import contextlib
 import json
 from datetime import datetime, timezone
 from datetime import time as dtime
 from pathlib import Path
-from typing import List, Optional, Tuple
 
 import discord
 
@@ -35,7 +35,7 @@ _STATE_PATH = Path(__file__).resolve().parent.parent / "data" / "risky_window_st
 
 # Daily windows (UTC) during which risky-gold trading is disabled. None of these
 # cross midnight, so a simple ``start <= now < end`` check per window suffices.
-RISKY_DISABLED_WINDOWS: List[Tuple[dtime, dtime]] = [
+RISKY_DISABLED_WINDOWS: list[tuple[dtime, dtime]] = [
     (dtime(22, 0), dtime(23, 10)),
     (dtime(1, 0), dtime(2, 0)),
     (dtime(12, 0), dtime(14, 0)),
@@ -48,14 +48,14 @@ _CHECK_INTERVAL_SECONDS = 20
 _ENDED_DELETE_AFTER_SECONDS = 300
 
 
-def is_risky_trading_disabled(now: Optional[datetime] = None) -> bool:
+def is_risky_trading_disabled(now: datetime | None = None) -> bool:
     """True when the current UTC time falls inside a risky-disabled window."""
     now = now or datetime.now(timezone.utc)
     t = now.time()
     return any(start <= t < end for start, end in RISKY_DISABLED_WINDOWS)
 
 
-def current_window_end(now: Optional[datetime] = None) -> Optional[datetime]:
+def current_window_end(now: datetime | None = None) -> datetime | None:
     """UTC datetime the active window ends, or None if not currently disabled."""
     now = now or datetime.now(timezone.utc)
     t = now.time()
@@ -74,7 +74,7 @@ def _windows_label() -> str:
     )
 
 
-def _save_state(message_id: int, channel_id: int, window_end: Optional[datetime]) -> None:
+def _save_state(message_id: int, channel_id: int, window_end: datetime | None) -> None:
     """Persist the posted disabled-embed reference so a restart can reattach."""
     data = {
         "message_id": message_id,
@@ -88,7 +88,7 @@ def _save_state(message_id: int, channel_id: int, window_end: Optional[datetime]
         logger.error(f"Failed to save risky-window state: {e}")
 
 
-def _load_state() -> Optional[dict]:
+def _load_state() -> dict | None:
     """Read the persisted disabled-embed reference, or None if absent/unreadable."""
     if not _STATE_PATH.exists():
         return None
@@ -113,9 +113,9 @@ class RiskyWindowAnnouncer:
     def __init__(self, bot, channel: discord.abc.Messageable):
         self.bot = bot
         self.channel = channel
-        self._active: Optional[bool] = None  # None until first evaluation
-        self._message: Optional[discord.Message] = None
-        self._task: Optional[asyncio.Task] = None
+        self._active: bool | None = None  # None until first evaluation
+        self._message: discord.Message | None = None
+        self._task: asyncio.Task | None = None
 
     def start(self) -> None:
         if self.channel is None:
@@ -167,10 +167,8 @@ class RiskyWindowAnnouncer:
             return
 
         # Stale embed from an ended (or different) window — remove it and reset.
-        try:
+        with contextlib.suppress(Exception):
             await msg.delete()
-        except Exception:
-            pass
         _clear_state()
 
     async def _evaluate(self) -> None:
@@ -233,9 +231,7 @@ class RiskyWindowAnnouncer:
 
         async def _delete_later():
             await asyncio.sleep(_ENDED_DELETE_AFTER_SECONDS)
-            try:
+            with contextlib.suppress(Exception):
                 await msg.delete()
-            except Exception:
-                pass
 
         asyncio.ensure_future(_delete_later())

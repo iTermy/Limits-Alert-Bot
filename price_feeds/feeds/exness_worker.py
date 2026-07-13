@@ -32,8 +32,8 @@ def _read_commands(subscribed: set, lock: threading.Lock, shutdown_event: thread
     linger as an orphan; a relaunched parent spawns a fresh worker, and two
     workers cannot share the same Exness terminal.
     """
-    for line in sys.stdin:
-        line = line.strip()
+    for raw_line in sys.stdin:
+        line = raw_line.strip()
         if not line:
             continue
         try:

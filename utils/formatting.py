@@ -1,7 +1,9 @@
+from typing import Optional
+
 from models.enums import SignalStatus
 
 
-def format_price(price: float, symbol: str = None) -> str:
+def format_price(price: float, symbol: Optional[str] = None) -> str:
     """Format price with appropriate decimal places based on magnitude"""
     if price is None:
         return "N/A"

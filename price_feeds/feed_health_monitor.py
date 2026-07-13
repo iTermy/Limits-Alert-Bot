@@ -4,6 +4,7 @@ Monitors all feeds (ICMarkets, OANDA, Binance) for stale data and connection iss
 """
 
 import asyncio
+import contextlib
 import faulthandler
 import logging
 import os
@@ -14,7 +15,7 @@ import time
 from collections import defaultdict
 from datetime import datetime, timedelta
 from datetime import time as dtime
-from typing import Dict
+from typing import Optional
 
 import pytz
 
@@ -125,8 +126,8 @@ class FeedHealthMonitor:
         self,
         stream_manager,
         bot,
-        admin_user_id: int = None,
-        us_market_holidays: list = None,
+        admin_user_id: Optional[int] = None,
+        us_market_holidays: Optional[list] = None,
         db=None,
     ):
         self.stream_manager = stream_manager
@@ -146,11 +147,11 @@ class FeedHealthMonitor:
 
         # feed -> (last written status, monotonic write time); gates DB writes
         # so unchanged statuses aren't re-upserted every check cycle.
-        self._last_health_written: Dict[str, tuple] = {}
+        self._last_health_written: dict[str, tuple] = {}
 
         # Reconnects run off the monitoring loop as tasks, keyed by feed, so a
         # slow or wedged reconnect can never block health checks or the watchdog.
-        self._reconnect_tasks: Dict[str, asyncio.Task] = {}
+        self._reconnect_tasks: dict[str, asyncio.Task] = {}
 
         # Loop-liveness watchdog state (see module constants).
         self._loop_heartbeat = time.monotonic()
@@ -159,18 +160,18 @@ class FeedHealthMonitor:
         self._loop_watchdog_stop = threading.Event()
 
         # Track last update times: feed -> symbol -> timestamp
-        self.last_seen: Dict[str, Dict[str, datetime]] = defaultdict(dict)
+        self.last_seen: dict[str, dict[str, datetime]] = defaultdict(dict)
 
         # Track feed status
-        self.feed_status: Dict[str, str] = {}  # 'healthy', 'down', 'idle'
-        self.last_alert_time: Dict[str, datetime] = {}
-        self.reconnect_attempts: Dict[str, int] = defaultdict(int)
+        self.feed_status: dict[str, str] = {}  # 'healthy', 'down', 'idle'
+        self.last_alert_time: dict[str, datetime] = {}
+        self.reconnect_attempts: dict[str, int] = defaultdict(int)
         # Earliest stale-symbol last_update timestamp captured when the feed first
         # crossed the down threshold. Used to report accurate downtime on recovery.
-        self.first_stale_time: Dict[str, datetime] = {}
+        self.first_stale_time: dict[str, datetime] = {}
 
         # Track alert history to prevent spam
-        self.alert_history: Dict[str, datetime] = {}
+        self.alert_history: dict[str, datetime] = {}
 
         # Statistics
         self.stats = {
@@ -265,10 +266,8 @@ class FeedHealthMonitor:
         for task in [self.monitor_task, self._heartbeat_task, *self._reconnect_tasks.values()]:
             if task:
                 task.cancel()
-                try:
+                with contextlib.suppress(asyncio.CancelledError):
                     await task
-                except asyncio.CancelledError:
-                    pass
         self._reconnect_tasks.clear()
 
         logger.info("Feed health monitoring stopped")
@@ -671,7 +670,7 @@ class FeedHealthMonitor:
         except Exception as e:
             logger.error(f"Failed to send custom alert: {e}")
 
-    def is_market_open(self, asset_class: str, at: datetime = None) -> bool:
+    def is_market_open(self, asset_class: str, at: Optional[datetime] = None) -> bool:
         """Return True if the market is expected to be open at `at` (default: now).
 
         Used both to avoid false stale alerts and to enforce a post-reopen
@@ -705,9 +704,11 @@ class FeedHealthMonitor:
         # and indices. Liquidity drops and price ticks slow or stop — treating it
         # as "open" would generate false-positive stale-feed alerts. Mirror the
         # weekend skip above and treat it as closed.
-        if asset_class in ("forex", "metals", "indices", "oil"):
-            if _SPREAD_START <= now.time() < _SPREAD_END:
-                return False
+        if (
+            asset_class in ("forex", "metals", "indices", "oil")
+            and _SPREAD_START <= now.time() < _SPREAD_END
+        ):
+            return False
 
         open_time = datetime.strptime(market_config["open_time"], "%H:%M").time()
         close_time = datetime.strptime(market_config["close_time"], "%H:%M").time()
@@ -771,7 +772,7 @@ class FeedHealthMonitor:
         except Exception as e:
             logger.error("Failed to write feed_health for %s: %s", feed_name, e)
 
-    def get_health_stats(self) -> Dict:
+    def get_health_stats(self) -> dict:
         """
         Get health monitoring statistics
 

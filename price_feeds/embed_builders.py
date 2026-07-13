@@ -5,7 +5,7 @@ Pure functions that construct Discord embeds for signal alerts and archives.
 """
 
 from datetime import datetime, timezone
-from typing import Dict, List, Optional
+from typing import Optional
 
 import discord
 
@@ -42,7 +42,7 @@ def _fmt(price: float) -> str:
 
 def _build_signal_embed(
     signal: SignalData,
-    limits: List[LimitData],
+    limits: list[LimitData],
     current_price: Optional[float] = None,
     distance_formatted: Optional[str] = None,
     spread: Optional[float] = None,
@@ -52,7 +52,7 @@ def _build_signal_embed(
     bot=None,
     hit_limit_ids: Optional[set] = None,
     force_hit_up_to_seq: int = 0,
-    limit_pnl_map: Optional[Dict] = None,
+    limit_pnl_map: Optional[dict] = None,
     delete_after_minutes: Optional[int] = None,
 ) -> discord.Embed:
     """
@@ -81,7 +81,7 @@ def _build_signal_embed(
             return True
         return bool(lim.hit_alert_sent or lim.status == "hit")
 
-    hit_count = sum(1 for l in limits if _is_hit(l))
+    hit_count = sum(1 for lim in limits if _is_hit(lim))
 
     status_map = {
         "approaching": (0xFFA500, "🟡 Approaching"),
@@ -111,7 +111,7 @@ def _build_signal_embed(
     direction = (signal.direction or "long").lower()
     signal_type = signal.type
 
-    sorted_limits = sorted(limits, key=lambda l: l.sequence_number)
+    sorted_limits = sorted(limits, key=lambda lim: lim.sequence_number)
     limit_lines = []
     for lim in sorted_limits:
         seq = lim.sequence_number
@@ -267,8 +267,8 @@ def _build_profit_archive_embed(
     # close recorded at profit time.
     tp_price = sig_data.manual_tp_price if sig_data.manual_tp_price is not None else sig_data.tp_price
 
-    all_limits = sorted(sig_data.limits, key=lambda l: l.sequence_number)
-    hit_limits = [l for l in all_limits if l.status == "hit" or l.hit_alert_sent]
+    all_limits = sorted(sig_data.limits, key=lambda lim: lim.sequence_number)
+    hit_limits = [lim for lim in all_limits if lim.status == "hit" or lim.hit_alert_sent]
     total = len(all_limits) or len(hit_limits)
     num_hit = len(hit_limits)
 
@@ -289,13 +289,13 @@ def _build_profit_archive_embed(
         signal_type = sig_data.type.lower()
         close_price = float(tp_price) if tp_price is not None else None
         lines = []
-        for l in hit_limits:
-            seq = l.sequence_number
-            price = _fmt(l.price_level)
-            if close_price is not None and l.price_level and _tp_config is not None:
+        for lim in hit_limits:
+            seq = lim.sequence_number
+            price = _fmt(lim.price_level)
+            if close_price is not None and lim.price_level and _tp_config is not None:
                 try:
                     pnl_val = _tp_config.calculate_pnl(
-                        instrument, dir_lc, l.price_level, close_price, signal_type=signal_type
+                        instrument, dir_lc, lim.price_level, close_price, signal_type=signal_type
                     )
                     pnl_str = _tp_config.format_value(instrument, abs(pnl_val))
                     sign = "+" if pnl_val >= 0 else "-"

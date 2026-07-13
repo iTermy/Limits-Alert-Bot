@@ -9,9 +9,10 @@ at the same timestamp, so no separate ICMarkets reference price is persisted.
 """
 
 import asyncio
+import contextlib
 import logging
 from datetime import datetime, timezone
-from typing import Dict, Optional
+from typing import Optional
 
 logger = logging.getLogger(__name__)
 
@@ -45,13 +46,13 @@ class LivePriceWriter:
 
         # Latest price snapshot per symbol {bid, ask, feed, updated_at}.
         # Not cleared on flush — kept so quiet symbols can still heartbeat.
-        self._latest: Dict[str, Dict] = {}
+        self._latest: dict[str, dict] = {}
         self._latest_lock = asyncio.Lock()
 
         # Last successfully written (bid, ask) and monotonic write time per
         # symbol — used to skip upserts for unchanged prices between heartbeats.
-        self._last_written: Dict[str, tuple] = {}
-        self._last_written_at: Dict[str, float] = {}
+        self._last_written: dict[str, tuple] = {}
+        self._last_written_at: dict[str, float] = {}
 
         self._task: Optional[asyncio.Task] = None
         self._running = False
@@ -80,10 +81,8 @@ class LivePriceWriter:
         self._stream.remove_subscriber(self._on_price_update)
         if self._task:
             self._task.cancel()
-            try:
+            with contextlib.suppress(asyncio.CancelledError):
                 await self._task
-            except asyncio.CancelledError:
-                pass
         # Final flush so we don't lose the last few ticks
         await self._flush_to_db()
         logger.info("LivePriceWriter stopped")
@@ -92,7 +91,7 @@ class LivePriceWriter:
     # Internal
     # ------------------------------------------------------------------
 
-    async def _on_price_update(self, symbol: str, price_data: Dict):
+    async def _on_price_update(self, symbol: str, price_data: dict):
         """
         Callback registered with PriceStreamManager.
         Called on every tick for every subscribed symbol.

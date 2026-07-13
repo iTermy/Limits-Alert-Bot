@@ -8,7 +8,7 @@ asset-class detection with fallback, pip-size lookup, and reload.
 import json
 import logging
 from pathlib import Path
-from typing import Dict
+from typing import Optional
 
 logger = logging.getLogger(__name__)
 
@@ -19,7 +19,7 @@ class BaseThresholdConfig:
     _shared_mapper = None
     CONFIG_FILENAME: str = ""
 
-    def __init__(self, config_path: str = None):
+    def __init__(self, config_path: Optional[str] = None):
         if config_path is not None:
             self.config_path = Path(config_path)
         else:
@@ -28,7 +28,7 @@ class BaseThresholdConfig:
             )
 
         self.mapper = self._get_shared_mapper()
-        self.config: Dict = self._load_config()
+        self.config: dict = self._load_config()
         self._validate_config()
 
     # === Shared SymbolMapper ===
@@ -49,7 +49,7 @@ class BaseThresholdConfig:
 
     # === Config I/O ===
 
-    def _load_config(self) -> Dict:
+    def _load_config(self) -> dict:
         try:
             with open(self.config_path, encoding="utf-8") as f:
                 raw = json.load(f)
@@ -63,11 +63,11 @@ class BaseThresholdConfig:
             logger.error(f"Invalid JSON in {self.config_path}: {e}. Using defaults.")
             return self._create_default_config()
 
-    def _post_load(self, raw: Dict) -> Dict:
+    def _post_load(self, raw: dict) -> dict:
         """Hook for subclass migration logic. Default: return as-is."""
         return raw
 
-    def _create_default_config(self) -> Dict:
+    def _create_default_config(self) -> dict:
         raise NotImplementedError
 
     def _validate_config(self):
@@ -78,7 +78,7 @@ class BaseThresholdConfig:
                 self.config = self._create_default_config()
                 return
 
-    def _save_config(self, config: Dict = None):
+    def _save_config(self, config: Optional[dict] = None):
         if config is None:
             config = self.config
         try:

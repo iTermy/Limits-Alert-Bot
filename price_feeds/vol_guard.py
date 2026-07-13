@@ -26,13 +26,13 @@ Reference counting, per key:
 from __future__ import annotations
 
 import asyncio
+import contextlib
 import json
 from collections import deque
 from datetime import datetime, timezone
 from datetime import time as dtime
 from pathlib import Path
 from time import monotonic
-from typing import Deque, Dict, Optional, Set, Tuple
 
 import discord
 import pytz
@@ -50,7 +50,7 @@ _MAX_TICK_AGE_SECONDS = 5
 
 # Pip size per asset class — forex/forex_jpy thresholds are expressed in pips,
 # everything else in dollars (pip size 1.0).
-_PIP_SIZES: Dict[str, float] = {
+_PIP_SIZES: dict[str, float] = {
     "forex": 0.0001,
     "forex_jpy": 0.01,
     "metals": 1.0,
@@ -70,7 +70,7 @@ _ENDED_DELETE_AFTER_SECONDS = 300
 _CONFIG_PATH = Path(__file__).resolve().parent.parent / "config" / "vol_guard.json"
 
 
-def _load_config() -> Dict:
+def _load_config() -> dict:
     """Load vol_guard.json, falling back to safe defaults if absent/malformed."""
     defaults = {
         "enabled": True,
@@ -105,23 +105,23 @@ class VolatilityGuard:
         self.enabled: bool = bool(config.get("enabled", True))
         self.lookback_seconds: float = float(config.get("lookback_seconds", 180))
         self.guard_seconds: float = float(config.get("guard_minutes", 15)) * 60.0
-        self.thresholds: Dict[str, float] = config.get("thresholds", {})
+        self.thresholds: dict[str, float] = config.get("thresholds", {})
 
         # symbol -> rolling (monotonic_ts, mid_price) samples within the lookback
-        self._samples: Dict[str, Deque[Tuple[float, float]]] = {}
+        self._samples: dict[str, deque[tuple[float, float]]] = {}
         # symbol -> monotonic expiry of its current guard window (present == guarded)
-        self._symbol_guards: Dict[str, float] = {}
+        self._symbol_guards: dict[str, float] = {}
         # key (currency or "ALL") -> set of guarded symbols contributing to it
-        self._key_members: Dict[str, Set[str]] = {}
+        self._key_members: dict[str, set[str]] = {}
         # key -> the activation embed message, for editing to "ended"
-        self._key_messages: Dict[str, discord.Message] = {}
+        self._key_messages: dict[str, discord.Message] = {}
 
-        self._eval_task: Optional[asyncio.Task] = None
+        self._eval_task: asyncio.Task | None = None
 
         # Last value written to bot_mode_status.vol_guard. None before the first
         # write; the first reconcile always writes so a stale value left by a crash
         # is corrected.
-        self._last_vol_guard_mode: Optional[str] = None
+        self._last_vol_guard_mode: str | None = None
         self._vol_guard_synced: bool = False
 
         # Cache for the spread-hour check so the per-tick path doesn't build a
@@ -153,7 +153,7 @@ class VolatilityGuard:
     # Hot path — sampling only
     # ------------------------------------------------------------------
 
-    async def on_price_update(self, symbol: str, price_data: Dict) -> None:
+    async def on_price_update(self, symbol: str, price_data: dict) -> None:
         """Record a mid-price sample. Keep this cheap — logic runs in the loop."""
         bid = price_data.get("bid")
         ask = price_data.get("ask")
@@ -186,7 +186,7 @@ class VolatilityGuard:
         samples.append((now, mid))
         self._prune(samples, now)
 
-    def _prune(self, samples: Deque[Tuple[float, float]], now: float) -> None:
+    def _prune(self, samples: deque[tuple[float, float]], now: float) -> None:
         cutoff = now - self.lookback_seconds
         while samples and samples[0][0] < cutoff:
             samples.popleft()
@@ -202,10 +202,7 @@ class VolatilityGuard:
             return self._spread_hour_cached
 
         now_est = datetime.now(_EST_TZ)
-        if now_est.weekday() >= 5:
-            result = False
-        else:
-            result = dtime(17, 0) <= now_est.time() < dtime(18, 0)
+        result = False if now_est.weekday() >= 5 else dtime(17, 0) <= now_est.time() < dtime(18, 0)
 
         cache_seconds = 5.0
         for hh in (17, 18):
@@ -256,7 +253,7 @@ class VolatilityGuard:
         await self._reconcile_vol_guard_mode()
 
     @staticmethod
-    def _is_volatile(samples: Deque[Tuple[float, float]], threshold: float) -> bool:
+    def _is_volatile(samples: deque[tuple[float, float]], threshold: float) -> bool:
         if len(samples) < 2:
             return False
         prices = [p for _, p in samples]
@@ -288,7 +285,7 @@ class VolatilityGuard:
     # DB state — mirror active keys to bot_mode_status.vol_guard
     # ------------------------------------------------------------------
 
-    def _compute_vol_guard_value(self) -> Optional[str]:
+    def _compute_vol_guard_value(self) -> str | None:
         """Comma-separated active keys (currencies and/or 'ALL'), or None if calm."""
         keys = [k for k, members in self._key_members.items() if members]
         if not keys:
@@ -317,7 +314,7 @@ class VolatilityGuard:
     # Threshold + key mapping
     # ------------------------------------------------------------------
 
-    def _threshold_price_units(self, symbol: str) -> Optional[float]:
+    def _threshold_price_units(self, symbol: str) -> float | None:
         """Threshold in absolute price units, or None if the asset class is unmonitored."""
         asset_class = self.symbol_mapper.determine_asset_class(symbol)
         configured = self.thresholds.get(asset_class)
@@ -326,7 +323,7 @@ class VolatilityGuard:
         pip_size = _PIP_SIZES.get(asset_class, 1.0)
         return float(configured) * pip_size
 
-    def _keys_for(self, symbol: str) -> Set[str]:
+    def _keys_for(self, symbol: str) -> set[str]:
         """Guard keys a volatile symbol contributes to.
 
         Gold (metals) flags the whole board as "ALL"; a forex pair flags both of
@@ -390,9 +387,7 @@ class VolatilityGuard:
 
         async def _delete_later():
             await asyncio.sleep(_ENDED_DELETE_AFTER_SECONDS)
-            try:
+            with contextlib.suppress(Exception):
                 await msg.delete()
-            except Exception:
-                pass
 
         asyncio.ensure_future(_delete_later())

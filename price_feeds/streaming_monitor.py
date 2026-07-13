@@ -1,10 +1,11 @@
 """Streaming price monitor: event-driven signal evaluation from live price feeds."""
 
 import asyncio
+import contextlib
 from datetime import datetime, timezone
 from datetime import time as dtime
 from time import monotonic
-from typing import Dict, List, Optional
+from typing import Optional
 
 import discord
 import pytz
@@ -32,7 +33,7 @@ _SPREAD_HOUR_CACHE_SECONDS = 5
 _EST_TZ = pytz.timezone("America/New_York")
 
 
-async def react_to_original_signal(bot, signal: Dict, emoji: str):
+async def react_to_original_signal(bot, signal: dict, emoji: str):
     """
     Add a reaction to the original signal message.
 
@@ -131,8 +132,8 @@ class StreamingPriceMonitor:
 
         # Monitoring state
         self.running = False
-        self.active_signals: Dict[int, Dict] = {}  # signal_id -> signal_data
-        self.symbol_to_signals: Dict[str, List[int]] = {}  # symbol -> [signal_ids]
+        self.active_signals: dict[int, dict] = {}  # signal_id -> signal_data
+        self.symbol_to_signals: dict[str, list[int]] = {}  # symbol -> [signal_ids]
 
         # Strong refs to fire-and-forget reaction tasks so they aren't GC'd
         # mid-flight; discarded on completion.
@@ -176,7 +177,7 @@ class StreamingPriceMonitor:
             logger.error(f"Failed to initialize monitor: {e}")
             raise
 
-    def _react_async(self, signal: Dict, emoji: str) -> None:
+    def _react_async(self, signal: dict, emoji: str) -> None:
         """Add an emoji reaction to the original signal off the tick hot path.
 
         Reactions are cosmetic and order-independent, so fetching the message
@@ -201,10 +202,7 @@ class StreamingPriceMonitor:
             return self._spread_hour_cached
 
         now_est = datetime.now(_EST_TZ)
-        if now_est.weekday() >= 5:
-            result = False
-        else:
-            result = dtime(17, 0) <= now_est.time() < dtime(18, 0)
+        result = False if now_est.weekday() >= 5 else dtime(17, 0) <= now_est.time() < dtime(18, 0)
 
         # Clamp the cache so it never serves a stale value across the 17:00 /
         # 18:00 ET boundaries. Spreads widen exactly at 17:00; a flat 5 s cache
@@ -236,10 +234,7 @@ class StreamingPriceMonitor:
             return self._late_market_cached
 
         now_est = datetime.now(_EST_TZ)
-        if now_est.weekday() >= 5:
-            result = False
-        else:
-            result = dtime(16, 0) <= now_est.time() < dtime(17, 0)
+        result = False if now_est.weekday() >= 5 else dtime(16, 0) <= now_est.time() < dtime(17, 0)
 
         cache_seconds = _SPREAD_HOUR_CACHE_SECONDS
         for hh in (16, 17):
@@ -251,11 +246,11 @@ class StreamingPriceMonitor:
         self._late_market_cache_expires = now_mono + cache_seconds
         return result
 
-    def _is_crypto_signal(self, signal: Dict) -> bool:
+    def _is_crypto_signal(self, signal: dict) -> bool:
         """Crypto signals run 24/7 and are exempt from spread-hour cancellation."""
         return signal.asset_class == "crypto"
 
-    def _annotate_asset_class(self, signal: Dict) -> None:
+    def _annotate_asset_class(self, signal: dict) -> None:
         """Cache asset_class on the signal so the hot path doesn't re-scan the symbol."""
         if signal.asset_class:
             return
@@ -431,10 +426,8 @@ class StreamingPriceMonitor:
                         continue
                     symbol = old_signal.instrument
                     if symbol and symbol in self.symbol_to_signals:
-                        try:
+                        with contextlib.suppress(ValueError):
                             self.symbol_to_signals[symbol].remove(signal_id)
-                        except ValueError:
-                            pass
                         if not self.symbol_to_signals[symbol]:
                             del self.symbol_to_signals[symbol]
                             removed_symbols.add(symbol)
@@ -471,7 +464,7 @@ class StreamingPriceMonitor:
             except Exception as e:
                 logger.error(f"Error in periodic refresh: {e}")
 
-    async def _on_price_update(self, symbol: str, price_data: Dict):
+    async def _on_price_update(self, symbol: str, price_data: dict):
         """Callback for price updates from stream manager."""
         self.stats["price_updates"] += 1
 
@@ -526,8 +519,8 @@ class StreamingPriceMonitor:
 
     async def _check_signal(
         self,
-        signal: Dict,
-        price_data: Dict,
+        signal: dict,
+        price_data: dict,
         is_spread_hour: bool,
         is_late_market: bool,
         spread_buffer_enabled: bool,
@@ -787,20 +780,21 @@ class StreamingPriceMonitor:
             await self._cancel_signal_during_guard(signal, current_price, "spread_hour")
             return
 
-        if is_late_market and not self._is_crypto_signal(signal):
-            # A fresh entry during the final market hour is cancelled. An
-            # already-HIT signal that rolled into the window keeps running
-            # normally — this limit hit is processed as usual below.
-            if signal.status != "hit":
-                logger.info(
-                    f"Late market hour: suppressing limit hit for signal "
-                    f"{signal.signal_id} limit #{limit.sequence_number} "
-                    f"({signal.instrument} @ {current_price:.5f})"
-                )
-                await self._cancel_signal_during_guard(
-                    signal, current_price, "late_market"
-                )
-                return
+        # A fresh entry during the final market hour is cancelled. An
+        # already-HIT signal that rolled into the window keeps running
+        # normally — this limit hit is processed as usual below.
+        if (
+            is_late_market
+            and not self._is_crypto_signal(signal)
+            and signal.status != "hit"
+        ):
+            logger.info(
+                f"Late market hour: suppressing limit hit for signal "
+                f"{signal.signal_id} limit #{limit.sequence_number} "
+                f"({signal.instrument} @ {current_price:.5f})"
+            )
+            await self._cancel_signal_during_guard(signal, current_price, "late_market")
+            return
 
         # Mark the limit hit in memory first so the embed edit and any
         # concurrent live-refresh render identical state — the embed updates
@@ -893,7 +887,7 @@ class StreamingPriceMonitor:
             await self._retract_approaching_alert(signal, limit, abs(distance))
 
     async def _retract_approaching_alert(
-        self, signal: Dict, limit: Dict, distance: float
+        self, signal: dict, limit: dict, distance: float
     ) -> None:
         """Drop the approaching embed + reset the flag after a long drift."""
         signal_id = signal.signal_id
@@ -922,7 +916,7 @@ class StreamingPriceMonitor:
 
     async def _check_stop_loss(
         self,
-        signal: Dict,
+        signal: dict,
         current_price: float,
         direction: str,
         is_spread_hour: bool,
@@ -934,10 +928,7 @@ class StreamingPriceMonitor:
         if signal.sl_alert_sent:
             return
 
-        if direction == "long":
-            is_hit = current_price <= stop_loss
-        else:
-            is_hit = current_price >= stop_loss
+        is_hit = current_price <= stop_loss if direction == "long" else current_price >= stop_loss
 
         if is_hit:
             if (
@@ -971,10 +962,13 @@ class StreamingPriceMonitor:
                 await self._cancel_signal_during_guard(signal, current_price, "spread_hour")
                 return
 
-            if is_late_market and not self._is_crypto_signal(signal):
-                # Only fresh entries are cancelled in the final market hour; an
-                # already-HIT signal takes its real stop loss below.
-                if signal.status != "hit":
+            # Only fresh entries are cancelled in the final market hour; an
+            # already-HIT signal takes its real stop loss below.
+            if (
+                is_late_market
+                and not self._is_crypto_signal(signal)
+                and signal.status != "hit"
+            ):
                     logger.info(
                         f"Late market hour: suppressing stop loss hit for signal "
                         f"{signal.signal_id} ({signal.instrument} @ {current_price:.5f})"
@@ -992,7 +986,7 @@ class StreamingPriceMonitor:
             self.stats["stop_losses_hit"] += 1
 
     async def _cancel_signal_during_guard(
-        self, signal: Dict, current_price: float, reason: str, news_event=None
+        self, signal: dict, current_price: float, reason: str, news_event=None
     ):
         """Shared evict-alert-react-process path for news and spread-hour guards."""
         signal_id = signal.signal_id
@@ -1029,7 +1023,7 @@ class StreamingPriceMonitor:
         except Exception as e:
             logger.error(f"Failed to mark approaching sent: {e}")
 
-    async def _process_limit_hit(self, signal: Dict, limit: Dict, actual_price: float):
+    async def _process_limit_hit(self, signal: dict, limit: dict, actual_price: float):
         """Process limit hit in database"""
         try:
             result = await self.signal_db.process_limit_hit(limit.id, actual_price)
@@ -1077,10 +1071,10 @@ class StreamingPriceMonitor:
         signal = self.active_signals.get(signal_id)
         if not signal:
             return
-        pending = [l for l in signal.limits if l.status == "pending"]
+        pending = [lim for lim in signal.limits if lim.status == "pending"]
         if not pending:
             return
-        first = min(pending, key=lambda l: l.sequence_number)
+        first = min(pending, key=lambda lim: lim.sequence_number)
         now = datetime.now(timezone.utc)
         first["status"] = "hit"
         first["hit_alert_sent"] = True
@@ -1091,7 +1085,7 @@ class StreamingPriceMonitor:
             first["hit_price"] = first.get("price_level")
 
     @staticmethod
-    def _apply_status_to_signal(signal: Dict, new_status: str) -> None:
+    def _apply_status_to_signal(signal: dict, new_status: str) -> None:
         """Mirror the DB-side limit-state side effects of manually_set_signal_status."""
         signal.status = new_status
         terminal = {"cancelled", "profit", "breakeven", "stop_loss"}
@@ -1191,10 +1185,8 @@ class StreamingPriceMonitor:
         if old_symbol and (old_symbol != new_symbol or new_status not in ("active", "hit")):
             bucket = self.symbol_to_signals.get(old_symbol)
             if bucket:
-                try:
+                with contextlib.suppress(ValueError):
                     bucket.remove(signal_id)
-                except ValueError:
-                    pass
                 if not bucket:
                     del self.symbol_to_signals[old_symbol]
                     try:
@@ -1238,7 +1230,7 @@ class StreamingPriceMonitor:
 
         return True
 
-    async def _process_stop_loss_hit(self, signal: Dict, current_price: float):
+    async def _process_stop_loss_hit(self, signal: dict, current_price: float):
         """Process stop loss hit"""
         try:
             success = await self.signal_db.manually_set_signal_status(
@@ -1263,7 +1255,7 @@ class StreamingPriceMonitor:
         except Exception as e:
             logger.error(f"Failed to process stop loss: {e}")
 
-    async def _process_spread_hour_cancel(self, signal: Dict):
+    async def _process_spread_hour_cancel(self, signal: dict):
         """Cancel a signal that was falsely triggered during spread hour."""
         signal_id = signal.signal_id
         try:
@@ -1284,7 +1276,7 @@ class StreamingPriceMonitor:
         except Exception as e:
             logger.error(f"Error cancelling signal {signal_id} for spread hour: {e}")
 
-    async def _process_late_market_cancel(self, signal: Dict):
+    async def _process_late_market_cancel(self, signal: dict):
         """Cancel a fresh entry that triggered during the final market hour."""
         signal_id = signal.signal_id
         try:
@@ -1305,7 +1297,7 @@ class StreamingPriceMonitor:
         except Exception as e:
             logger.error(f"Error cancelling signal {signal_id} for late market hour: {e}")
 
-    async def _process_risky_window_cancel(self, signal: Dict):
+    async def _process_risky_window_cancel(self, signal: dict):
         """Cancel a risky signal that triggered during a disabled window."""
         signal_id = signal.signal_id
         try:
@@ -1328,7 +1320,7 @@ class StreamingPriceMonitor:
         except Exception as e:
             logger.error(f"Error cancelling signal {signal_id} for risky window: {e}")
 
-    async def _process_news_cancel(self, signal: Dict, news_event) -> None:
+    async def _process_news_cancel(self, signal: dict, news_event) -> None:
         """Cancel a signal that was triggered during an active news window."""
         signal_id = signal.signal_id
         try:
@@ -1364,7 +1356,7 @@ class StreamingPriceMonitor:
         self.tp_monitor.evict_signal(completed_signal_id)
         self.nm_monitor.evict_signal(completed_signal_id)
 
-    def get_stats(self) -> Dict:
+    def get_stats(self) -> dict:
         """Get monitoring statistics"""
         return {
             **self.stats,

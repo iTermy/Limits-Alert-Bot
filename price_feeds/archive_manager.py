@@ -7,8 +7,9 @@ and cleaning up original signal messages in auto-purge channels.
 """
 
 import asyncio
+import contextlib
 import logging
-from typing import Dict, Optional
+from typing import Optional
 
 import discord
 
@@ -48,9 +49,9 @@ class ArchiveManager:
     def __init__(
         self,
         bot,
-        signal_messages: Dict[int, discord.Message],
-        signal_ping_messages: Dict[int, discord.Message],
-        signal_finished_messages: Dict[int, discord.Message],
+        signal_messages: dict[int, discord.Message],
+        signal_ping_messages: dict[int, discord.Message],
+        signal_finished_messages: dict[int, discord.Message],
         alert_messages: dict,
         auto_purge_channel_ids: set,
         role_mention: str,
@@ -68,7 +69,7 @@ class ArchiveManager:
         self._track_alert_message = track_alert_message_fn
         self._finished_channel_id = finished_channel_id
         self._profit_channel_id = profit_channel_id
-        self._deletion_tasks: Dict[int, asyncio.Task] = {}
+        self._deletion_tasks: dict[int, asyncio.Task] = {}
 
     def cancel_pending_move(self, signal_id: int):
         """Cancel any pending move-to-finished task for a signal (e.g. on reactivation)."""
@@ -79,7 +80,7 @@ class ArchiveManager:
 
     def cancel_all(self):
         """Cancel all pending archive-move tasks. Called during shutdown."""
-        for signal_id, task in list(self._deletion_tasks.items()):
+        for _signal_id, task in list(self._deletion_tasks.items()):
             if not task.done():
                 task.cancel()
         self._deletion_tasks.clear()
@@ -95,7 +96,7 @@ class ArchiveManager:
             return None
         return self.bot.get_channel(int(self._profit_channel_id))
 
-    async def maybe_delete_original_message(self, signal: Dict, signal_id: int) -> None:
+    async def maybe_delete_original_message(self, signal: dict, signal_id: int) -> None:
         """
         Delete the original signal message if its channel is in auto_purge_channel_ids.
         Safe to call on any signal — silently skips exempt channels and manual signals.
@@ -150,10 +151,8 @@ class ArchiveManager:
             ping_msg = self.signal_ping_messages.pop(signal_id, None)
             if ping_msg:
                 self.alert_messages.pop(str(ping_msg.id), None)
-                try:
+                with contextlib.suppress(Exception):
                     await ping_msg.delete()
-                except Exception:
-                    pass
 
             embed_msg = self.signal_messages.get(signal_id)
             if not embed_msg:
@@ -321,7 +320,7 @@ class ArchiveManager:
         )
 
     async def move_standalone_after_delay(
-        self, signal: Dict, signal_id: int, message: discord.Message, embed: discord.Embed
+        self, signal: dict, signal_id: int, message: discord.Message, embed: discord.Embed
     ) -> None:
         """Move a standalone news-cancel message to finished-signals after the delay."""
         try:

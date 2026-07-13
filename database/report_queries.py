@@ -6,7 +6,7 @@ list of floats aggregated in SQL, not LimitData rows.
 """
 
 from datetime import datetime, timedelta
-from typing import Any, Dict, List
+from typing import Any, Optional
 
 import pytz
 
@@ -17,8 +17,8 @@ from .utils import _parse_dt
 
 
 async def get_active_signals_detailed_sorted(
-    db, instrument: str = None, sort_by: str = "recent", limit: int = None
-) -> List[Dict[str, Any]]:
+    db, instrument: Optional[str] = None, sort_by: str = "recent", limit: Optional[int] = None
+) -> list[dict[str, Any]]:
     """Get detailed active signals with sorting options."""
     base_query = """
         SELECT
@@ -88,7 +88,7 @@ async def get_active_signals_detailed_sorted(
     return rows
 
 
-async def get_statistics(db) -> Dict[str, Any]:
+async def get_statistics(db) -> dict[str, Any]:
     """Get comprehensive database statistics."""
     stats = {}
 
@@ -118,7 +118,7 @@ async def get_statistics(db) -> Dict[str, Any]:
     return stats
 
 
-async def get_trading_period_range(period: str = "week") -> Dict[str, Any]:
+async def get_trading_period_range(period: str = "week") -> dict[str, Any]:
     """
     Get the date range for the current trading period.
     Trading week starts Sunday 6:00 PM UTC and ends Sunday 5:59 PM UTC.
@@ -158,7 +158,7 @@ async def get_trading_period_range(period: str = "week") -> Dict[str, Any]:
     raise ValueError(f"Invalid period: {period}")
 
 
-async def get_period_signals_with_results(db, start_date, end_date) -> List[Dict[str, Any]]:
+async def get_period_signals_with_results(db, start_date, end_date) -> list[dict[str, Any]]:
     """Get all signals with final results within a date range."""
     query = """
         SELECT
@@ -200,8 +200,8 @@ async def get_period_signals_with_results(db, start_date, end_date) -> List[Dict
     rows = await db.fetch_all(query, params)
 
     result = []
-    for row in rows:
-        row = dict(row)
+    for raw in rows:
+        row = dict(raw)
         row["status_emoji"] = get_status_emoji(row["status"])
         if row["total_limits"] > 0:
             row["completion_pct"] = (row["limits_hit"] / row["total_limits"]) * 100

@@ -8,7 +8,7 @@ for the in-memory side.
 """
 
 from datetime import datetime
-from typing import Any, Dict, Optional
+from typing import Any, Optional
 
 from utils.logger import get_logger
 
@@ -112,7 +112,7 @@ class ExcursionDatabase:
             ),
         )
 
-    async def set_entry_context(self, signal_id: int, context: Dict[str, Any]) -> None:
+    async def set_entry_context(self, signal_id: int, context: dict[str, Any]) -> None:
         """Fill the market-context columns sampled at entry (bar-derived)."""
         await self.db.execute(
             """
@@ -214,7 +214,7 @@ class ExcursionDatabase:
             (signal_id, phase, price, volume, atr),
         )
 
-    async def get_excursion(self, signal_id: int) -> Optional[Dict[str, Any]]:
+    async def get_excursion(self, signal_id: int) -> Optional[dict[str, Any]]:
         """Fetch an open excursion row for restart resume; None if absent/closed."""
         return await self.db.fetch_one(
             """

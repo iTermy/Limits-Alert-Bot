@@ -2,7 +2,8 @@
 Utility functions for signal operations
 """
 
-from datetime import datetime, time as dtime, timedelta
+from datetime import datetime, timedelta
+from datetime import time as dtime
 from typing import Optional
 
 import pytz
@@ -16,9 +17,7 @@ def is_weekend_window(now_est: Optional[datetime] = None) -> bool:
     wd = now_est.weekday()
     if wd >= 5:
         return True
-    if wd == 4 and now_est.time() >= dtime(16, 45):
-        return True
-    return False
+    return bool(wd == 4 and now_est.time() >= dtime(16, 45))
 
 
 def _parse_dt(value) -> Optional[datetime]:

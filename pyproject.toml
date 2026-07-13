@@ -23,14 +23,31 @@ ignore = [
     "PLR0913",  # too-many-arguments — fires too often on legitimate Discord/asyncpg signatures
     "PLR0912",  # too-many-branches — same; fires on parser dispatch code
     "PLR0915",  # too-many-statements — same
+    "PLR0911",  # too-many-returns — same; early returns are the house style
     "PLR2004",  # magic-value-comparison — too noisy on `if status == "active":`
     "B008",     # function-call-in-default — fires on FastAPI/discord patterns
     "RET504",   # unnecessary-assignment-before-return — sometimes the name aids readability
+    # import-outside-top-level — lazy imports are used deliberately at genuine
+    # boundaries (MetaTrader5 availability, parser lazy-init, circular seams)
+    "PLC0415",
+    # global-statement — module-level TTL caches (SL offsets, parser singleton)
+    # use globals intentionally
+    "PLW0603",
+    # ambiguous-unicode — typographic —/−/• in Discord-facing strings, docstrings,
+    # and comments is deliberate
+    "RUF001",
+    "RUF002",
+    "RUF003",
+    # dangling asyncio task — fire-and-forget loops are owned by the bot lifetime;
+    # tasks that need cancellation are stored explicitly
+    "RUF006",
 ]
 
 [tool.ruff.lint.per-file-ignores]
-# Tests and migration scripts can be looser if you add them later
 "tests/*" = ["PLR2004", "S101"]
+# load_dotenv() must run before the modules that read env vars at import time
+"main.py" = ["E402"]
+"database/__init__.py" = ["E402"]
 
 [tool.ruff.format]
 quote-style = "double"

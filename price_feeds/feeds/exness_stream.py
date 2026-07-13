@@ -23,7 +23,7 @@ import threading
 from collections.abc import AsyncIterator
 from datetime import datetime, timezone
 from pathlib import Path
-from typing import Dict, Optional, Set, Tuple
+from typing import Optional
 
 logger = logging.getLogger(__name__)
 
@@ -43,7 +43,7 @@ class ExnessStream:
         self.server = os.getenv("EXNESS_MT5_SERVER", "")
 
         self.connected = False
-        self.subscribed_symbols: Set[str] = set()
+        self.subscribed_symbols: set[str] = set()
         self.streaming = False
 
         # Plain (non-asyncio) Popen so its syscalls run on worker threads, never
@@ -194,7 +194,7 @@ class ExnessStream:
             except Exception as e:
                 logger.error(f"Failed to subscribe to {symbol}: {e}")
 
-    async def stream_prices(self) -> AsyncIterator[Tuple[str, Dict]]:
+    async def stream_prices(self) -> AsyncIterator[tuple[str, dict]]:
         if not self.connected or self._queue is None:
             raise Exception("Not connected to Exness MT5")
 
@@ -214,7 +214,7 @@ class ExnessStream:
                 return
             yield item
 
-    def get_subscribed_symbols(self) -> Set[str]:
+    def get_subscribed_symbols(self) -> set[str]:
         return self.subscribed_symbols.copy()
 
     def _send_command(self, cmd: dict):

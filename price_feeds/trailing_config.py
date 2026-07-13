@@ -13,7 +13,7 @@ Supported types:
 """
 
 import logging
-from typing import Dict, Literal
+from typing import Literal, Optional
 
 from ._base_config import BaseThresholdConfig
 from .tp_config import TPConfig
@@ -42,7 +42,7 @@ class TrailingStopConfig(BaseThresholdConfig):
     CONFIG_FILENAME = "trailing_configuration.json"
     ASSET_CLASS_TYPES = TPConfig.ASSET_CLASS_TYPES
 
-    def __init__(self, tp_config: TPConfig, config_path: str = None):
+    def __init__(self, tp_config: TPConfig, config_path: Optional[str] = None):
         self._tp_config = tp_config
         super().__init__(config_path)
         logger.info("TrailingStopConfig initialised")
@@ -50,14 +50,14 @@ class TrailingStopConfig(BaseThresholdConfig):
     # === Config defaults & validation ===
 
     @staticmethod
-    def _scale(tp_entry: Dict) -> Dict:
+    def _scale(tp_entry: dict) -> dict:
         value = tp_entry["value"]
         return {
             "type": tp_entry["type"],
             **{level: value * mult for level, mult in LEVEL_MULTIPLIERS.items()},
         }
 
-    def _create_default_config(self) -> Dict:
+    def _create_default_config(self) -> dict:
         config = {
             "type_defaults": {t: {} for t in VALID_SIGNAL_TYPES},
             "type_overrides": {t: {} for t in VALID_SIGNAL_TYPES},
@@ -103,7 +103,7 @@ class TrailingStopConfig(BaseThresholdConfig):
             return signal_type
         return "standard"
 
-    def _get_config_for_symbol(self, symbol: str, signal_type: str = "standard") -> Dict:
+    def _get_config_for_symbol(self, symbol: str, signal_type: str = "standard") -> dict:
         """Return {type, tight, medium, loose} for a symbol given a signal type.
 
         Resolution order mirrors TPConfig:
@@ -134,9 +134,9 @@ class TrailingStopConfig(BaseThresholdConfig):
             return dict(standard_defaults[asset_class])
 
         logger.warning(f"No trailing config for {s} (type={signal_type}), using fallback")
-        return {"type": "dollars", **{l: 5.0 * LEVEL_MULTIPLIERS[l] for l in LEVELS}}
+        return {"type": "dollars", **{lim: 5.0 * LEVEL_MULTIPLIERS[lim] for lim in LEVELS}}
 
-    def get_levels(self, symbol: str, signal_type: str = "standard") -> Dict[str, float]:
+    def get_levels(self, symbol: str, signal_type: str = "standard") -> dict[str, float]:
         """Return {"tight": x, "medium": y, "loose": z} distances in native units."""
         cfg = self._get_config_for_symbol(symbol, signal_type=signal_type)
         return {level: cfg[level] for level in LEVELS}

@@ -4,15 +4,14 @@ Signal-specific database operations — CRUD, lifecycle, and analytics
 
 from collections import defaultdict
 from datetime import datetime
-from typing import Any, Dict, List, Optional, Tuple
+from typing import Any, Optional
 
 import pytz
 
 from core.parser import ParsedSignal
+from models.enums import LimitStatus, SignalStatus
 from models.signal import LimitData, SignalData
 from utils.logger import get_logger
-
-from models.enums import LimitStatus, SignalStatus
 
 from .utils import _parse_dt, calculate_expiry, is_weekend_window
 
@@ -41,10 +40,10 @@ def _is_crypto_symbol(symbol: str) -> bool:
     s = symbol.upper()
     if any(c in s for c in ("BTC", "ETH", "BNB", "XRP", "ADA", "DOGE", "SOL", "DOT")):
         return True
-    return s.endswith("USDT") or s.endswith("USDC")
+    return s.endswith(("USDT", "USDC"))
 
 
-def _plan_limit_diff(existing_limits: List[Dict[str, Any]], new_levels: List[float]) -> Dict[str, Any]:
+def _plan_limit_diff(existing_limits: list[dict[str, Any]], new_levels: list[float]) -> dict[str, Any]:
     """Plan how an edited limit list maps onto the existing rows.
 
     Matches edited levels to preservable rows (pending/hit) by exact price so
@@ -105,8 +104,8 @@ class SignalDatabase:
         parsed_signal: ParsedSignal,
         message_id: str,
         channel_id: str,
-        context: Optional[Dict[str, Any]] = None,
-    ) -> Tuple[bool, Optional[int]]:
+        context: Optional[dict[str, Any]] = None,
+    ) -> tuple[bool, Optional[int]]:
         """
         Save a parsed signal to the database.
 
@@ -156,18 +155,17 @@ class SignalDatabase:
                     if row is not None:
                         existing_id = row["id"]
                         existing_status = row["status"]
-                else:
-                    if parsed_signal.limits:
-                        await conn.executemany(
-                            """
+                elif parsed_signal.limits:
+                    await conn.executemany(
+                        """
                             INSERT INTO limits (signal_id, price_level, sequence_number, status)
                             VALUES ($1, $2, $3, $4)
                             """,
-                            [
-                                (signal_id, level, idx + 1, LimitStatus.PENDING)
-                                for idx, level in enumerate(parsed_signal.limits)
-                            ],
-                        )
+                        [
+                            (signal_id, level, idx + 1, LimitStatus.PENDING)
+                            for idx, level in enumerate(parsed_signal.limits)
+                        ],
+                    )
 
             # Handle conflict result after releasing connection
             if signal_id is None:
@@ -191,7 +189,7 @@ class SignalDatabase:
             logger.error(f"Error saving signal: {e}", exc_info=True)
             return False, None
 
-    async def get_signal_by_message_id(self, message_id: str) -> Optional[Dict[str, Any]]:
+    async def get_signal_by_message_id(self, message_id: str) -> Optional[dict[str, Any]]:
         """Get signal by Discord message ID."""
         query = f"SELECT {SIGNAL_COLUMNS} FROM signals WHERE message_id = $1"
         row = await self.db.fetch_one(query, (message_id,))
@@ -216,7 +214,7 @@ class SignalDatabase:
 
     async def update_signal_from_edit(
         self, message_id: str, parsed_signal: ParsedSignal
-    ) -> Tuple[bool, bool]:
+    ) -> tuple[bool, bool]:
         """Update an existing signal from an edited message.
 
         Returns (success, alert_invalidated). alert_invalidated is True when the edit
@@ -287,7 +285,7 @@ class SignalDatabase:
             return False, False
 
     @staticmethod
-    async def _apply_limit_diff(conn, signal_id: int, diff: Dict[str, Any]) -> None:
+    async def _apply_limit_diff(conn, signal_id: int, diff: dict[str, Any]) -> None:
         """Apply a _plan_limit_diff result: delete removed rows, renumber kept
         rows, insert new levels, and reset alert flags when a stale alert was
         invalidated."""
@@ -335,11 +333,11 @@ class SignalDatabase:
                 signal_id,
             )
 
-    async def get_signals_for_tracking(self) -> List[Dict[str, Any]]:
+    async def get_signals_for_tracking(self) -> list[dict[str, Any]]:
         """Get all signals that need price tracking (wrapper for DB method)."""
         return await self.db.get_active_signals_for_tracking()
 
-    async def get_hit_limits_for_signal(self, signal_id: int) -> List[LimitData]:
+    async def get_hit_limits_for_signal(self, signal_id: int) -> list[LimitData]:
         """Return all hit limits for a signal with hit_price for P&L calculations."""
         return await self.db.get_hit_limits_for_signal(signal_id)
 
@@ -505,7 +503,7 @@ class SignalDatabase:
 
     async def get_overlapping_signals(
         self, instrument: str, min_limit: float, max_limit: float, exclude_signal_id: int
-    ) -> List[SignalData]:
+    ) -> list[SignalData]:
         """
         Return active/hit signals on the same instrument whose pending-limit price range
         intersects [min_limit, max_limit].  Used for overlap detection on new signal saves.
@@ -538,7 +536,7 @@ class SignalDatabase:
         )
         return [SignalData.from_db_row(dict(r)) for r in rows]
 
-    async def _get_live_price(self, instrument: str) -> Optional[Dict[str, Any]]:
+    async def _get_live_price(self, instrument: str) -> Optional[dict[str, Any]]:
         """Fetch current bid/ask/feed from live_prices table."""
         row = await self.db.fetch_one(
             "SELECT bid, ask, feed FROM live_prices WHERE symbol = $1",
@@ -574,7 +572,7 @@ class SignalDatabase:
         except Exception as e:
             logger.warning(f"Close-price snapshot failed for signal {signal_id}: {e}")
 
-    async def check_reactivation_guard(self, signal_id: int) -> Optional[Dict[str, Any]]:
+    async def check_reactivation_guard(self, signal_id: int) -> Optional[dict[str, Any]]:
         """
         Before reactivating a cancelled signal, check whether the current price has
         already moved to or past any of its would-be-pending limits.
@@ -640,9 +638,9 @@ class SignalDatabase:
         self,
         signal_id: int,
         new_status: str,
-        reason: str = None,
-        tp_price: float = None,
-        closed_reason: str = None,
+        reason: Optional[str] = None,
+        tp_price: Optional[float] = None,
+        closed_reason: Optional[str] = None,
     ) -> bool:
         """
         Manually set a signal's status (for admin override).
@@ -868,7 +866,7 @@ class SignalDatabase:
                 )
                 return False
 
-            pending_limits = [l for l in limits if l.get("status") == "pending"]
+            pending_limits = [lim for lim in limits if lim.get("status") == "pending"]
 
             if not pending_limits:
                 logger.warning(
@@ -876,7 +874,7 @@ class SignalDatabase:
                 )
                 return False
 
-            first_limit = min(pending_limits, key=lambda l: l.get("sequence_number", 999))
+            first_limit = min(pending_limits, key=lambda lim: lim.get("sequence_number", 999))
 
             logger.info(
                 f"Manually marking signal {signal_id} as HIT by hitting limit {first_limit['id']} "
@@ -915,7 +913,7 @@ class SignalDatabase:
             logger.error(f"Error manually setting signal {signal_id} to hit: {e}", exc_info=True)
             return False
 
-    async def process_limit_hit(self, limit_id: int, actual_price: float = None) -> Dict[str, Any]:
+    async def process_limit_hit(self, limit_id: int, actual_price: Optional[float] = None) -> dict[str, Any]:
         """Process a limit hit event."""
         result = await self.db.mark_limit_hit(limit_id, actual_price)
 
@@ -932,7 +930,7 @@ class SignalDatabase:
         return result
 
     async def manually_set_signal_expiry(
-        self, signal_id: int, expiry_type: str, custom_datetime: str = None
+        self, signal_id: int, expiry_type: str, custom_datetime: Optional[str] = None
     ) -> bool:
         """Manually set a signal's expiry type and recalculate expiry time."""
         try:

@@ -6,12 +6,12 @@ import asyncio
 import json
 from datetime import datetime
 from pathlib import Path
+from typing import Optional
 
 import discord
 from discord.ext import commands
 
-from database import db
-from database import report_queries
+from database import db, report_queries
 from price_feeds.alert_config import AlertDistanceConfig
 from price_feeds.tp_config import TPConfig
 from utils.formatting import format_price, format_signal_type, get_status_emoji
@@ -31,7 +31,7 @@ class LifecycleCog(BaseCog):
         self.tp_config = TPConfig()
 
     @commands.command(name="active")
-    async def active_signals(self, ctx: commands.Context, *, args: str = None):
+    async def active_signals(self, ctx: commands.Context, *, args: Optional[str] = None):
         """
         Display active trading signals with sorting and pagination
 
@@ -223,12 +223,12 @@ class LifecycleCog(BaseCog):
             signal_type = signal.type.lower()
 
             limit_lines = []
-            for l in sorted(signal.limits, key=lambda x: x.sequence_number):
-                seq = l.get("sequence_number", "?")
-                price = format_price(l["price_level"], instrument)
-                if l["status"] == "hit":
+            for lim in sorted(signal.limits, key=lambda x: x.sequence_number):
+                seq = lim.get("sequence_number", "?")
+                price = format_price(lim["price_level"], instrument)
+                if lim["status"] == "hit":
                     pnl_str = ""
-                    entry = l["price_level"]
+                    entry = lim["price_level"]
                     if close_price is not None:
                         try:
                             pnl_val = self.tp_config.calculate_pnl(
@@ -362,27 +362,26 @@ class LifecycleCog(BaseCog):
                     await ctx.send(embed=embed)
                     return
 
-        if status == "profit":
-            # If signal is approaching (no limits hit yet), mirror !hit behaviour:
-            # mark the first pending limit as hit before setting status to profit.
-            if not signal.hit_limits:
-                pending_limits = signal.pending_limits
-                if pending_limits:
-                    first_limit = min(pending_limits, key=lambda l: l.sequence_number)
-                    try:
-                        await db.mark_limit_hit(first_limit.id, first_limit.price_level)
-                        if self.services.monitor:
-                            self.services.monitor._mutate_limit_hit_in_memory(
-                                signal_id, first_limit.id, first_limit.price_level
-                            )
-                        logger.info(
-                            f"Auto-hit limit #{first_limit.sequence_number} "
-                            f"for signal {signal_id} as part of manual profit (approaching→profit)"
+        # If a profit-bound signal is still approaching (no limits hit yet),
+        # mirror !hit behaviour: mark the first pending limit as hit first.
+        if status == "profit" and not signal.hit_limits:
+            pending_limits = signal.pending_limits
+            if pending_limits:
+                first_limit = min(pending_limits, key=lambda lim: lim.sequence_number)
+                try:
+                    await db.mark_limit_hit(first_limit.id, first_limit.price_level)
+                    if self.services.monitor:
+                        self.services.monitor._mutate_limit_hit_in_memory(
+                            signal_id, first_limit.id, first_limit.price_level
                         )
-                    except Exception as _hit_err:
-                        logger.warning(
-                            f"Could not auto-hit limit for signal {signal_id} on profit: {_hit_err}"
-                        )
+                    logger.info(
+                        f"Auto-hit limit #{first_limit.sequence_number} "
+                        f"for signal {signal_id} as part of manual profit (approaching→profit)"
+                    )
+                except Exception as _hit_err:
+                    logger.warning(
+                        f"Could not auto-hit limit for signal {signal_id} on profit: {_hit_err}"
+                    )
 
         success = await self.signal_db.manually_set_signal_status(
             signal_id,
@@ -445,7 +444,7 @@ class LifecycleCog(BaseCog):
     # Shortcut commands for status changes
     @commands.command(name="profit", aliases=[], description="Mark signal as profit")
     async def set_profit(
-        self, ctx: commands.Context, signal_id: int, tp_price: float = None
+        self, ctx: commands.Context, signal_id: int, tp_price: Optional[float] = None
     ):
         """Mark a signal as profit. An optional tp_price sets a retrospective
         manual TP price (stored separately from the recorded close price) that
@@ -516,7 +515,7 @@ class LifecycleCog(BaseCog):
     @commands.command(
         name="cancel", aliases=["nm"], description="Cancel a signal or bulk cancel signals"
     )
-    async def set_cancelled(self, ctx: commands.Context, *, args: str = None):
+    async def set_cancelled(self, ctx: commands.Context, *, args: Optional[str] = None):
         """
         Cancel signals. Supports:
           !cancel <id>                              - Cancel a specific signal

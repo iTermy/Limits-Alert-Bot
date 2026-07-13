@@ -1,7 +1,7 @@
 import json
 import logging
 from pathlib import Path
-from typing import Dict, Optional, Tuple
+from typing import Optional
 
 logger = logging.getLogger(__name__)
 
@@ -17,7 +17,7 @@ class SymbolMapper:
     - Exness: Oil symbols (USOILSPOT via MT5)
     """
 
-    def __init__(self, config_path: str = None):
+    def __init__(self, config_path: Optional[str] = None):
         """Initialize the symbol mapper with configuration"""
         if config_path is None:
             # Locate config folder relative to this file
@@ -29,7 +29,7 @@ class SymbolMapper:
         self.mappings = self._load_mappings()
         logger.info(f"SymbolMapper initialized with config from {config_path}")
 
-    def _load_mappings(self) -> Dict:
+    def _load_mappings(self) -> dict:
         """Load symbol mappings from JSON configuration"""
         try:
             with open(self.config_path) as f:
@@ -163,7 +163,7 @@ class SymbolMapper:
         # Default to ICMarkets if no specific feed is configured
         return "icmarkets"
 
-    def get_feed_symbol(self, internal_symbol: str, feed: str = None) -> Optional[str]:
+    def get_feed_symbol(self, internal_symbol: str, feed: Optional[str] = None) -> Optional[str]:
         """
         Convert internal symbol to feed-specific format
 
@@ -405,7 +405,7 @@ class SymbolMapper:
 
         return feed_symbol.upper()  # ✓ FINAL FALLBACK: ALWAYS UPPERCASE
 
-    def get_all_feed_symbols(self, internal_symbol: str) -> Dict[str, Optional[str]]:
+    def get_all_feed_symbols(self, internal_symbol: str) -> dict[str, Optional[str]]:
         """
         Get symbol mappings for all feeds
         Useful for debugging and fallback scenarios
@@ -420,7 +420,7 @@ class SymbolMapper:
             "exness": self.get_feed_symbol(internal_symbol, "exness"),
         }
 
-    def validate_symbol(self, symbol: str) -> Tuple[bool, str]:
+    def validate_symbol(self, symbol: str) -> tuple[bool, str]:
         """
         Validate if a symbol can be processed
 

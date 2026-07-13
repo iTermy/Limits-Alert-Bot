@@ -4,7 +4,7 @@ Trading Bot Core - Main bot class
 
 import traceback
 from datetime import datetime
-from typing import Optional, Set
+from typing import Optional
 
 import discord
 from discord.ext import commands, tasks
@@ -41,8 +41,8 @@ class TradingBot(commands.Bot):
         self.logger = get_logger("bot")
         self.start_time = datetime.utcnow()
         self.channels_config = None
-        self.monitored_channels: Set[int] = set()
-        self.allowed_channel_ids: Set[int] = set()
+        self.monitored_channels: set[int] = set()
+        self.allowed_channel_ids: set[int] = set()
         self.alert_channel_id: Optional[int] = None
         self.command_channel_id: Optional[int] = None
         self.signal_db = None
@@ -311,10 +311,14 @@ class TradingBot(commands.Bot):
         """Initialize the price monitoring system — creates all subsystems and injects them."""
         self.logger.info("Starting price monitor initialization...")
         try:
+            from database.excursion_ops import ExcursionDatabase
+            from database.trailing_ops import TrailingDatabase
             from price_feeds.alert_config import AlertDistanceConfig
             from price_feeds.alert_system import AlertSystem
+            from price_feeds.excursion_monitor import ExcursionMonitor
             from price_feeds.feed_health_monitor import FeedHealthMonitor
             from price_feeds.live_price_writer import LivePriceWriter
+            from price_feeds.market_context import MarketContextProvider
             from price_feeds.nm_config import NMConfig
             from price_feeds.nm_monitor import NearMissMonitor
             from price_feeds.price_stream_manager import PriceStreamManager
@@ -323,11 +327,6 @@ class TradingBot(commands.Bot):
             from price_feeds.tp_monitor import AutoTPMonitor
             from price_feeds.trailing_config import TrailingStopConfig
             from price_feeds.trailing_monitor import TrailingStopMonitor
-            from price_feeds.excursion_monitor import ExcursionMonitor
-            from price_feeds.market_context import MarketContextProvider
-
-            from database.trailing_ops import TrailingDatabase
-            from database.excursion_ops import ExcursionDatabase
 
             # Create subsystems
             alert_config = AlertDistanceConfig()

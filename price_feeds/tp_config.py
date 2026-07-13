@@ -16,7 +16,7 @@ P&L is always calculated in the same native unit as the TP type:
 import copy
 import logging
 from datetime import datetime, timezone
-from typing import Dict, Literal
+from typing import ClassVar, Literal, Optional
 
 from ._base_config import BaseThresholdConfig
 
@@ -41,7 +41,7 @@ class TPConfig(BaseThresholdConfig):
 
     CONFIG_FILENAME = "tp_configuration.json"
 
-    ASSET_CLASS_TYPES: Dict[str, TPType] = {
+    ASSET_CLASS_TYPES: ClassVar[dict[str, TPType]] = {
         "forex": "pips",
         "forex_jpy": "pips",
         "metals": "dollars",
@@ -51,14 +51,14 @@ class TPConfig(BaseThresholdConfig):
         "oil": "dollars",
     }
 
-    def __init__(self, config_path: str = None):
+    def __init__(self, config_path: Optional[str] = None):
         super().__init__(config_path)
         logger.info("TPConfig initialised")
 
     # === Config defaults & validation ===
 
     @staticmethod
-    def _standard_defaults() -> Dict:
+    def _standard_defaults() -> dict:
         return {
             "forex": {"type": "pips", "value": 5.0, "description": "Standard forex pairs"},
             "forex_jpy": {"type": "pips", "value": 10.0, "description": "JPY pairs"},
@@ -70,7 +70,7 @@ class TPConfig(BaseThresholdConfig):
         }
 
     @staticmethod
-    def _scalp_defaults() -> Dict:
+    def _scalp_defaults() -> dict:
         return {
             "forex": {"type": "pips", "value": 3.0, "description": "Scalp - forex"},
             "forex_jpy": {"type": "pips", "value": 5.0, "description": "Scalp - JPY pairs"},
@@ -82,7 +82,7 @@ class TPConfig(BaseThresholdConfig):
         }
 
     @classmethod
-    def _swing_defaults(cls) -> Dict:
+    def _swing_defaults(cls) -> dict:
         # Swing = 3x standard.
         out = {}
         for asset_class, cfg in cls._standard_defaults().items():
@@ -94,14 +94,14 @@ class TPConfig(BaseThresholdConfig):
         return out
 
     @staticmethod
-    def _one_one_defaults() -> Dict:
+    def _one_one_defaults() -> dict:
         # $10 from the last hit limit for metals (gold-1-1-rr default).
         # Other asset classes fall back to standard via the resolution chain.
         return {
             "metals": {"type": "dollars", "value": 10.0, "description": "1-1 RR - metals"},
         }
 
-    def _create_default_config(self) -> Dict:
+    def _create_default_config(self) -> dict:
         config = {
             "type_defaults": {
                 "standard": self._standard_defaults(),
@@ -159,7 +159,7 @@ class TPConfig(BaseThresholdConfig):
             return signal_type
         return "standard"
 
-    def _get_config_for_symbol(self, symbol: str, signal_type: str = "standard") -> Dict:
+    def _get_config_for_symbol(self, symbol: str, signal_type: str = "standard") -> dict:
         """Return {type, value} for a symbol given a signal type.
 
         Resolution order:
@@ -292,7 +292,7 @@ class TPConfig(BaseThresholdConfig):
             return True
         return False
 
-    def get_display_info(self, symbol: str = None, signal_type: str = "standard") -> Dict:
+    def get_display_info(self, symbol: Optional[str] = None, signal_type: str = "standard") -> dict:
         """Return formatted config dict for display."""
         signal_type = self._normalize_type(signal_type)
         if symbol:

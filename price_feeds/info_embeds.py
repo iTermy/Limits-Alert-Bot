@@ -10,7 +10,7 @@ being reposted.
 
 import json
 from pathlib import Path
-from typing import Callable, Dict, Optional, Set
+from typing import Callable, Optional
 
 import discord
 
@@ -21,7 +21,7 @@ logger = get_logger("info_embeds")
 _DATA_PATH = Path(__file__).resolve().parent.parent / "data" / "info_embeds.json"
 
 
-def info_embed_message_ids() -> Set[str]:
+def info_embed_message_ids() -> set[str]:
     """Return the set of persisted info-embed message IDs (as strings).
 
     Used by the weekly channel cleaner to preserve these permanent embeds.
@@ -239,7 +239,7 @@ class InfoEmbedManager:
         self.bot = bot
         self.alert_system = alert_system
 
-    def _channel_builders(self) -> Dict[Optional[discord.TextChannel], Callable[[], discord.Embed]]:
+    def _channel_builders(self) -> dict[Optional[discord.TextChannel], Callable[[], discord.Embed]]:
         """Map each resolved alert channel to its embed builder, skipping any that
         are unconfigured or share an ID with one already mapped."""
         pairs = [
@@ -250,7 +250,7 @@ class InfoEmbedManager:
             (self.alert_system.legends_alert_channel, _build_legends_embed),
             (self.alert_system.risky_alert_channel, _build_risky_embed),
         ]
-        mapping: Dict[discord.TextChannel, Callable[[], discord.Embed]] = {}
+        mapping: dict[discord.TextChannel, Callable[[], discord.Embed]] = {}
         seen = set()
         for channel, builder in pairs:
             if channel is None or channel.id in seen:
@@ -259,7 +259,7 @@ class InfoEmbedManager:
             mapping[channel] = builder
         return mapping
 
-    def _load_ids(self) -> Dict[str, int]:
+    def _load_ids(self) -> dict[str, int]:
         if not _DATA_PATH.exists():
             return {}
         try:
@@ -269,7 +269,7 @@ class InfoEmbedManager:
             logger.error(f"Failed to read info_embeds.json: {e}")
             return {}
 
-    def _save_ids(self, ids: Dict[str, int]) -> None:
+    def _save_ids(self, ids: dict[str, int]) -> None:
         try:
             _DATA_PATH.parent.mkdir(parents=True, exist_ok=True)
             with open(_DATA_PATH, "w") as f:

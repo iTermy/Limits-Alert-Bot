@@ -2,7 +2,7 @@
 Discord UI views for command interactions.
 """
 
-from typing import Dict, List, Optional
+from typing import Optional
 
 import discord
 
@@ -14,7 +14,7 @@ class ActiveSignalsView(discord.ui.View):
 
     def __init__(
         self,
-        signals: List[Dict],
+        signals: list[dict],
         guild_id: int,
         instrument: Optional[str],
         page_size: int = 10,
@@ -47,7 +47,7 @@ class ActiveSignalsView(discord.ui.View):
         )
 
     def create_active_signals_embed(
-        self, signals: List[Dict], guild_id: int, instrument: Optional[str], page_info: tuple
+        self, signals: list[dict], guild_id: int, instrument: Optional[str], page_info: tuple
     ) -> discord.Embed:
         current_page, total_pages, total_signals = page_info
 
