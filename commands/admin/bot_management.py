@@ -16,6 +16,7 @@ from core.parser.pattern_parsers import (
     invalidate_gold_tolls_sl_cache,
     invalidate_risky_gold_sl_cache,
 )
+from database import report_queries
 from database.config_history_ops import log_config_change
 from utils.config_loader import load_channels_config, load_settings, save_settings
 
@@ -363,7 +364,7 @@ class BotManagementCog(BaseCog):
 
         # Database
         try:
-            stats = await self.signal_db.get_statistics()
+            stats = await report_queries.get_statistics(self.signal_db.db)
             active = stats.get("tracking_count", 0)
             total = stats.get("total_signals", 0)
             embed.add_field(

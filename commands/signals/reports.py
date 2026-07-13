@@ -12,6 +12,7 @@ from discord.ext import commands
 
 from price_feeds.tp_config import TPConfig
 from utils.formatting import format_price
+from database import report_queries
 from utils.logger import get_logger
 
 from .._base import BaseCog
@@ -212,11 +213,13 @@ class ReportsCog(BaseCog):
             return result
 
         try:
-            date_range = await self.signal_db.get_trading_period_range(period)
+            date_range = await report_queries.get_trading_period_range(period)
             start_date = date_range["start"]
             end_date = date_range["end"]
 
-            signals = await self.signal_db.get_period_signals_with_results(start_date, end_date)
+            signals = await report_queries.get_period_signals_with_results(
+                self.signal_db.db, start_date, end_date
+            )
 
             if not signals:
                 embed = discord.Embed(

@@ -11,6 +11,7 @@ import discord
 from discord.ext import commands
 
 from database import db
+from database import report_queries
 from price_feeds.alert_config import AlertDistanceConfig
 from price_feeds.tp_config import TPConfig
 from utils.formatting import format_price, format_signal_type, get_status_emoji
@@ -66,8 +67,8 @@ class LifecycleCog(BaseCog):
             )
             return
 
-        signals = await self.signal_db.get_active_signals_detailed_sorted(
-            instrument if instrument else None
+        signals = await report_queries.get_active_signals_detailed_sorted(
+            db, instrument if instrument else None
         )
 
         if not signals:
