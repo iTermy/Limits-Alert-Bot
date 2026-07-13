@@ -1,47 +1,81 @@
 # TM Bot — Trading Signal Monitor
 
-A Discord bot that turns free-form trading-signal messages into tracked, alerted, and
-audited positions. It parses signals posted in designated channels, stores them in
-PostgreSQL, streams real-time prices from four independent feeds, and drives each
-signal through its full lifecycle — approaching, entry hit, take-profit, stop-loss,
-near-miss cancellation — by live-editing a single persistent Discord embed per signal.
+A Discord bot for monitoring trading-signal channels. It parses signal messages
+posted in monitored channels, tracks entry limits against live price feeds, and
+fires approaching / hit / stop-loss / take-profit alerts in real time — editing a
+single persistent embed per signal rather than flooding the channel with new
+messages.
 
-A companion per-user execution bot (separate repository) reads the same database and
-mirrors these signals onto MetaTrader 5 broker accounts.
+A companion per-user execution bot (separate repository) reads the same database
+and mirrors these signals onto MetaTrader 5 broker accounts.
 
-## Highlights
+---
 
-- **Four-feed price streaming** — ICMarkets (MT5 polling), OANDA (REST streaming),
-  Binance (WebSocket), and Exness (MT5 in an isolated child process, since the
-  MetaTrader5 package is process-global). A symbol mapper routes each instrument to
-  its best feed and translates symbol formats in both directions.
-- **Channel-aware signal parsing** — pattern parsers per channel family (core forex /
+## What it does
+
+The bot watches a set of configured Discord channels for signal messages. When a
+signal is posted, it extracts the instrument, direction, entry limits, and stop
+loss, stores them in PostgreSQL, and begins monitoring live prices from four feeds.
+As price approaches or crosses a limit, the bot posts an alert embed in the
+designated channel and edits it in place as the trade moves through its lifecycle.
+
+Key behaviours:
+
+- **Four price feeds** — ICMarkets (MT5), OANDA, Binance, and Exness (MT5, run in
+  an isolated child process since the MetaTrader5 package is process-global). A
+  symbol mapper routes each instrument to the right feed and translates symbol
+  formats in both directions.
+- **Channel-aware parsing** — pattern parsers per channel family (core forex /
   metals / indices, stocks via MT5 symbol lookup, crypto with auto-`USDT` tickers),
-  per-channel defaults, typo detection via limit-ordering validation, and an optional
-  AI fallback parser.
-- **Persistent-embed alerting** — one embed per signal, edited in place for every
-  lifecycle event and refreshed with live prices every 15 s. Embed references are
-  persisted to the database so restarts re-attach to existing embeds instead of
-  orphaning them.
-- **Self-healing** — per-feed health monitoring with targeted reconnects, a
-  price-flow watchdog that force-restarts the bot when open markets go silent, and an
-  out-of-loop freeze watchdog that survives a wedged event loop.
-- **Egress-conscious persistence** — TOCTOU-safe signal saves, dirty-checked live
-  price writes with a 30 s heartbeat contract for the execution bot, and
-  transition-only feed-health writes.
-- **Runtime configuration** — take-profit thresholds per signal type, alert
-  distances, and near-miss rules are all adjustable through commands without a
-  restart, with every change appended to a `config_history` audit table.
+  per-channel defaults, typo detection via limit-ordering validation, and an
+  optional AI fallback parser.
+- **Persistent alert embeds** — one embed per signal, edited in place on every
+  event and refreshed with live prices every 15 s. Embed references are stored in
+  the database so restarts re-attach to existing embeds instead of orphaning them.
+- **Auto take-profit** — once a signal is hit, P&L is tracked on every tick and the
+  signal closes automatically when the configured TP threshold is reached.
+- **News and spread-hour handling** — scheduled news windows and the daily
+  spread-widening window suppress alerts and auto-cancel affected signals with a
+  notification.
+- **Feed health monitoring** — stale-feed detection with targeted reconnects, a
+  price-flow watchdog that restarts the bot when open markets go silent, and admin
+  DM alerts on failure.
+- **Runtime configuration** — TP thresholds, alert distances, and near-miss rules
+  are adjustable through commands without a restart; every change is appended to a
+  `config_history` audit table.
+- **Full audit trail** — every status change is recorded in a `status_changes`
+  table with timestamp, reason, and whether it was automatic or manual.
+
+---
+
+## Signal lifecycle
+
+```
+ACTIVE → HIT → PROFIT
+                BREAKEVEN
+                STOP_LOSS
+       → CANCELLED  (reversible → ACTIVE or HIT)
+```
+
+Signals expire automatically based on their configured expiry type (`day_end`,
+`week_end`, `month_end`, or `no_expiry`). A hit signal rolls its expiry forward to
+the next window instead of being cancelled, so an open position is never dropped.
+
+The full per-tick check order, state machine, and restart-recovery semantics are
+documented in [CLAUDE.md](CLAUDE.md), which serves as the maintainer reference.
+
+---
 
 ## Tech stack
 
-| Layer | Choice |
-|---|---|
-| Language | Python 3.9+ (Windows required for the MetaTrader5 feeds) |
-| Discord | discord.py 2.3+, `commands.Bot` with cog extensions |
-| Database | PostgreSQL (Supabase) via asyncpg |
-| Models | Pydantic v2 (`SignalData`, `LimitData`, `BotSettings`) |
-| Lint / tests | ruff, pytest (CI via GitHub Actions) |
+- Python 3.9+ (Windows required for the MetaTrader5 feeds)
+- discord.py 2.3+, `commands.Bot` with cog extensions
+- PostgreSQL (Supabase) via `asyncpg`
+- Pydantic v2 for domain models (`SignalData`, `LimitData`, `BotSettings`)
+- OpenAI API (optional AI parsing fallback, disabled by default)
+- ruff and pytest (CI via GitHub Actions)
+
+---
 
 ## Project layout
 
@@ -61,24 +95,12 @@ config/                  Runtime JSON configuration
 tests/                   Pure-logic test suite (parser, TP math, state machine, …)
 ```
 
-## How a signal flows
-
-```
-message → parse_signal() → save (atomic, TOCTOU-safe) → ✅ reaction
-   → streaming monitor subscribes the symbol
-   → per tick: staleness gate → spread-hour/news/risky gates → approaching
-     → hit → stop-loss → near-miss → auto-TP
-   → every event edits the signal's persistent embed + pings subscribers
-   → terminal states archive the embed and snapshot close prices
-```
-
-The full check order, state machine, and recovery semantics are documented in
-[CLAUDE.md](CLAUDE.md), which serves as the maintainer reference.
+---
 
 ## Setup
 
-1. Python 3.9+ on Windows (both MT5 terminals must be installed for the ICMarkets
-   and Exness feeds; the bot degrades gracefully without them).
+1. Python 3.9+ on Windows. Both MT5 terminals (ICMarkets and Exness) must be
+   installed and logged in for their feeds; the bot degrades gracefully without them.
 2. `pip install -r requirements.txt` (or `-r requirements-dev.txt` for tests).
 3. Create `.env`:
 
@@ -101,6 +123,8 @@ LOG_LEVEL=INFO
    `config/settings.json` with admin IDs.
 5. `python main.py`
 
+---
+
 ## Testing
 
 ```
@@ -108,9 +132,11 @@ pytest tests/ -q      # pure-logic suite: parser, TP math, status machine, pip s
 ruff check .          # lint (clean baseline enforced in CI)
 ```
 
+---
+
 ## Shared database contract (TM bot ↔ execution bot)
 
-The execution bot is a read-mostly consumer of this bot's database. The contract:
+The execution bot is a read-mostly consumer of this bot's database.
 
 **Ownership** — TM bot owns and writes `signals`, `limits`, `status_changes`,
 `live_prices`, `feed_health`, `bot_mode_status`, `config_history`, and the analytics
