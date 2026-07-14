@@ -32,9 +32,9 @@
     },
     "crypto": {
       "type": "dollars",
-      "max_proximity": 50.0,
-      "base_bounce": 30.0,
-      "description": "Crypto — track within $50; bounce = closest + $30"
+      "max_proximity": 100.0,
+      "base_bounce": 100.0,
+      "description": "Crypto — track within $100; bounce = closest + $100"
     },
     "oil": {
       "type": "dollars",
@@ -44,13 +44,6 @@
     }
   },
   "overrides": {
-    "GOLD": {
-      "type": "dollars",
-      "max_proximity": 5.0,
-      "base_bounce": 4.0,
-      "set_by": "itermy",
-      "set_at": "2026-03-04T03:11:41.771344+00:00"
-    },
     "XTIUSD": {
       "type": "dollars",
       "max_proximity": 0.3,

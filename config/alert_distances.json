@@ -109,12 +109,6 @@
       "set_by": "itermy",
       "set_at": "2025-12-17T17:53:21.543002+00:00"
     },
-    "SPX": {
-      "type": "dollars",
-      "value": 25.0,
-      "set_by": "realtrademaster",
-      "set_at": "2025-12-17T18:00:10.915855+00:00"
-    },
     "XAUUSD": {
       "type": "dollars",
       "value": 15.0,
@@ -157,12 +151,6 @@
       "set_by": "itermy",
       "set_at": "2026-02-03T12:54:11.480272+00:00"
     },
-    "STOCKS": {
-      "type": "dollars",
-      "value": 5.0,
-      "set_by": "itermy",
-      "set_at": "2026-02-03T12:54:32.235418+00:00"
-    },
     "BIDU.NAS": {
       "type": "dollars",
       "value": 1.0,
@@ -186,12 +174,6 @@
       "value": 1.5,
       "set_by": "itermy",
       "set_at": "2026-02-03T14:51:17.195771+00:00"
-    },
-    "AAP.L.NAS": {
-      "type": "dollars",
-      "value": 2.5,
-      "set_by": "itermy",
-      "set_at": "2026-02-03T15:08:19.927071+00:00"
     },
     "GOOG.NAS": {
       "type": "dollars",
@@ -307,12 +289,6 @@
       "set_by": "itermy",
       "set_at": "2026-02-03T15:19:36.579130+00:00"
     },
-    "USOILM": {
-      "type": "dollars",
-      "value": 0.5,
-      "set_by": "itermy",
-      "set_at": "2026-06-01T22:27:53.140575+00:00"
-    },
     "GCQ26": {
       "type": "dollars",
       "value": 15.0,
@@ -348,6 +324,36 @@
       "value": 1.5,
       "set_by": "itermy",
       "set_at": "2026-07-01T22:48:45.311415+00:00"
+    },
+    "AAXJ.NAS": {
+      "type": "dollars",
+      "value": 1.0,
+      "set_by": "itermy",
+      "set_at": "2026-07-13T00:00:00+00:00"
+    },
+    "SPY.NYSE": {
+      "type": "dollars",
+      "value": 2.0,
+      "set_by": "itermy",
+      "set_at": "2026-07-13T00:00:00+00:00"
+    },
+    "UK100": {
+      "type": "dollars",
+      "value": 50.0,
+      "set_by": "itermy",
+      "set_at": "2026-07-13T00:00:00+00:00"
+    },
+    "UK100USD": {
+      "type": "dollars",
+      "value": 50.0,
+      "set_by": "itermy",
+      "set_at": "2026-07-13T00:00:00+00:00"
+    },
+    "F40": {
+      "type": "dollars",
+      "value": 20.0,
+      "set_by": "itermy",
+      "set_at": "2026-07-13T00:00:00+00:00"
     }
   }
 }

@@ -270,6 +270,30 @@
         "set_by": "manual",
         "set_at": "2026-06-06T00:00:00+00:00"
       },
+      "DE40": {
+        "type": "dollars",
+        "value": 50.0,
+        "set_by": "itermy",
+        "set_at": "2026-07-13T00:00:00+00:00"
+      },
+      "UK100": {
+        "type": "dollars",
+        "value": 10.0,
+        "set_by": "itermy",
+        "set_at": "2026-07-13T00:00:00+00:00"
+      },
+      "UK100USD": {
+        "type": "dollars",
+        "value": 10.0,
+        "set_by": "itermy",
+        "set_at": "2026-07-13T00:00:00+00:00"
+      },
+      "F40": {
+        "type": "dollars",
+        "value": 7.0,
+        "set_by": "itermy",
+        "set_at": "2026-07-13T00:00:00+00:00"
+      },
       "JP225": {
         "type": "dollars",
         "value": 100.0,
@@ -493,6 +517,12 @@
         "value": 30.0,
         "set_by": "manual",
         "set_at": "2026-06-06T00:00:00+00:00"
+      },
+      "DE40": {
+        "type": "dollars",
+        "value": 30.0,
+        "set_by": "itermy",
+        "set_at": "2026-07-13T00:00:00+00:00"
       },
       "JP225": {
         "type": "dollars",
@@ -730,6 +760,12 @@
         "set_by": "manual",
         "set_at": "2026-06-06T00:00:00+00:00"
       },
+      "DE40": {
+        "type": "dollars",
+        "value": 150.0,
+        "set_by": "itermy",
+        "set_at": "2026-07-13T00:00:00+00:00"
+      },
       "JP225": {
         "type": "dollars",
         "value": 750.0,
@@ -951,6 +987,12 @@
         "value": 30.0,
         "set_by": "manual",
         "set_at": "2026-06-06T00:00:00+00:00"
+      },
+      "DE40": {
+        "type": "dollars",
+        "value": 30.0,
+        "set_by": "itermy",
+        "set_at": "2026-07-13T00:00:00+00:00"
       },
       "JP225": {
         "type": "dollars",
