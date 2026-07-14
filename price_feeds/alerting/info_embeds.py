@@ -37,25 +37,6 @@ def info_embed_message_ids() -> set[str]:
 
 _FOOTER = "Discipline over everything — protect your account first. Small, consistent gains win long-term."
 
-# Plain-text reference notices pinned in monitored (signal) channels. Keyed by
-# the channels.json monitored-channel name. URLs are wrapped in <> to suppress
-# link previews so the pinned message stays compact.
-_CHANNEL_NOTICES: dict[str, str] = {
-    "oil-trades": (
-        "All oil signals are based on this chart: "
-        "<https://www.tradingview.com/symbols/USOILSPOT/>"
-    ),
-    "indices-trades": (
-        "All indices signals are based on OANDA charts unless specified otherwise. "
-        "You can find them below:\n"
-        "- SPX: <https://www.tradingview.com/symbols/SPX500USD/>\n"
-        "- NAS: <https://www.tradingview.com/symbols/OANDA-NAS100USD/>\n"
-        "- DAX: <https://www.tradingview.com/symbols/OANDA-DE30EUR/>\n"
-        "- US30: <https://www.tradingview.com/symbols/OANDA-US30USD/>\n"
-        "- JP225: <https://www.tradingview.com/symbols/OANDA-JP225USD/>"
-    ),
-}
-
 
 def _base_embed(title: str, description: str, color: int) -> discord.Embed:
     embed = discord.Embed(title=title, description=description, color=color)
@@ -251,6 +232,40 @@ def _build_risky_embed() -> discord.Embed:
     return embed
 
 
+# ── Monitored-channel reference notices ──────────────────────────────────────
+
+
+def _build_oil_notice_embed() -> discord.Embed:
+    return _base_embed(
+        "🛢️ Oil Trades",
+        "All oil signals are based on this chart:\n"
+        "[USOILSPOT on TradingView](https://www.tradingview.com/symbols/USOILSPOT/)",
+        0x2C3E50,
+    )
+
+
+def _build_indices_notice_embed() -> discord.Embed:
+    return _base_embed(
+        "📈 Indices Trades",
+        "All indices signals are based on **OANDA charts** unless specified "
+        "otherwise. Reference charts:\n"
+        "- [SPX](https://www.tradingview.com/symbols/SPX500USD/)\n"
+        "- [NAS](https://www.tradingview.com/symbols/OANDA-NAS100USD/)\n"
+        "- [DAX](https://www.tradingview.com/symbols/OANDA-DE30EUR/)\n"
+        "- [US30](https://www.tradingview.com/symbols/OANDA-US30USD/)\n"
+        "- [JP225](https://www.tradingview.com/symbols/OANDA-JP225USD/)",
+        0x3498DB,
+    )
+
+
+# Persistent reference embeds pinned in monitored (signal) channels. Keyed by
+# the channels.json monitored-channel name.
+_CHANNEL_NOTICES: dict[str, Callable[[], discord.Embed]] = {
+    "oil-trades": _build_oil_notice_embed,
+    "indices-trades": _build_indices_notice_embed,
+}
+
+
 class InfoEmbedManager:
     """Posts and maintains the pinned informational embed in each alert channel."""
 
@@ -331,14 +346,14 @@ class InfoEmbedManager:
             self._save_ids(ids)
 
     async def _sync_notices(self, ids: dict[str, int]) -> bool:
-        """Post or refresh the pinned text notice in each configured channel.
+        """Post or refresh the pinned reference embed in each configured channel.
 
         Returns True if any stored ID changed.
         """
         monitored = (self.bot.channels_config or {}).get("monitored_channels", {})
         changed = False
 
-        for name, content in _CHANNEL_NOTICES.items():
+        for name, builder in _CHANNEL_NOTICES.items():
             channel_id = monitored.get(name)
             if not channel_id or not str(channel_id).isdigit():
                 continue
@@ -347,12 +362,13 @@ class InfoEmbedManager:
                 logger.warning(f"Notice channel #{name} ({channel_id}) not found")
                 continue
 
+            embed = builder()
             key = f"notice:{channel.id}"
             stored_id = ids.get(key)
             if stored_id:
                 try:
                     msg = await channel.fetch_message(int(stored_id))
-                    await msg.edit(content=content)
+                    await msg.edit(content=None, embed=embed)
                     logger.info(f"Refreshed notice in #{channel.name}")
                     continue
                 except discord.NotFound:
@@ -361,16 +377,16 @@ class InfoEmbedManager:
                     logger.warning(f"Could not refresh notice in #{channel.name}: {e}")
                     continue
 
-            new_id = await self._post_notice(channel, content)
+            new_id = await self._post_notice(channel, embed)
             if new_id:
                 ids[key] = new_id
                 changed = True
 
         return changed
 
-    async def _post_notice(self, channel: discord.TextChannel, content: str) -> Optional[int]:
+    async def _post_notice(self, channel: discord.TextChannel, embed: discord.Embed) -> Optional[int]:
         try:
-            msg = await channel.send(content)
+            msg = await channel.send(embed=embed)
         except Exception as e:
             logger.error(f"Failed to post notice in #{channel.name}: {e}")
             return None
