@@ -139,8 +139,8 @@ class NearMissMonitor:
         first_limit = next(
             (
                 lim
-                for lim in sorted(pending_limits, key=lambda x: x.get("sequence_number", 99))
-                if lim.get("sequence_number") == 1
+                for lim in sorted(pending_limits, key=lambda x: x.sequence_number)
+                if lim.sequence_number == 1
             ),
             None,
         )

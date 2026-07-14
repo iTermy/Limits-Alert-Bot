@@ -1086,13 +1086,13 @@ class StreamingPriceMonitor:
             return
         first = min(pending, key=lambda lim: lim.sequence_number)
         now = datetime.now(timezone.utc)
-        first["status"] = "hit"
-        first["hit_alert_sent"] = True
-        first["hit_time"] = now
+        first.status = "hit"
+        first.hit_alert_sent = True
+        first.hit_time = now
         if hit_price is not None:
-            first["hit_price"] = hit_price
+            first.hit_price = hit_price
         else:
-            first["hit_price"] = first.get("price_level")
+            first.hit_price = first.price_level
 
     @staticmethod
     def _apply_status_to_signal(signal: dict, new_status: str) -> None:

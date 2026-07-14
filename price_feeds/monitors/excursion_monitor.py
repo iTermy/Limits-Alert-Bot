@@ -436,4 +436,4 @@ class ExcursionMonitor:
         if not hit_limits:
             return None
         first = sorted(hit_limits, key=lambda lim: lim.sequence_number)[0]
-        return first.get("hit_price") or first.get("price_level")
+        return first.hit_price or first.price_level

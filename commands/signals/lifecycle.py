@@ -225,11 +225,11 @@ class LifecycleCog(BaseCog):
 
             limit_lines = []
             for lim in sorted(signal.limits, key=lambda x: x.sequence_number):
-                seq = lim.get("sequence_number", "?")
-                price = format_price(lim["price_level"], instrument)
-                if lim["status"] == "hit":
+                seq = lim.sequence_number
+                price = format_price(lim.price_level, instrument)
+                if lim.status == "hit":
                     pnl_str = ""
-                    entry = lim["price_level"]
+                    entry = lim.price_level
                     if close_price is not None:
                         try:
                             pnl_val = self.tp_config.calculate_pnl(
