@@ -38,9 +38,10 @@ def info_embed_message_ids() -> set[str]:
 _FOOTER = "Discipline over everything — protect your account first. Small, consistent gains win long-term."
 
 
-def _base_embed(title: str, description: str, color: int) -> discord.Embed:
+def _base_embed(title: str, description: str, color: int, footer: bool = True) -> discord.Embed:
     embed = discord.Embed(title=title, description=description, color=color)
-    embed.set_footer(text=_FOOTER)
+    if footer:
+        embed.set_footer(text=_FOOTER)
     return embed
 
 
@@ -237,16 +238,17 @@ def _build_risky_embed() -> discord.Embed:
 
 def _build_oil_notice_embed() -> discord.Embed:
     return _base_embed(
-        "🛢️ Oil Trades",
+        "Oil Trades",
         "All oil signals are based on this chart:\n"
         "[USOILSPOT on TradingView](https://www.tradingview.com/symbols/USOILSPOT/)",
         0x2C3E50,
+        footer=False,
     )
 
 
 def _build_indices_notice_embed() -> discord.Embed:
     return _base_embed(
-        "📈 Indices Trades",
+        "Indices Trades",
         "All indices signals are based on **OANDA charts** unless specified "
         "otherwise. Reference charts:\n"
         "- [SPX](https://www.tradingview.com/symbols/SPX500USD/)\n"
@@ -255,6 +257,7 @@ def _build_indices_notice_embed() -> discord.Embed:
         "- [US30](https://www.tradingview.com/symbols/OANDA-US30USD/)\n"
         "- [JP225](https://www.tradingview.com/symbols/OANDA-JP225USD/)",
         0x3498DB,
+        footer=False,
     )
 
 
