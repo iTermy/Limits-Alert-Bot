@@ -109,6 +109,11 @@ class BaseThresholdConfig:
     def _fallback_asset_class(symbol: str) -> str:
         s = symbol.upper()
 
+        # Stocks carry an exchange suffix; check before crypto/indices so a
+        # ticker like ABNB.NAS (BNB) or GOOGL.NAS (NAS) is not misclassified.
+        if "." in s:
+            return "stocks"
+
         if (
             any(x in s for x in ["BTC", "ETH", "BNB", "XRP", "ADA", "DOGE", "SOL", "DOT"])
             or "USDT" in s
@@ -143,9 +148,6 @@ class BaseThresholdConfig:
             ]
         ):
             return "indices"
-
-        if "." in s:
-            return "stocks"
 
         forex_ccys = {"EUR", "USD", "GBP", "JPY", "AUD", "NZD", "CAD", "CHF"}
         if len(s) == 6 and s[:3] in forex_ccys and s[3:] in forex_ccys:

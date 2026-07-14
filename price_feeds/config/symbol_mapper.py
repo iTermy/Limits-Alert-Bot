@@ -45,6 +45,12 @@ class SymbolMapper:
         """Return the asset class for a symbol (forex, forex_jpy, metals, crypto, indices, stocks, oil)."""
         symbol_upper = symbol.upper()
 
+        # Stocks carry an exchange suffix (e.g. AAPL.NAS, BAC.NYSE). Check this
+        # before crypto: a ticker like ABNB.NAS or SOLV.NAS contains a crypto
+        # substring (BNB, SOL) and would otherwise misclassify as crypto.
+        if "." in symbol_upper:
+            return "stocks"
+
         # Check crypto patterns
         if any(
             crypto in symbol_upper
@@ -64,10 +70,6 @@ class SymbolMapper:
             for oil in ["WTI", "BRENT", "OIL", "USOIL", "USOILSPOT", "XTIUSD", "XTI"]
         ):
             return "oil"
-
-        # Check stocks (common patterns)
-        if "." in symbol or any(exchange in symbol_upper for exchange in [".NAS", ".NYSE", ".LON"]):
-            return "stocks"
 
         # Check indices
         if any(
