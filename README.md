@@ -3,8 +3,7 @@
 A Discord bot for monitoring trading-signal channels. It parses signal messages
 posted in monitored channels, tracks entry limits against live price feeds, and
 fires approaching / hit / stop-loss / take-profit alerts in real time — editing a
-single persistent embed per signal rather than flooding the channel with new
-messages.
+single persistent embed per signal.
 
 A companion per-user execution bot (separate repository) reads the same database
 and mirrors these signals onto MetaTrader 5 broker accounts.
