@@ -1,0 +1,922 @@
+{
+  "type_defaults": {
+    "standard": {
+      "forex": {
+        "type": "pips",
+        "tight": 3.5,
+        "medium": 7.0,
+        "loose": 14.0
+      },
+      "forex_jpy": {
+        "type": "pips",
+        "tight": 3.5,
+        "medium": 7.0,
+        "loose": 14.0
+      },
+      "metals": {
+        "type": "dollars",
+        "tight": 2.5,
+        "medium": 5.0,
+        "loose": 10.0
+      },
+      "indices": {
+        "type": "dollars",
+        "tight": 10.0,
+        "medium": 20.0,
+        "loose": 40.0
+      },
+      "stocks": {
+        "type": "dollars",
+        "tight": 2.5,
+        "medium": 5.0,
+        "loose": 10.0
+      },
+      "crypto": {
+        "type": "dollars",
+        "tight": 250.0,
+        "medium": 500.0,
+        "loose": 1000.0
+      },
+      "oil": {
+        "type": "dollars",
+        "tight": 0.25,
+        "medium": 0.5,
+        "loose": 1.0
+      }
+    },
+    "scalp": {
+      "forex": {
+        "type": "pips",
+        "tight": 2.5,
+        "medium": 5.0,
+        "loose": 10.0
+      },
+      "forex_jpy": {
+        "type": "pips",
+        "tight": 2.5,
+        "medium": 5.0,
+        "loose": 10.0
+      },
+      "metals": {
+        "type": "dollars",
+        "tight": 2.0,
+        "medium": 4.0,
+        "loose": 8.0
+      },
+      "indices": {
+        "type": "dollars",
+        "tight": 5.0,
+        "medium": 10.0,
+        "loose": 20.0
+      },
+      "stocks": {
+        "type": "dollars",
+        "tight": 0.25,
+        "medium": 0.5,
+        "loose": 1.0
+      },
+      "crypto": {
+        "type": "dollars",
+        "tight": 150.0,
+        "medium": 300.0,
+        "loose": 600.0
+      },
+      "oil": {
+        "type": "dollars",
+        "tight": 0.1,
+        "medium": 0.2,
+        "loose": 0.4
+      }
+    },
+    "swing": {
+      "forex": {
+        "type": "pips",
+        "tight": 10.5,
+        "medium": 21.0,
+        "loose": 42.0
+      },
+      "forex_jpy": {
+        "type": "pips",
+        "tight": 10.5,
+        "medium": 21.0,
+        "loose": 42.0
+      },
+      "metals": {
+        "type": "dollars",
+        "tight": 7.5,
+        "medium": 15.0,
+        "loose": 30.0
+      },
+      "indices": {
+        "type": "dollars",
+        "tight": 30.0,
+        "medium": 60.0,
+        "loose": 120.0
+      },
+      "stocks": {
+        "type": "dollars",
+        "tight": 7.5,
+        "medium": 15.0,
+        "loose": 30.0
+      },
+      "crypto": {
+        "type": "dollars",
+        "tight": 750.0,
+        "medium": 1500.0,
+        "loose": 3000.0
+      },
+      "oil": {
+        "type": "dollars",
+        "tight": 0.75,
+        "medium": 1.5,
+        "loose": 3.0
+      }
+    },
+    "toll": {
+      "forex": {
+        "type": "pips",
+        "tight": 2.5,
+        "medium": 5.0,
+        "loose": 10.0
+      },
+      "forex_jpy": {
+        "type": "pips",
+        "tight": 2.5,
+        "medium": 5.0,
+        "loose": 10.0
+      },
+      "metals": {
+        "type": "dollars",
+        "tight": 2.5,
+        "medium": 5.0,
+        "loose": 10.0
+      },
+      "indices": {
+        "type": "dollars",
+        "tight": 5.0,
+        "medium": 10.0,
+        "loose": 20.0
+      },
+      "stocks": {
+        "type": "dollars",
+        "tight": 0.25,
+        "medium": 0.5,
+        "loose": 1.0
+      },
+      "crypto": {
+        "type": "dollars",
+        "tight": 150.0,
+        "medium": 300.0,
+        "loose": 600.0
+      },
+      "oil": {
+        "type": "dollars",
+        "tight": 0.1,
+        "medium": 0.2,
+        "loose": 0.4
+      }
+    },
+    "pa": {
+      "forex": {
+        "type": "pips",
+        "tight": 3.5,
+        "medium": 7.0,
+        "loose": 14.0
+      },
+      "forex_jpy": {
+        "type": "pips",
+        "tight": 3.5,
+        "medium": 7.0,
+        "loose": 14.0
+      },
+      "metals": {
+        "type": "dollars",
+        "tight": 2.5,
+        "medium": 5.0,
+        "loose": 10.0
+      },
+      "indices": {
+        "type": "dollars",
+        "tight": 10.0,
+        "medium": 20.0,
+        "loose": 40.0
+      },
+      "stocks": {
+        "type": "dollars",
+        "tight": 2.5,
+        "medium": 5.0,
+        "loose": 10.0
+      },
+      "crypto": {
+        "type": "dollars",
+        "tight": 250.0,
+        "medium": 500.0,
+        "loose": 1000.0
+      },
+      "oil": {
+        "type": "dollars",
+        "tight": 0.25,
+        "medium": 0.5,
+        "loose": 1.0
+      }
+    },
+    "1-1": {
+      "metals": {
+        "type": "dollars",
+        "tight": 5.0,
+        "medium": 10.0,
+        "loose": 20.0
+      }
+    }
+  },
+  "type_overrides": {
+    "standard": {
+      "SPX500USD": {
+        "type": "dollars",
+        "tight": 5.0,
+        "medium": 10.0,
+        "loose": 20.0
+      },
+      "NAS100USD": {
+        "type": "dollars",
+        "tight": 25.0,
+        "medium": 50.0,
+        "loose": 100.0
+      },
+      "XTIUSD": {
+        "type": "dollars",
+        "tight": 0.25,
+        "medium": 0.5,
+        "loose": 1.0
+      },
+      "XAGUSD": {
+        "type": "dollars",
+        "tight": 0.25,
+        "medium": 0.5,
+        "loose": 1.0
+      },
+      "US30USD": {
+        "type": "dollars",
+        "tight": 30.0,
+        "medium": 60.0,
+        "loose": 120.0
+      },
+      "DE30EUR": {
+        "type": "dollars",
+        "tight": 25.0,
+        "medium": 50.0,
+        "loose": 100.0
+      },
+      "JP225": {
+        "type": "dollars",
+        "tight": 50.0,
+        "medium": 100.0,
+        "loose": 200.0
+      },
+      "ETHUSDT": {
+        "type": "dollars",
+        "tight": 12.5,
+        "medium": 25.0,
+        "loose": 50.0
+      },
+      "WMT.NAS": {
+        "type": "dollars",
+        "tight": 0.5,
+        "medium": 1.0,
+        "loose": 2.0
+      },
+      "AAPL.NAS": {
+        "type": "dollars",
+        "tight": 1.25,
+        "medium": 2.5,
+        "loose": 5.0
+      },
+      "AMD.NAS": {
+        "type": "dollars",
+        "tight": 2.5,
+        "medium": 5.0,
+        "loose": 10.0
+      },
+      "AMZN.NAS": {
+        "type": "dollars",
+        "tight": 1.0,
+        "medium": 2.0,
+        "loose": 4.0
+      },
+      "AVGO.NAS": {
+        "type": "dollars",
+        "tight": 2.5,
+        "medium": 5.0,
+        "loose": 10.0
+      },
+      "BIDU.NAS": {
+        "type": "dollars",
+        "tight": 0.75,
+        "medium": 1.5,
+        "loose": 3.0
+      },
+      "CLSK.NAS": {
+        "type": "dollars",
+        "tight": 0.175,
+        "medium": 0.35,
+        "loose": 0.7
+      },
+      "COIN.NAS": {
+        "type": "dollars",
+        "tight": 1.5,
+        "medium": 3.0,
+        "loose": 6.0
+      },
+      "CSCO.NAS": {
+        "type": "dollars",
+        "tight": 0.375,
+        "medium": 0.75,
+        "loose": 1.5
+      },
+      "GILD.NAS": {
+        "type": "dollars",
+        "tight": 0.25,
+        "medium": 0.5,
+        "loose": 1.0
+      },
+      "GOOG.NAS": {
+        "type": "dollars",
+        "tight": 1.25,
+        "medium": 2.5,
+        "loose": 5.0
+      },
+      "INTC.NAS": {
+        "type": "dollars",
+        "tight": 0.75,
+        "medium": 1.5,
+        "loose": 3.0
+      },
+      "MARA.NAS": {
+        "type": "dollars",
+        "tight": 0.15,
+        "medium": 0.3,
+        "loose": 0.6
+      },
+      "MRNA.NAS": {
+        "type": "dollars",
+        "tight": 0.375,
+        "medium": 0.75,
+        "loose": 1.5
+      },
+      "MSFT.NAS": {
+        "type": "dollars",
+        "tight": 2.5,
+        "medium": 5.0,
+        "loose": 10.0
+      },
+      "MU.NAS": {
+        "type": "dollars",
+        "tight": 10.0,
+        "medium": 20.0,
+        "loose": 40.0
+      },
+      "NFLX.NAS": {
+        "type": "dollars",
+        "tight": 0.175,
+        "medium": 0.35,
+        "loose": 0.7
+      },
+      "NVDA.NAS": {
+        "type": "dollars",
+        "tight": 0.875,
+        "medium": 1.75,
+        "loose": 3.5
+      },
+      "PDD.NAS": {
+        "type": "dollars",
+        "tight": 0.375,
+        "medium": 0.75,
+        "loose": 1.5
+      },
+      "PLTR.NAS": {
+        "type": "dollars",
+        "tight": 1.0,
+        "medium": 2.0,
+        "loose": 4.0
+      },
+      "PTON.NAS": {
+        "type": "dollars",
+        "tight": 0.075,
+        "medium": 0.15,
+        "loose": 0.3
+      },
+      "PYPL.NAS": {
+        "type": "dollars",
+        "tight": 0.25,
+        "medium": 0.5,
+        "loose": 1.0
+      },
+      "QCOM.NAS": {
+        "type": "dollars",
+        "tight": 3.0,
+        "medium": 6.0,
+        "loose": 12.0
+      },
+      "QQQ.NAS": {
+        "type": "dollars",
+        "tight": 1.0,
+        "medium": 2.0,
+        "loose": 4.0
+      },
+      "RIVN.NAS": {
+        "type": "dollars",
+        "tight": 0.2,
+        "medium": 0.4,
+        "loose": 0.8
+      },
+      "RKLB.NAS": {
+        "type": "dollars",
+        "tight": 1.5,
+        "medium": 3.0,
+        "loose": 6.0
+      },
+      "SBUX.NAS": {
+        "type": "dollars",
+        "tight": 0.25,
+        "medium": 0.5,
+        "loose": 1.0
+      },
+      "SOFI.NAS": {
+        "type": "dollars",
+        "tight": 0.125,
+        "medium": 0.25,
+        "loose": 0.5
+      },
+      "TSLA.NAS": {
+        "type": "dollars",
+        "tight": 2.0,
+        "medium": 4.0,
+        "loose": 8.0
+      },
+      "UAL.NAS": {
+        "type": "dollars",
+        "tight": 0.75,
+        "medium": 1.5,
+        "loose": 3.0
+      }
+    },
+    "scalp": {
+      "XAGUSD": {
+        "type": "dollars",
+        "tight": 0.25,
+        "medium": 0.5,
+        "loose": 1.0
+      },
+      "NAS100USD": {
+        "type": "dollars",
+        "tight": 20.0,
+        "medium": 40.0,
+        "loose": 80.0
+      },
+      "US30USD": {
+        "type": "dollars",
+        "tight": 20.0,
+        "medium": 40.0,
+        "loose": 80.0
+      },
+      "DE30EUR": {
+        "type": "dollars",
+        "tight": 15.0,
+        "medium": 30.0,
+        "loose": 60.0
+      },
+      "JP225": {
+        "type": "dollars",
+        "tight": 62.5,
+        "medium": 125.0,
+        "loose": 250.0
+      },
+      "ETHUSDT": {
+        "type": "dollars",
+        "tight": 7.5,
+        "medium": 15.0,
+        "loose": 30.0
+      },
+      "USOILSPOT": {
+        "type": "dollars",
+        "tight": 0.15,
+        "medium": 0.3,
+        "loose": 0.6
+      },
+      "XTIUSD": {
+        "type": "dollars",
+        "tight": 0.15,
+        "medium": 0.3,
+        "loose": 0.6
+      },
+      "WMT.NAS": {
+        "type": "dollars",
+        "tight": 0.25,
+        "medium": 0.5,
+        "loose": 1.0
+      },
+      "AAPL.NAS": {
+        "type": "dollars",
+        "tight": 0.625,
+        "medium": 1.25,
+        "loose": 2.5
+      },
+      "AMD.NAS": {
+        "type": "dollars",
+        "tight": 1.25,
+        "medium": 2.5,
+        "loose": 5.0
+      },
+      "AMZN.NAS": {
+        "type": "dollars",
+        "tight": 0.5,
+        "medium": 1.0,
+        "loose": 2.0
+      },
+      "AVGO.NAS": {
+        "type": "dollars",
+        "tight": 1.25,
+        "medium": 2.5,
+        "loose": 5.0
+      },
+      "BIDU.NAS": {
+        "type": "dollars",
+        "tight": 0.375,
+        "medium": 0.75,
+        "loose": 1.5
+      },
+      "CLSK.NAS": {
+        "type": "dollars",
+        "tight": 0.125,
+        "medium": 0.25,
+        "loose": 0.5
+      },
+      "COIN.NAS": {
+        "type": "dollars",
+        "tight": 0.75,
+        "medium": 1.5,
+        "loose": 3.0
+      },
+      "CSCO.NAS": {
+        "type": "dollars",
+        "tight": 0.25,
+        "medium": 0.5,
+        "loose": 1.0
+      },
+      "GILD.NAS": {
+        "type": "dollars",
+        "tight": 0.125,
+        "medium": 0.25,
+        "loose": 0.5
+      },
+      "GOOG.NAS": {
+        "type": "dollars",
+        "tight": 0.75,
+        "medium": 1.5,
+        "loose": 3.0
+      },
+      "INTC.NAS": {
+        "type": "dollars",
+        "tight": 0.5,
+        "medium": 1.0,
+        "loose": 2.0
+      },
+      "MARA.NAS": {
+        "type": "dollars",
+        "tight": 0.075,
+        "medium": 0.15,
+        "loose": 0.3
+      },
+      "MRNA.NAS": {
+        "type": "dollars",
+        "tight": 0.25,
+        "medium": 0.5,
+        "loose": 1.0
+      },
+      "MSFT.NAS": {
+        "type": "dollars",
+        "tight": 1.25,
+        "medium": 2.5,
+        "loose": 5.0
+      },
+      "MU.NAS": {
+        "type": "dollars",
+        "tight": 5.0,
+        "medium": 10.0,
+        "loose": 20.0
+      },
+      "NFLX.NAS": {
+        "type": "dollars",
+        "tight": 0.1,
+        "medium": 0.2,
+        "loose": 0.4
+      },
+      "NVDA.NAS": {
+        "type": "dollars",
+        "tight": 0.5,
+        "medium": 1.0,
+        "loose": 2.0
+      },
+      "PDD.NAS": {
+        "type": "dollars",
+        "tight": 0.25,
+        "medium": 0.5,
+        "loose": 1.0
+      },
+      "PLTR.NAS": {
+        "type": "dollars",
+        "tight": 0.5,
+        "medium": 1.0,
+        "loose": 2.0
+      },
+      "PTON.NAS": {
+        "type": "dollars",
+        "tight": 0.05,
+        "medium": 0.1,
+        "loose": 0.2
+      },
+      "PYPL.NAS": {
+        "type": "dollars",
+        "tight": 0.125,
+        "medium": 0.25,
+        "loose": 0.5
+      },
+      "QCOM.NAS": {
+        "type": "dollars",
+        "tight": 1.5,
+        "medium": 3.0,
+        "loose": 6.0
+      },
+      "QQQ.NAS": {
+        "type": "dollars",
+        "tight": 0.5,
+        "medium": 1.0,
+        "loose": 2.0
+      },
+      "RIVN.NAS": {
+        "type": "dollars",
+        "tight": 0.1,
+        "medium": 0.2,
+        "loose": 0.4
+      },
+      "RKLB.NAS": {
+        "type": "dollars",
+        "tight": 0.75,
+        "medium": 1.5,
+        "loose": 3.0
+      },
+      "SBUX.NAS": {
+        "type": "dollars",
+        "tight": 0.125,
+        "medium": 0.25,
+        "loose": 0.5
+      },
+      "SOFI.NAS": {
+        "type": "dollars",
+        "tight": 0.075,
+        "medium": 0.15,
+        "loose": 0.3
+      },
+      "TSLA.NAS": {
+        "type": "dollars",
+        "tight": 1.0,
+        "medium": 2.0,
+        "loose": 4.0
+      },
+      "UAL.NAS": {
+        "type": "dollars",
+        "tight": 0.5,
+        "medium": 1.0,
+        "loose": 2.0
+      }
+    },
+    "swing": {
+      "XAGUSD": {
+        "type": "dollars",
+        "tight": 0.75,
+        "medium": 1.5,
+        "loose": 3.0
+      },
+      "SPX500USD": {
+        "type": "dollars",
+        "tight": 15.0,
+        "medium": 30.0,
+        "loose": 60.0
+      },
+      "NAS100USD": {
+        "type": "dollars",
+        "tight": 75.0,
+        "medium": 150.0,
+        "loose": 300.0
+      },
+      "US30USD": {
+        "type": "dollars",
+        "tight": 90.0,
+        "medium": 180.0,
+        "loose": 360.0
+      },
+      "DE30EUR": {
+        "type": "dollars",
+        "tight": 75.0,
+        "medium": 150.0,
+        "loose": 300.0
+      },
+      "JP225": {
+        "type": "dollars",
+        "tight": 375.0,
+        "medium": 750.0,
+        "loose": 1500.0
+      },
+      "ETHUSDT": {
+        "type": "dollars",
+        "tight": 37.5,
+        "medium": 75.0,
+        "loose": 150.0
+      },
+      "WMT.NAS": {
+        "type": "dollars",
+        "tight": 1.5,
+        "medium": 3.0,
+        "loose": 6.0
+      },
+      "AAPL.NAS": {
+        "type": "dollars",
+        "tight": 3.75,
+        "medium": 7.5,
+        "loose": 15.0
+      },
+      "AMZN.NAS": {
+        "type": "dollars",
+        "tight": 3.0,
+        "medium": 6.0,
+        "loose": 12.0
+      },
+      "BIDU.NAS": {
+        "type": "dollars",
+        "tight": 2.25,
+        "medium": 4.5,
+        "loose": 9.0
+      },
+      "CLSK.NAS": {
+        "type": "dollars",
+        "tight": 0.525,
+        "medium": 1.05,
+        "loose": 2.1
+      },
+      "COIN.NAS": {
+        "type": "dollars",
+        "tight": 4.5,
+        "medium": 9.0,
+        "loose": 18.0
+      },
+      "CSCO.NAS": {
+        "type": "dollars",
+        "tight": 1.125,
+        "medium": 2.25,
+        "loose": 4.5
+      },
+      "GILD.NAS": {
+        "type": "dollars",
+        "tight": 0.75,
+        "medium": 1.5,
+        "loose": 3.0
+      },
+      "GOOG.NAS": {
+        "type": "dollars",
+        "tight": 3.75,
+        "medium": 7.5,
+        "loose": 15.0
+      },
+      "INTC.NAS": {
+        "type": "dollars",
+        "tight": 2.25,
+        "medium": 4.5,
+        "loose": 9.0
+      },
+      "MARA.NAS": {
+        "type": "dollars",
+        "tight": 0.45,
+        "medium": 0.9,
+        "loose": 1.8
+      },
+      "MRNA.NAS": {
+        "type": "dollars",
+        "tight": 1.125,
+        "medium": 2.25,
+        "loose": 4.5
+      },
+      "MU.NAS": {
+        "type": "dollars",
+        "tight": 30.0,
+        "medium": 60.0,
+        "loose": 120.0
+      },
+      "NFLX.NAS": {
+        "type": "dollars",
+        "tight": 0.525,
+        "medium": 1.05,
+        "loose": 2.1
+      },
+      "NVDA.NAS": {
+        "type": "dollars",
+        "tight": 2.625,
+        "medium": 5.25,
+        "loose": 10.5
+      },
+      "PDD.NAS": {
+        "type": "dollars",
+        "tight": 1.125,
+        "medium": 2.25,
+        "loose": 4.5
+      },
+      "PLTR.NAS": {
+        "type": "dollars",
+        "tight": 3.0,
+        "medium": 6.0,
+        "loose": 12.0
+      },
+      "PTON.NAS": {
+        "type": "dollars",
+        "tight": 0.225,
+        "medium": 0.45,
+        "loose": 0.9
+      },
+      "PYPL.NAS": {
+        "type": "dollars",
+        "tight": 0.75,
+        "medium": 1.5,
+        "loose": 3.0
+      },
+      "QCOM.NAS": {
+        "type": "dollars",
+        "tight": 9.0,
+        "medium": 18.0,
+        "loose": 36.0
+      },
+      "QQQ.NAS": {
+        "type": "dollars",
+        "tight": 3.0,
+        "medium": 6.0,
+        "loose": 12.0
+      },
+      "RIVN.NAS": {
+        "type": "dollars",
+        "tight": 0.6,
+        "medium": 1.2,
+        "loose": 2.4
+      },
+      "RKLB.NAS": {
+        "type": "dollars",
+        "tight": 4.5,
+        "medium": 9.0,
+        "loose": 18.0
+      },
+      "SBUX.NAS": {
+        "type": "dollars",
+        "tight": 0.75,
+        "medium": 1.5,
+        "loose": 3.0
+      },
+      "SOFI.NAS": {
+        "type": "dollars",
+        "tight": 0.375,
+        "medium": 0.75,
+        "loose": 1.5
+      },
+      "TSLA.NAS": {
+        "type": "dollars",
+        "tight": 6.0,
+        "medium": 12.0,
+        "loose": 24.0
+      },
+      "UAL.NAS": {
+        "type": "dollars",
+        "tight": 2.25,
+        "medium": 4.5,
+        "loose": 9.0
+      },
+      "XAUUSD": {
+        "type": "dollars",
+        "tight": 50.0,
+        "medium": 100.0,
+        "loose": 200.0
+      }
+    },
+    "toll": {
+      "USOILSPOT": {
+        "type": "dollars",
+        "tight": 0.2,
+        "medium": 0.4,
+        "loose": 0.8
+      },
+      "XTIUSD": {
+        "type": "dollars",
+        "tight": 0.2,
+        "medium": 0.4,
+        "loose": 0.8
+      }
+    },
+    "pa": {},
+    "1-1": {}
+  }
+}

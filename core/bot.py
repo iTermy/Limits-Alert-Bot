@@ -4,7 +4,7 @@ Trading Bot Core - Main bot class
 
 import traceback
 from datetime import datetime
-from typing import Optional, Set
+from typing import Optional
 
 import discord
 from discord.ext import commands, tasks
@@ -41,8 +41,8 @@ class TradingBot(commands.Bot):
         self.logger = get_logger("bot")
         self.start_time = datetime.utcnow()
         self.channels_config = None
-        self.monitored_channels: Set[int] = set()
-        self.allowed_channel_ids: Set[int] = set()
+        self.monitored_channels: set[int] = set()
+        self.allowed_channel_ids: set[int] = set()
         self.alert_channel_id: Optional[int] = None
         self.command_channel_id: Optional[int] = None
         self.signal_db = None
@@ -52,6 +52,8 @@ class TradingBot(commands.Bot):
         self.channel_cleaner = None
         self.news_fetcher = None
         self.vol_guard = None
+        self.risky_window_announcer = None
+        self._info_embeds_synced = False
 
         # Flat service registry — populated during setup_hook, injected into cogs/handlers
         self.services = ServiceRegistry()
@@ -109,6 +111,7 @@ class TradingBot(commands.Bot):
             self.services.nm_monitor = self.monitor.nm_monitor
             self.services.alert_config = self.monitor.alert_config
             self.services.trailing_monitor = self.monitor.trailing_monitor
+            self.services.excursion_monitor = self.monitor.excursion_monitor
 
         # Connect alert system to message handler
         if self.monitor and self.message_handler:
@@ -165,6 +168,7 @@ class TradingBot(commands.Bot):
             "toll-alert-channel",
             "general-tolls-alert",
             "legends-trade-alert",
+            "risky-gold-alert",
             "finished_signals",
             "profit_channel",
         ):
@@ -202,6 +206,18 @@ class TradingBot(commands.Bot):
             self.monitor.alert_system.bot = self
             self.monitor.alert_system.start_live_updates()
             self.logger.info("Live embed update loop started")
+
+        # Post/refresh the pinned informational embeds in the alert channels and
+        # the reference notices in the monitored channels.
+        # Guarded so reconnect-triggered on_ready calls don't re-run it.
+        if self.monitor and self.monitor.alert_system and not self._info_embeds_synced:
+            self._info_embeds_synced = True
+            try:
+                from price_feeds.alerting.info_embeds import InfoEmbedManager
+
+                await InfoEmbedManager(self, self.monitor.alert_system).sync()
+            except Exception as e:
+                self.logger.error(f"Failed to sync info embeds: {e}", exc_info=True)
 
         # Set bot status
         await self.change_presence(
@@ -296,20 +312,22 @@ class TradingBot(commands.Bot):
         """Initialize the price monitoring system — creates all subsystems and injects them."""
         self.logger.info("Starting price monitor initialization...")
         try:
-            from price_feeds.alert_config import AlertDistanceConfig
-            from price_feeds.alert_system import AlertSystem
-            from price_feeds.feed_health_monitor import FeedHealthMonitor
-            from price_feeds.live_price_writer import LivePriceWriter
-            from price_feeds.nm_config import NMConfig
-            from price_feeds.nm_monitor import NearMissMonitor
-            from price_feeds.price_stream_manager import PriceStreamManager
-            from price_feeds.streaming_monitor import StreamingPriceMonitor
-            from price_feeds.tp_config import TPConfig
-            from price_feeds.tp_monitor import AutoTPMonitor
-            from price_feeds.trailing_config import TrailingStopConfig
-            from price_feeds.trailing_monitor import TrailingStopMonitor
-
+            from database.excursion_ops import ExcursionDatabase
             from database.trailing_ops import TrailingDatabase
+            from price_feeds.config.alert_config import AlertDistanceConfig
+            from price_feeds.alerting.alert_system import AlertSystem
+            from price_feeds.monitors.excursion_monitor import ExcursionMonitor
+            from price_feeds.monitors.feed_health_monitor import FeedHealthMonitor
+            from price_feeds.monitors.live_price_writer import LivePriceWriter
+            from price_feeds.monitors.market_context import MarketContextProvider
+            from price_feeds.config.nm_config import NMConfig
+            from price_feeds.monitors.nm_monitor import NearMissMonitor
+            from price_feeds.feeds.price_stream_manager import PriceStreamManager
+            from price_feeds.monitors.streaming_monitor import StreamingPriceMonitor
+            from price_feeds.config.tp_config import TPConfig
+            from price_feeds.monitors.tp_monitor import AutoTPMonitor
+            from price_feeds.config.trailing_config import TrailingStopConfig
+            from price_feeds.monitors.trailing_monitor import TrailingStopMonitor
 
             # Create subsystems
             alert_config = AlertDistanceConfig()
@@ -335,6 +353,11 @@ class TradingBot(commands.Bot):
             trailing_monitor = TrailingStopMonitor(
                 trailing_config=trailing_config,
                 trailing_db=TrailingDatabase(db),
+            )
+            excursion_monitor = ExcursionMonitor(
+                excursion_db=ExcursionDatabase(db),
+                market_context=MarketContextProvider(stream_manager.symbol_mapper),
+                tp_config=tp_config,
             )
             live_price_writer = LivePriceWriter(
                 db_manager=db,
@@ -366,6 +389,7 @@ class TradingBot(commands.Bot):
                 nm_config=nm_config,
                 nm_monitor=nm_monitor,
                 trailing_monitor=trailing_monitor,
+                excursion_monitor=excursion_monitor,
                 live_price_writer=live_price_writer,
                 health_monitor=health_monitor,
             )
@@ -389,8 +413,12 @@ class TradingBot(commands.Bot):
                 self.logger.info("ForexFactory news fetcher started")
 
             # Volatility guard — informational only; subscribes to the same price
-            # stream and announces sharp moves per currency (gold flags "ALL").
+            # stream and announces sharp moves per pair (gold flags "ALL").
             await self._start_vol_guard(stream_manager)
+
+            # Risky-window announcer — posts a "disabled/resumed" embed to the
+            # risky-gold alert channel around each scheduled disabled window.
+            self._start_risky_window_announcer(alert_system)
 
             self.logger.info("Price monitoring system initialized and started")
             self.logger.info(
@@ -410,6 +438,7 @@ class TradingBot(commands.Bot):
             "toll-alert-channel": alert_system.set_toll_channel,
             "general-tolls-alert": alert_system.set_general_toll_channel,
             "legends-trade-alert": alert_system.set_legends_channel,
+            "risky-gold-alert": alert_system.set_risky_channel,
         }
         for key, setter in channel_setters.items():
             channel_id = self.channels_config.get(key)
@@ -426,7 +455,7 @@ class TradingBot(commands.Bot):
     async def _start_vol_guard(self, stream_manager):
         """Create and start the volatility guard, posting to its own channel
         (`vol-guard-alert` in channels.json) or the main alert channel as a fallback."""
-        from price_feeds.vol_guard import VolatilityGuard
+        from price_feeds.monitors.vol_guard import VolatilityGuard
 
         channel_id = self.channels_config.get("vol-guard-alert") or self.channels_config.get(
             "alert_channel"
@@ -440,10 +469,24 @@ class TradingBot(commands.Bot):
             self.logger.error(f"Failed to resolve vol guard channel: {e}")
             return
 
-        self.vol_guard = VolatilityGuard(self, stream_manager, channel)
+        self.vol_guard = VolatilityGuard(self, stream_manager, channel, db=db)
         self.services.vol_guard = self.vol_guard
         self.vol_guard.start()
         self.logger.info(f"Volatility guard channel set: #{channel.name}")
+
+    def _start_risky_window_announcer(self, alert_system):
+        """Create and start the risky-window announcer, posting to the risky-gold
+        alert channel. No-op if that channel isn't configured."""
+        from price_feeds.monitors.risky_window import RiskyWindowAnnouncer
+
+        channel = getattr(alert_system, "risky_alert_channel", None)
+        if channel is None:
+            self.logger.warning("No risky-gold-alert channel — risky window announcer off")
+            return
+        self.risky_window_announcer = RiskyWindowAnnouncer(self, channel)
+        self.services.risky_window_announcer = self.risky_window_announcer
+        self.risky_window_announcer.start()
+        self.logger.info(f"Risky window announcer channel set: #{channel.name}")
 
     @tasks.loop(seconds=30)
     async def heartbeat(self):
@@ -482,6 +525,9 @@ class TradingBot(commands.Bot):
 
         if self.vol_guard:
             self.vol_guard.stop()
+
+        if self.risky_window_announcer:
+            self.risky_window_announcer.stop()
 
         if self.monitor:
             await self.monitor.stop()

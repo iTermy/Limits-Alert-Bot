@@ -3,21 +3,34 @@ Signal-specific database operations — CRUD, lifecycle, and analytics
 """
 
 from collections import defaultdict
-from datetime import datetime, timedelta
-from typing import Any, Dict, List, Optional, Tuple
+from datetime import datetime
+from typing import Any, Optional
 
 import pytz
 
 from core.parser import ParsedSignal
-from models.signal import SignalData
-from utils.logger import get_logger
-
 from models.enums import LimitStatus, SignalStatus
-from utils.formatting import get_status_emoji
+from models.signal import LimitData, SignalData
+from utils.logger import get_logger
 
 from .utils import _parse_dt, calculate_expiry, is_weekend_window
 
 logger = get_logger("signal_db")
+
+# Explicit column lists for single-signal fetches. Matches the SignalData /
+# LimitData model fields; analytics-only columns (close_*, tp_threshold_*,
+# minutes_to_news, data_version) are written but never read at runtime.
+SIGNAL_COLUMNS = (
+    "id, message_id, channel_id, instrument, direction, stop_loss, expiry_type, "
+    "expiry_time, status, type, first_limit_hit_time, closed_at, closed_reason, "
+    "tp_price, manual_tp_price, total_limits, limits_hit, alert_message_id, "
+    "alert_channel_id, ping_message_id, finished_message_id, finished_channel_id, "
+    "created_at, updated_at"
+)
+LIMIT_COLUMNS = (
+    "id, signal_id, price_level, sequence_number, status, hit_time, hit_price, "
+    "approaching_alert_sent, hit_alert_sent, created_at"
+)
 
 
 def _is_crypto_symbol(symbol: str) -> bool:
@@ -27,7 +40,55 @@ def _is_crypto_symbol(symbol: str) -> bool:
     s = symbol.upper()
     if any(c in s for c in ("BTC", "ETH", "BNB", "XRP", "ADA", "DOGE", "SOL", "DOT")):
         return True
-    return s.endswith("USDT") or s.endswith("USDC")
+    return s.endswith(("USDT", "USDC"))
+
+
+def _plan_limit_diff(existing_limits: list[dict[str, Any]], new_levels: list[float]) -> dict[str, Any]:
+    """Plan how an edited limit list maps onto the existing rows.
+
+    Matches edited levels to preservable rows (pending/hit) by exact price so
+    unchanged levels keep their limit_id — the execution bot keys pending
+    orders and filled positions off limit_id, so re-minting ids on every edit
+    would force it to cancel and re-place untouched limits.
+
+    Returns a dict with:
+      plan:              [(sequence_number, price_level, matched_row_or_None)]
+      matched_ids:       ids of rows kept in place
+      removed_rows:      rows deleted by the edit
+      hit_count:         how many kept rows are already hit
+      alert_invalidated: True when a removed row had already fired an alert
+                         (stale embed must be retracted by the caller)
+    """
+    preservable_by_price = defaultdict(list)
+    for r in existing_limits:
+        if r["status"] in ("pending", "hit"):
+            preservable_by_price[r["price_level"]].append(r)
+
+    plan = []
+    matched_ids = set()
+    hit_count = 0
+    for idx, level in enumerate(new_levels):
+        queue = preservable_by_price.get(level)
+        matched = queue.pop(0) if queue else None
+        if matched is not None:
+            matched_ids.add(matched["id"])
+            if matched["status"] == "hit":
+                hit_count += 1
+        plan.append((idx + 1, level, matched))
+
+    removed_rows = [r for r in existing_limits if r["id"] not in matched_ids]
+    alert_invalidated = any(
+        r["status"] == "hit" or r["hit_alert_sent"] or r["approaching_alert_sent"]
+        for r in removed_rows
+    )
+
+    return {
+        "plan": plan,
+        "matched_ids": matched_ids,
+        "removed_rows": removed_rows,
+        "hit_count": hit_count,
+        "alert_invalidated": alert_invalidated,
+    }
 
 
 class SignalDatabase:
@@ -39,11 +100,21 @@ class SignalDatabase:
     # === CRUD ===
 
     async def save_signal(
-        self, parsed_signal: ParsedSignal, message_id: str, channel_id: str
-    ) -> Tuple[bool, Optional[int]]:
-        """Save a parsed signal to the database."""
+        self,
+        parsed_signal: ParsedSignal,
+        message_id: str,
+        channel_id: str,
+        context: Optional[dict[str, Any]] = None,
+    ) -> tuple[bool, Optional[int]]:
+        """
+        Save a parsed signal to the database.
+
+        `context` optionally carries save-time analysis stamps
+        (tp_threshold_used, tp_threshold_unit, minutes_to_news).
+        """
         try:
             expiry_time = calculate_expiry(parsed_signal.expiry_type)
+            context = context or {}
 
             existing_id = None
             existing_status = None
@@ -54,9 +125,10 @@ class SignalDatabase:
                     """
                     INSERT INTO signals (
                         message_id, channel_id, instrument, direction,
-                        stop_loss, expiry_type, expiry_time, total_limits, status, type
+                        stop_loss, expiry_type, expiry_time, total_limits, status, type,
+                        tp_threshold_used, tp_threshold_unit, minutes_to_news
                     )
-                    VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10)
+                    VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13)
                     ON CONFLICT (message_id) DO NOTHING
                     RETURNING id
                     """,
@@ -70,6 +142,9 @@ class SignalDatabase:
                     len(parsed_signal.limits) if parsed_signal.limits else 0,
                     SignalStatus.ACTIVE,
                     getattr(parsed_signal, "type", "standard"),
+                    context.get("tp_threshold_used"),
+                    context.get("tp_threshold_unit"),
+                    context.get("minutes_to_news"),
                 )
 
                 if signal_id is None:
@@ -80,18 +155,17 @@ class SignalDatabase:
                     if row is not None:
                         existing_id = row["id"]
                         existing_status = row["status"]
-                else:
-                    if parsed_signal.limits:
-                        await conn.executemany(
-                            """
+                elif parsed_signal.limits:
+                    await conn.executemany(
+                        """
                             INSERT INTO limits (signal_id, price_level, sequence_number, status)
                             VALUES ($1, $2, $3, $4)
                             """,
-                            [
-                                (signal_id, level, idx + 1, LimitStatus.PENDING)
-                                for idx, level in enumerate(parsed_signal.limits)
-                            ],
-                        )
+                        [
+                            (signal_id, level, idx + 1, LimitStatus.PENDING)
+                            for idx, level in enumerate(parsed_signal.limits)
+                        ],
+                    )
 
             # Handle conflict result after releasing connection
             if signal_id is None:
@@ -115,34 +189,32 @@ class SignalDatabase:
             logger.error(f"Error saving signal: {e}", exc_info=True)
             return False, None
 
-    async def get_signal_by_message_id(self, message_id: str) -> Optional[Dict[str, Any]]:
+    async def get_signal_by_message_id(self, message_id: str) -> Optional[dict[str, Any]]:
         """Get signal by Discord message ID."""
-        query = "SELECT * FROM signals WHERE message_id = $1"
-        signal = await self.db.fetch_one(query, (message_id,))
-        if signal is not None:
-            signal["signal_id"] = signal["id"]
-        return signal
+        query = f"SELECT {SIGNAL_COLUMNS} FROM signals WHERE message_id = $1"
+        row = await self.db.fetch_one(query, (message_id,))
+        if row is not None:
+            row["signal_id"] = row["id"]
+        return row
 
     async def get_signal_with_limits(self, signal_id: int) -> Optional[SignalData]:
         """Get signal with all its limits (including hit ones)."""
-        signal_query = "SELECT * FROM signals WHERE id = $1"
+        signal_query = f"SELECT {SIGNAL_COLUMNS} FROM signals WHERE id = $1"
         signal = await self.db.fetch_one(signal_query, (signal_id,))
 
         if not signal:
             return None
 
-        limits_query = """
-            SELECT * FROM limits
-            WHERE signal_id = $1
-            ORDER BY sequence_number
-        """
+        limits_query = (
+            f"SELECT {LIMIT_COLUMNS} FROM limits WHERE signal_id = $1 ORDER BY sequence_number"
+        )
         limits = await self.db.fetch_all(limits_query, (signal_id,))
 
         return SignalData.from_db_row(signal, limits)
 
     async def update_signal_from_edit(
         self, message_id: str, parsed_signal: ParsedSignal
-    ) -> Tuple[bool, bool]:
+    ) -> tuple[bool, bool]:
         """Update an existing signal from an edited message.
 
         Returns (success, alert_invalidated). alert_invalidated is True when the edit
@@ -170,95 +242,18 @@ class SignalDatabase:
                 new_expiry_time = _parse_dt(calculate_expiry(parsed_signal.expiry_type))
 
             async with self.db.get_connection() as conn:
-                # Diff existing limits against the edited levels by price, preserving the
-                # limit_id of every unchanged level. The execution bot keys its pending
-                # orders and filled positions off limit_id; a DELETE-all + re-INSERT would
-                # mint fresh IDENTITY ids for every level on each edit, forcing the bot to
-                # cancel + re-place untouched limits — and, worse, drop limits that were
-                # already hit/filled because it can no longer correlate the new id. So we
-                # UPDATE matched levels in place, INSERT only genuinely new prices, and
-                # DELETE only removed ones. A matched 'hit' row keeps its fill price/time
-                # and alert flags untouched.
                 existing_limits = await conn.fetch(
                     "SELECT id, price_level, sequence_number, status, "
                     "approaching_alert_sent, hit_alert_sent FROM limits "
                     "WHERE signal_id = $1 ORDER BY sequence_number",
                     signal_id,
                 )
-                # Only pending/hit rows are preservable; cancelled rows are rebuilt fresh.
-                preservable_by_price = defaultdict(list)
-                for r in existing_limits:
-                    if r["status"] in ("pending", "hit"):
-                        preservable_by_price[r["price_level"]].append(r)
-
-                plan = []  # (sequence_number, price_level, matched_row_or_None)
-                matched_ids = set()
-                hit_count = 0
-                for idx, level in enumerate(parsed_signal.limits):
-                    queue = preservable_by_price.get(level)
-                    matched = queue.pop(0) if queue else None
-                    if matched is not None:
-                        matched_ids.add(matched["id"])
-                        if matched["status"] == "hit":
-                            hit_count += 1
-                    plan.append((idx + 1, level, matched))
-
-                removed_rows = [r for r in existing_limits if r["id"] not in matched_ids]
-                # A removed row that had already fired an alert means the alert we sent is
-                # now stale — typically a mistyped price that fired a false approaching/hit
-                # alert and is being corrected. Signal it so the caller retracts the embed
-                # and a corrected alert can fire fresh once the real level is reached.
-                alert_invalidated = any(
-                    r["status"] == "hit" or r["hit_alert_sent"] or r["approaching_alert_sent"]
-                    for r in removed_rows
-                )
-                if removed_rows:
-                    await conn.execute(
-                        "DELETE FROM limits WHERE id = ANY($1::bigint[])",
-                        [r["id"] for r in removed_rows],
-                    )
-
-                # Vacate the sequence space so kept rows can be renumbered without
-                # tripping the (signal_id, sequence_number) unique constraint mid-update.
-                kept_ids = list(matched_ids)
-                if kept_ids:
-                    await conn.execute(
-                        "UPDATE limits SET sequence_number = sequence_number + 100000 "
-                        "WHERE id = ANY($1::bigint[])",
-                        kept_ids,
-                    )
-
-                for seq, level, matched in plan:
-                    if matched is not None:
-                        await conn.execute(
-                            "UPDATE limits SET sequence_number = $1 WHERE id = $2",
-                            seq,
-                            matched["id"],
-                        )
-                    else:
-                        await conn.execute(
-                            """
-                            INSERT INTO limits (signal_id, price_level, sequence_number, status)
-                            VALUES ($1, $2, $3, 'pending')
-                            """,
-                            signal_id,
-                            level,
-                            seq,
-                        )
-
-                # When a stale alert was cleared above, let the surviving pending limits
-                # re-alert by clearing their approaching flag (the shared embed is retracted
-                # by the caller, so it must be re-established on re-approach).
-                if alert_invalidated:
-                    await conn.execute(
-                        "UPDATE limits SET approaching_alert_sent = FALSE "
-                        "WHERE signal_id = $1 AND status = 'pending'",
-                        signal_id,
-                    )
+                diff = _plan_limit_diff([dict(r) for r in existing_limits], parsed_signal.limits)
+                await self._apply_limit_diff(conn, signal_id, diff)
 
                 # A HIT signal whose hit limit(s) were edited away reverts to ACTIVE.
                 new_status = existing["status"]
-                if existing["status"] == SignalStatus.HIT and hit_count == 0:
+                if existing["status"] == SignalStatus.HIT and diff["hit_count"] == 0:
                     new_status = SignalStatus.ACTIVE
 
                 await conn.execute(
@@ -277,98 +272,72 @@ class SignalDatabase:
                     new_expiry_time,
                     len(parsed_signal.limits),
                     getattr(parsed_signal, "type", "standard"),
-                    hit_count,
+                    diff["hit_count"],
                     new_status,
                     signal_id,
                 )
 
             logger.info(f"Updated signal {signal_id} from edited message")
-            return True, alert_invalidated
+            return True, diff["alert_invalidated"]
 
         except Exception as e:
             logger.error(f"Error updating signal from edit: {e}", exc_info=True)
             return False, False
 
-    async def get_active_signals_detailed_sorted(
-        self, instrument: str = None, sort_by: str = "recent", limit: int = None
-    ) -> List[Dict[str, Any]]:
-        """Get detailed active signals with sorting options."""
-        base_query = """
-            SELECT
-                s.*,
-                COUNT(DISTINCT l.id) as total_limit_count,
-                COUNT(DISTINCT CASE WHEN l.status = 'hit' THEN l.id END) as hit_limit_count,
-                STRING_AGG(
-                    (CASE WHEN l.status = 'pending' THEN l.price_level END)::TEXT, ',' ORDER BY l.sequence_number) as pending_limits_str,
-                STRING_AGG(
-                    (CASE WHEN l.status = 'hit' THEN l.price_level END)::TEXT, ',' ORDER BY l.sequence_number) as hit_limits_str
-            FROM signals s
-            LEFT JOIN limits l ON s.id = l.signal_id
-            WHERE s.status IN ($1, $2)
-        """
-
-        params = [SignalStatus.ACTIVE, SignalStatus.HIT]
-
-        if instrument:
-            base_query += " AND s.instrument = $3"
-            params.append(instrument)
-
-        base_query += " GROUP BY s.id"
-
-        if sort_by == "recent":
-            base_query += " ORDER BY s.created_at DESC"
-        elif sort_by == "oldest":
-            base_query += " ORDER BY s.created_at ASC"
-        elif sort_by == "progress":
-            base_query += " ORDER BY hit_limit_count DESC, s.created_at DESC"
-        else:
-            base_query += " ORDER BY s.created_at DESC"
-
-        if limit:
-            base_query += f" LIMIT {limit}"
-
-        signals = await self.db.fetch_all(base_query, tuple(params))
-
-        for signal in signals:
-            signal["pending_limits"] = []
-            signal["hit_limits"] = []
-
-            if signal.get("pending_limits_str"):
-                signal["pending_limits"] = [
-                    float(p) for p in signal["pending_limits_str"].split(",")
-                ]
-
-            if signal.get("hit_limits_str"):
-                signal["hit_limits"] = [float(p) for p in signal["hit_limits_str"].split(",")]
-
-            signal.pop("pending_limits_str", None)
-            signal.pop("hit_limits_str", None)
-
-            if signal.get("expiry_time"):
-                expiry = _parse_dt(signal["expiry_time"])
-                now = datetime.now(pytz.UTC)
-                remaining = expiry - now
-                if remaining.total_seconds() > 0:
-                    hours = int(remaining.total_seconds() // 3600)
-                    minutes = int((remaining.total_seconds() % 3600) // 60)
-                    signal["time_remaining"] = f"{hours}h {minutes}m"
-                else:
-                    signal["time_remaining"] = "Expired"
-            else:
-                signal["time_remaining"] = "No expiry"
-
-            signal["status_emoji"] = get_status_emoji(signal["status"])
-            signal["progress"] = (
-                f"{signal['hit_limit_count']}/{signal['total_limit_count']} limits hit"
+    @staticmethod
+    async def _apply_limit_diff(conn, signal_id: int, diff: dict[str, Any]) -> None:
+        """Apply a _plan_limit_diff result: delete removed rows, renumber kept
+        rows, insert new levels, and reset alert flags when a stale alert was
+        invalidated."""
+        if diff["removed_rows"]:
+            await conn.execute(
+                "DELETE FROM limits WHERE id = ANY($1::bigint[])",
+                [r["id"] for r in diff["removed_rows"]],
             )
 
-        return signals
+        # Vacate the sequence space so kept rows can be renumbered without
+        # tripping the (signal_id, sequence_number) unique constraint mid-update.
+        kept_ids = list(diff["matched_ids"])
+        if kept_ids:
+            await conn.execute(
+                "UPDATE limits SET sequence_number = sequence_number + 100000 "
+                "WHERE id = ANY($1::bigint[])",
+                kept_ids,
+            )
 
-    async def get_signals_for_tracking(self) -> List[Dict[str, Any]]:
+        for seq, level, matched in diff["plan"]:
+            if matched is not None:
+                await conn.execute(
+                    "UPDATE limits SET sequence_number = $1 WHERE id = $2",
+                    seq,
+                    matched["id"],
+                )
+            else:
+                await conn.execute(
+                    """
+                    INSERT INTO limits (signal_id, price_level, sequence_number, status)
+                    VALUES ($1, $2, $3, 'pending')
+                    """,
+                    signal_id,
+                    level,
+                    seq,
+                )
+
+        # When a stale alert was cleared, let the surviving pending limits
+        # re-alert by clearing their approaching flag (the shared embed is
+        # retracted by the caller, so it must be re-established on re-approach).
+        if diff["alert_invalidated"]:
+            await conn.execute(
+                "UPDATE limits SET approaching_alert_sent = FALSE "
+                "WHERE signal_id = $1 AND status = 'pending'",
+                signal_id,
+            )
+
+    async def get_signals_for_tracking(self) -> list[dict[str, Any]]:
         """Get all signals that need price tracking (wrapper for DB method)."""
         return await self.db.get_active_signals_for_tracking()
 
-    async def get_hit_limits_for_signal(self, signal_id: int) -> List[Dict[str, Any]]:
+    async def get_hit_limits_for_signal(self, signal_id: int) -> list[LimitData]:
         """Return all hit limits for a signal with hit_price for P&L calculations."""
         return await self.db.get_hit_limits_for_signal(signal_id)
 
@@ -390,23 +359,23 @@ class SignalDatabase:
         try:
             logger.debug(f"Starting cancel_signal_by_message for message {message_id}")
 
-            signal = await self.get_signal_by_message_id(message_id)
-            if not signal:
+            row = await self.get_signal_by_message_id(message_id)
+            if not row:
                 logger.warning(f"No signal found for message {message_id}")
                 return False
 
-            logger.debug(f"Found signal {signal['id']} with status {signal['status']}")
+            logger.debug(f"Found signal {row['id']} with status {row['status']}")
 
-            if signal["status"] == SignalStatus.CANCELLED:
-                logger.info(f"Signal {signal['id']} is already cancelled")
+            if row["status"] == SignalStatus.CANCELLED:
+                logger.info(f"Signal {row['id']} is already cancelled")
                 return True
 
             if (
-                SignalStatus.is_final(signal["status"])
-                and signal["status"] != SignalStatus.CANCELLED
+                SignalStatus.is_final(row["status"])
+                and row["status"] != SignalStatus.CANCELLED
             ):
                 logger.warning(
-                    f"Cannot cancel signal {signal['id']} in final status {signal['status']}"
+                    f"Cannot cancel signal {row['id']} in final status {row['status']}"
                 )
                 return False
 
@@ -423,7 +392,7 @@ class SignalDatabase:
                         SET status = 'cancelled'
                         WHERE signal_id = $1 AND status = 'pending'
                     """,
-                        signal["id"],
+                        row["id"],
                     )
                     await conn.execute(
                         """
@@ -435,20 +404,21 @@ class SignalDatabase:
                         now,
                         now,
                         "manual",
-                        signal["id"],
+                        row["id"],
                     )
                     await conn.execute(
                         """
                         INSERT INTO status_changes (signal_id, old_status, new_status, change_type, reason)
                         VALUES ($1, $2, $3, $4, $5)
                     """,
-                        signal["id"],
-                        signal["status"],
+                        row["id"],
+                        row["status"],
                         SignalStatus.CANCELLED,
                         "manual",
                         "User cancelled",
                     )
-                logger.info(f"Successfully cancelled signal {signal['id']}")
+                await self._snapshot_close_prices(row["id"], row["instrument"])
+                logger.info(f"Successfully cancelled signal {row['id']}")
                 return True
 
             except Exception as e:
@@ -466,23 +436,23 @@ class SignalDatabase:
         try:
             logger.debug(f"Attempting to reactivate signal {signal_id}")
 
-            signal_query = "SELECT * FROM signals WHERE id = $1"
-            signal = await self.db.fetch_one(signal_query, (signal_id,))
+            signal_query = f"SELECT {SIGNAL_COLUMNS} FROM signals WHERE id = $1"
+            row = await self.db.fetch_one(signal_query, (signal_id,))
 
-            if not signal:
+            if not row:
                 logger.error(f"Signal {signal_id} not found")
                 return False
 
             reactivatable = (SignalStatus.CANCELLED, SignalStatus.STOP_LOSS)
-            if signal["status"] not in reactivatable:
+            if row["status"] not in reactivatable:
                 logger.warning(
-                    f"Signal {signal_id} is not reactivatable, status: {signal['status']}"
+                    f"Signal {signal_id} is not reactivatable, status: {row['status']}"
                 )
                 return False
 
-            old_status = signal["status"]
+            old_status = row["status"]
             new_status = (
-                SignalStatus.HIT if signal.get("limits_hit", 0) > 0 else SignalStatus.ACTIVE
+                SignalStatus.HIT if row.get("limits_hit", 0) > 0 else SignalStatus.ACTIVE
             )
 
             try:
@@ -533,7 +503,7 @@ class SignalDatabase:
 
     async def get_overlapping_signals(
         self, instrument: str, min_limit: float, max_limit: float, exclude_signal_id: int
-    ) -> List[Dict[str, Any]]:
+    ) -> list[SignalData]:
         """
         Return active/hit signals on the same instrument whose pending-limit price range
         intersects [min_limit, max_limit].  Used for overlap detection on new signal saves.
@@ -564,17 +534,45 @@ class SignalDatabase:
         rows = await self.db.fetch_all(
             query, (instrument.upper(), exclude_signal_id, float(min_limit), float(max_limit))
         )
-        return [dict(r) for r in rows]
+        return [SignalData.from_db_row(dict(r)) for r in rows]
 
-    async def _get_live_price(self, instrument: str) -> Optional[Dict[str, Any]]:
-        """Fetch current bid/ask from live_prices table."""
+    async def _get_live_price(self, instrument: str) -> Optional[dict[str, Any]]:
+        """Fetch current bid/ask/feed from live_prices table."""
         row = await self.db.fetch_one(
-            "SELECT bid, ask FROM live_prices WHERE symbol = $1",
+            "SELECT bid, ask, feed FROM live_prices WHERE symbol = $1",
             (instrument.upper(),),
         )
         return dict(row) if row else None
 
-    async def check_reactivation_guard(self, signal_id: int) -> Optional[Dict[str, Any]]:
+    async def _snapshot_close_prices(self, signal_id: int, instrument: str) -> None:
+        """
+        Record live bid/ask/feed on a signal at close time.
+
+        Only applies to signals that entered a position (>=1 hit limit) — the
+        snapshot gives every such close a mark-to-market exit price, including
+        manual cancels and breakevens that otherwise record nothing. Failures
+        are logged and swallowed: a missing snapshot must never break a status
+        transition.
+        """
+        try:
+            has_hit = await self.db.fetch_one(
+                "SELECT 1 FROM limits WHERE signal_id = $1 AND status = 'hit' LIMIT 1",
+                (signal_id,),
+            )
+            if not has_hit:
+                return
+            price = await self._get_live_price(instrument)
+            if not price or price.get("bid") is None or price.get("ask") is None:
+                logger.warning(f"No live price for {instrument} — close snapshot skipped for signal {signal_id}")
+                return
+            await self.db.execute(
+                "UPDATE signals SET close_bid = $1, close_ask = $2, close_feed = $3 WHERE id = $4",
+                (float(price["bid"]), float(price["ask"]), price.get("feed"), signal_id),
+            )
+        except Exception as e:
+            logger.warning(f"Close-price snapshot failed for signal {signal_id}: {e}")
+
+    async def check_reactivation_guard(self, signal_id: int) -> Optional[dict[str, Any]]:
         """
         Before reactivating a cancelled signal, check whether the current price has
         already moved to or past any of its would-be-pending limits.
@@ -587,11 +585,11 @@ class SignalDatabase:
           - instrument (str)
           - direction (str)
         """
-        signal = await self.db.fetch_one(
+        row = await self.db.fetch_one(
             "SELECT id, instrument, direction, status FROM signals WHERE id = $1",
             (signal_id,),
         )
-        if not signal or signal["status"] not in (
+        if not row or row["status"] not in (
             SignalStatus.CANCELLED,
             SignalStatus.STOP_LOSS,
         ):
@@ -609,15 +607,15 @@ class SignalDatabase:
         if not pending_limits:
             return None
 
-        price_data = await self._get_live_price(signal["instrument"])
+        price_data = await self._get_live_price(row["instrument"])
         if not price_data or price_data.get("bid") is None or price_data.get("ask") is None:
             logger.warning(
-                f"No live price for {signal['instrument']} — reactivation guard skipped"
+                f"No live price for {row['instrument']} — reactivation guard skipped"
             )
             return None
 
         mid = (float(price_data["bid"]) + float(price_data["ask"])) / 2
-        direction = signal["direction"]
+        direction = row["direction"]
 
         # A limit is "past" if the hit condition would fire immediately on reactivation:
         # long hits when price ≤ limit; short hits when price ≥ limit.
@@ -632,7 +630,7 @@ class SignalDatabase:
             "blocked": len(blocked) > 0,
             "blocked_limits": blocked,
             "current_price": mid,
-            "instrument": signal["instrument"],
+            "instrument": row["instrument"],
             "direction": direction,
         }
 
@@ -640,9 +638,9 @@ class SignalDatabase:
         self,
         signal_id: int,
         new_status: str,
-        reason: str = None,
-        tp_price: float = None,
-        closed_reason: str = None,
+        reason: Optional[str] = None,
+        tp_price: Optional[float] = None,
+        closed_reason: Optional[str] = None,
     ) -> bool:
         """
         Manually set a signal's status (for admin override).
@@ -655,13 +653,15 @@ class SignalDatabase:
                 logger.error(f"Invalid status: {new_status}")
                 return False
 
-            signal = await self.db.fetch_one("SELECT * FROM signals WHERE id = $1", (signal_id,))
+            row = await self.db.fetch_one(
+                f"SELECT {SIGNAL_COLUMNS} FROM signals WHERE id = $1", (signal_id,)
+            )
 
-            if not signal:
+            if not row:
                 logger.error(f"Signal {signal_id} not found")
                 return False
 
-            old_status = signal["status"]
+            old_status = row["status"]
 
             if old_status == new_status:
                 logger.info(f"Signal {signal_id} already has status {new_status}")
@@ -672,9 +672,9 @@ class SignalDatabase:
             # Record the market price at the time of a manual profit so the DB always
             # captures the close price (auto-TP supplies its own; manual paths fall here).
             if new_status == SignalStatus.PROFIT and tp_price is None:
-                price_data = await self._get_live_price(signal["instrument"])
+                price_data = await self._get_live_price(row["instrument"])
                 if price_data and price_data.get("bid") is not None and price_data.get("ask") is not None:
-                    direction = (signal["direction"] or "").lower()
+                    direction = (row["direction"] or "").lower()
                     tp_price = (
                         float(price_data["bid"])
                         if direction == "long"
@@ -682,7 +682,7 @@ class SignalDatabase:
                     )
                 else:
                     logger.warning(
-                        f"No live price for {signal['instrument']} — tp_price will be NULL "
+                        f"No live price for {row['instrument']} — tp_price will be NULL "
                         f"for manual profit on signal {signal_id}"
                     )
 
@@ -767,6 +767,8 @@ class SignalDatabase:
                         effective_closed_reason,
                         reason or "Manual override",
                     )
+                if SignalStatus.is_final(new_status):
+                    await self._snapshot_close_prices(signal_id, row["instrument"])
                 logger.info(
                     f"Successfully set signal {signal_id} status: {old_status} -> {new_status}"
                     + (f" (tp_price={tp_price:.5f})" if tp_price is not None else "")
@@ -781,13 +783,30 @@ class SignalDatabase:
             logger.error(f"Error manually setting signal status: {e}", exc_info=True)
             return False
 
+    async def set_manual_tp_price(self, signal_id: int, manual_tp_price: float) -> bool:
+        """Set the retrospective manual TP price for a signal.
+
+        Stored in its own column so the original tp_price (the close price
+        captured at profit time) is preserved. The report prefers this value
+        over tp_price when computing P&L. Returns False if the signal is absent.
+        """
+        try:
+            affected = await self.db.execute(
+                "UPDATE signals SET manual_tp_price = $1, updated_at = $2 WHERE id = $3",
+                (manual_tp_price, datetime.now(pytz.UTC), signal_id),
+            )
+            return affected > 0
+        except Exception as e:
+            logger.error(f"Error setting manual_tp_price for signal {signal_id}: {e}")
+            return False
+
     async def manually_set_signal_to_hit(self, signal_id: int, reason: str) -> bool:
         """
         Manually mark a signal as HIT by marking its first pending limit as hit.
         This mimics the behavior of automatic hit detection.
         """
         try:
-            signal_query = "SELECT * FROM signals WHERE id = $1"
+            signal_query = f"SELECT {SIGNAL_COLUMNS} FROM signals WHERE id = $1"
             signal_row = await self.db.fetch_one(signal_query, (signal_id,))
 
             if not signal_row:
@@ -795,7 +814,8 @@ class SignalDatabase:
                 return False
 
             limits = await self.db.fetch_all(
-                "SELECT * FROM limits WHERE signal_id = $1 ORDER BY sequence_number", (signal_id,)
+                f"SELECT {LIMIT_COLUMNS} FROM limits WHERE signal_id = $1 ORDER BY sequence_number",
+                (signal_id,),
             )
 
             if signal_row["status"] == SignalStatus.HIT:
@@ -836,7 +856,7 @@ class SignalDatabase:
                         f"Reactivated as part of manual hit — {reason}",
                     )
                 limits = await self.db.fetch_all(
-                    "SELECT * FROM limits WHERE signal_id = $1 ORDER BY sequence_number",
+                    f"SELECT {LIMIT_COLUMNS} FROM limits WHERE signal_id = $1 ORDER BY sequence_number",
                     (signal_id,),
                 )
 
@@ -846,7 +866,7 @@ class SignalDatabase:
                 )
                 return False
 
-            pending_limits = [l for l in limits if l.get("status") == "pending"]
+            pending_limits = [lim for lim in limits if lim.get("status") == "pending"]
 
             if not pending_limits:
                 logger.warning(
@@ -854,7 +874,7 @@ class SignalDatabase:
                 )
                 return False
 
-            first_limit = min(pending_limits, key=lambda l: l.get("sequence_number", 999))
+            first_limit = min(pending_limits, key=lambda lim: lim.get("sequence_number", 999))
 
             logger.info(
                 f"Manually marking signal {signal_id} as HIT by hitting limit {first_limit['id']} "
@@ -893,7 +913,7 @@ class SignalDatabase:
             logger.error(f"Error manually setting signal {signal_id} to hit: {e}", exc_info=True)
             return False
 
-    async def process_limit_hit(self, limit_id: int, actual_price: float = None) -> Dict[str, Any]:
+    async def process_limit_hit(self, limit_id: int, actual_price: Optional[float] = None) -> dict[str, Any]:
         """Process a limit hit event."""
         result = await self.db.mark_limit_hit(limit_id, actual_price)
 
@@ -901,16 +921,16 @@ class SignalDatabase:
             signal = await self.get_signal_with_limits(result["signal_id"])
             result["signal"] = signal
 
-            if signal and len(signal["hit_limits"]) == signal["total_limits"]:
+            if signal and len(signal.hit_limits) == signal.total_limits:
                 result["all_limits_hit"] = True
-                logger.info(f"All limits hit for signal {signal['signal_id']}")
+                logger.info(f"All limits hit for signal {signal.signal_id}")
             else:
                 result["all_limits_hit"] = False
 
         return result
 
     async def manually_set_signal_expiry(
-        self, signal_id: int, expiry_type: str, custom_datetime: str = None
+        self, signal_id: int, expiry_type: str, custom_datetime: Optional[str] = None
     ) -> bool:
         """Manually set a signal's expiry type and recalculate expiry time."""
         try:
@@ -925,15 +945,17 @@ class SignalDatabase:
                 logger.error("Custom expiry type requires datetime")
                 return False
 
-            signal = await self.db.fetch_one("SELECT * FROM signals WHERE id = $1", (signal_id,))
+            row = await self.db.fetch_one(
+                f"SELECT {SIGNAL_COLUMNS} FROM signals WHERE id = $1", (signal_id,)
+            )
 
-            if not signal:
+            if not row:
                 logger.error(f"Signal {signal_id} not found")
                 return False
 
-            if SignalStatus.is_final(signal["status"]):
+            if SignalStatus.is_final(row["status"]):
                 logger.warning(
-                    f"Cannot modify expiry for signal {signal_id} in final status {signal['status']}"
+                    f"Cannot modify expiry for signal {signal_id} in final status {row['status']}"
                 )
                 return False
 
@@ -963,13 +985,13 @@ class SignalDatabase:
                         VALUES ($1, $2, $3, $4, $5)
                     """,
                         signal_id,
-                        signal["status"],
-                        signal["status"],
+                        row["status"],
+                        row["status"],
                         "manual",
-                        f"Expiry changed from {signal['expiry_type']} to {expiry_type}",
+                        f"Expiry changed from {row['expiry_type']} to {expiry_type}",
                     )
 
-                old_expiry = signal["expiry_type"] or "none"
+                old_expiry = row["expiry_type"] or "none"
                 if expiry_type == "no_expiry":
                     logger.info(f"Removed expiry for signal {signal_id} (was {old_expiry})")
                 elif expiry_type == "custom":
@@ -1008,10 +1030,10 @@ class SignalDatabase:
 
         # Each signal gets its own transaction so a single failure does not
         # roll back signals that were already successfully processed.
-        for signal in expired:
-            signal_id = signal["id"]
-            old_status = signal["status"]
-            instrument = signal.get("instrument") or ""
+        for row in expired:
+            signal_id = row["id"]
+            old_status = row["status"]
+            instrument = row.get("instrument") or ""
 
             # HIT signals normally roll over to the next expiry window. Non-crypto
             # HIT signals heading into the weekend gap (Fri ≥ 4:45 PM or Sat/Sun)
@@ -1023,7 +1045,7 @@ class SignalDatabase:
             )
 
             if should_rollover:
-                next_expiry = calculate_expiry(signal["expiry_type"])
+                next_expiry = calculate_expiry(row["expiry_type"])
                 if next_expiry is None:
                     continue
                 try:
@@ -1084,6 +1106,7 @@ class SignalDatabase:
                             "automatic",
                             "Expired",
                         )
+                    await self._snapshot_close_prices(signal_id, instrument)
                     count += 1
                 except Exception as e:
                     logger.error(f"Error expiring signal {signal_id}: {e}", exc_info=True)
@@ -1155,142 +1178,3 @@ class SignalDatabase:
                 logger.error(f"Failed to update SL for toll signal {sig_id}: {e}", exc_info=True)
 
         return updated, skipped, errors
-
-    # === Analytics ===
-
-    async def get_statistics(self) -> Dict[str, Any]:
-        """Get comprehensive database statistics."""
-        stats = {}
-
-        total_query = "SELECT COUNT(*) as count FROM signals"
-        result = await self.db.fetch_one(total_query)
-        stats["total_signals"] = result["count"]
-
-        status_query = """
-            SELECT status, COUNT(*) as count
-            FROM signals
-            GROUP BY status
-        """
-        status_results = await self.db.fetch_all(status_query)
-        stats["by_status"] = {row["status"]: row["count"] for row in status_results}
-
-        tracking_query = """
-            SELECT COUNT(*) as count
-            FROM signals
-            WHERE status IN ($1, $2)
-        """
-        result = await self.db.fetch_one(tracking_query, (SignalStatus.ACTIVE, SignalStatus.HIT))
-        stats["tracking_count"] = result["count"]
-
-        today_start = datetime.now(pytz.UTC).replace(hour=0, minute=0, second=0, microsecond=0)
-
-        today_stats = await self.db.get_performance_stats(start_date=today_start)
-        stats["today"] = today_stats["overall"]
-
-        overall_stats = await self.db.get_performance_stats()
-        stats["overall"] = overall_stats["overall"]
-        stats["by_instrument"] = overall_stats["by_instrument"]
-
-        return stats
-
-    async def get_trading_period_range(self, period: str = "week") -> Dict[str, Any]:
-        """
-        Get the date range for the current trading period.
-        Trading week starts Sunday 6:00 PM UTC and ends Sunday 5:59 PM UTC.
-        """
-        now = datetime.now(pytz.UTC)
-
-        if period == "week":
-            days_since_sunday = (now.weekday() + 1) % 7
-            last_sunday = now - timedelta(days=days_since_sunday)
-
-            week_start = last_sunday.replace(hour=18, minute=0, second=0, microsecond=0)
-
-            if now < week_start:
-                week_start = week_start - timedelta(days=7)
-
-            week_end = week_start + timedelta(days=7) - timedelta(seconds=1)
-
-            return {
-                "start": week_start,
-                "end": week_end,
-                "display_start": week_start.strftime("%B %d, %Y"),
-                "display_end": week_end.strftime("%B %d, %Y"),
-            }
-
-        if period == "month":
-            month_start = now.replace(day=1, hour=0, minute=0, second=0, microsecond=0)
-
-            if now.month == 12:
-                next_month = month_start.replace(year=now.year + 1, month=1)
-            else:
-                next_month = month_start.replace(month=now.month + 1)
-
-            month_end = next_month - timedelta(seconds=1)
-
-            return {
-                "start": month_start,
-                "end": month_end,
-                "display_start": month_start.strftime("%B %d, %Y"),
-                "display_end": month_end.strftime("%B %d, %Y"),
-            }
-
-        raise ValueError(f"Invalid period: {period}")
-
-    async def get_period_signals_with_results(self, start_date, end_date) -> List[Dict[str, Any]]:
-        """Get all signals with final results within a date range."""
-        query = """
-            SELECT
-                s.id,
-                s.message_id,
-                s.channel_id,
-                s.instrument,
-                s.direction,
-                s.status,
-                s.type,
-                s.limits_hit,
-                s.total_limits,
-                s.created_at,
-                s.closed_at,
-                CASE
-                    WHEN s.closed_at IS NOT NULL THEN s.closed_at
-                    ELSE s.updated_at
-                END as completion_time
-            FROM signals s
-            WHERE s.status IN ($1, $2, $3)
-            AND (
-                (s.closed_at IS NOT NULL AND s.closed_at >= $4 AND s.closed_at <= $5)
-                OR
-                (s.closed_at IS NULL AND s.updated_at >= $6 AND s.updated_at <= $7)
-            )
-            ORDER BY completion_time DESC
-        """
-
-        params = (
-            SignalStatus.PROFIT,
-            SignalStatus.BREAKEVEN,
-            SignalStatus.STOP_LOSS,
-            start_date,
-            end_date,
-            start_date,
-            end_date,
-        )
-
-        signals = await self.db.fetch_all(query, params)
-
-        result = []
-        for signal in signals:
-            signal_dict = dict(signal)
-
-            signal_dict["status_emoji"] = get_status_emoji(signal_dict["status"])
-
-            if signal_dict["total_limits"] > 0:
-                signal_dict["completion_pct"] = (
-                    signal_dict["limits_hit"] / signal_dict["total_limits"]
-                ) * 100
-            else:
-                signal_dict["completion_pct"] = 0
-
-            result.append(signal_dict)
-
-        return result

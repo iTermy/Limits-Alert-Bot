@@ -2,7 +2,7 @@
 Discord UI views for command interactions.
 """
 
-from typing import Dict, List, Optional
+from typing import Optional
 
 import discord
 
@@ -14,7 +14,7 @@ class ActiveSignalsView(discord.ui.View):
 
     def __init__(
         self,
-        signals: List[Dict],
+        signals: list[dict],
         guild_id: int,
         instrument: Optional[str],
         page_size: int = 10,
@@ -47,7 +47,7 @@ class ActiveSignalsView(discord.ui.View):
         )
 
     def create_active_signals_embed(
-        self, signals: List[Dict], guild_id: int, instrument: Optional[str], page_info: tuple
+        self, signals: list[dict], guild_id: int, instrument: Optional[str], page_info: tuple
     ) -> discord.Embed:
         current_page, total_pages, total_signals = page_info
 
@@ -66,15 +66,18 @@ class ActiveSignalsView(discord.ui.View):
             color=0x00BFFF,
         )
 
-        for signal in signals:
-            status_emoji = get_status_emoji(signal.get("status", "active"))
+        # Rows are presentation dicts from get_active_signals_detailed_sorted,
+        # not SignalData models — pending_limits here is a list of floats.
+        for row in signals:
+            status = row.get("status", "active")
+            status_emoji = get_status_emoji(status)
 
-            pending_limits = signal.get("pending_limits", [])
-            hit_limits = signal.get("hit_limits", [])
+            pending_limits = row.get("pending_limits", [])
+            hit_limits = row.get("hit_limits", [])
 
             if pending_limits:
                 limits_str = ", ".join(
-                    [format_price(p, signal["instrument"]) for p in pending_limits]
+                    [format_price(p, row["instrument"]) for p in pending_limits]
                 )
             else:
                 limits_str = "None pending"
@@ -82,38 +85,33 @@ class ActiveSignalsView(discord.ui.View):
             if hit_limits:
                 limits_str += f" | {len(hit_limits)} hit"
 
-            if str(signal["message_id"]).startswith("manual_"):
+            if str(row["message_id"]).startswith("manual_"):
                 link_label = "Manual Entry"
             else:
-                message_url = f"https://discord.com/channels/{guild_id}/{signal['channel_id']}/{signal['message_id']}"
+                message_url = f"https://discord.com/channels/{guild_id}/{row['channel_id']}/{row['message_id']}"
                 link_label = f"{message_url}"
 
             field_value = f"**Limits:** {limits_str}"
 
-            if signal.get("distance_info") and signal.get("status", "active").lower() in [
-                "active",
-                "hit",
-            ]:
-                distance_info = signal["distance_info"]
-                is_crypto = signal.get("is_crypto", False)
-                is_index = signal.get("is_index", False)
+            if row.get("distance_info") and status.lower() in ["active", "hit"]:
+                distance_info = row["distance_info"]
 
-                if is_crypto or is_index:
+                if row.get("is_crypto") or row.get("is_index"):
                     distance_dollars = abs(distance_info.get("distance", 0))
-                    if distance_dollars > 0 and signal.get("status", "active").upper() != "HIT":
+                    if distance_dollars > 0 and status.upper() != "HIT":
                         field_value += f"\n**Distance:** ${distance_dollars:.2f} away"
                 else:
                     formatted_distance = distance_info.get("formatted", "")
-                    if formatted_distance and signal.get("status", "active").upper() != "HIT":
+                    if formatted_distance and status.upper() != "HIT":
                         field_value += f"\n**Distance:** {formatted_distance}"
 
-            if signal.get("time_remaining"):
-                field_value += f"\n**Expiry:** {signal['time_remaining']}"
+            if row.get("time_remaining"):
+                field_value += f"\n**Expiry:** {row['time_remaining']}"
 
             field_value += f"\n**Source:** {link_label}"
 
             embed.add_field(
-                name=f"{status_emoji} #{signal['id']} - {signal['instrument']} - {signal['direction'].upper()}",
+                name=f"{status_emoji} #{row['id']} - {row['instrument']} - {row['direction'].upper()}",
                 value=field_value,
                 inline=False,
             )

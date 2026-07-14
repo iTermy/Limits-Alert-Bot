@@ -3,6 +3,8 @@ License Commands - activate, setkeys, grantkey, revoke, licenses + member listen
 """
 
 import asyncio
+import contextlib
+from typing import Optional
 
 import discord
 from discord.ext import commands
@@ -25,22 +27,18 @@ class LicenseCog(BaseCog):
     @commands.command(name="activate")
     async def activate(self, ctx: commands.Context):
         """Get an Auto-Limits-Adder license key (requires Signal Subscriber role)"""
-        try:
+        with contextlib.suppress(discord.HTTPException, discord.Forbidden):
             await ctx.message.delete()
-        except (discord.HTTPException, discord.Forbidden):
-            pass
 
         member = ctx.author
 
         role_names = [r.name for r in getattr(member, "roles", [])]
         if not any(self.LICENSE_ROLE_NAME in r for r in role_names):
-            try:
+            with contextlib.suppress(discord.Forbidden):
                 await member.send(
                     f"❌ You need the **{self.LICENSE_ROLE_NAME}** role to activate a license.\n"
                     "If you are a subscriber, please contact an admin."
                 )
-            except discord.Forbidden:
-                pass
             return
 
         try:
@@ -244,7 +242,7 @@ class LicenseCog(BaseCog):
             )
 
     @commands.command(name="revoke")
-    async def revoke(self, ctx: commands.Context, member: discord.Member, mt5_account: str = None):
+    async def revoke(self, ctx: commands.Context, member: discord.Member, mt5_account: Optional[str] = None):
         """Admin: revoke a license. Usage: !revoke @user [mt5_account]"""
         if not self.is_admin(ctx.author):
             await ctx.send("❌ Admin only.")
@@ -451,10 +449,8 @@ class LicenseCog(BaseCog):
                     "If you rejoin and regain subscriber access, contact an admin to restore your license."
                 )
 
-            try:
+            with contextlib.suppress(discord.Forbidden):
                 await member.send(msg)
-            except discord.Forbidden:
-                pass
 
         except Exception as e:
             self.logger.error(
@@ -494,15 +490,13 @@ class LicenseCog(BaseCog):
             keys_info = "\n".join(
                 f"• MT5 `{r['mt5_account']}` → key `{r['license_key'][:8]}…`" for r in rows
             )
-            try:
+            with contextlib.suppress(discord.Forbidden):
                 await member.send(
                     f"✅ **Your Auto-Limits-Adder license has been reactivated!**\n\n"
                     f"Your **{self.LICENSE_ROLE_NAME}** role was restored, so your license key(s) "
                     f"are active again:\n{keys_info}\n\n"
                     "No changes needed in your config — just (re)start the Auto-Limits-Adder bot."
                 )
-            except discord.Forbidden:
-                pass
 
         except Exception as e:
             self.logger.error(

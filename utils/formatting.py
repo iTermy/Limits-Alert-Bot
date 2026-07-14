@@ -1,14 +1,16 @@
+from typing import Optional
+
 from models.enums import SignalStatus
 
 
-def format_price(price: float, symbol: str = None) -> str:
+def format_price(price: float, symbol: Optional[str] = None) -> str:
     """Format price with appropriate decimal places based on magnitude"""
     if price is None:
         return "N/A"
 
     if price < 0.0001:
         formatted = f"{price:.8f}"
-    elif price < 0.01 or price < 10:
+    elif price < 10:
         formatted = f"{price:.5f}"
     elif price < 100:
         formatted = f"{price:.3f}"
@@ -51,6 +53,7 @@ SIGNAL_TYPE_LABELS = {
     "toll": "💰 Toll",
     "pa": "🎯 PA",
     "1-1": "⚖️ 1:1 RR",
+    "risky": "🎲 Risky",
 }
 
 

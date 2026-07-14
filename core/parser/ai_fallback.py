@@ -11,7 +11,7 @@ from typing import Optional
 from utils.logger import get_logger
 
 # Import from parent package
-from . import ParsedSignal
+from . import INSTRUMENT_MAPPINGS, ParsedSignal
 from .pattern_parsers import get_signal_type
 from .validators import validate_signal
 
@@ -30,7 +30,7 @@ class AIFallbackParser:
     - Unusual spacing or ordering
     """
 
-    def __init__(self, channel_config: dict = None):
+    def __init__(self, channel_config: Optional[dict] = None):
         self.channel_config = channel_config or {}
         self.api_key = os.getenv("OPENAI_API_KEY")
         self.model = os.getenv("OPENAI_MODEL", "gpt-4o-mini")
@@ -41,7 +41,7 @@ class AIFallbackParser:
         else:
             logger.info(f"Initialized AIFallbackParser with model {self.model}")
 
-    def parse(self, message: str, channel_name: str = None) -> Optional[ParsedSignal]:
+    def parse(self, message: str, channel_name: Optional[str] = None) -> Optional[ParsedSignal]:
         """
         Parse using AI
 
@@ -122,10 +122,10 @@ Extract:
 
 Guidelines for Robust Parsing:
 - Treat this as an **edge case cleanup job**, not normal parsing.
-- Look for relative absurdities:  
-  * If one limit is hundreds of pips away while others are close together, it may be a typo – try to fix.  
-  * If decimal placement seems off compared to other numbers in the same message, adjust accordingly.  
-  * If one digit seems extra or missing and fixing it would make the set consistent, fix it.  
+- Look for relative absurdities:
+  * If one limit is hundreds of pips away while others are close together, it may be a typo – try to fix.
+  * If decimal placement seems off compared to other numbers in the same message, adjust accordingly.
+  * If one digit seems extra or missing and fixing it would make the set consistent, fix it.
 - Prefer internal consistency over absolute market knowledge (data may be outdated).
 - If instrument is unclear but price pattern clearly matches a known instrument in context, infer it.
 - If expiry keywords are slightly misspelled, correct them.
@@ -238,9 +238,18 @@ If unable to confidently parse even after correction attempts, return null.
                 logger.debug("AI returned null")
                 return None
 
+            # Canonicalize the model's instrument through the alias map so AI
+            # output matches the pattern parser (e.g. UK100 -> UK100GBP).
+            raw_instrument = data.get("instrument")
+            instrument = (
+                INSTRUMENT_MAPPINGS.get(raw_instrument.lower(), raw_instrument)
+                if raw_instrument
+                else raw_instrument
+            )
+
             # Create signal
             signal = ParsedSignal(
-                instrument=data.get("instrument"),
+                instrument=instrument,
                 direction=data.get("direction"),
                 limits=data.get("limits", []),
                 stop_loss=data.get("stop_loss"),

@@ -4,22 +4,35 @@ Exness MT5 Streaming Feed
 Spawns a child process (exness_worker.py) that holds its own MT5 connection,
 isolated from the ICMarkets connection in the main process. Communication
 is via JSON lines over stdin/stdout.
+
+All subprocess syscalls (spawn, kill, wait, blocking reads) run OFF the event
+loop — the spawn/teardown via asyncio.to_thread and stdout consumption on a
+dedicated reader thread — because on the Windows Proactor loop those calls block
+the loop thread synchronously, where asyncio.wait_for guards cannot interrupt
+them. A wedged spawn or reap there froze the whole bot; isolating them keeps the
+loop responsive so the worst case is a failed reconnect, not a frozen process.
 """
 
 import asyncio
 import json
 import logging
 import os
+import subprocess
 import sys
+import threading
 from collections.abc import AsyncIterator
 from datetime import datetime, timezone
 from pathlib import Path
-from typing import Dict, Set, Tuple
+from typing import Optional
 
 logger = logging.getLogger(__name__)
 
 _WORKER_PATH = str(Path(__file__).resolve().parent / "exness_worker.py")
 _CONNECT_TIMEOUT = 30
+# Bounds on child-process spawn and kill/reap. Even off-loop these are bounded so
+# a stuck terminal can't tie up worker threads indefinitely.
+_SPAWN_TIMEOUT = 15
+_KILL_TIMEOUT = 5
 
 
 class ExnessStream:
@@ -30,11 +43,27 @@ class ExnessStream:
         self.server = os.getenv("EXNESS_MT5_SERVER", "")
 
         self.connected = False
-        self.subscribed_symbols: Set[str] = set()
+        self.subscribed_symbols: set[str] = set()
         self.streaming = False
-        self._process: asyncio.subprocess.Process = None
+
+        # Plain (non-asyncio) Popen so its syscalls run on worker threads, never
+        # the loop. A dedicated reader thread pumps parsed price ticks into an
+        # asyncio.Queue that stream_prices() consumes.
+        self._process: Optional[subprocess.Popen] = None
+        self._queue: Optional[asyncio.Queue] = None
+        self._loop: Optional[asyncio.AbstractEventLoop] = None
+        self._reader_thread: Optional[threading.Thread] = None
 
         logger.info("ExnessStream initialized")
+
+    def _spawn(self) -> subprocess.Popen:
+        """Blocking child-process spawn — always called via asyncio.to_thread."""
+        return subprocess.Popen(
+            [sys.executable, _WORKER_PATH, self.mt5_path, self.login, self.password, self.server],
+            stdin=subprocess.PIPE,
+            stdout=subprocess.PIPE,
+            stderr=subprocess.PIPE,
+        )
 
     async def connect(self) -> bool:
         if not self.mt5_path:
@@ -47,20 +76,12 @@ class ExnessStream:
         )
 
         try:
-            self._process = await asyncio.create_subprocess_exec(
-                sys.executable,
-                _WORKER_PATH,
-                self.mt5_path,
-                self.login,
-                self.password,
-                self.server,
-                stdin=asyncio.subprocess.PIPE,
-                stdout=asyncio.subprocess.PIPE,
-                stderr=asyncio.subprocess.PIPE,
+            self._process = await asyncio.wait_for(
+                asyncio.to_thread(self._spawn), timeout=_SPAWN_TIMEOUT
             )
 
             first_line = await asyncio.wait_for(
-                self._process.stdout.readline(), timeout=_CONNECT_TIMEOUT
+                asyncio.to_thread(self._process.stdout.readline), timeout=_CONNECT_TIMEOUT
             )
             if not first_line:
                 stderr_out = await self._read_stderr()
@@ -76,6 +97,16 @@ class ExnessStream:
                 return False
 
             self.connected = True
+            self._loop = asyncio.get_running_loop()
+            self._queue = asyncio.Queue()
+            self._reader_thread = threading.Thread(
+                target=self._read_loop,
+                args=(self._process, self._queue),
+                name="exness-reader",
+                daemon=True,
+            )
+            self._reader_thread.start()
+
             logger.info(f"Connected to Exness MT5 - {msg.get('terminal', 'unknown')}")
             return True
 
@@ -88,13 +119,47 @@ class ExnessStream:
             await self._kill_process()
             return False
 
+    def _read_loop(self, proc: subprocess.Popen, queue: asyncio.Queue):
+        """Consume the worker's stdout on a dedicated thread and hand parsed
+        ticks to the loop. Pushes a None sentinel on EOF (worker exited).
+
+        proc/queue are passed explicitly so a reader left over from a previous
+        connection posts its sentinel to its own queue, never the live one.
+        """
+        try:
+            for raw in proc.stdout:
+                line = raw.decode(errors="replace").strip()
+                if not line:
+                    continue
+                try:
+                    msg = json.loads(line)
+                except json.JSONDecodeError:
+                    continue
+                if "s" in msg:
+                    data = (
+                        msg["s"],
+                        {
+                            "bid": msg["b"],
+                            "ask": msg["a"],
+                            "timestamp": datetime.fromtimestamp(msg["t"], tz=timezone.utc),
+                        },
+                    )
+                    self._loop.call_soon_threadsafe(queue.put_nowait, data)
+        except Exception as e:
+            logger.error(f"Error reading Exness stream: {e}")
+        finally:
+            self._loop.call_soon_threadsafe(queue.put_nowait, None)
+
     async def disconnect(self):
         self.streaming = False
-        if self._process and self._process.returncode is None:
+        proc = self._process
+        if proc and proc.poll() is None:
             try:
                 self._send_command({"cmd": "shutdown"})
-                await asyncio.wait_for(self._process.wait(), timeout=5)
-            except (asyncio.TimeoutError, Exception):
+                await asyncio.to_thread(proc.wait, 5)
+            except subprocess.TimeoutExpired:
+                await self._kill_process()
+            except Exception:
                 await self._kill_process()
         self._process = None
         self.connected = False
@@ -129,59 +194,58 @@ class ExnessStream:
             except Exception as e:
                 logger.error(f"Failed to subscribe to {symbol}: {e}")
 
-    async def stream_prices(self) -> AsyncIterator[Tuple[str, Dict]]:
-        if not self.connected or not self._process:
+    async def stream_prices(self) -> AsyncIterator[tuple[str, dict]]:
+        if not self.connected or self._queue is None:
             raise Exception("Not connected to Exness MT5")
 
         self.streaming = True
 
         while self.streaming:
-            try:
-                line = await self._process.stdout.readline()
-                if not line:
-                    if self._process.returncode is not None:
-                        stderr_out = await self._read_stderr()
-                        logger.error(
-                            "Exness worker exited (code %s). stderr: %s",
-                            self._process.returncode, stderr_out,
-                        )
-                        self.connected = False
-                        return
-                    continue
+            item = await self._queue.get()
+            if item is None:
+                # Worker exited (EOF). Mark down so the next stream_prices()
+                # call raises and the stream manager reconnects.
+                returncode = self._process.poll() if self._process else None
+                stderr_out = await self._read_stderr()
+                logger.error(
+                    "Exness worker exited (code %s). stderr: %s", returncode, stderr_out
+                )
+                self.connected = False
+                return
+            yield item
 
-                msg = json.loads(line)
-
-                if "s" in msg:
-                    yield msg["s"], {
-                        "bid": msg["b"],
-                        "ask": msg["a"],
-                        "timestamp": datetime.fromtimestamp(msg["t"], tz=timezone.utc),
-                    }
-
-            except json.JSONDecodeError:
-                continue
-            except Exception as e:
-                logger.error(f"Error reading Exness stream: {e}")
-                await asyncio.sleep(1)
-
-    def get_subscribed_symbols(self) -> Set[str]:
+    def get_subscribed_symbols(self) -> set[str]:
         return self.subscribed_symbols.copy()
 
     def _send_command(self, cmd: dict):
-        if self._process and self._process.stdin:
-            data = json.dumps(cmd) + "\n"
-            self._process.stdin.write(data.encode())
+        proc = self._process
+        if proc and proc.stdin:
+            try:
+                proc.stdin.write((json.dumps(cmd) + "\n").encode())
+                proc.stdin.flush()
+            except (OSError, ValueError):
+                # Broken/closed pipe — the worker is gone; reconnect handles it.
+                pass
 
     async def _read_stderr(self) -> str:
-        if not self._process or not self._process.stderr:
+        proc = self._process
+        if not proc or not proc.stderr:
             return "(no stderr)"
         try:
-            data = await asyncio.wait_for(self._process.stderr.read(4096), timeout=2)
+            data = await asyncio.wait_for(
+                asyncio.to_thread(proc.stderr.read, 4096), timeout=2
+            )
             return data.decode(errors="replace").strip() or "(empty)"
         except (asyncio.TimeoutError, Exception):
             return "(read failed)"
 
     async def _kill_process(self):
-        if self._process and self._process.returncode is None:
-            self._process.kill()
-            await self._process.wait()
+        proc = self._process
+        if proc and proc.poll() is None:
+            try:
+                await asyncio.to_thread(proc.kill)
+                await asyncio.to_thread(proc.wait, _KILL_TIMEOUT)
+            except subprocess.TimeoutExpired:
+                logger.error("Exness worker did not exit after kill within %ss", _KILL_TIMEOUT)
+            except Exception:
+                pass

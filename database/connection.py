@@ -4,7 +4,7 @@ Database connection manager using asyncpg for Supabase (PostgreSQL)
 
 import os
 from contextlib import asynccontextmanager
-from typing import Any, Dict, List, Optional
+from typing import Any, Optional
 
 import asyncpg
 
@@ -16,7 +16,7 @@ logger = get_logger("database")
 class DatabaseManager:
     """Manages database connections and base operations via asyncpg connection pool"""
 
-    def __init__(self, db_url: str = None):
+    def __init__(self, db_url: Optional[str] = None):
         """
         Initialize database manager.
 
@@ -87,7 +87,7 @@ class DatabaseManager:
             except (ValueError, IndexError):
                 return 0
 
-    async def execute_many(self, query: str, params_list: List[tuple]) -> int:
+    async def execute_many(self, query: str, params_list: list[tuple]) -> int:
         """
         Execute the same query multiple times with different parameters.
 
@@ -104,7 +104,7 @@ class DatabaseManager:
             await conn.executemany(query, params_list)
             return len(params_list)
 
-    async def fetch_one(self, query: str, params: tuple = ()) -> Optional[Dict[str, Any]]:
+    async def fetch_one(self, query: str, params: tuple = ()) -> Optional[dict[str, Any]]:
         """
         Fetch a single row.
 
@@ -121,7 +121,7 @@ class DatabaseManager:
             row = await conn.fetchrow(query, *params)
             return dict(row) if row else None
 
-    async def fetch_all(self, query: str, params: tuple = ()) -> List[Dict[str, Any]]:
+    async def fetch_all(self, query: str, params: tuple = ()) -> list[dict[str, Any]]:
         """
         Fetch all matching rows.
 

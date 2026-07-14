@@ -97,8 +97,8 @@ class ExpiryManager:
         elif alert_system:
             # No embed exists (signal expired before approaching alert was sent).
             # Delete the original message in auto-purge channels.
-            src_channel_id = str(signal.get("channel_id", ""))
-            src_message_id = str(signal.get("message_id", ""))
+            src_channel_id = str(signal.channel_id or "")
+            src_message_id = str(signal.message_id or "")
             if (
                 alert_system.is_auto_purge_channel(src_channel_id)
                 and src_message_id
@@ -109,7 +109,7 @@ class ExpiryManager:
         # ── 3b. Add ❌ reaction to the original signal message ────────────────
         if monitor:
             try:
-                from price_feeds.streaming_monitor import react_to_original_signal
+                from price_feeds.monitors.streaming_monitor import react_to_original_signal
 
                 await react_to_original_signal(self.bot, signal, "❌")
             except Exception as _re:

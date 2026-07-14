@@ -7,12 +7,13 @@ and cleaning up original signal messages in auto-purge channels.
 """
 
 import asyncio
+import contextlib
 import logging
-from typing import Dict, Optional
+from typing import Optional
 
 import discord
 
-from price_feeds.embed_builders import (
+from price_feeds.alerting.embed_builders import (
     _build_profit_archive_embed,
     _build_signal_embed,
     _set_archive_footer,
@@ -27,6 +28,8 @@ _END_STATES = {
     "cancelled",
     "near_miss_cancelled",
     "spread_hour_cancelled",
+    "late_market_cancelled",
+    "risky_window_cancelled",
     "expired",
     "breakeven",
 }
@@ -46,9 +49,9 @@ class ArchiveManager:
     def __init__(
         self,
         bot,
-        signal_messages: Dict[int, discord.Message],
-        signal_ping_messages: Dict[int, discord.Message],
-        signal_finished_messages: Dict[int, discord.Message],
+        signal_messages: dict[int, discord.Message],
+        signal_ping_messages: dict[int, discord.Message],
+        signal_finished_messages: dict[int, discord.Message],
         alert_messages: dict,
         auto_purge_channel_ids: set,
         role_mention: str,
@@ -66,7 +69,7 @@ class ArchiveManager:
         self._track_alert_message = track_alert_message_fn
         self._finished_channel_id = finished_channel_id
         self._profit_channel_id = profit_channel_id
-        self._deletion_tasks: Dict[int, asyncio.Task] = {}
+        self._deletion_tasks: dict[int, asyncio.Task] = {}
 
     def cancel_pending_move(self, signal_id: int):
         """Cancel any pending move-to-finished task for a signal (e.g. on reactivation)."""
@@ -77,7 +80,7 @@ class ArchiveManager:
 
     def cancel_all(self):
         """Cancel all pending archive-move tasks. Called during shutdown."""
-        for signal_id, task in list(self._deletion_tasks.items()):
+        for _signal_id, task in list(self._deletion_tasks.items()):
             if not task.done():
                 task.cancel()
         self._deletion_tasks.clear()
@@ -93,13 +96,13 @@ class ArchiveManager:
             return None
         return self.bot.get_channel(int(self._profit_channel_id))
 
-    async def maybe_delete_original_message(self, signal: Dict, signal_id: int) -> None:
+    async def maybe_delete_original_message(self, signal: dict, signal_id: int) -> None:
         """
         Delete the original signal message if its channel is in auto_purge_channel_ids.
         Safe to call on any signal — silently skips exempt channels and manual signals.
         """
-        src_channel_id = str(signal.get("channel_id", ""))
-        src_message_id = str(signal.get("message_id", ""))
+        src_channel_id = str(signal.channel_id or "")
+        src_message_id = str(signal.message_id or "")
         if (
             src_channel_id not in self.auto_purge_channel_ids
             or not src_message_id
@@ -148,10 +151,8 @@ class ArchiveManager:
             ping_msg = self.signal_ping_messages.pop(signal_id, None)
             if ping_msg:
                 self.alert_messages.pop(str(ping_msg.id), None)
-                try:
+                with contextlib.suppress(Exception):
                     await ping_msg.delete()
-                except Exception:
-                    pass
 
             embed_msg = self.signal_messages.get(signal_id)
             if not embed_msg:
@@ -160,11 +161,9 @@ class ArchiveManager:
 
             if is_profit:
                 dest_channel = self._get_profit_channel()
-                archive_label = "📁 Profit Archived"
                 dest_name = "profit channel"
             else:
                 dest_channel = self._get_finished_channel()
-                archive_label = "📁 Archived"
                 dest_name = "finished-signals channel"
 
             finished_msg = None
@@ -185,8 +184,8 @@ class ArchiveManager:
                         new_embed = None
                         if sig_data:
                             try:
-                                db_status = sig_data.get("status", "")
-                                cancel_type_db = sig_data.get("closed_reason") or ""
+                                db_status = sig_data.status
+                                cancel_type_db = sig_data.closed_reason or ""
                                 _status_to_event = {
                                     "profit": "profit",
                                     "auto_tp": "auto_tp",
@@ -201,14 +200,18 @@ class ArchiveManager:
                                         rebuild_event = "near_miss_cancelled"
                                     elif cancel_type_db == "spread_hour":
                                         rebuild_event = "spread_hour_cancelled"
+                                    elif cancel_type_db == "late_market":
+                                        rebuild_event = "late_market_cancelled"
+                                    elif cancel_type_db == "risky_window":
+                                        rebuild_event = "risky_window_cancelled"
 
-                                guild_id_val = sig_data.get("guild_id")
+                                guild_id_val = sig_data.guild_id
                                 if not guild_id_val and self.bot and self.bot.guilds:
                                     guild_id_val = self.bot.guilds[0].id
 
                                 new_embed = _build_signal_embed(
                                     signal=sig_data,
-                                    limits=sig_data.get("limits", []),
+                                    limits=sig_data.limits,
                                     event=rebuild_event,
                                     guild_id=guild_id_val,
                                     bot=self.bot,
@@ -317,7 +320,7 @@ class ArchiveManager:
         )
 
     async def move_standalone_after_delay(
-        self, signal: Dict, signal_id: int, message: discord.Message, embed: discord.Embed
+        self, signal: dict, signal_id: int, message: discord.Message, embed: discord.Embed
     ) -> None:
         """Move a standalone news-cancel message to finished-signals after the delay."""
         try:

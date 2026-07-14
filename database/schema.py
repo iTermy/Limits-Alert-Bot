@@ -22,6 +22,7 @@ _CHANNEL_NAME_TO_TYPE = {
     "gold-pa-signals": "pa",
     "price-action-trades": "pa",
     "gold-1-1-rr": "1-1",
+    "risky-gold": "risky",
 }
 
 
@@ -50,6 +51,7 @@ async def initialize_database(db_manager):
                 closed_at            TIMESTAMPTZ,
                 closed_reason        TEXT,
                 tp_price             DOUBLE PRECISION,
+                manual_tp_price      DOUBLE PRECISION,
 
                 total_limits INTEGER DEFAULT 0,
                 limits_hit   INTEGER DEFAULT 0,
@@ -63,7 +65,7 @@ async def initialize_database(db_manager):
                 CONSTRAINT signals_direction_check
                     CHECK (direction IN ('long', 'short')),
                 CONSTRAINT signals_type_check
-                    CHECK (type IN ('standard', 'scalp', 'swing', 'toll', 'pa', '1-1'))
+                    CHECK (type IN ('standard', 'scalp', 'swing', 'toll', 'pa', '1-1', 'risky'))
             )
         """)
 
@@ -101,23 +103,6 @@ async def initialize_database(db_manager):
                 change_type TEXT NOT NULL,
                 reason      TEXT,
                 changed_at  TIMESTAMPTZ DEFAULT NOW()
-            )
-        """)
-
-        # Create performance metrics table
-        await conn.execute("""
-            CREATE TABLE IF NOT EXISTS performance_metrics (
-                id           BIGINT GENERATED ALWAYS AS IDENTITY PRIMARY KEY,
-                date         DATE NOT NULL,
-                instrument   TEXT,
-                total_signals INTEGER DEFAULT 0,
-                profitable    INTEGER DEFAULT 0,
-                breakeven     INTEGER DEFAULT 0,
-                stop_loss     INTEGER DEFAULT 0,
-                cancelled     INTEGER DEFAULT 0,
-                win_rate      DOUBLE PRECISION,
-
-                CONSTRAINT perf_date_instrument_unique UNIQUE (date, instrument)
             )
         """)
 
@@ -160,6 +145,86 @@ async def initialize_database(db_manager):
             )
         """)
 
+        # Create signal_excursions table — one row per signal, MFE/MAE + entry
+        # context. Pure backend analytics; never read by alerting code.
+        await conn.execute("""
+            CREATE TABLE IF NOT EXISTS signal_excursions (
+                signal_id   BIGINT PRIMARY KEY REFERENCES signals(id) ON DELETE CASCADE,
+                instrument  TEXT NOT NULL,
+                direction   TEXT NOT NULL,
+                signal_type TEXT NOT NULL,
+                pip_size    DOUBLE PRECISION NOT NULL,
+                phase       TEXT NOT NULL DEFAULT 'approach',
+
+                approach_start_price DOUBLE PRECISION,
+                approach_start_time  TIMESTAMPTZ,
+                approach_velocity    DOUBLE PRECISION,
+                pre_hit_mae          DOUBLE PRECISION,
+
+                entry_price DOUBLE PRECISION,
+                entry_time  TIMESTAMPTZ,
+
+                mfe_price    DOUBLE PRECISION,
+                mfe_pips     DOUBLE PRECISION,
+                mfe_atr_mult DOUBLE PRECISION,
+                mfe_time     TIMESTAMPTZ,
+                mae_price    DOUBLE PRECISION,
+                mae_pips     DOUBLE PRECISION,
+                mae_atr_mult DOUBLE PRECISION,
+                mae_time     TIMESTAMPTZ,
+
+                exit_price  DOUBLE PRECISION,
+                exit_time   TIMESTAMPTZ,
+                exit_reason TEXT,
+
+                atr_at_hit        DOUBLE PRECISION,
+                rsi_at_hit        DOUBLE PRECISION,
+                ema_distance_atr  DOUBLE PRECISION,
+                wick_rejection    DOUBLE PRECISION,
+                htf_trend         INTEGER,
+                htf_aligned       BOOLEAN,
+                volume_at_hit     DOUBLE PRECISION,
+                avg_volume        DOUBLE PRECISION,
+                volume_spike_ratio DOUBLE PRECISION,
+                spread_at_hit     DOUBLE PRECISION,
+                session           TEXT,
+
+                created_at TIMESTAMPTZ DEFAULT NOW(),
+
+                CONSTRAINT excursion_phase_check
+                    CHECK (phase IN ('approach', 'in_trade', 'closed'))
+            )
+        """)
+
+        # Create signal_volume_samples table — bounded per-minute volume/ATR
+        # snapshots over a signal's life, for volume-trend exit analysis.
+        await conn.execute("""
+            CREATE TABLE IF NOT EXISTS signal_volume_samples (
+                id         BIGINT GENERATED ALWAYS AS IDENTITY PRIMARY KEY,
+                signal_id  BIGINT NOT NULL REFERENCES signals(id) ON DELETE CASCADE,
+                sampled_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+                phase      TEXT NOT NULL,
+                price      DOUBLE PRECISION,
+                volume     DOUBLE PRECISION,
+                atr        DOUBLE PRECISION
+            )
+        """)
+
+        # Create config_history table — audit log of runtime config changes
+        # (!tp set, !alertdist set, !nmconfig set, !goldtollssl). Analysis needs
+        # config-at-time to interpret historical outcomes.
+        await conn.execute("""
+            CREATE TABLE IF NOT EXISTS config_history (
+                id            BIGINT GENERATED ALWAYS AS IDENTITY PRIMARY KEY,
+                changed_at    TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+                config_family TEXT NOT NULL,
+                key           TEXT NOT NULL,
+                old_value     TEXT,
+                new_value     TEXT,
+                set_by        TEXT
+            )
+        """)
+
         await _create_indexes(conn)
 
         # Run migrations for any new columns added to existing tables
@@ -184,10 +249,11 @@ async def _create_indexes(conn):
         "CREATE INDEX IF NOT EXISTS idx_limits_signal ON limits(signal_id)",
         "CREATE INDEX IF NOT EXISTS idx_limits_status ON limits(status)",
         "CREATE INDEX IF NOT EXISTS idx_status_changes_signal ON status_changes(signal_id)",
-        "CREATE INDEX IF NOT EXISTS idx_performance_date ON performance_metrics(date)",
         "CREATE INDEX IF NOT EXISTS idx_live_prices_updated ON live_prices(updated_at)",
         "CREATE INDEX IF NOT EXISTS idx_trailing_signal ON trailing_simulations(signal_id)",
         "CREATE INDEX IF NOT EXISTS idx_trailing_incomplete ON trailing_simulations(stopped_out) WHERE stopped_out = FALSE",
+        "CREATE INDEX IF NOT EXISTS idx_excursions_open ON signal_excursions(phase) WHERE phase <> 'closed'",
+        "CREATE INDEX IF NOT EXISTS idx_volume_samples_signal ON signal_volume_samples(signal_id)",
     ]
 
     for index_query in indexes:
@@ -239,12 +305,15 @@ async def _run_migrations(conn):
         );
         """,
         # Bot mode status — single-row table tracking active modes. news_mode is a
-        # TEXT list of categories currently under news (e.g. 'EUR, GOLD' or 'ALL'),
-        # NULL when no news. spread_hour stays a boolean. Updated in real-time.
+        # TEXT list of currencies/categories currently active (e.g. 'EUR, GOLD' or
+        # 'ALL'); vol_guard is a TEXT list of volatile pairs (e.g. 'EURUSD') or 'ALL'
+        # for gold. Both are NULL when inactive. spread_hour stays a boolean.
+        # Updated in real-time.
         """
         CREATE TABLE IF NOT EXISTS bot_mode_status (
             id           INT PRIMARY KEY DEFAULT 1,
             news_mode    TEXT,
+            vol_guard    TEXT,
             spread_hour  BOOLEAN NOT NULL DEFAULT FALSE,
             updated_at   TIMESTAMPTZ NOT NULL DEFAULT NOW(),
             CONSTRAINT bot_mode_status_singleton CHECK (id = 1)
@@ -271,6 +340,11 @@ async def _run_migrations(conn):
                     USING (CASE WHEN news_mode THEN 'ALL' ELSE NULL END);
             END IF;
         END $$;
+        """,
+        # Add vol_guard to existing installs (CREATE TABLE IF NOT EXISTS skips it).
+        # Mirrors news_mode: TEXT list of volatile pairs/'ALL', NULL when calm.
+        """
+        ALTER TABLE bot_mode_status ADD COLUMN IF NOT EXISTS vol_guard TEXT;
         """,
         # Add revoked_reason to licenses table (stage18 — auto-revoke tracking)
         """
@@ -349,6 +423,69 @@ async def _run_migrations(conn):
         """
         ALTER TABLE signals ADD COLUMN IF NOT EXISTS finished_channel_id BIGINT;
         """,
+        # Retrospective manual TP price override, kept separate from tp_price so
+        # the close price captured at profit time is preserved.
+        """
+        ALTER TABLE signals ADD COLUMN IF NOT EXISTS manual_tp_price DOUBLE PRECISION;
+        """,
+        # Widen the type CHECK constraint to include 'risky'. Runs every startup
+        # (drop-if-exists then re-add) so DBs migrated before the risky type
+        # existed pick up the new value without a manual step.
+        """
+        ALTER TABLE signals DROP CONSTRAINT IF EXISTS signals_type_check;
+        ALTER TABLE signals ADD CONSTRAINT signals_type_check
+            CHECK (type IN ('standard', 'scalp', 'swing', 'toll', 'pa', '1-1', 'risky'));
+        """,
+        # Close-price snapshot: live bid/ask/feed captured when a signal that
+        # entered a position (limits_hit > 0) reaches any terminal status.
+        """
+        ALTER TABLE signals ADD COLUMN IF NOT EXISTS close_bid DOUBLE PRECISION;
+        """,
+        """
+        ALTER TABLE signals ADD COLUMN IF NOT EXISTS close_ask DOUBLE PRECISION;
+        """,
+        """
+        ALTER TABLE signals ADD COLUMN IF NOT EXISTS close_feed TEXT;
+        """,
+        # Config-at-time stamps captured at signal save so analysis never has to
+        # guess which TP threshold or news backdrop applied historically.
+        """
+        ALTER TABLE signals ADD COLUMN IF NOT EXISTS tp_threshold_used DOUBLE PRECISION;
+        """,
+        """
+        ALTER TABLE signals ADD COLUMN IF NOT EXISTS tp_threshold_unit TEXT;
+        """,
+        """
+        ALTER TABLE signals ADD COLUMN IF NOT EXISTS minutes_to_news INTEGER;
+        """,
+        # Data-era marker: rows created before 2026-07-12 predate the clean-data
+        # instrumentation and are excluded from primary analysis (see DATA_ANALYSIS.md).
+        """
+        DO $$
+        BEGIN
+            IF NOT EXISTS (
+                SELECT 1 FROM information_schema.columns
+                WHERE table_name = 'signals' AND column_name = 'data_version'
+            ) THEN
+                ALTER TABLE signals ADD COLUMN data_version SMALLINT NOT NULL DEFAULT 2;
+                UPDATE signals SET data_version = 1;
+            END IF;
+        END $$;
+        """,
+        # Excursion additions: which extreme came first, and post-close follow-through.
+        """
+        ALTER TABLE signal_excursions ADD COLUMN IF NOT EXISTS mae_before_mfe BOOLEAN;
+        """,
+        """
+        ALTER TABLE signal_excursions ADD COLUMN IF NOT EXISTS post_exit_mfe_pips DOUBLE PRECISION;
+        """,
+        """
+        ALTER TABLE signal_excursions ADD COLUMN IF NOT EXISTS post_exit_end_time TIMESTAMPTZ;
+        """,
+        # performance_metrics was never written or read; dropped for schema clarity.
+        """
+        DROP TABLE IF EXISTS performance_metrics;
+        """,
     ]
 
     for migration in migrations:
@@ -357,6 +494,7 @@ async def _run_migrations(conn):
     logger.debug(f"Ran {len(migrations)} database migrations")
 
     await _migrate_scalp_to_type(conn)
+    await _migrate_risky_gold_type(conn)
 
 
 async def _migrate_scalp_to_type(conn):
@@ -427,11 +565,43 @@ async def _migrate_scalp_to_type(conn):
             ) THEN
                 ALTER TABLE signals
                 ADD CONSTRAINT signals_type_check
-                CHECK (type IN ('standard', 'scalp', 'swing', 'toll', 'pa', '1-1'));
+                CHECK (type IN ('standard', 'scalp', 'swing', 'toll', 'pa', '1-1', 'risky'));
             END IF;
         END $$;
         """
     )
 
     await conn.execute("ALTER TABLE signals DROP COLUMN scalp")
-    logger.info("Migrated signals.scalp → signals.type and dropped scalp column")
+    logger.info("Migrated signals.scalp to signals.type and dropped scalp column")
+
+
+async def _migrate_risky_gold_type(conn):
+    """Backfill type='risky' for existing risky-gold signals.
+
+    The risky-gold channel was originally classified as 'scalp'; those rows are
+    retyped to 'risky' so reporting and per-type config treat them consistently
+    with newly parsed risky signals. Idempotent — only touches rows not already
+    'risky'.
+    """
+    try:
+        channels_path = Path(__file__).resolve().parent.parent / "config" / "channels.json"
+        channels = json.loads(channels_path.read_text(encoding="utf-8")).get(
+            "monitored_channels", {}
+        )
+    except Exception as e:
+        logger.warning(f"Could not load channels.json for risky-gold backfill: {e}")
+        return
+
+    risky_channel_id = channels.get("risky-gold")
+    if not risky_channel_id or not str(risky_channel_id).isdigit():
+        return
+
+    await conn.execute(
+        """
+        UPDATE signals
+        SET type = 'risky'
+        WHERE CAST(channel_id AS TEXT) = $1
+          AND type != 'risky'
+        """,
+        str(risky_channel_id),
+    )

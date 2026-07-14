@@ -22,7 +22,7 @@ since those are the only ones the bot has an embed for.
 
 import asyncio
 from dataclasses import dataclass
-from typing import Dict, Optional
+from typing import Optional
 
 from utils.logger import get_logger
 
@@ -64,7 +64,7 @@ class NearMissMonitor:
         self.alert_system = alert_system
 
         # signal_id -> NMTrackingState
-        self._tracking: Dict[int, NMTrackingState] = {}
+        self._tracking: dict[int, NMTrackingState] = {}
 
         # Signals currently being processed (dedup guard against rapid ticks)
         self._processing: set = set()
@@ -108,7 +108,7 @@ class NearMissMonitor:
     # Core evaluation
     # ------------------------------------------------------------------
 
-    def update(self, signal: Dict, current_price: float) -> bool:
+    def update(self, signal: dict, current_price: float) -> bool:
         """
         Update NM tracking state for a signal on a price tick.
 
@@ -119,8 +119,8 @@ class NearMissMonitor:
             True if a near-miss is confirmed this tick (caller should cancel).
             False otherwise.
         """
-        signal_id = signal["signal_id"]
-        instrument = signal["instrument"]
+        signal_id = signal.signal_id
+        instrument = signal.instrument
 
         # Dedup guard
         if signal_id in self._processing:
@@ -131,16 +131,16 @@ class NearMissMonitor:
             return False
 
         # Swing signals are not subject to near-miss cancellation.
-        if signal.get("type") == "swing":
+        if signal.type == "swing":
             return False
 
         # Find the first pending limit
-        pending_limits = signal.get("pending_limits", [])
+        pending_limits = signal.pending_limits
         first_limit = next(
             (
-                l
-                for l in sorted(pending_limits, key=lambda x: x.get("sequence_number", 99))
-                if l.get("sequence_number") == 1
+                lim
+                for lim in sorted(pending_limits, key=lambda x: x.sequence_number)
+                if lim.sequence_number == 1
             ),
             None,
         )
@@ -148,14 +148,16 @@ class NearMissMonitor:
             return False
 
         # Only track if approaching alert was already sent
-        if not first_limit.get("approaching_alert_sent", False):
+        if not first_limit.approaching_alert_sent:
             return False
 
-        first_limit_price = first_limit["price_level"]
+        first_limit_price = first_limit.price_level
         current_distance = abs(current_price - first_limit_price)
 
-        # Get thresholds from config
-        max_proximity = self.nm_config.get_max_proximity(instrument)
+        # Get thresholds from config (scoped to the signal type, so risky gold
+        # can use its own more-sensitive params)
+        signal_type = signal.type
+        max_proximity = self.nm_config.get_max_proximity(instrument, signal_type)
 
         # Get or create tracking state
         state = self._tracking.get(signal_id)
@@ -166,7 +168,7 @@ class NearMissMonitor:
             state = NMTrackingState(
                 signal_id=signal_id,
                 instrument=instrument,
-                direction=signal["direction"].lower(),
+                direction=signal.direction.lower(),
                 first_limit_price=first_limit_price,
                 in_proximity=True,
                 closest_distance=current_distance,
@@ -174,7 +176,7 @@ class NearMissMonitor:
             )
             self._tracking[signal_id] = state
             logger.info(
-                f"NM tracking started: signal {signal_id} ({instrument} {signal['direction'].upper()}) "
+                f"NM tracking started: signal {signal_id} ({instrument} {signal.direction.upper()}) "
                 f"limit @ {first_limit_price} | "
                 f"entered proximity at {self.nm_config.format_value(instrument, current_distance)} away"
             )
@@ -194,7 +196,9 @@ class NearMissMonitor:
         # Check the linear bounce condition:
         #   bounce_so_far >= closest_distance + base_bounce
         bounce_so_far = current_distance - state.closest_distance
-        required_bounce = self.nm_config.get_required_bounce(instrument, state.closest_distance)
+        required_bounce = self.nm_config.get_required_bounce(
+            instrument, state.closest_distance, signal_type
+        )
 
         if bounce_so_far >= required_bounce:
             logger.info(
@@ -213,14 +217,15 @@ class NearMissMonitor:
     # Trigger
     # ------------------------------------------------------------------
 
-    async def trigger_near_miss(self, signal: Dict) -> bool:
+    async def trigger_near_miss(self, signal: dict) -> bool:
         """
         Cancel a signal due to near-miss, update embed, send ping.
 
         Returns True if successfully cancelled.
         """
-        signal_id = signal["signal_id"]
-        instrument = signal["instrument"]
+        signal_id = signal.signal_id
+        instrument = signal.instrument
+        signal_type = signal.type
         state = self._tracking.get(signal_id)
 
         closest_str = (
@@ -228,7 +233,10 @@ class NearMissMonitor:
         )
         required_str = (
             self.nm_config.format_value(
-                instrument, self.nm_config.get_required_bounce(instrument, state.closest_distance)
+                instrument,
+                self.nm_config.get_required_bounce(
+                    instrument, state.closest_distance, signal_type
+                ),
             )
             if state
             else "N/A"

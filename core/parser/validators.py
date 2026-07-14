@@ -4,7 +4,7 @@ Signal validation and channel detection for the trading signal parser
 """
 
 import re
-from typing import List
+from typing import Optional
 
 from utils.logger import get_logger
 
@@ -13,6 +13,23 @@ logger = get_logger("parser.validators")
 # ============================================================================
 # CONSTANTS
 # ============================================================================
+
+# Channels that treat every number as a limit and derive the stop loss from the
+# gold-tolls offset (default $5 from the last limit) instead of reading an
+# explicit SL from the message. The toll channels (except general-tolls, which
+# has its own per-instrument auto-SL) match by substring; anything else is
+# listed here explicitly.
+_GOLD_TOLLS_SL_CHANNELS = {"risky-gold"}
+
+
+def uses_gold_tolls_sl(channel_name: Optional[str]) -> bool:
+    """True for channels that auto-derive SL from the gold-tolls offset."""
+    if not channel_name:
+        return False
+    name = channel_name.lower()
+    if name in _GOLD_TOLLS_SL_CHANNELS:
+        return True
+    return "toll" in name and name != "general-tolls"
 
 INDEX_SYMBOL_BLACKLIST = [
     "spx500usd",
@@ -46,7 +63,7 @@ INDEX_SYMBOL_BLACKLIST = [
 
 # Step 1: Check if message is a signal
 def is_potential_signal(
-    message: str, trading_keywords: List[str], instrument_mappings: dict, channel_name: str = None
+    message: str, trading_keywords: list[str], instrument_mappings: dict, channel_name: Optional[str] = None
 ) -> bool:
     """
     Check if message could be a trading signal
@@ -66,12 +83,10 @@ def is_potential_signal(
 
     numbers = _extract_numbers(text)
 
-    # Check if this is the tolls channel
-    is_tolls_channel = channel_name and "toll" in channel_name.lower()
-
-    # For tolls channel, allow single number (just a limit)
-    # For regular channels, require at least 2 numbers (limits + stop)
-    min_numbers = 1 if is_tolls_channel else 2
+    # Tolls-style channels (including risky-gold) auto-derive the stop loss, so a
+    # single number is a valid signal — just a limit. Regular channels need at
+    # least 2 numbers (limits + stop).
+    min_numbers = 1 if uses_gold_tolls_sl(channel_name) else 2
 
     if len(numbers) < min_numbers:
         return False
@@ -79,14 +94,11 @@ def is_potential_signal(
     # Check for trading-related keywords
     text_lower = text.lower()
     all_keywords = trading_keywords + list(instrument_mappings.keys())
-    if not any(keyword in text_lower for keyword in all_keywords):
-        return False
-
-    return True
+    return any(keyword in text_lower for keyword in all_keywords)
 
 
 # Step 2: Exclude Keywords
-def should_exclude(message: str, exclusion_keywords: List[str]) -> bool:
+def should_exclude(message: str, exclusion_keywords: list[str]) -> bool:
     """
     Check if message should be excluded based on keywords
 
@@ -128,16 +140,13 @@ def validate_signal(signal) -> bool:
         return False
 
     # Instrument must be valid
-    if not validate_instrument(signal.instrument):
-        return False
-
-    return True
+    return validate_instrument(signal.instrument)
 
 
 # ============================================================================
 # HELPER FUNCTIONS
 # ============================================================================
-def validate_instrument(instrument: str, forbidden_instruments: set = None) -> bool:
+def validate_instrument(instrument: str, forbidden_instruments: Optional[set] = None) -> bool:
     """
     Validate an instrument
 
@@ -191,7 +200,7 @@ def _remove_index_symbols(text: str) -> str:
     return text
 
 
-def _extract_numbers(text: str) -> List[float]:
+def _extract_numbers(text: str) -> list[float]:
     """Extract all numbers from text"""
     try:
         numbers_str = re.findall(r"\d+\.?\d*", text)

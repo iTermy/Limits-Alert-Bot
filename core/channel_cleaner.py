@@ -18,11 +18,11 @@ window.
 
 import asyncio
 from datetime import datetime, timedelta, timezone
-from typing import Set
 
 import discord
 from discord.ext import tasks
 
+from price_feeds.alerting.info_embeds import info_embed_message_ids
 from utils.logger import get_logger
 
 # ── tuneable constants ────────────────────────────────────────────────────────
@@ -38,6 +38,7 @@ ALERT_CHANNEL_KEYS = [
     "toll-alert-channel",
     "general-tolls-alert",
     "legends-trade-alert",
+    "risky-gold-alert",
 ]
 
 # Monitored channels whose signal messages are preserved by the weekly purge.
@@ -93,7 +94,8 @@ class ChannelCleaner:
     # ── alert-channel purge ───────────────────────────────────────────────────
 
     async def _purge_alert_channels(self):
-        """Delete every message < MESSAGE_AGE_DAYS old from every alert channel."""
+        """Delete every message < MESSAGE_AGE_DAYS old from every alert channel,
+        preserving the permanent informational embeds."""
         cfg = getattr(self.bot, "channels_config", {}) or {}
 
         channel_ids = []
@@ -110,6 +112,7 @@ class ChannelCleaner:
             return
 
         cutoff = datetime.now(tz=timezone.utc) - timedelta(days=MESSAGE_AGE_DAYS)
+        preserve = info_embed_message_ids()
 
         for ch_id in channel_ids:
             channel = self.bot.get_channel(ch_id)
@@ -117,7 +120,7 @@ class ChannelCleaner:
                 self.logger.warning(f"Channel {ch_id} not found in cache — skipping")
                 continue
 
-            await self._purge_channel(channel, cutoff)
+            await self._purge_channel_preserving(channel, cutoff, preserve)
 
     # ── monitored-channel purge ───────────────────────────────────────────────
 
@@ -160,15 +163,11 @@ class ChannelCleaner:
 
     # ── channel-level helpers ─────────────────────────────────────────────────
 
-    async def _purge_channel(self, channel: discord.TextChannel, cutoff: datetime):
-        """Bulk-delete every message newer than *cutoff* in *channel*."""
-        await self._purge_channel_preserving(channel, cutoff, preserve_ids=set())
-
     async def _purge_channel_preserving(
         self,
         channel: discord.TextChannel,
         cutoff: datetime,
-        preserve_ids: Set[str],
+        preserve_ids: set[str],
     ):
         """Bulk-delete messages newer than *cutoff* in *channel*, skipping
         messages whose ID is in *preserve_ids* (e.g. active/hit signal posts)."""

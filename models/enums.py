@@ -1,6 +1,7 @@
 """Enums and status constants for signals, limits, and lifecycle transitions."""
 
 from enum import Enum
+from typing import ClassVar
 
 
 class SignalStatus(str, Enum):
@@ -57,7 +58,7 @@ class Direction(str, Enum):
 
 
 class StatusTransitions:
-    VALID_TRANSITIONS: dict[str, list[str]] = {
+    VALID_TRANSITIONS: ClassVar[dict[str, list[str]]] = {
         SignalStatus.ACTIVE: [SignalStatus.HIT, SignalStatus.CANCELLED, SignalStatus.STOP_LOSS],
         SignalStatus.HIT: [
             SignalStatus.PROFIT,

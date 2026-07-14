@@ -4,19 +4,17 @@ import asyncio
 import logging
 from collections import defaultdict
 from datetime import datetime, timezone
-from typing import Callable, Dict, List, Optional, Set
+from typing import Callable, Optional
 
 from price_feeds.feeds.binance_stream import BinanceStream
 from price_feeds.feeds.icmarkets_stream import ICMarketsStream
 from price_feeds.feeds.oanda_stream import OANDAStream
-from price_feeds.symbol_mapper import SymbolMapper
+from price_feeds.config.symbol_mapper import SymbolMapper
 
 logger = logging.getLogger(__name__)
 
-# ICMarkets symbols subscribed unconditionally at startup so that last_prices
-# always has reference prices for the execution-bot offset calculation,
-# independent of which signals happen to be active.
-_IC_REFERENCE_SYMBOLS = ["XTIUSD", "US500", "USTEC", "US30", "JP225", "DE40", "BTCUSD", "ETHUSD"]
+# Hard ceiling on a single feed reconnect (teardown + respawn + resubscribe).
+RECONNECT_TIMEOUT_SECONDS = 45
 
 
 class PriceStreamManager:
@@ -36,19 +34,19 @@ class PriceStreamManager:
         self.symbol_mapper = SymbolMapper()
 
         # Initialize streaming feeds
-        self.feeds: Dict[str, any] = {}
-        self.feed_status: Dict[str, bool] = {}
+        self.feeds: dict[str, any] = {}
+        self.feed_status: dict[str, bool] = {}
 
         # Symbol tracking
-        self.subscribed_symbols: Set[str] = set()
-        self.symbol_to_feed: Dict[str, str] = {}  # Maps symbol to feed name
+        self.subscribed_symbols: set[str] = set()
+        self.symbol_to_feed: dict[str, str] = {}  # Maps symbol to feed name
 
         # Price storage (latest prices only)
-        self.latest_prices: Dict[str, Dict] = {}
+        self.latest_prices: dict[str, dict] = {}
         self.price_lock = asyncio.Lock()
 
         # Subscribers (callbacks to notify on price updates)
-        self.subscribers: List[Callable] = []
+        self.subscribers: list[Callable] = []
 
         # Start health monitor
         self.health_monitor = None
@@ -73,18 +71,9 @@ class PriceStreamManager:
             await self.feeds["icmarkets"].connect()
             self.feed_status["icmarkets"] = True
 
-            # Subscribe reference symbols needed for execution-bot offset calc.
-            # These are polled at a 15-minute cadence by ICMarketsStream since
-            # the offset they feed only drifts on minute timescales.
-            for sym in _IC_REFERENCE_SYMBOLS:
-                try:
-                    await self.feeds["icmarkets"].subscribe_reference(sym)
-                except Exception as e:
-                    logger.warning("Could not subscribe IC reference symbol %s: %s", sym, e)
-
             # Start MT5 stream handler
             asyncio.create_task(self._handle_icmarkets_stream())
-            logger.info("✓ ICMarkets stream initialized")
+            logger.info("ICMarkets stream initialized")
         except Exception as e:
             logger.error(f"Failed to initialize ICMarkets stream: {e}")
             self.feed_status["icmarkets"] = False
@@ -109,7 +98,7 @@ class PriceStreamManager:
 
                 # Log which server we're connected to
                 server_type = "practice" if practice else "live"
-                logger.info(f"✓ OANDA stream initialized ({server_type} account)")
+                logger.info(f"OANDA stream initialized ({server_type} account)")
             else:
                 logger.info("OANDA credentials not configured, skipping")
         except Exception as e:
@@ -124,7 +113,7 @@ class PriceStreamManager:
 
             # Start Binance stream handler
             asyncio.create_task(self._handle_binance_stream())
-            logger.info("✓ Binance WebSocket initialized")
+            logger.info("Binance WebSocket initialized")
         except Exception as e:
             logger.error(f"Failed to initialize Binance stream: {e}")
             self.feed_status["binance"] = False
@@ -215,7 +204,7 @@ class PriceStreamManager:
         if self.health_monitor:
             self.health_monitor.clear_symbol(symbol)
 
-    async def bulk_subscribe(self, symbols: List[str]):
+    async def bulk_subscribe(self, symbols: list[str]):
         """
         Subscribe to multiple symbols at once
 
@@ -225,7 +214,7 @@ class PriceStreamManager:
         logger.info(f"Bulk subscribing to {len(symbols)} symbols")
 
         # Group by feed
-        feed_symbols: Dict[str, List[tuple]] = defaultdict(list)
+        feed_symbols: dict[str, list[tuple]] = defaultdict(list)
 
         for symbol in symbols:
             if symbol in self.subscribed_symbols:
@@ -250,7 +239,7 @@ class PriceStreamManager:
                 await self.feeds[feed_name].bulk_subscribe(feed_syms)
 
                 # Track subscriptions
-                for internal, feed_sym in symbol_pairs:
+                for internal, _feed_sym in symbol_pairs:
                     self.subscribed_symbols.add(internal)
                     self.symbol_to_feed[internal] = feed_name
 
@@ -392,7 +381,7 @@ class PriceStreamManager:
                     logger.error(f"Exness reconnection failed: {e2}")
                     await asyncio.sleep(30)
 
-    async def _process_price_update(self, symbol: str, price_data: Dict, feed: str):
+    async def _process_price_update(self, symbol: str, price_data: dict, feed: str):
         """Process a price update, compute spread if absent, and notify subscribers."""
         # Calculate spread if not already present
         if "spread" not in price_data and "bid" in price_data and "ask" in price_data:
@@ -434,7 +423,7 @@ class PriceStreamManager:
             except Exception as e:
                 logger.error(f"Subscriber {subscriber.__name__} failed: {e}")
 
-    async def get_latest_price(self, symbol: str) -> Optional[Dict]:
+    async def get_latest_price(self, symbol: str) -> Optional[dict]:
         """
         Get the latest cached price for a symbol
 
@@ -499,14 +488,22 @@ class PriceStreamManager:
             return False
         try:
             logger.info(f"Reconnecting {feed_name}...")
-            await feed.reconnect()
+            # Bound the reconnect: a feed teardown/respawn that hangs (e.g. a
+            # stuck MT5 child-process spawn) must fail, not wedge the caller.
+            await asyncio.wait_for(feed.reconnect(), timeout=RECONNECT_TIMEOUT_SECONDS)
             self.feed_status[feed_name] = feed.connected
             self.stats["reconnections"] += 1
             if feed.connected:
-                logger.info(f"✓ {feed_name} reconnected")
+                logger.info(f"{feed_name} reconnected")
             else:
                 logger.warning(f"{feed_name} reconnect did not restore connection")
             return feed.connected
+        except asyncio.TimeoutError:
+            logger.error(
+                f"{feed_name} reconnect timed out after {RECONNECT_TIMEOUT_SECONDS}s"
+            )
+            self.feed_status[feed_name] = False
+            return False
         except Exception as e:
             logger.error(f"Failed to reconnect {feed_name}: {e}")
             self.feed_status[feed_name] = False
@@ -525,7 +522,7 @@ class PriceStreamManager:
                 self.feed_status[feed_name] = feed.connected
                 reconnect_results[feed_name] = True
                 self.stats["reconnections"] += 1
-                logger.info(f"✓ {feed_name} reconnected")
+                logger.info(f"{feed_name} reconnected")
             except Exception as e:
                 logger.error(f"Failed to reconnect {feed_name}: {e}")
                 self.feed_status[feed_name] = False
@@ -538,7 +535,7 @@ class PriceStreamManager:
 
         return reconnect_results
 
-    def get_stats(self) -> Dict:
+    def get_stats(self) -> dict:
         """Get streaming statistics"""
         return {
             **self.stats,

@@ -5,12 +5,12 @@ Channel-specific pattern-based parsers for trading signals
 
 import re
 import time
-from typing import Dict, List, Optional, Set
+from typing import Optional
 
 from utils.logger import get_logger
 
 from . import INSTRUMENT_MAPPINGS, ParsedSignal
-from .validators import INDEX_SYMBOL_BLACKLIST, validate_signal
+from .validators import INDEX_SYMBOL_BLACKLIST, uses_gold_tolls_sl, validate_signal
 
 logger = get_logger("parser.pattern_parsers")
 
@@ -52,6 +52,44 @@ def invalidate_gold_tolls_sl_cache() -> None:
     """Force the next call to get_gold_tolls_sl_offset() to re-read from disk."""
     global _gold_tolls_sl_cache_ts
     _gold_tolls_sl_cache_ts = 0.0
+
+
+# ---------------------------------------------------------------------------
+# Risky-Gold SL offset — configurable independently of gold tolls via
+# !riskygoldsl, stored in settings.json → risky_gold_sl_offset
+# ---------------------------------------------------------------------------
+
+_RISKY_GOLD_SL_OFFSET_DEFAULT = 10.0
+_risky_gold_sl_cache: float = _RISKY_GOLD_SL_OFFSET_DEFAULT
+_risky_gold_sl_cache_ts: float = 0.0
+
+
+def get_risky_gold_sl_offset() -> float:
+    """
+    Return the current risky-gold SL offset (dollars from the nearest limit).
+
+    Read from settings.json → ``risky_gold_sl_offset`` and cached for 30 s.
+    Independent of the gold-tolls offset so the two can be tuned separately.
+    """
+    global _risky_gold_sl_cache, _risky_gold_sl_cache_ts
+    if time.monotonic() - _risky_gold_sl_cache_ts > _GOLD_TOLLS_SL_CACHE_TTL:
+        try:
+            from utils.config_loader import load_settings
+
+            settings = load_settings()
+            _risky_gold_sl_cache = float(settings.risky_gold_sl_offset)
+        except Exception as e:
+            logger.warning(
+                f"Could not load risky_gold_sl_offset from settings: {e}. Using {_risky_gold_sl_cache}."
+            )
+        _risky_gold_sl_cache_ts = time.monotonic()
+    return _risky_gold_sl_cache
+
+
+def invalidate_risky_gold_sl_cache() -> None:
+    """Force the next call to get_risky_gold_sl_offset() to re-read from disk."""
+    global _risky_gold_sl_cache_ts
+    _risky_gold_sl_cache_ts = 0.0
 
 
 # Optional import for stock parsing
@@ -138,6 +176,7 @@ CHANNEL_TYPE_MAP = {
     "gold-pa-signals": "pa",
     "price-action-trades": "pa",
     "gold-1-1-rr": "1-1",
+    "risky-gold": "risky",
 }
 
 # Expiry patterns
@@ -211,7 +250,7 @@ def clean_message(message: str) -> str:
     return cleaned.strip()
 
 
-def extract_numbers(text: str) -> List[float]:
+def extract_numbers(text: str) -> list[float]:
     """Extract all numbers from text, excluding numbers inside blacklisted terms"""
     for word in INDEX_SYMBOL_BLACKLIST:
         text = re.sub(re.escape(word), "", text, flags=re.IGNORECASE)
@@ -222,7 +261,7 @@ def extract_numbers(text: str) -> List[float]:
         return []
 
 
-def scale_forex_numbers(numbers: List[float], instrument: str) -> List[float]:
+def scale_forex_numbers(numbers: list[float], instrument: str) -> list[float]:
     """Scale down large forex numbers if needed"""
     if instrument not in FOREX_PAIRS or instrument in HIGH_VALUE_INSTRUMENTS:
         return numbers
@@ -236,12 +275,12 @@ def scale_forex_numbers(numbers: List[float], instrument: str) -> List[float]:
     return numbers
 
 
-def extract_words_with_boundaries(text: str) -> List[str]:
+def extract_words_with_boundaries(text: str) -> list[str]:
     """Extract words from text including alphanumeric patterns"""
     return re.findall(r"\b[a-z0-9]+\b", text.lower())
 
 
-def validate_limits_and_stop(limits: List[float], stop_loss: float, direction: str) -> bool:
+def validate_limits_and_stop(limits: list[float], stop_loss: float, direction: str) -> bool:
     """Validate that limits and stop loss make sense for the direction"""
     if not limits:
         return False
@@ -308,7 +347,7 @@ def _extract_from_channel_name(
     if is_crypto_alt:
         alt_symbol = _extract_crypto_alt_symbol(text_lower)
         if alt_symbol:
-            logger.debug(f"Crypto-alt channel: {alt_symbol} → {alt_symbol}USDT")
+            logger.debug(f"Crypto-alt channel: {alt_symbol} maps to {alt_symbol}USDT")
             return f"{alt_symbol}USDT"
 
     # Gold channel - default to XAUUSD if no other instrument found
@@ -339,7 +378,7 @@ def _find_explicit_instrument(text_lower: str, is_crypto_alt: bool = False) -> O
     if is_crypto_alt:
         alt_symbol = _extract_crypto_alt_symbol(text_lower)
         if alt_symbol:
-            logger.debug(f"Crypto-alt auto-append: {alt_symbol} → {alt_symbol}USDT")
+            logger.debug(f"Crypto-alt auto-append: {alt_symbol} maps to {alt_symbol}USDT")
             return f"{alt_symbol}USDT"
 
     # Check for crypto first (standard mappings for BTC, ETH, etc.)
@@ -360,10 +399,9 @@ def _find_explicit_instrument(text_lower: str, is_crypto_alt: bool = False) -> O
 
     # Check for full instrument names (6+ characters like 'eurusd')
     for pattern, instrument in INSTRUMENT_MAPPINGS.items():
-        if len(pattern) >= 6:  # Full names
-            if pattern in text_lower:
-                logger.debug(f"Found full instrument: {pattern} -> {instrument}")
-                return instrument
+        if len(pattern) >= 6 and pattern in text_lower:  # Full names
+            logger.debug(f"Found full instrument: {pattern} -> {instrument}")
+            return instrument
 
     return None
 
@@ -479,7 +517,7 @@ def extract_expiry(text: str, channel_name: str, channel_config: dict) -> str:
     return "day_end"
 
 
-def extract_keywords(text: str) -> List[str]:
+def extract_keywords(text: str) -> list[str]:
     """Extract special keywords from text"""
     text_lower = text.lower()
     keywords = []
@@ -501,7 +539,7 @@ def extract_keywords(text: str) -> List[str]:
     return keywords
 
 
-def validate_limits_order(limits: List[float], direction: str) -> bool:
+def validate_limits_order(limits: list[float], direction: str) -> bool:
     """
     Validate that limits are in the expected order for the given direction.
 
@@ -526,177 +564,163 @@ def validate_limits_order(limits: List[float], direction: str) -> bool:
     return all(limits[i] >= limits[i + 1] for i in range(len(limits) - 1))
 
 
-def determine_limits_and_stop(
-    numbers: List[float],
-    direction: str,
-    channel_name: str = None,
-    raw_text: str = None,
-    instrument: str = None,
-) -> tuple:
-    """
-    Determine which numbers are limits and which is stop loss.
-
-    Numbers are taken in the order provided — no reordering is performed.
-    If the limits are not in the expected order for the given direction, the
-    signal is rejected (returns None, None) to surface typos such as a
-    misplaced decimal point or a transposed digit.
-
-    Expected convention (how traders write signals):
-      - SHORT: limits ascending  (e.g. 1.1800, 1.1810, 1.1820  → stop above all)
-      - LONG:  limits descending (e.g. 1.1820, 1.1810, 1.1800  → stop below all)
-
-    Special handling for tolls channel:
-    - All numbers are treated as limits (no stop loss in the message)
-    - Stop loss is automatically set to ±5 from the appropriate limit:
-      * Long: min(limits) - 5 (5 below the lowest limit)
-      * Short: max(limits) + 5 (5 above the highest limit)
-    - Single-number messages are valid (one limit, no stop loss required)
-
-    Special handling for general-tolls channel:
-    - If raw_text contains an explicit SL keyword (sl / stop / stops), the last
-      number is treated as the stop loss (standard convention), requiring at
-      least 2 numbers.
-    - If no SL keyword is found, all numbers are treated as limits and the SL
-      is auto-calculated per instrument:
-        * SPX500USD → ±$10
-        * NAS100USD → ±$30
-        * anything else → ±$10 (safe default)
-      Single-number messages are valid in this auto-SL mode.
-    """
-    # Auto-SL offsets for general-tolls when no explicit SL keyword is found
-    _GENERAL_TOLLS_AUTO_SL = {
-        "SPX500USD": 10.0,
-        "NAS100USD": 30.0,
-    }
-    _GENERAL_TOLLS_AUTO_SL_DEFAULT = 10.0
-
-    # Check if this is the gold tolls channel (auto-infers SL)
-    is_tolls_channel = (
-        channel_name and "toll" in channel_name.lower() and channel_name.lower() != "general-tolls"
-    )
-
-    # Check if this is the general-tolls channel
-    is_general_tolls = channel_name and channel_name.lower() == "general-tolls"
-
-    if is_general_tolls:
-        # Decide whether the message contains an explicit SL keyword
-        has_sl_keyword = bool(raw_text and _SL_KEYWORD_RE.search(raw_text))
-
-        if has_sl_keyword:
-            # Explicit SL: last number is the stop loss — requires at least 2 numbers.
-            if len(numbers) < 2:
-                return None, None
-
-            # Last number is the stop loss (primary convention)
-            stop_loss = numbers[-1]
-            limits = numbers[:-1]
-
-            if not validate_limits_and_stop(limits, stop_loss, direction):
-                # Try first number as stop loss (alternative convention)
-                stop_loss = numbers[0]
-                limits = numbers[1:]
-                if not validate_limits_and_stop(limits, stop_loss, direction):
-                    logger.debug(
-                        f"General tolls stop loss validation failed for {direction} with numbers {numbers}"
-                    )
-                    return None, None
-
-            if not validate_limits_order(limits, direction):
-                from . import LimitsOrderError
-
-                raise LimitsOrderError(
-                    f"{direction} general-tolls limits not {'ascending' if direction == 'short' else 'descending'}: {limits}"
-                )
-
-            logger.debug(
-                f"General tolls (explicit SL): {len(limits)} limit(s), stop={stop_loss} ({direction})"
-            )
-            return limits, stop_loss
-
-        # No SL keyword — treat all numbers as limits and auto-calculate SL.
-        # Single-number messages are valid in this mode.
-        if len(numbers) < 1:
-            return None, None
-
-        limits = numbers
-        instr_upper = (instrument or "").upper()
-        sl_offset = _GENERAL_TOLLS_AUTO_SL.get(instr_upper, _GENERAL_TOLLS_AUTO_SL_DEFAULT)
-
-        if direction == "long":
-            stop_loss = min(limits) - sl_offset
-        else:  # short
-            stop_loss = max(limits) + sl_offset
-
-        if len(limits) > 1 and not validate_limits_order(limits, direction):
-            from . import LimitsOrderError
-
-            raise LimitsOrderError(
-                f"{direction} general-tolls limits not {'ascending' if direction == 'short' else 'descending'}: {limits}"
-            )
-
-        logger.debug(
-            f"General tolls (auto SL, offset={sl_offset}): {len(limits)} limit(s), "
-            f"stop={stop_loss} ({direction}, instrument={instr_upper})"
-        )
-        return limits, stop_loss
-
-    if is_tolls_channel:
-        if len(numbers) < 1:
-            return None, None
-
-        limits = numbers
-        sl_offset = get_gold_tolls_sl_offset()
-        if direction == "long":
-            lowest_limit = min(limits)
-            stop_loss = lowest_limit - sl_offset
-        else:  # short
-            highest_limit = max(limits)
-            stop_loss = highest_limit + sl_offset
-
-        # Validate order — tolls signals are subject to the same typo checks
-        if len(limits) > 1 and not validate_limits_order(limits, direction):
-            from . import LimitsOrderError
-
-            raise LimitsOrderError(
-                f"{direction} tolls limits not {'ascending' if direction == 'short' else 'descending'}: {limits}"
-            )
-
-        logger.debug(
-            f"Tolls channel: Using all {len(limits)} number(s) as limits, "
-            f"auto-setting stop to {stop_loss} (offset={sl_offset}, {direction})"
-        )
-        return limits, stop_loss
-
-    # Normal channel logic (requires at least 2 numbers)
-    if len(numbers) < 2:
-        return None, None
-
-    # Last number is the stop loss (primary convention)
-    stop_loss = numbers[-1]
-    limits = numbers[:-1]
-
-    if not validate_limits_and_stop(limits, stop_loss, direction):
-        # Try first number as stop loss (alternative convention)
-        stop_loss = numbers[0]
-        limits = numbers[1:]
-        if not validate_limits_and_stop(limits, stop_loss, direction):
-            logger.debug(f"Stop loss validation failed for {direction} with numbers {numbers}")
-            return None, None
-
-    # Validate that limits are in the expected order — no auto-sort fallback.
-    # Out-of-order limits almost always indicate a typo (e.g. missing decimal,
-    # wrong digit) rather than a valid signal.
-    if not validate_limits_order(limits, direction):
+def _reject_out_of_order(limits: list[float], direction: str, label: str) -> None:
+    """Raise LimitsOrderError when multi-limit prices break the direction's
+    expected ordering (short ascending, long descending) — almost always a typo."""
+    if len(limits) > 1 and not validate_limits_order(limits, direction):
         from . import LimitsOrderError
 
+        prefix = f"{direction} {label}".strip()
         raise LimitsOrderError(
-            f"{direction} limits not {'ascending' if direction == 'short' else 'descending'}: {limits}"
+            f"{prefix} limits not "
+            f"{'ascending' if direction == 'short' else 'descending'}: {limits}"
         )
 
+
+def _split_explicit_stop(numbers: list[float], direction: str) -> tuple:
+    """Split numbers into (limits, stop_loss) trying the last number as the stop
+    first, then the first (alternative convention). Returns (None, None) when
+    neither placement validates against the direction."""
+    stop_loss = numbers[-1]
+    limits = numbers[:-1]
+    if validate_limits_and_stop(limits, stop_loss, direction):
+        return limits, stop_loss
+
+    stop_loss = numbers[0]
+    limits = numbers[1:]
+    if validate_limits_and_stop(limits, stop_loss, direction):
+        return limits, stop_loss
+
+    return None, None
+
+
+def _auto_stop(limits: list[float], direction: str, offset: float) -> float:
+    """Derive the stop loss from the outermost limit: offset below the lowest
+    limit for longs, offset above the highest for shorts."""
+    if direction == "long":
+        return min(limits) - offset
+    return max(limits) + offset
+
+
+def _general_tolls_limits_and_stop(
+    numbers: list[float], direction: str, raw_text: str, instrument: str
+) -> tuple:
+    """general-tolls: explicit SL keyword uses the standard last/first-number
+    convention; otherwise every number is a limit and the SL is derived from a
+    per-instrument dollar offset (single-number messages are valid)."""
+    auto_sl_offsets = {"SPX500USD": 10.0, "NAS100USD": 30.0}
+    auto_sl_default = 10.0
+
+    if raw_text and _SL_KEYWORD_RE.search(raw_text):
+        if len(numbers) < 2:
+            return None, None
+        limits, stop_loss = _split_explicit_stop(numbers, direction)
+        if limits is None:
+            logger.debug(
+                f"General tolls stop loss validation failed for {direction} with numbers {numbers}"
+            )
+            return None, None
+        _reject_out_of_order(limits, direction, "general-tolls")
+        logger.debug(
+            f"General tolls (explicit SL): {len(limits)} limit(s), stop={stop_loss} ({direction})"
+        )
+        return limits, stop_loss
+
+    if not numbers:
+        return None, None
+
+    limits = numbers
+    instr_upper = (instrument or "").upper()
+    sl_offset = auto_sl_offsets.get(instr_upper, auto_sl_default)
+    stop_loss = _auto_stop(limits, direction, sl_offset)
+    _reject_out_of_order(limits, direction, "general-tolls")
+    logger.debug(
+        f"General tolls (auto SL, offset={sl_offset}): {len(limits)} limit(s), "
+        f"stop={stop_loss} ({direction}, instrument={instr_upper})"
+    )
     return limits, stop_loss
 
 
-def get_signal_type(text: str, channel_name: str = None) -> str:
+def _tolls_limits_and_stop(numbers: list[float], direction: str, raw_text: str, channel_name: str) -> tuple:
+    """Gold-tolls-style channels: an explicit SL keyword (with 2+ numbers) makes
+    the last number the stop; otherwise every number is a limit and the SL is the
+    configured offset beyond the outermost limit (risky-gold has its own offset)."""
+    if not numbers:
+        return None, None
+
+    if raw_text and _SL_KEYWORD_RE.search(raw_text) and len(numbers) >= 2:
+        limits, stop_loss = _split_explicit_stop(numbers, direction)
+        if limits is None:
+            logger.debug(
+                f"Tolls explicit stop loss validation failed for {direction} with numbers {numbers}"
+            )
+            return None, None
+        _reject_out_of_order(limits, direction, "tolls")
+        logger.debug(
+            f"Tolls channel (explicit SL): {len(limits)} limit(s), stop={stop_loss} ({direction})"
+        )
+        return limits, stop_loss
+
+    limits = numbers
+    if channel_name and channel_name.lower() == "risky-gold":
+        sl_offset = get_risky_gold_sl_offset()
+    else:
+        sl_offset = get_gold_tolls_sl_offset()
+    stop_loss = _auto_stop(limits, direction, sl_offset)
+    _reject_out_of_order(limits, direction, "tolls")
+    logger.debug(
+        f"Tolls channel: Using all {len(limits)} number(s) as limits, "
+        f"auto-setting stop to {stop_loss} (offset={sl_offset}, {direction})"
+    )
+    return limits, stop_loss
+
+
+def _standard_limits_and_stop(numbers: list[float], direction: str) -> tuple:
+    """Regular channels: at least two numbers; the last (or first) is the stop,
+    the rest are limits, and multi-limit ordering must match the direction."""
+    if len(numbers) < 2:
+        return None, None
+
+    limits, stop_loss = _split_explicit_stop(numbers, direction)
+    if limits is None:
+        logger.debug(f"Stop loss validation failed for {direction} with numbers {numbers}")
+        return None, None
+
+    _reject_out_of_order(limits, direction, "")
+    return limits, stop_loss
+
+
+def determine_limits_and_stop(
+    numbers: list[float],
+    direction: str,
+    channel_name: Optional[str] = None,
+    raw_text: Optional[str] = None,
+    instrument: Optional[str] = None,
+) -> tuple:
+    """
+    Determine which numbers are limits and which is the stop loss.
+
+    Numbers are taken in the order provided — no reordering is performed. If the
+    limits are not in the expected order for the direction (short ascending,
+    long descending), LimitsOrderError is raised to surface typos such as a
+    misplaced decimal point.
+
+    Channel routing:
+      - general-tolls: per-instrument auto-SL unless an SL keyword is present
+      - gold-tolls-style channels (incl. risky-gold): offset-derived auto-SL
+        unless an SL keyword provides one explicitly
+      - everything else: last (or first) number is the stop loss
+    """
+    if channel_name and channel_name.lower() == "general-tolls":
+        return _general_tolls_limits_and_stop(numbers, direction, raw_text, instrument)
+
+    if uses_gold_tolls_sl(channel_name):
+        return _tolls_limits_and_stop(numbers, direction, raw_text, channel_name)
+
+    return _standard_limits_and_stop(numbers, direction)
+
+
+def get_signal_type(text: str, channel_name: Optional[str] = None) -> str:
     """
     Determine the signal type from the channel and message body.
 
@@ -725,23 +749,20 @@ class CorePatternParser:
     This is the main parser used for most channels.
     """
 
-    def __init__(self, channel_config: dict = None):
+    def __init__(self, channel_config: Optional[dict] = None):
         self.channel_config = channel_config or {}
         logger.info("Initialized CorePatternParser")
 
-    def parse(self, message: str, channel_name: str = None) -> Optional[ParsedSignal]:
+    def parse(self, message: str, channel_name: Optional[str] = None) -> Optional[ParsedSignal]:
         """Parse using pattern matching for core instruments"""
         try:
             cleaned = clean_message(message)
             numbers = extract_numbers(cleaned)
 
-            is_gold_tolls_channel = (
-                channel_name
-                and "toll" in channel_name.lower()
-                and channel_name.lower() != "general-tolls"
-            )
             min_numbers = (
-                1 if (is_gold_tolls_channel or _general_tolls_auto_sl(channel_name, cleaned)) else 2
+                1
+                if (uses_gold_tolls_sl(channel_name) or _general_tolls_auto_sl(channel_name, cleaned))
+                else 2
             )
 
             if len(numbers) < min_numbers:
@@ -822,10 +843,10 @@ class StockPatternParser:
     # genuinely has no stocks.
     _SYMBOL_REFRESH_MIN_INTERVAL = 60.0
 
-    def __init__(self, channel_config: dict = None):
+    def __init__(self, channel_config: Optional[dict] = None):
         self.channel_config = channel_config or {}
         self.mt5_initialized = False
-        self.available_symbols: Set[str] = set()
+        self.available_symbols: set[str] = set()
         self._last_symbol_refresh: float = 0.0
         self._initialize_mt5()
         logger.info("Initialized StockPatternParser")
@@ -869,7 +890,7 @@ class StockPatternParser:
         except Exception as e:
             logger.debug(f"Symbol refresh failed: {e}")
 
-    def parse(self, message: str, channel_name: str = None) -> Optional[ParsedSignal]:
+    def parse(self, message: str, channel_name: Optional[str] = None) -> Optional[ParsedSignal]:
         """
         Parse a stock trading signal
 
@@ -1013,7 +1034,7 @@ class StockPatternParser:
 
         return None
 
-    def _find_by_description(self, text: str, stock_symbols: List[str]) -> List[Dict]:
+    def _find_by_description(self, text: str, stock_symbols: list[str]) -> list[dict]:
         """Find stocks by description matching"""
         # Get meaningful words for search
         words_lower = [
@@ -1055,7 +1076,7 @@ class StockPatternParser:
 
         return matches
 
-    def _select_best_match(self, matches: List[Dict]) -> Optional[Dict]:
+    def _select_best_match(self, matches: list[dict]) -> Optional[dict]:
         """Select the best match from multiple candidates"""
         if not matches:
             return None

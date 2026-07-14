@@ -1,7 +1,7 @@
 import json
 import logging
 from pathlib import Path
-from typing import Dict, Optional, Tuple
+from typing import Optional
 
 logger = logging.getLogger(__name__)
 
@@ -17,19 +17,19 @@ class SymbolMapper:
     - Exness: Oil symbols (USOILSPOT via MT5)
     """
 
-    def __init__(self, config_path: str = None):
+    def __init__(self, config_path: Optional[str] = None):
         """Initialize the symbol mapper with configuration"""
         if config_path is None:
             # Locate config folder relative to this file
             self.config_path = (
-                Path(__file__).resolve().parent.parent / "config" / "symbol_mappings.json"
+                Path(__file__).resolve().parent.parent.parent / "config" / "symbol_mappings.json"
             )
         else:
             self.config_path = Path(config_path)
         self.mappings = self._load_mappings()
         logger.info(f"SymbolMapper initialized with config from {config_path}")
 
-    def _load_mappings(self) -> Dict:
+    def _load_mappings(self) -> dict:
         """Load symbol mappings from JSON configuration"""
         try:
             with open(self.config_path) as f:
@@ -44,6 +44,12 @@ class SymbolMapper:
     def determine_asset_class(self, symbol: str) -> str:
         """Return the asset class for a symbol (forex, forex_jpy, metals, crypto, indices, stocks, oil)."""
         symbol_upper = symbol.upper()
+
+        # Stocks carry an exchange suffix (e.g. AAPL.NAS, BAC.NYSE). Check this
+        # before crypto: a ticker like ABNB.NAS or SOLV.NAS contains a crypto
+        # substring (BNB, SOL) and would otherwise misclassify as crypto.
+        if "." in symbol_upper:
+            return "stocks"
 
         # Check crypto patterns
         if any(
@@ -65,10 +71,6 @@ class SymbolMapper:
         ):
             return "oil"
 
-        # Check stocks (common patterns)
-        if "." in symbol or any(exchange in symbol_upper for exchange in [".NAS", ".NYSE", ".LON"]):
-            return "stocks"
-
         # Check indices
         if any(
             idx in symbol_upper
@@ -77,6 +79,7 @@ class SymbolMapper:
                 "NAS",
                 "DOW",
                 "DAX",
+                "UK100",
                 "CHINA50",
                 "US500",
                 "USTEC",
@@ -84,7 +87,9 @@ class SymbolMapper:
                 "US2000",
                 "RUSSEL",
                 "GER30",
+                "GER40",
                 "DE30",
+                "DE40",
                 "JP225",
                 "NIKKEI",
             ]
@@ -160,7 +165,7 @@ class SymbolMapper:
         # Default to ICMarkets if no specific feed is configured
         return "icmarkets"
 
-    def get_feed_symbol(self, internal_symbol: str, feed: str = None) -> Optional[str]:
+    def get_feed_symbol(self, internal_symbol: str, feed: Optional[str] = None) -> Optional[str]:
         """
         Convert internal symbol to feed-specific format
 
@@ -402,7 +407,7 @@ class SymbolMapper:
 
         return feed_symbol.upper()  # ✓ FINAL FALLBACK: ALWAYS UPPERCASE
 
-    def get_all_feed_symbols(self, internal_symbol: str) -> Dict[str, Optional[str]]:
+    def get_all_feed_symbols(self, internal_symbol: str) -> dict[str, Optional[str]]:
         """
         Get symbol mappings for all feeds
         Useful for debugging and fallback scenarios
@@ -417,7 +422,7 @@ class SymbolMapper:
             "exness": self.get_feed_symbol(internal_symbol, "exness"),
         }
 
-    def validate_symbol(self, symbol: str) -> Tuple[bool, str]:
+    def validate_symbol(self, symbol: str) -> tuple[bool, str]:
         """
         Validate if a symbol can be processed
 

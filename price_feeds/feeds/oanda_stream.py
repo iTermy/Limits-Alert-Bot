@@ -8,7 +8,7 @@ import json
 import logging
 from collections.abc import AsyncIterator
 from datetime import datetime
-from typing import Dict, Set, Tuple
+from typing import Optional
 
 import aiohttp
 
@@ -27,7 +27,7 @@ class OANDAStream:
     which provides continuous real-time pricing updates
     """
 
-    def __init__(self, api_key: str = None, account_id: str = None, practice: bool = False):
+    def __init__(self, api_key: Optional[str] = None, account_id: Optional[str] = None, practice: bool = False):
         """Initialize OANDA stream"""
         import os
 
@@ -48,7 +48,7 @@ class OANDAStream:
         # Connection management
         self.session: aiohttp.ClientSession = None
         self.connected = False
-        self.subscribed_symbols: Set[str] = set()
+        self.subscribed_symbols: set[str] = set()
 
         # Stream control
         self.streaming = False
@@ -158,7 +158,7 @@ class OANDAStream:
         if was_streaming:
             self.streaming = True
 
-    async def stream_prices(self) -> AsyncIterator[Tuple[str, Dict]]:
+    async def stream_prices(self) -> AsyncIterator[tuple[str, dict]]:
         """
         Stream price updates from OANDA
 
@@ -257,6 +257,6 @@ class OANDAStream:
                 logger.error(f"Error in OANDA stream: {e}")
                 await asyncio.sleep(5)
 
-    def get_subscribed_symbols(self) -> Set[str]:
+    def get_subscribed_symbols(self) -> set[str]:
         """Get set of currently subscribed symbols"""
         return self.subscribed_symbols.copy()

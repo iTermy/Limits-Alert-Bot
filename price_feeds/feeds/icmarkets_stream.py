@@ -4,21 +4,26 @@ Uses continuous tick polling with asyncio for real-time price updates
 """
 
 import asyncio
+import contextlib
 import logging
 import os
 from collections.abc import AsyncIterator
+from concurrent.futures import ThreadPoolExecutor
 from datetime import datetime, timezone
-from time import monotonic
-from typing import Callable, Dict, Optional, Set, Tuple
+from typing import Callable, Optional
 
 import MetaTrader5 as mt5
 
 logger = logging.getLogger(__name__)
 
-# Reference-only symbols (subscribed at startup purely so live_prices.ic_bid/ic_ask
-# can be stamped for the execution bot's broker-offset calc) are polled at this
-# slower cadence instead of the 100 ms used for signal-bearing symbols.
-_REFERENCE_POLL_INTERVAL = 15 * 60  # seconds
+# The MetaTrader5 package makes blocking C calls. Running them on a dedicated
+# thread pool (rather than asyncio's shared default executor) keeps a hung MT5
+# terminal — common during the broker's spread-hour rollover — from starving the
+# machinery the rest of the loop depends on (DNS resolution, feed reconnects,
+# Discord I/O). A per-call timeout lets the poll loop abandon a wedged tick fetch
+# and keep serving the symbols that are still responding.
+_MT5_EXECUTOR_WORKERS = 4
+_MT5_CALL_TIMEOUT_SECONDS = 5
 
 
 class ICMarketsStream:
@@ -27,34 +32,30 @@ class ICMarketsStream:
 
     MT5 doesn't have native WebSocket streaming, so we use continuous polling
     with symbol_info_tick() in a tight loop (runs every 100ms per symbol).
-    Reference-only symbols (see subscribe_reference) poll at a 15-minute
-    cadence since their only consumer is the broker-offset stamp.
     """
 
     def __init__(self):
         """Initialize MT5 stream"""
         self.connected = False
-        self.subscribed_symbols: Set[str] = set()
-
-        # Symbols subscribed only for ic_bid/ic_ask reference data — polled at
-        # _REFERENCE_POLL_INTERVAL unless they're also in subscribed_symbols
-        # (in which case they're signal-bearing and poll at 100 ms).
-        self.reference_symbols: Set[str] = set()
-
-        # monotonic timestamp of the next allowed poll per reference symbol.
-        self._reference_next_poll: Dict[str, float] = {}
+        self.subscribed_symbols: set[str] = set()
 
         # Resolved MT5 name per requested stock "-24" symbol. Some stocks have
         # no 24-hour variant on this broker, so we fall back to the bare symbol
         # and cache the result to avoid re-probing on every subscribe.
-        self._stock_symbol_cache: Dict[str, str] = {}
+        self._stock_symbol_cache: dict[str, str] = {}
 
         # Price cache to detect changes
-        self.last_prices: Dict[str, Dict] = {}
+        self.last_prices: dict[str, dict] = {}
 
         # Stream control
         self.streaming = False
         self.stream_task = None
+
+        # Dedicated pool for MetaTrader5's blocking calls; recreated on each
+        # connect so threads leaked to a wedged terminal don't accumulate.
+        self._mt5_executor = ThreadPoolExecutor(
+            max_workers=_MT5_EXECUTOR_WORKERS, thread_name_prefix="mt5"
+        )
 
         # Optional callback invoked on every successful MT5 poll, regardless of
         # whether the price changed. Used by the health monitor to refresh its
@@ -64,25 +65,38 @@ class ICMarketsStream:
 
         logger.info("ICMarketsStream initialized")
 
+    async def _run_mt5(self, func, *args):
+        """Run a blocking MT5 call on the dedicated pool, never on the loop thread."""
+        loop = asyncio.get_running_loop()
+        return await loop.run_in_executor(self._mt5_executor, func, *args)
+
+    def _reset_mt5_executor(self):
+        """Swap in a fresh MT5 pool, abandoning any threads wedged on a hung
+        terminal (shutdown(wait=False) does not join them)."""
+        self._mt5_executor.shutdown(wait=False)
+        self._mt5_executor = ThreadPoolExecutor(
+            max_workers=_MT5_EXECUTOR_WORKERS, thread_name_prefix="mt5"
+        )
+
     async def connect(self) -> bool:
         """Initialize MT5 connection"""
         try:
-            loop = asyncio.get_event_loop()
+            self._reset_mt5_executor()
             mt5_path = os.getenv("MT5_PATH")
             if mt5_path:
-                result = await loop.run_in_executor(None, lambda: mt5.initialize(mt5_path))
+                result = await self._run_mt5(mt5.initialize, mt5_path)
             else:
-                result = await loop.run_in_executor(None, mt5.initialize)
+                result = await self._run_mt5(mt5.initialize)
 
             if result:
                 self.connected = True
 
-                terminal_info = mt5.terminal_info()
+                terminal_info = await self._run_mt5(mt5.terminal_info)
                 if terminal_info:
                     logger.info(f"Connected to MT5 - {terminal_info.name}")
 
                 return True
-            error = mt5.last_error()
+            error = await self._run_mt5(mt5.last_error)
             logger.error(f"MT5 initialization failed: {error}")
             return False
 
@@ -96,14 +110,11 @@ class ICMarketsStream:
 
         if self.stream_task:
             self.stream_task.cancel()
-            try:
+            with contextlib.suppress(asyncio.CancelledError):
                 await self.stream_task
-            except asyncio.CancelledError:
-                pass
 
         if self.connected:
-            loop = asyncio.get_event_loop()
-            await loop.run_in_executor(None, mt5.shutdown)
+            await self._run_mt5(mt5.shutdown)
             self.connected = False
             logger.info("Disconnected from MT5")
 
@@ -121,11 +132,7 @@ class ICMarketsStream:
 
     async def subscribe(self, symbol: str):
         """
-        Subscribe to price updates for a symbol (signal-bearing, 100 ms cadence).
-
-        If the symbol was previously a reference-only subscription, this
-        promotes it: the slow-poll gate is cleared so the next loop iteration
-        polls immediately and stays at 100 ms.
+        Subscribe to price updates for a symbol (100 ms polling cadence).
 
         Args:
             symbol: MT5 format symbol (e.g., EURUSD, XAUUSD)
@@ -133,25 +140,19 @@ class ICMarketsStream:
         if not self.connected:
             raise Exception("Not connected to MT5")
 
-        if symbol not in self.reference_symbols:
-            # Resolve the 24-hour stock fallback before validating, so a stock
-            # without a "-24" variant subscribes to its bare symbol instead.
-            symbol = await self._resolve_stock_symbol(symbol)
+        # Resolve the 24-hour stock fallback before validating, so a stock
+        # without a "-24" variant subscribes to its bare symbol instead.
+        symbol = await self._resolve_stock_symbol(symbol)
 
-            # Validate symbol exists. Reference symbols are already validated
-            # at subscribe_reference time, so skip here for the promotion case.
-            loop = asyncio.get_event_loop()
-            symbol_info = await loop.run_in_executor(None, mt5.symbol_info, symbol)
+        symbol_info = await self._run_mt5(mt5.symbol_info, symbol)
 
-            if symbol_info is None:
-                raise Exception(f"Symbol {symbol} not found in MT5")
+        if symbol_info is None:
+            raise Exception(f"Symbol {symbol} not found in MT5")
 
-            if not symbol_info.visible:
-                await loop.run_in_executor(None, mt5.symbol_select, symbol, True)
+        if not symbol_info.visible:
+            await self._run_mt5(mt5.symbol_select, symbol, True)
 
         self.subscribed_symbols.add(symbol)
-        # Promote a reference symbol to signal-bearing cadence immediately.
-        self._reference_next_poll.pop(symbol, None)
         logger.info(f"Subscribed to {symbol} on MT5")
 
     async def _resolve_stock_symbol(self, symbol: str) -> str:
@@ -169,13 +170,12 @@ class ICMarketsStream:
         if symbol in self._stock_symbol_cache:
             return self._stock_symbol_cache[symbol]
 
-        loop = asyncio.get_event_loop()
-        if await loop.run_in_executor(None, mt5.symbol_info, symbol) is not None:
+        if await self._run_mt5(mt5.symbol_info, symbol) is not None:
             self._stock_symbol_cache[symbol] = symbol
             return symbol
 
         bare = symbol[:-3]
-        if await loop.run_in_executor(None, mt5.symbol_info, bare) is not None:
+        if await self._run_mt5(mt5.symbol_info, bare) is not None:
             logger.info("Stock %s has no 24-hour variant; using %s", symbol, bare)
             self._stock_symbol_cache[symbol] = bare
             return bare
@@ -184,46 +184,13 @@ class ICMarketsStream:
         self._stock_symbol_cache[symbol] = symbol
         return symbol
 
-    async def subscribe_reference(self, symbol: str):
-        """
-        Subscribe a symbol purely as reference data (15-minute polling cadence).
-
-        Used for live_prices.ic_bid/ic_ask stamping — the offset between IC
-        and the signal feed (OANDA/Binance) drifts slowly enough that minute-
-        scale refresh is sufficient. Signal-bearing subscriptions go via
-        subscribe() and override the slow cadence.
-        """
-        if not self.connected:
-            raise Exception("Not connected to MT5")
-
-        loop = asyncio.get_event_loop()
-        symbol_info = await loop.run_in_executor(None, mt5.symbol_info, symbol)
-
-        if symbol_info is None:
-            raise Exception(f"Symbol {symbol} not found in MT5")
-
-        if not symbol_info.visible:
-            await loop.run_in_executor(None, mt5.symbol_select, symbol, True)
-
-        self.reference_symbols.add(symbol)
-        # Poll immediately on the first loop iteration so ic_bid/ic_ask is
-        # populated quickly after startup, then drop to the slow cadence.
-        self._reference_next_poll[symbol] = 0.0
-        logger.info(f"Subscribed reference symbol {symbol} on MT5 (15 min cadence)")
-
     async def unsubscribe(self, symbol: str):
         """Unsubscribe from a symbol"""
         # Resolve through the stock fallback cache so we discard the name that
         # was actually subscribed (bare symbol when "-24" didn't exist).
         symbol = self._stock_symbol_cache.get(symbol, symbol)
         self.subscribed_symbols.discard(symbol)
-        # If the symbol was *also* a reference subscription it stays subscribed
-        # at the slow cadence; only drop last_prices when it's gone from both.
-        if symbol not in self.reference_symbols:
-            self.last_prices.pop(symbol, None)
-        else:
-            # Reset the next-poll timer so it's not held to the fast schedule.
-            self._reference_next_poll[symbol] = monotonic() + _REFERENCE_POLL_INTERVAL
+        self.last_prices.pop(symbol, None)
 
     async def bulk_subscribe(self, symbols: list):
         """Subscribe to multiple symbols"""
@@ -233,7 +200,7 @@ class ICMarketsStream:
             except Exception as e:
                 logger.error(f"Failed to subscribe to {symbol}: {e}")
 
-    async def stream_prices(self) -> AsyncIterator[Tuple[str, Dict]]:
+    async def stream_prices(self) -> AsyncIterator[tuple[str, dict]]:
         """
         Stream price updates for all subscribed symbols
 
@@ -244,40 +211,32 @@ class ICMarketsStream:
             raise Exception("Not connected to MT5")
 
         self.streaming = True
-        loop = asyncio.get_event_loop()
 
         while self.streaming:
             try:
-                now_mono = monotonic()
-                # Poll every signal-bearing symbol every iteration; reference-
-                # only symbols only when their per-symbol next-poll time has
-                # elapsed (slow cadence).
-                symbols_to_poll = set(self.subscribed_symbols)
-                for ref_sym in list(self.reference_symbols):
-                    if ref_sym in self.subscribed_symbols:
+                for symbol in set(self.subscribed_symbols):
+                    # Fetch current tick. Bound the call so a wedged terminal
+                    # (e.g. spread-hour rollover) can't stall polling for the
+                    # symbols that are still responding.
+                    try:
+                        tick = await asyncio.wait_for(
+                            self._run_mt5(mt5.symbol_info_tick, symbol),
+                            timeout=_MT5_CALL_TIMEOUT_SECONDS,
+                        )
+                    except asyncio.TimeoutError:
+                        logger.warning(
+                            "MT5 tick fetch for %s timed out after %ss; skipping",
+                            symbol, _MT5_CALL_TIMEOUT_SECONDS,
+                        )
                         continue
-                    if self._reference_next_poll.get(ref_sym, 0.0) <= now_mono:
-                        symbols_to_poll.add(ref_sym)
-
-                for symbol in symbols_to_poll:
-                    # Fetch current tick
-                    tick = await loop.run_in_executor(None, mt5.symbol_info_tick, symbol)
-
-                    is_reference_only = (
-                        symbol in self.reference_symbols
-                        and symbol not in self.subscribed_symbols
-                    )
-                    if is_reference_only:
-                        self._reference_next_poll[symbol] = now_mono + _REFERENCE_POLL_INTERVAL
 
                     if tick is None:
                         continue
 
                     # Refresh health-monitor liveness on every successful poll,
                     # even when bid/ask are unchanged — quiet markets still mean
-                    # the feed is alive. Reference-only symbols skip this so the
-                    # 15-minute cadence doesn't trip the 5-minute stale check.
-                    if self.on_poll is not None and not is_reference_only:
+                    # the feed is alive.
+                    if self.on_poll is not None:
                         try:
                             self.on_poll(symbol)
                         except Exception as cb_err:
@@ -296,8 +255,7 @@ class ICMarketsStream:
                     if symbol not in self.last_prices:
                         # First time seeing this symbol
                         self.last_prices[symbol] = current_price
-                        if not is_reference_only:
-                            yield symbol, current_price
+                        yield symbol, current_price
                     else:
                         # Check if bid or ask changed
                         last = self.last_prices[symbol]
@@ -306,8 +264,7 @@ class ICMarketsStream:
                             or last["ask"] != current_price["ask"]
                         ):
                             self.last_prices[symbol] = current_price
-                            if not is_reference_only:
-                                yield symbol, current_price
+                            yield symbol, current_price
 
                 # Small delay between checks (100ms = 10 updates/sec max per symbol)
                 await asyncio.sleep(0.1)
@@ -316,6 +273,6 @@ class ICMarketsStream:
                 logger.error(f"Error in MT5 stream: {e}")
                 await asyncio.sleep(1)
 
-    def get_subscribed_symbols(self) -> Set[str]:
+    def get_subscribed_symbols(self) -> set[str]:
         """Get set of currently subscribed symbols"""
         return self.subscribed_symbols.copy()

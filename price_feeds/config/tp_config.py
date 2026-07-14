@@ -13,9 +13,10 @@ P&L is always calculated in the same native unit as the TP type:
   - dollars for everything else
 """
 
+import copy
 import logging
 from datetime import datetime, timezone
-from typing import Dict, Literal
+from typing import ClassVar, Literal, Optional
 
 from ._base_config import BaseThresholdConfig
 
@@ -23,7 +24,7 @@ logger = logging.getLogger(__name__)
 
 TPType = Literal["pips", "dollars"]
 
-VALID_SIGNAL_TYPES = ("standard", "scalp", "swing", "toll", "pa", "1-1")
+VALID_SIGNAL_TYPES = ("standard", "scalp", "swing", "toll", "pa", "1-1", "risky")
 
 
 class TPConfig(BaseThresholdConfig):
@@ -40,7 +41,7 @@ class TPConfig(BaseThresholdConfig):
 
     CONFIG_FILENAME = "tp_configuration.json"
 
-    ASSET_CLASS_TYPES: Dict[str, TPType] = {
+    ASSET_CLASS_TYPES: ClassVar[dict[str, TPType]] = {
         "forex": "pips",
         "forex_jpy": "pips",
         "metals": "dollars",
@@ -50,14 +51,14 @@ class TPConfig(BaseThresholdConfig):
         "oil": "dollars",
     }
 
-    def __init__(self, config_path: str = None):
+    def __init__(self, config_path: Optional[str] = None):
         super().__init__(config_path)
         logger.info("TPConfig initialised")
 
     # === Config defaults & validation ===
 
     @staticmethod
-    def _standard_defaults() -> Dict:
+    def _standard_defaults() -> dict:
         return {
             "forex": {"type": "pips", "value": 5.0, "description": "Standard forex pairs"},
             "forex_jpy": {"type": "pips", "value": 10.0, "description": "JPY pairs"},
@@ -69,7 +70,7 @@ class TPConfig(BaseThresholdConfig):
         }
 
     @staticmethod
-    def _scalp_defaults() -> Dict:
+    def _scalp_defaults() -> dict:
         return {
             "forex": {"type": "pips", "value": 3.0, "description": "Scalp - forex"},
             "forex_jpy": {"type": "pips", "value": 5.0, "description": "Scalp - JPY pairs"},
@@ -81,7 +82,7 @@ class TPConfig(BaseThresholdConfig):
         }
 
     @classmethod
-    def _swing_defaults(cls) -> Dict:
+    def _swing_defaults(cls) -> dict:
         # Swing = 3x standard.
         out = {}
         for asset_class, cfg in cls._standard_defaults().items():
@@ -93,14 +94,14 @@ class TPConfig(BaseThresholdConfig):
         return out
 
     @staticmethod
-    def _one_one_defaults() -> Dict:
+    def _one_one_defaults() -> dict:
         # $10 from the last hit limit for metals (gold-1-1-rr default).
         # Other asset classes fall back to standard via the resolution chain.
         return {
             "metals": {"type": "dollars", "value": 10.0, "description": "1-1 RR - metals"},
         }
 
-    def _create_default_config(self) -> Dict:
+    def _create_default_config(self) -> dict:
         config = {
             "type_defaults": {
                 "standard": self._standard_defaults(),
@@ -109,61 +110,12 @@ class TPConfig(BaseThresholdConfig):
                 "toll": self._scalp_defaults(),  # initialised from scalp; user-adjustable
                 "pa": self._standard_defaults(),  # initialised from standard; user-adjustable
                 "1-1": self._one_one_defaults(),
+                "risky": self._scalp_defaults(),  # initialised from scalp; user-adjustable
             },
             "type_overrides": {t: {} for t in VALID_SIGNAL_TYPES},
         }
         self._save_config(config)
         return config
-
-    def _post_load(self, raw: Dict) -> Dict:
-        """Migrate legacy {defaults, scalp_defaults, overrides, scalp_overrides} → new shape."""
-        if "type_defaults" in raw and "type_overrides" in raw:
-            return raw
-
-        migrated: Dict = {
-            "type_defaults": {t: {} for t in VALID_SIGNAL_TYPES},
-            "type_overrides": {t: {} for t in VALID_SIGNAL_TYPES},
-        }
-
-        legacy_defaults = raw.get("defaults") or {}
-        legacy_scalp_defaults = raw.get("scalp_defaults") or {}
-        legacy_overrides = raw.get("overrides") or {}
-        legacy_scalp_overrides = raw.get("scalp_overrides") or {}
-
-        if legacy_defaults:
-            migrated["type_defaults"]["standard"] = legacy_defaults
-            migrated["type_defaults"]["pa"] = dict(legacy_defaults)
-            # Swing = 3x standard.
-            swing = {}
-            for ac, cfg in legacy_defaults.items():
-                swing[ac] = {
-                    "type": cfg.get("type", "dollars"),
-                    "value": cfg.get("value", 5.0) * 3,
-                    "description": f"Swing - {ac}",
-                }
-            migrated["type_defaults"]["swing"] = swing
-        else:
-            migrated["type_defaults"]["standard"] = self._standard_defaults()
-            migrated["type_defaults"]["pa"] = self._standard_defaults()
-            migrated["type_defaults"]["swing"] = self._swing_defaults()
-
-        if legacy_scalp_defaults:
-            migrated["type_defaults"]["scalp"] = legacy_scalp_defaults
-            migrated["type_defaults"]["toll"] = dict(legacy_scalp_defaults)
-        else:
-            migrated["type_defaults"]["scalp"] = self._scalp_defaults()
-            migrated["type_defaults"]["toll"] = self._scalp_defaults()
-
-        migrated["type_defaults"]["1-1"] = self._one_one_defaults()
-
-        if legacy_overrides:
-            migrated["type_overrides"]["standard"] = legacy_overrides
-        if legacy_scalp_overrides:
-            migrated["type_overrides"]["scalp"] = legacy_scalp_overrides
-
-        self._save_config(migrated)
-        logger.info("Migrated TP config from legacy scalp shape to per-type shape")
-        return migrated
 
     def _validate_config(self):
         if "type_defaults" not in self.config or "type_overrides" not in self.config:
@@ -175,6 +127,17 @@ class TPConfig(BaseThresholdConfig):
         for t in VALID_SIGNAL_TYPES:
             self.config["type_defaults"].setdefault(t, {})
             self.config["type_overrides"].setdefault(t, {})
+
+        # Seed the risky config from the loaded scalp config for files written
+        # before the risky type existed, so risky signals keep the same TP they
+        # had when they were classified as scalp (rather than falling back to
+        # standard). Copies the on-disk scalp values, not the hardcoded defaults.
+        if not self.config["type_defaults"].get("risky"):
+            scalp_defaults = self.config["type_defaults"].get("scalp") or self._scalp_defaults()
+            self.config["type_defaults"]["risky"] = copy.deepcopy(scalp_defaults)
+            if not self.config["type_overrides"].get("risky"):
+                scalp_overrides = self.config["type_overrides"].get("scalp") or {}
+                self.config["type_overrides"]["risky"] = copy.deepcopy(scalp_overrides)
 
         # Fill in missing fields on each entry.
         for type_name, asset_classes in self.config["type_defaults"].items():
@@ -196,7 +159,7 @@ class TPConfig(BaseThresholdConfig):
             return signal_type
         return "standard"
 
-    def _get_config_for_symbol(self, symbol: str, signal_type: str = "standard") -> Dict:
+    def _get_config_for_symbol(self, symbol: str, signal_type: str = "standard") -> dict:
         """Return {type, value} for a symbol given a signal type.
 
         Resolution order:
@@ -329,7 +292,7 @@ class TPConfig(BaseThresholdConfig):
             return True
         return False
 
-    def get_display_info(self, symbol: str = None, signal_type: str = "standard") -> Dict:
+    def get_display_info(self, symbol: Optional[str] = None, signal_type: str = "standard") -> dict:
         """Return formatted config dict for display."""
         signal_type = self._normalize_type(signal_type)
         if symbol:

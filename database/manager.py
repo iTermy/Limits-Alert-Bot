@@ -3,14 +3,13 @@ DatabaseManager — integrates connection and core signal/limit operations
 """
 
 from datetime import datetime
-from typing import Any, Dict, List, Optional
+from typing import Any, Optional
 
 import pytz
 
-from models.signal import SignalData
-from utils.logger import get_logger
-
 from models.enums import ChangeType, LimitStatus, SignalStatus, StatusTransitions
+from models.signal import LimitData, SignalData
+from utils.logger import get_logger
 
 from .connection import DatabaseManager as BaseConnectionManager
 from .schema import initialize_database
@@ -30,7 +29,7 @@ class DatabaseManager(BaseConnectionManager):
     # === Signal Status Operations ===
 
     async def update_signal_status(
-        self, signal_id: int, new_status: str, change_type: str = "automatic", reason: str = None
+        self, signal_id: int, new_status: str, change_type: str = "automatic", reason: Optional[str] = None
     ) -> bool:
         """Update signal status with proper lifecycle management."""
         async with self.get_connection() as conn:
@@ -87,10 +86,9 @@ class DatabaseManager(BaseConnectionManager):
             logger.info(f"Updated signal {signal_id}: {old_status} -> {new_status} ({change_type})")
             return True
 
-    async def mark_limit_hit(self, limit_id: int, hit_price: float = None) -> Dict[str, Any]:
+    async def mark_limit_hit(self, limit_id: int, hit_price: Optional[float] = None) -> dict[str, Any]:
         """Mark a limit as hit and update signal status if needed."""
-        async with self.get_connection() as conn:
-            async with conn.transaction():
+        async with self.get_connection() as conn, conn.transaction():
                 limit_data = await conn.fetchrow(
                     """
                     SELECT l.*, s.status as signal_status, s.id as signal_id
@@ -168,7 +166,7 @@ class DatabaseManager(BaseConnectionManager):
                     else limit_data["signal_status"],
                 }
 
-    async def get_active_signals_for_tracking(self) -> List[SignalData]:
+    async def get_active_signals_for_tracking(self) -> list[SignalData]:
         """Get all signals that need price tracking (ACTIVE or HIT status)."""
         query = """
             SELECT
@@ -199,7 +197,7 @@ class DatabaseManager(BaseConnectionManager):
             query, (LimitStatus.PENDING, SignalStatus.ACTIVE, SignalStatus.HIT)
         )
 
-        signals: Dict[int, dict] = {}
+        signals: dict[int, dict] = {}
         for row in rows:
             signal_id = row["signal_id"]
             if signal_id not in signals:
@@ -233,10 +231,11 @@ class DatabaseManager(BaseConnectionManager):
 
         return [SignalData.model_validate(s) for s in signals.values()]
 
-    async def get_hit_limits_for_signal(self, signal_id: int) -> List[Dict[str, Any]]:
+    async def get_hit_limits_for_signal(self, signal_id: int) -> list[LimitData]:
         """Return all hit limits for a signal ordered by sequence_number."""
         query = """
             SELECT id AS limit_id,
+                   signal_id,
                    sequence_number,
                    price_level,
                    hit_price,
@@ -246,11 +245,11 @@ class DatabaseManager(BaseConnectionManager):
             ORDER BY sequence_number
         """
         rows = await self.fetch_all(query, (signal_id,))
-        return [dict(r) for r in rows]
+        return [LimitData.model_validate({**dict(r), "status": "hit"}) for r in rows]
 
     async def get_performance_stats(
-        self, start_date: str = None, end_date: str = None, instrument: str = None
-    ) -> Dict[str, Any]:
+        self, start_date: Optional[str] = None, end_date: Optional[str] = None, instrument: Optional[str] = None
+    ) -> dict[str, Any]:
         """Get performance statistics for closed signals."""
         conditions = ["status IN ('profit', 'breakeven', 'stop_loss')"]
         params = []
@@ -308,15 +307,15 @@ class DatabaseManager(BaseConnectionManager):
             logger.error(f"Invalid expiry type: {expiry_type}")
             return False
 
-        signal = await self.fetch_one("SELECT * FROM signals WHERE id = $1", (signal_id,))
+        row = await self.fetch_one("SELECT status FROM signals WHERE id = $1", (signal_id,))
 
-        if not signal:
+        if not row:
             logger.error(f"Signal {signal_id} not found")
             return False
 
-        if SignalStatus.is_final(signal["status"]):
+        if SignalStatus.is_final(row["status"]):
             logger.warning(
-                f"Cannot modify expiry for signal {signal_id} in final status {signal['status']}"
+                f"Cannot modify expiry for signal {signal_id} in final status {row['status']}"
             )
             return False
 
@@ -362,9 +361,30 @@ class DatabaseManager(BaseConnectionManager):
                 """,
                 (value,),
             )
-            logger.debug(f"bot_mode_status.news_mode → {value!r}")
+            logger.debug(f"bot_mode_status.news_mode set to {value!r}")
         except Exception as e:
             logger.error(f"Failed to update news_mode status: {e}", exc_info=True)
+
+    async def set_vol_guard_mode(self, value: Optional[str]) -> None:
+        """Set bot_mode_status.vol_guard to a pair list (e.g. 'EURUSD, GBPUSD'), 'ALL',
+        or NULL.
+
+        A non-empty string marks the market as volatile; NULL marks it calm. Like
+        news_mode, consumers read this column for truthiness, so callers must pass
+        None — never the literal string 'FALSE' — when no volatility is active.
+        """
+        try:
+            await self.execute(
+                """
+                UPDATE bot_mode_status
+                SET vol_guard = $1, updated_at = NOW()
+                WHERE id = 1
+                """,
+                (value,),
+            )
+            logger.debug(f"bot_mode_status.vol_guard set to {value!r}")
+        except Exception as e:
+            logger.error(f"Failed to update vol_guard status: {e}", exc_info=True)
 
     async def set_spread_hour(self, active: bool) -> None:
         """Update the spread_hour flag in bot_mode_status."""
@@ -377,7 +397,7 @@ class DatabaseManager(BaseConnectionManager):
                 """,
                 (active,),
             )
-            logger.debug(f"bot_mode_status.spread_hour → {active}")
+            logger.debug(f"bot_mode_status.spread_hour set to {active}")
         except Exception as e:
             logger.error(f"Failed to update spread_hour status: {e}", exc_info=True)
 
@@ -385,11 +405,13 @@ class DatabaseManager(BaseConnectionManager):
         """Retrieve the current bot mode flags."""
         try:
             row = await self.fetch_one(
-                "SELECT news_mode, spread_hour, updated_at FROM bot_mode_status WHERE id = 1", ()
+                "SELECT news_mode, vol_guard, spread_hour, updated_at "
+                "FROM bot_mode_status WHERE id = 1",
+                (),
             )
             if row:
                 return dict(row)
-            return {"news_mode": None, "spread_hour": False, "updated_at": None}
+            return {"news_mode": None, "vol_guard": None, "spread_hour": False, "updated_at": None}
         except Exception as e:
             logger.error(f"Failed to fetch bot_mode_status: {e}", exc_info=True)
-            return {"news_mode": None, "spread_hour": False, "updated_at": None}
+            return {"news_mode": None, "vol_guard": None, "spread_hour": False, "updated_at": None}

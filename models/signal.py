@@ -3,11 +3,11 @@
 from __future__ import annotations
 
 from datetime import datetime
-from typing import Any, Optional
+from typing import Any
 
 from pydantic import BaseModel, Field, computed_field, model_validator
 
-VALID_SIGNAL_TYPES = ("standard", "scalp", "swing", "toll", "pa", "1-1")
+VALID_SIGNAL_TYPES = ("standard", "scalp", "swing", "toll", "pa", "1-1", "risky")
 
 
 class LimitData(BaseModel):
@@ -16,11 +16,11 @@ class LimitData(BaseModel):
     price_level: float = 0.0
     sequence_number: int = 0
     status: str = "pending"
-    hit_time: Optional[datetime] = None
-    hit_price: Optional[float] = None
+    hit_time: datetime | None = None
+    hit_price: float | None = None
     approaching_alert_sent: bool = False
     hit_alert_sent: bool = False
-    created_at: Optional[datetime] = None
+    created_at: datetime | None = None
 
     model_config = {"from_attributes": True}
 
@@ -32,54 +32,41 @@ class LimitData(BaseModel):
             values["id"] = values.pop("limit_id")
         return values
 
-    # Dict-protocol methods for seamless transition from dict-based code.
-    def __getitem__(self, key: str) -> Any:
-        try:
-            return getattr(self, key)
-        except AttributeError:
-            raise KeyError(key)
-
-    def __setitem__(self, key: str, value: Any) -> None:
-        object.__setattr__(self, key, value)
-
-    def __contains__(self, key: str) -> bool:
-        return hasattr(self, key)
-
-    def get(self, key: str, default: Any = None) -> Any:
-        return getattr(self, key, default)
-
 
 class SignalData(BaseModel):
     signal_id: int = 0
-    message_id: Optional[str] = None
-    channel_id: Optional[str] = None
+    message_id: str | None = None
+    channel_id: str | None = None
     instrument: str = ""
     direction: str = ""
     stop_loss: float = 0.0
-    expiry_type: Optional[str] = None
-    expiry_time: Optional[datetime] = None
+    expiry_type: str | None = None
+    expiry_time: datetime | None = None
     status: str = "active"
     type: str = "standard"
-    first_limit_hit_time: Optional[datetime] = None
-    closed_at: Optional[datetime] = None
-    closed_reason: Optional[str] = None
-    tp_price: Optional[float] = None
+    first_limit_hit_time: datetime | None = None
+    closed_at: datetime | None = None
+    closed_reason: str | None = None
+    tp_price: float | None = None
+    manual_tp_price: float | None = None
     total_limits: int = 0
     limits_hit: int = 0
-    alert_message_id: Optional[int] = None
-    alert_channel_id: Optional[int] = None
-    ping_message_id: Optional[int] = None
-    finished_message_id: Optional[int] = None
-    finished_channel_id: Optional[int] = None
-    created_at: Optional[datetime] = None
-    updated_at: Optional[datetime] = None
+    alert_message_id: int | None = None
+    alert_channel_id: int | None = None
+    ping_message_id: int | None = None
+    finished_message_id: int | None = None
+    finished_channel_id: int | None = None
+    created_at: datetime | None = None
+    updated_at: datetime | None = None
 
     limits: list[LimitData] = Field(default_factory=list)
 
     # Runtime-only fields set by the streaming monitor (not from DB)
-    guild_id: Optional[int] = None
-    current_spread: Optional[float] = None
+    guild_id: int | None = None
+    current_spread: float | None = None
     sl_alert_sent: bool = False
+    asset_class: str | None = None
+    shadow_only: bool = False
 
     model_config = {"from_attributes": True}
 
@@ -100,7 +87,7 @@ class SignalData(BaseModel):
 
     @classmethod
     def from_db_row(
-        cls, row: dict[str, Any], limits: Optional[list[dict[str, Any]]] = None
+        cls, row: dict[str, Any], limits: list[dict[str, Any]] | None = None
     ) -> SignalData:
         """Build a SignalData from an asyncpg Record dict.
 
@@ -140,23 +127,3 @@ class SignalData(BaseModel):
         if type_val is not None and type_val not in VALID_SIGNAL_TYPES:
             values["type"] = "standard"
         return values
-
-    # Dict-protocol methods for seamless transition from dict-based code.
-    def __getitem__(self, key: str) -> Any:
-        try:
-            return getattr(self, key)
-        except AttributeError:
-            raise KeyError(key)
-
-    def __setitem__(self, key: str, value: Any) -> None:
-        object.__setattr__(self, key, value)
-
-    def __contains__(self, key: str) -> bool:
-        return hasattr(self, key)
-
-    def get(self, key: str, default: Any = None) -> Any:
-        return getattr(self, key, default)
-
-    def pop(self, key: str, *args: Any) -> Any:
-        val = getattr(self, key, *args) if args else getattr(self, key)
-        return val

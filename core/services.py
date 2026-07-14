@@ -7,38 +7,42 @@ handlers via constructor.
 
 from __future__ import annotations
 
-from typing import TYPE_CHECKING, Optional
+from typing import TYPE_CHECKING
 
 if TYPE_CHECKING:
     from core.news_fetcher import NewsFetcher
     from database import DatabaseManager
     from database.signal_ops import SignalDatabase
-    from price_feeds.alert_config import AlertDistanceConfig
-    from price_feeds.alert_system import AlertSystem
-    from price_feeds.nm_config import NMConfig
-    from price_feeds.nm_monitor import NearMissMonitor
-    from price_feeds.price_stream_manager import PriceStreamManager
-    from price_feeds.streaming_monitor import StreamingPriceMonitor
-    from price_feeds.tp_config import TPConfig
-    from price_feeds.tp_monitor import AutoTPMonitor
-    from price_feeds.trailing_monitor import TrailingStopMonitor
-    from price_feeds.vol_guard import VolatilityGuard
+    from price_feeds.config.alert_config import AlertDistanceConfig
+    from price_feeds.alerting.alert_system import AlertSystem
+    from price_feeds.monitors.excursion_monitor import ExcursionMonitor
+    from price_feeds.config.nm_config import NMConfig
+    from price_feeds.monitors.nm_monitor import NearMissMonitor
+    from price_feeds.feeds.price_stream_manager import PriceStreamManager
+    from price_feeds.monitors.risky_window import RiskyWindowAnnouncer
+    from price_feeds.monitors.streaming_monitor import StreamingPriceMonitor
+    from price_feeds.config.tp_config import TPConfig
+    from price_feeds.monitors.tp_monitor import AutoTPMonitor
+    from price_feeds.monitors.trailing_monitor import TrailingStopMonitor
+    from price_feeds.monitors.vol_guard import VolatilityGuard
 
 
 class ServiceRegistry:
     """Flat, typed container holding references to every bot subsystem."""
 
     def __init__(self) -> None:
-        self.monitor: Optional[StreamingPriceMonitor] = None
-        self.alert_system: Optional[AlertSystem] = None
-        self.stream_manager: Optional[PriceStreamManager] = None
-        self.tp_config: Optional[TPConfig] = None
-        self.tp_monitor: Optional[AutoTPMonitor] = None
-        self.nm_config: Optional[NMConfig] = None
-        self.nm_monitor: Optional[NearMissMonitor] = None
-        self.trailing_monitor: Optional[TrailingStopMonitor] = None
-        self.alert_config: Optional[AlertDistanceConfig] = None
-        self.signal_db: Optional[SignalDatabase] = None
-        self.db: Optional[DatabaseManager] = None
-        self.news_fetcher: Optional[NewsFetcher] = None
-        self.vol_guard: Optional[VolatilityGuard] = None
+        self.monitor: StreamingPriceMonitor | None = None
+        self.alert_system: AlertSystem | None = None
+        self.stream_manager: PriceStreamManager | None = None
+        self.tp_config: TPConfig | None = None
+        self.tp_monitor: AutoTPMonitor | None = None
+        self.nm_config: NMConfig | None = None
+        self.nm_monitor: NearMissMonitor | None = None
+        self.trailing_monitor: TrailingStopMonitor | None = None
+        self.excursion_monitor: ExcursionMonitor | None = None
+        self.alert_config: AlertDistanceConfig | None = None
+        self.signal_db: SignalDatabase | None = None
+        self.db: DatabaseManager | None = None
+        self.news_fetcher: NewsFetcher | None = None
+        self.vol_guard: VolatilityGuard | None = None
+        self.risky_window_announcer: RiskyWindowAnnouncer | None = None

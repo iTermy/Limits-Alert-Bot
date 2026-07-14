@@ -6,7 +6,6 @@ import logging
 import ssl
 from collections.abc import AsyncIterator
 from datetime import datetime
-from typing import Dict, Set, Tuple
 
 import aiohttp
 import certifi
@@ -52,7 +51,7 @@ class BinanceStream:
         self.connected = False
 
         # Symbol tracking
-        self.subscribed_symbols: Set[str] = set()
+        self.subscribed_symbols: set[str] = set()
 
         # Stream control
         self.streaming = False
@@ -163,7 +162,7 @@ class BinanceStream:
         except Exception as e:
             logger.error(f"Failed to send unsubscribe message: {e}")
 
-    async def stream_prices(self) -> AsyncIterator[Tuple[str, Dict]]:
+    async def stream_prices(self) -> AsyncIterator[tuple[str, dict]]:
         """
         Stream price updates from Binance
 
@@ -246,6 +245,6 @@ class BinanceStream:
             finally:
                 self.ws_connection = None
 
-    def get_subscribed_symbols(self) -> Set[str]:
+    def get_subscribed_symbols(self) -> set[str]:
         """Get set of currently subscribed symbols"""
         return self.subscribed_symbols.copy()

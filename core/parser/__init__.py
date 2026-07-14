@@ -8,8 +8,7 @@ from typing import Optional
 
 from utils.logger import get_logger
 
-# Import validation functions
-from .validators import detect_channel_type, is_potential_signal, should_exclude, validate_signal
+from .validators import detect_channel_type, is_potential_signal, should_exclude
 
 logger = get_logger("parser")
 
@@ -32,7 +31,7 @@ class ParsedSignal:
     parse_method: str  # high_confidence/stock/ai
     keywords: list[str] = field(default_factory=list)
     channel_name: str = None
-    type: str = "standard"  # standard, scalp, swing, toll, pa, 1-1
+    type: str = "standard"  # standard, scalp, swing, toll, pa, 1-1, risky
 
 
 class RejectedSignal:
@@ -157,6 +156,9 @@ INSTRUMENT_MAPPINGS = {
     "asx": "AUS2000",
     "f40": "F40",
     "cac": "F40",
+    "uk100": "UK100GBP",
+    "uk100gbp": "UK100GBP",
+    "ftse": "UK100GBP",
     # Crypto (keep main ones, alt coins handled by auto-append)
     "btc": "BTCUSDT",
     "bitcoin": "BTCUSDT",
@@ -219,7 +221,7 @@ class SignalParser:
             logger.warning(f"Could not load channel configuration: {e}")
             return {}
 
-    def parse(self, message: str, channel_name: str = None) -> Optional[ParsedSignal]:
+    def parse(self, message: str, channel_name: Optional[str] = None) -> Optional[ParsedSignal]:
         """
         Parse a trading signal with channel-aware routing
 
@@ -241,31 +243,31 @@ class SignalParser:
             logger.debug(f"Not a potential signal: {message[:50]}...")
             return None
 
-        logger.debug("✓ Pre-validation passed")
+        logger.debug("Pre-validation passed")
 
         # Step 2: Check for exclusions
         if should_exclude(message, EXCLUSION_KEYWORDS):
             logger.debug(f"Excluded: {message[:50]}...")
             return None
 
-        logger.debug("✓ Not excluded")
+        logger.debug("Not excluded")
 
         # Step 3: Detect channel type and route to appropriate parser
         channel_type = detect_channel_type(channel_name)
-        logger.debug(f"✓ Channel type detected: '{channel_type}' for '{channel_name}'")
+        logger.debug(f"Channel type detected: '{channel_type}' for '{channel_name}'")
 
         result = None
 
         # Try channel-specific parser first
         try:
             if channel_type == "stock":
-                logger.debug("→ Routing to StockPatternParser")
+                logger.debug("Routing to StockPatternParser")
                 result = self._parse_with_stock_parser(message, channel_name)
             elif channel_type == "crypto":
-                logger.debug("→ Routing to crypto parser (CorePatternParser)")
+                logger.debug("Routing to crypto parser (CorePatternParser)")
                 result = self._parse_with_crypto_parser(message, channel_name)
             else:  # core
-                logger.debug("→ Routing to CorePatternParser")
+                logger.debug("Routing to CorePatternParser")
                 result = self._parse_with_core_parser(message, channel_name)
         except LimitsOrderError as e:
             logger.info(f"Signal rejected — limits out of order (likely typo): {e}")
@@ -348,7 +350,7 @@ def get_parser() -> SignalParser:
     return _parser_instance
 
 
-def parse_signal(message: str, channel_name: str = None) -> Optional[ParsedSignal]:
+def parse_signal(message: str, channel_name: Optional[str] = None) -> Optional[ParsedSignal]:
     """
     Main entry point for signal parsing.
 

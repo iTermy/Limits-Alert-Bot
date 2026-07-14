@@ -4,14 +4,22 @@ Monitors all feeds (ICMarkets, OANDA, Binance) for stale data and connection iss
 """
 
 import asyncio
+import contextlib
+import faulthandler
+import logging
+import os
+import subprocess
+import sys
+import threading
+import time
 from collections import defaultdict
 from datetime import datetime, timedelta
 from datetime import time as dtime
-from typing import Dict
+from typing import Optional
 
 import pytz
 
-from price_feeds.symbol_mapper import SymbolMapper
+from price_feeds.config.symbol_mapper import SymbolMapper
 from utils.logger import get_logger
 
 logger = get_logger("feed_health")
@@ -19,10 +27,46 @@ logger = get_logger("feed_health")
 # Monitoring knobs — not user-configurable
 CHECK_INTERVAL_SECONDS = 60
 STALE_THRESHOLD_SECONDS = 300
+# Re-write an unchanged feed_health row at most this often (liveness refresh
+# for humans inspecting the table; consumers only react to status changes).
+_HEALTH_REWRITE_SECONDS = 600
 MAX_RECONNECT_ATTEMPTS = 3
 RECONNECT_DELAY_SECONDS = 10
 ALERT_COOLDOWN_MINUTES = 15
 STARTUP_GRACE_PERIOD_SECONDS = 120
+
+# Loop-liveness watchdog: an async heartbeat stamps a monotonic timestamp while
+# the event loop is healthy; a daemon thread (which survives a frozen loop)
+# hard-exits the process if that stamp stops advancing. This is the only backstop
+# that works when a synchronous call wedges the loop itself (e.g. a blocking
+# subprocess spawn) — at that point graceful shutdown is impossible. os._exit
+# kills main.py's in-process supervisor too, so the watchdog first spawns a fresh
+# replacement (_relaunch_process) and then exits; no external wrapper is needed.
+LOOP_HEARTBEAT_INTERVAL_SECONDS = 10
+LOOP_WATCHDOG_POLL_SECONDS = 15
+LOOP_FREEZE_RESTART_SECONDS = 120
+
+# Where the watchdog writes all-thread stack dumps when it detects a freeze.
+FREEZE_DUMP_DIR = "data/logs"
+
+
+def _relaunch_process():
+    """Spawn a fresh copy of the bot before the caller hard-exits.
+
+    The loop-freeze watchdog exits from a daemon thread with os._exit, which
+    tears down main.py's in-process restart supervisor too — so without this a
+    wedged loop leaves nothing to relaunch the bot unless an external wrapper is
+    running. Spawning a replacement here lets a plain `python main.py` self-heal
+    on its own. The replacement inherits the current console so its output keeps
+    flowing to the same terminal.
+    """
+    try:
+        script = os.path.abspath(sys.argv[0])
+        cmd = [sys.executable, script, *sys.argv[1:]]
+        subprocess.Popen(cmd, cwd=os.path.dirname(script) or None)
+        logger.critical("Spawned replacement process: %s", " ".join(cmd))
+    except Exception as e:
+        logger.error("Failed to spawn replacement process: %s", e)
 
 # Price-flow watchdog: when at least one subscribed symbol's market should be
 # open but ZERO ticks have arrived across EVERY feed for this long, the bot is
@@ -82,8 +126,8 @@ class FeedHealthMonitor:
         self,
         stream_manager,
         bot,
-        admin_user_id: int = None,
-        us_market_holidays: list = None,
+        admin_user_id: Optional[int] = None,
+        us_market_holidays: Optional[list] = None,
         db=None,
     ):
         self.stream_manager = stream_manager
@@ -101,19 +145,33 @@ class FeedHealthMonitor:
         # Set once the watchdog has initiated a restart, so it never fires twice.
         self._watchdog_fired = False
 
+        # feed -> (last written status, monotonic write time); gates DB writes
+        # so unchanged statuses aren't re-upserted every check cycle.
+        self._last_health_written: dict[str, tuple] = {}
+
+        # Reconnects run off the monitoring loop as tasks, keyed by feed, so a
+        # slow or wedged reconnect can never block health checks or the watchdog.
+        self._reconnect_tasks: dict[str, asyncio.Task] = {}
+
+        # Loop-liveness watchdog state (see module constants).
+        self._loop_heartbeat = time.monotonic()
+        self._heartbeat_task = None
+        self._loop_watchdog_thread = None
+        self._loop_watchdog_stop = threading.Event()
+
         # Track last update times: feed -> symbol -> timestamp
-        self.last_seen: Dict[str, Dict[str, datetime]] = defaultdict(dict)
+        self.last_seen: dict[str, dict[str, datetime]] = defaultdict(dict)
 
         # Track feed status
-        self.feed_status: Dict[str, str] = {}  # 'healthy', 'down', 'idle'
-        self.last_alert_time: Dict[str, datetime] = {}
-        self.reconnect_attempts: Dict[str, int] = defaultdict(int)
+        self.feed_status: dict[str, str] = {}  # 'healthy', 'down', 'idle'
+        self.last_alert_time: dict[str, datetime] = {}
+        self.reconnect_attempts: dict[str, int] = defaultdict(int)
         # Earliest stale-symbol last_update timestamp captured when the feed first
         # crossed the down threshold. Used to report accurate downtime on recovery.
-        self.first_stale_time: Dict[str, datetime] = {}
+        self.first_stale_time: dict[str, datetime] = {}
 
         # Track alert history to prevent spam
-        self.alert_history: Dict[str, datetime] = {}
+        self.alert_history: dict[str, datetime] = {}
 
         # Statistics
         self.stats = {
@@ -146,18 +204,71 @@ class FeedHealthMonitor:
         # Start monitoring task
         self.monitor_task = asyncio.create_task(self._monitoring_loop())
 
+        # Start the loop-liveness heartbeat + the out-of-loop watchdog thread.
+        self._loop_heartbeat = time.monotonic()
+        self._heartbeat_task = asyncio.create_task(self._loop_heartbeat_beat())
+        self._loop_watchdog_stop.clear()
+        self._loop_watchdog_thread = threading.Thread(
+            target=self._loop_watchdog_run, name="loop-watchdog", daemon=True
+        )
+        self._loop_watchdog_thread.start()
+
         logger.info("Feed health monitoring started")
+
+    async def _loop_heartbeat_beat(self):
+        """Stamp a monotonic heartbeat while the event loop is servicing tasks."""
+        while self.running:
+            self._loop_heartbeat = time.monotonic()
+            await asyncio.sleep(LOOP_HEARTBEAT_INTERVAL_SECONDS)
+
+    def _loop_watchdog_run(self):
+        """Daemon thread: hard-restart the process if the event loop freezes.
+
+        Runs off the event loop, so it keeps ticking even when the loop is
+        blocked by a synchronous call. If the heartbeat stops advancing for
+        LOOP_FREEZE_RESTART_SECONDS the loop is wedged and no in-loop recovery
+        (timeouts, tasks, bot.close()) can fire — so we flush logs and exit hard
+        for the supervisor to relaunch.
+        """
+        while not self._loop_watchdog_stop.wait(LOOP_WATCHDOG_POLL_SECONDS):
+            stalled = time.monotonic() - self._loop_heartbeat
+            if stalled > LOOP_FREEZE_RESTART_SECONDS:
+                logger.critical(
+                    "Event loop frozen for %.0fs (heartbeat stalled) — forcing hard restart",
+                    stalled,
+                )
+                self._dump_all_thread_stacks()
+                _relaunch_process()
+                logging.shutdown()
+                os._exit(1)
+
+    def _dump_all_thread_stacks(self):
+        """Write every thread's stack to a file before the hard exit.
+
+        A frozen loop means a synchronous call is blocking the loop thread; the
+        stack of that thread names the exact culprit. faulthandler runs from this
+        daemon thread even though the loop is wedged, so it always captures it.
+        """
+        try:
+            path = os.path.join(FREEZE_DUMP_DIR, "freeze_traceback.log")
+            with open(path, "a", encoding="utf-8") as fh:
+                fh.write(f"\n===== Event loop freeze at {datetime.now().isoformat()} =====\n")
+                faulthandler.dump_traceback(file=fh, all_threads=True)
+        except Exception as e:
+            logger.error("Failed to dump freeze traceback: %s", e)
 
     async def stop_monitoring(self):
         """Stop the health monitoring loop"""
         self.running = False
 
-        if self.monitor_task:
-            self.monitor_task.cancel()
-            try:
-                await self.monitor_task
-            except asyncio.CancelledError:
-                pass
+        self._loop_watchdog_stop.set()
+
+        for task in [self.monitor_task, self._heartbeat_task, *self._reconnect_tasks.values()]:
+            if task:
+                task.cancel()
+                with contextlib.suppress(asyncio.CancelledError):
+                    await task
+        self._reconnect_tasks.clear()
 
         logger.info("Feed health monitoring stopped")
 
@@ -314,6 +425,18 @@ class FeedHealthMonitor:
         # Check each actively subscribed symbol
         stale_symbols = []
 
+        # Post-reopen grace: a feed is only "stale" if the market has been open
+        # for the entire preceding staleness window — not merely open at this
+        # instant. Right when a market reopens (spread-hour end at 18:00 ET, the
+        # daily forex break, Sunday open, post-holiday open) the last tick is
+        # still old because the feed was legitimately quiet while closed, and the
+        # persistent streams take a moment to deliver their first post-reopen
+        # tick. Flagging that gap as a failure fired an unnecessary reconnect —
+        # and the Exness MT5 subprocess reconnect wedges the Windows event loop,
+        # forcing the daily 6 PM hard restart. Requiring the market to have been
+        # open a full window ago removes that false positive uniformly.
+        reopen_grace_cutoff = datetime.now(self.est) - stale_threshold
+
         for symbol, last_update in feed_symbols.items():
             time_since_update = now - last_update
 
@@ -321,7 +444,9 @@ class FeedHealthMonitor:
                 # Check if market should be open for this symbol
                 asset_class = self.symbol_mapper.determine_asset_class(symbol)
 
-                if self.is_market_open(asset_class):
+                if self.is_market_open(asset_class) and self.is_market_open(
+                    asset_class, at=reopen_grace_cutoff
+                ):
                     stale_symbols.append(
                         {
                             "symbol": symbol,
@@ -371,20 +496,32 @@ class FeedHealthMonitor:
             logger.debug(f"Alert cooldown active for {feed_name}, skipping")
             return
 
-        # Attempt reconnection
-        if self.reconnect_attempts[feed_name] < MAX_RECONNECT_ATTEMPTS:
-            success = await self.attempt_reconnection(feed_name)
+        # Run reconnect + alert off the monitoring loop so a slow or wedged
+        # reconnect can't block health checks or the price-flow watchdog. Never
+        # stack a second attempt for the same feed while one is in flight.
+        existing = self._reconnect_tasks.get(feed_name)
+        if existing and not existing.done():
+            logger.debug(f"Reconnection already in progress for {feed_name}")
+            return
 
-            if success:
-                logger.info(f"{feed_name} reconnection successful")
-                return  # Don't alert if reconnection worked
-        else:
-            logger.error(
-                f"{feed_name} max reconnection attempts reached ({MAX_RECONNECT_ATTEMPTS})"
-            )
+        self._reconnect_tasks[feed_name] = asyncio.create_task(
+            self._reconnect_and_alert(feed_name, stale_symbols)
+        )
 
-        # Send admin alert
-        await self._send_feed_failure_alert(feed_name, stale_symbols)
+    async def _reconnect_and_alert(self, feed_name: str, stale_symbols: list):
+        """Attempt reconnection and, if it fails, DM the admin. Runs as a task."""
+        try:
+            if self.reconnect_attempts[feed_name] < MAX_RECONNECT_ATTEMPTS:
+                if await self.attempt_reconnection(feed_name):
+                    return  # Don't alert if reconnection worked
+            else:
+                logger.error(
+                    f"{feed_name} max reconnection attempts reached ({MAX_RECONNECT_ATTEMPTS})"
+                )
+
+            await self._send_feed_failure_alert(feed_name, stale_symbols)
+        finally:
+            self._reconnect_tasks.pop(feed_name, None)
 
     async def _handle_feed_recovery(self, feed_name: str):
         """Handle feed recovery"""
@@ -533,9 +670,15 @@ class FeedHealthMonitor:
         except Exception as e:
             logger.error(f"Failed to send custom alert: {e}")
 
-    def is_market_open(self, asset_class: str) -> bool:
-        """Return True if the market is expected to be open (used to avoid false stale alerts)."""
-        now = datetime.now(self.est)
+    def is_market_open(self, asset_class: str, at: Optional[datetime] = None) -> bool:
+        """Return True if the market is expected to be open at `at` (default: now).
+
+        Used both to avoid false stale alerts and to enforce a post-reopen
+        grace: callers pass a past `at` to ask "was the market already open a
+        full staleness window ago?". `at` should be timezone-aware; a naive
+        value is interpreted as system-local.
+        """
+        now = datetime.now(self.est) if at is None else at.astimezone(self.est)
 
         if asset_class == "forex_jpy":
             asset_class = "forex"
@@ -561,9 +704,11 @@ class FeedHealthMonitor:
         # and indices. Liquidity drops and price ticks slow or stop — treating it
         # as "open" would generate false-positive stale-feed alerts. Mirror the
         # weekend skip above and treat it as closed.
-        if asset_class in ("forex", "metals", "indices", "oil"):
-            if _SPREAD_START <= now.time() < _SPREAD_END:
-                return False
+        if (
+            asset_class in ("forex", "metals", "indices", "oil")
+            and _SPREAD_START <= now.time() < _SPREAD_END
+        ):
+            return False
 
         open_time = datetime.strptime(market_config["open_time"], "%H:%M").time()
         close_time = datetime.strptime(market_config["close_time"], "%H:%M").time()
@@ -596,8 +741,20 @@ class FeedHealthMonitor:
     async def _write_feed_health(
         self, feed_name: str, status: str, stale_seconds, last_seen_ts
     ) -> None:
+        """Upsert a feed's health row.
+
+        Writes only on status transitions (plus a periodic liveness refresh)
+        — the EX bot reads only the status column, so re-writing an unchanged
+        row every check cycle is wasted egress.
+        """
         if self.db is None:
             return
+
+        now_mono = time.monotonic()
+        last_status, last_written = self._last_health_written.get(feed_name, (None, 0.0))
+        if status == last_status and now_mono - last_written < _HEALTH_REWRITE_SECONDS:
+            return
+
         try:
             await self.db.execute(
                 """
@@ -611,10 +768,11 @@ class FeedHealthMonitor:
                 """,
                 (feed_name, status, stale_seconds, last_seen_ts),
             )
+            self._last_health_written[feed_name] = (status, now_mono)
         except Exception as e:
             logger.error("Failed to write feed_health for %s: %s", feed_name, e)
 
-    def get_health_stats(self) -> Dict:
+    def get_health_stats(self) -> dict:
         """
         Get health monitoring statistics
 

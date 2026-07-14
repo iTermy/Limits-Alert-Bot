@@ -5,6 +5,7 @@ News Commands — news mode scheduling and management.
 import datetime as _dt
 import re as _re
 from datetime import timedelta as _td
+from typing import Optional
 
 import discord
 import pytz
@@ -29,7 +30,7 @@ class NewsCog(BaseCog):
         name="news",
         description="Schedule a news window that auto-cancels signals when hit",
     )
-    async def news(self, ctx: commands.Context, *, args: str = None):
+    async def news(self, ctx: commands.Context, *, args: Optional[str] = None):
         """
         Schedule a news window, or use special subcommands.
 
@@ -315,7 +316,7 @@ class NewsCog(BaseCog):
         aliases=["newsdel", "newsremove"],
         description="Remove a news event by ID, or clear all events",
     )
-    async def newsclear(self, ctx: commands.Context, event_id: int = None):
+    async def newsclear(self, ctx: commands.Context, event_id: Optional[int] = None):
         """
         Remove a scheduled news event.
 

@@ -2,7 +2,7 @@
   "admin_ids": [
     582358569542877184
   ],
-  "signal_manager_role_ids": [],
+  "signal_manager_role_ids": [1274308820352499785, 1134083706341048370, 1098568532666630235],
   "signal_manager_user_ids": [],
   "health_alert_admin_id": 582358569542877184,
   "spread_buffer_enabled": true,
@@ -13,7 +13,8 @@
     "fallback_spread": 0.0
   },
   "license_role_name": "Signal Subscriber",
-  "gold_tolls_sl_offset": 5.0,
+  "gold_tolls_sl_offset": 10.0,
+  "risky_gold_sl_offset": 10.0,
   "news_autofetch": {
     "enabled": true,
     "impact_levels": [

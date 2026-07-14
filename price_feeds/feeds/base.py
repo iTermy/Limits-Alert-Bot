@@ -6,7 +6,7 @@ Defines the interface that all feeds must implement
 import logging
 from abc import ABC, abstractmethod
 from datetime import datetime
-from typing import Dict, List, Optional, Tuple
+from typing import Optional
 
 logger = logging.getLogger(__name__)
 
@@ -66,7 +66,7 @@ class BaseFeed(ABC):
         """
 
     @abstractmethod
-    async def get_price(self, symbol: str) -> Optional[Dict]:
+    async def get_price(self, symbol: str) -> Optional[dict]:
         """
         Get current bid/ask price for a single symbol
 
@@ -78,7 +78,7 @@ class BaseFeed(ABC):
         """
 
     @abstractmethod
-    async def get_batch_prices(self, symbols: List[str]) -> Dict[str, Dict]:
+    async def get_batch_prices(self, symbols: list[str]) -> dict[str, dict]:
         """
         Get prices for multiple symbols efficiently
 
@@ -89,7 +89,7 @@ class BaseFeed(ABC):
             Dict mapping symbol to price data
         """
 
-    def get_health_status(self) -> Dict:
+    def get_health_status(self) -> dict:
         """
         Get feed health metrics
 
@@ -130,7 +130,7 @@ class BaseFeed(ABC):
             "avg_symbols_per_batch": f"{avg_symbols_per_batch:.1f}",
         }
 
-    async def test_connection(self) -> Tuple[bool, str]:
+    async def test_connection(self) -> tuple[bool, str]:
         """
         Test feed connection and basic functionality
 

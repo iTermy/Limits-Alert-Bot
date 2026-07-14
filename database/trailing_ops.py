@@ -6,7 +6,7 @@ lifecycle code. See TrailingStopMonitor for the in-memory side.
 """
 
 from datetime import datetime
-from typing import Any, Dict, List
+from typing import Any
 
 from utils.logger import get_logger
 
@@ -19,15 +19,17 @@ class TrailingDatabase:
     def __init__(self, db_manager):
         self.db = db_manager
 
-    async def create_tracking_rows(self, signal_id: int, levels: Dict[str, Dict[str, Any]]) -> None:
+    async def create_tracking_rows(self, signal_id: int, levels: dict[str, dict[str, Any]]) -> None:
         """Insert one row per level for a signal that just went HIT.
 
-        levels: {level_name: {distance_value, distance_type, anchor_price}}
+        levels: {level_name: {distance_value, distance_type, anchor_price,
+        high_water_mark}}. anchor_price is the deepest fill (P&L baseline);
+        high_water_mark seeds at the TP price where trailing begins.
 
         A (signal_id, level) row can already exist if this signal was
-        reactivated after a prior HIT cycle finished tracking — upsert resets
-        it to a fresh open row instead of silently no-opping, otherwise the
-        unique constraint would block the insert and every later
+        reactivated after a prior cycle finished tracking — upsert resets it to
+        a fresh open row instead of silently no-opping, otherwise the unique
+        constraint would block the insert and every later
         update_high_water_mark/finalize_level call would match zero rows.
         """
         for level, cfg in levels.items():
@@ -37,7 +39,7 @@ class TrailingDatabase:
                     signal_id, level, distance_value, distance_type,
                     anchor_price, high_water_mark, hwm_updated_at
                 )
-                VALUES ($1, $2, $3, $4, $5, $5, NOW())
+                VALUES ($1, $2, $3, $4, $5, $6, NOW())
                 ON CONFLICT (signal_id, level) DO UPDATE SET
                     distance_value = EXCLUDED.distance_value,
                     distance_type = EXCLUDED.distance_type,
@@ -56,6 +58,7 @@ class TrailingDatabase:
                     cfg["distance_value"],
                     cfg["distance_type"],
                     cfg["anchor_price"],
+                    cfg["high_water_mark"],
                 ),
             )
 
@@ -90,32 +93,14 @@ class TrailingDatabase:
             (stop_price, stop_time, stop_reason, pnl_at_stop, signal_id, level),
         )
 
-    async def get_open_levels_for_signal(self, signal_id: int) -> List[str]:
+    async def get_open_levels_for_signal(self, signal_id: int) -> list[str]:
         rows = await self.db.fetch_all(
             "SELECT level FROM trailing_simulations WHERE signal_id = $1 AND stopped_out = FALSE",
             (signal_id,),
         )
         return [r["level"] for r in rows]
 
-    async def get_levels_for_signal(self, signal_id: int) -> List[Dict[str, Any]]:
-        """All tracking rows for a signal, any state.
-
-        Used to resume a signal that's still HIT (real position not yet
-        closed) across a restart, so its high-water-mark progress isn't
-        wiped back to the anchor price.
-        """
-        rows = await self.db.fetch_all(
-            """
-            SELECT level, distance_value, distance_type, anchor_price,
-                   high_water_mark, stopped_out
-            FROM trailing_simulations
-            WHERE signal_id = $1
-            """,
-            (signal_id,),
-        )
-        return rows
-
-    async def get_incomplete_shadow_signals(self) -> List[Dict[str, Any]]:
+    async def get_incomplete_shadow_signals(self) -> list[dict[str, Any]]:
         """Signals closed via auto-TP that still have at least one open trail level.
 
         Used at startup to re-hydrate shadow tracking after a restart.
@@ -136,7 +121,7 @@ class TrailingDatabase:
             """
         )
 
-        signals: Dict[int, Dict[str, Any]] = {}
+        signals: dict[int, dict[str, Any]] = {}
         for row in rows:
             signal_id = row["signal_id"]
             if signal_id not in signals:

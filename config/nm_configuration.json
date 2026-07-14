@@ -32,9 +32,9 @@
     },
     "crypto": {
       "type": "dollars",
-      "max_proximity": 50.0,
-      "base_bounce": 30.0,
-      "description": "Crypto — track within $50; bounce = closest + $30"
+      "max_proximity": 100.0,
+      "base_bounce": 100.0,
+      "description": "Crypto — track within $100; bounce = closest + $100"
     },
     "oil": {
       "type": "dollars",
@@ -43,5 +43,52 @@
       "description": "Oil — track within $0.20; bounce = closest + $0.10"
     }
   },
-  "overrides": {}
+  "overrides": {
+    "XTIUSD": {
+      "type": "dollars",
+      "max_proximity": 0.3,
+      "base_bounce": 0.1,
+      "set_by": "itermy",
+      "set_at": "2026-03-21T04:21:14.781369+00:00"
+    },
+    "NAS100USD": {
+      "type": "dollars",
+      "max_proximity": 30.0,
+      "base_bounce": 15.0,
+      "set_by": "itermy",
+      "set_at": "2026-03-21T06:24:18.700330+00:00"
+    },
+    "SPX500USD": {
+      "type": "dollars",
+      "max_proximity": 15.0,
+      "base_bounce": 10.0,
+      "set_by": "itermy",
+      "set_at": "2026-06-08T01:21:34.636894+00:00"
+    },
+    "XAUUSD": {
+      "type": "dollars",
+      "max_proximity": 5.0,
+      "base_bounce": 5.0,
+      "set_by": "itermy",
+      "set_at": "2026-06-19T03:04:57.861759+00:00"
+    },
+    "LRCX.NAS": {
+      "type": "dollars",
+      "max_proximity": 1.0,
+      "base_bounce": 1.0,
+      "set_by": "itermy",
+      "set_at": "2026-07-01T17:52:08.656794+00:00"
+    }
+  },
+  "type_overrides": {
+    "risky": {
+      "metals": {
+        "type": "dollars",
+        "max_proximity": 5.0,
+        "base_bounce": 4.0,
+        "set_by": "itermy",
+        "set_at": "2026-07-06T19:54:10.856151+00:00"
+      }
+    }
+  }
 }

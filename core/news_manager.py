@@ -26,7 +26,6 @@ import re
 from dataclasses import dataclass, field
 from datetime import datetime, timedelta
 from pathlib import Path
-from typing import Dict, List, Optional, Set, Tuple
 
 import pytz
 
@@ -40,7 +39,7 @@ EST = pytz.timezone("America/New_York")
 # Timezone alias map — maps short names to pytz zone names
 # ---------------------------------------------------------------------------
 
-TIMEZONE_ALIASES: Dict[str, str] = {
+TIMEZONE_ALIASES: dict[str, str] = {
     # Eastern
     "EST": "America/New_York",
     "EDT": "America/New_York",
@@ -92,11 +91,11 @@ def resolve_timezone(tz_str: str) -> pytz.BaseTzInfo:
     # Try as a direct pytz name (e.g. "America/Toronto")
     try:
         return pytz.timezone(tz_str.strip())
-    except pytz.UnknownTimeZoneError:
+    except pytz.UnknownTimeZoneError as e:
         raise ValueError(
             f"Unknown timezone '{tz_str}'. "
             f"Use a short code like EST, UTC, GMT, CET, JST, or a full pytz name."
-        )
+        ) from e
 
 
 # ---------------------------------------------------------------------------
@@ -104,7 +103,7 @@ def resolve_timezone(tz_str: str) -> pytz.BaseTzInfo:
 # ---------------------------------------------------------------------------
 
 # All forex currency codes we recognise
-FOREX_CURRENCIES: Set[str] = {
+FOREX_CURRENCIES: set[str] = {
     "EUR",
     "USD",
     "GBP",
@@ -127,7 +126,7 @@ FOREX_CURRENCIES: Set[str] = {
 }
 
 # Special named categories that map to specific instruments or patterns
-NAMED_CATEGORIES: Dict[str, Set[str]] = {
+NAMED_CATEGORIES: dict[str, set[str]] = {
     "GOLD": {"XAUUSD", "GOLD"},
     "XAU": {"XAUUSD", "GOLD"},
     "OIL": {"USOILSPOT", "USOIL", "WTIUSD", "OIL"},
@@ -152,13 +151,13 @@ class NewsEvent:
     # Original timezone label for display (e.g. "EST", "UTC")
     display_tz: str = field(default="EST")
     # Optional explicit end time for timed "now" events (e.g. !news now gold 5 minutes)
-    end_time_override: Optional[datetime] = field(default=None)
+    end_time_override: datetime | None = field(default=None)
     # "manual" (set via !news) or "forexfactory" (auto-fetched from the calendar feed)
     source: str = field(default="manual")
     # Stable dedup key for auto-fetched events; None for manual events
-    external_id: Optional[str] = field(default=None)
+    external_id: str | None = field(default=None)
     # Human-readable event name for auto-fetched events (e.g. "Federal Funds Rate")
-    title: Optional[str] = field(default=None)
+    title: str | None = field(default=None)
     # When True the event also pauses gold (XAUUSD) — used for USD news, which
     # ForexFactory files dollar releases (FOMC/NFP/CPI) that move gold hard.
     affects_gold: bool = field(default=False)
@@ -185,12 +184,12 @@ class NewsEvent:
             return self.news_time + timedelta(days=365)
         return self.news_time + timedelta(minutes=self.window_minutes)
 
-    def is_active(self, at: Optional[datetime] = None) -> bool:
+    def is_active(self, at: datetime | None = None) -> bool:
         """Return True if the event window covers the given time (default: now)."""
         now = at or datetime.now(pytz.utc)
         return self.start_time <= now <= self.end_time
 
-    def is_expired(self, at: Optional[datetime] = None) -> bool:
+    def is_expired(self, at: datetime | None = None) -> bool:
         # Now-mode with a timed end CAN expire when end_time_override passes
         if self.is_now_mode and self.end_time_override is None:
             return False  # Never auto-expires; must be manually removed
@@ -232,7 +231,7 @@ class NewsEvent:
                 suffix3 = instr[3:]
                 if prefix3 in METAL_PREFIXES:
                     return False  # e.g. XAUUSD — not a forex pair
-                return prefix3 == cat or suffix3 == cat
+                return cat in (prefix3, suffix3)
             return False
 
         # Fallback: substring match
@@ -256,7 +255,7 @@ class NewsEvent:
 
 # US index identifiers (internal/feed symbol fragments). USD news pauses these
 # alongside US equities — high-impact dollar releases move US indices hardest.
-US_INDEX_KEYWORDS: Set[str] = {
+US_INDEX_KEYWORDS: set[str] = {
     "NAS100",
     "US30",
     "US500",
@@ -273,7 +272,7 @@ US_INDEX_KEYWORDS: Set[str] = {
 
 def _is_us_stock(symbol: str) -> bool:
     """US equities are stored with a .NAS / .NYSE suffix."""
-    return symbol.endswith(".NAS") or symbol.endswith(".NYSE")
+    return symbol.endswith((".NAS", ".NYSE"))
 
 
 def _is_us_index(symbol: str) -> bool:
@@ -284,14 +283,11 @@ def _is_us_index(symbol: str) -> bool:
 def _is_crypto(symbol: str) -> bool:
     """Rough check: symbol ends with USDT, USDC, or BTC."""
     return (
-        symbol.endswith("USDT")
-        or symbol.endswith("USDC")
-        or symbol.endswith("BTC")
-        or (symbol.endswith("USD") and len(symbol) > 6)
+        symbol.endswith(("USDT", "USDC", "BTC")) or (symbol.endswith("USD") and len(symbol) > 6)
     )
 
 
-def _load_optional_dt(value) -> Optional[datetime]:
+def _load_optional_dt(value) -> datetime | None:
     """Parse an optional ISO datetime string from JSON, returning None if absent."""
     if not value:
         return None
@@ -324,28 +320,28 @@ class NewsManager:
     _CONFIG_PATH = Path(__file__).resolve().parent.parent / "data" / "news_events.json"
 
     def __init__(self):
-        self._events: List[NewsEvent] = []
+        self._events: list[NewsEvent] = []
         self._next_id: int = 1
-        self._cleanup_task: Optional[asyncio.Task] = None
+        self._cleanup_task: asyncio.Task | None = None
         self._db = None  # Set by bot after DB initialisation via set_db()
         # Last news_mode value written to bot_mode_status. _news_mode_synced is
         # False until the first successful write, forcing one reconcile at startup
         # to correct any stale value a crash may have left behind.
-        self._last_news_mode: Optional[str] = None
+        self._last_news_mode: str | None = None
         self._news_mode_synced: bool = False
 
     def set_db(self, db) -> None:
         """Attach the DatabaseManager so mode-status flags can be persisted."""
         self._db = db
 
-    def _compute_news_mode_value(self) -> Optional[str]:
+    def _compute_news_mode_value(self) -> str | None:
         """Return the news_mode column value for the currently-active events.
 
         'ALL' if any active event covers all symbols; otherwise a comma-separated
         list of the active category labels (e.g. 'EUR, GOLD'); None when nothing
         is active.
         """
-        labels: List[str] = []
+        labels: list[str] = []
         for event in self._events:
             if not event.is_active():
                 continue
@@ -488,10 +484,10 @@ class NewsManager:
         created_by: str,
         is_now_mode: bool = False,
         display_tz: str = "EST",
-        end_time_override: Optional[datetime] = None,
+        end_time_override: datetime | None = None,
         source: str = "manual",
-        external_id: Optional[str] = None,
-        title: Optional[str] = None,
+        external_id: str | None = None,
+        title: str | None = None,
     ) -> NewsEvent:
         """Register a new news event, persist to disk, and return it."""
         event = NewsEvent(
@@ -513,7 +509,7 @@ class NewsManager:
         logger.info(f"News event added: {event}")
         return event
 
-    def remove_now_events(self) -> List[NewsEvent]:
+    def remove_now_events(self) -> list[NewsEvent]:
         """Remove all 'now' mode events. Returns list of removed events."""
         removed = [e for e in self._events if e.is_now_mode]
         if removed:
@@ -521,7 +517,7 @@ class NewsManager:
             self._save()
         return removed
 
-    def is_news_active_for(self, instrument: str) -> Optional[NewsEvent]:
+    def is_news_active_for(self, instrument: str) -> NewsEvent | None:
         """
         Return the first active NewsEvent that affects *instrument*, or None.
         Called on every limit-hit check — must be fast.
@@ -532,12 +528,12 @@ class NewsManager:
                 return event
         return None
 
-    def get_all_events(self) -> List[NewsEvent]:
+    def get_all_events(self) -> list[NewsEvent]:
         """Return all non-expired events (for display)."""
         now = datetime.now(pytz.utc)
         return [e for e in self._events if not e.is_expired(now)]
 
-    def remove_event(self, event_id: int) -> Optional[NewsEvent]:
+    def remove_event(self, event_id: int) -> NewsEvent | None:
         """Manually remove an event by ID, persist to disk. Returns the removed event if found."""
         target = next((e for e in self._events if e.event_id == event_id), None)
         if target:
@@ -555,7 +551,7 @@ class NewsManager:
             logger.debug(f"Purged {removed} expired news event(s)")
             self._save()
 
-    def sync_forexfactory_events(self, events: List[NewsEvent]) -> Tuple[int, int]:
+    def sync_forexfactory_events(self, events: list[NewsEvent]) -> tuple[int, int]:
         """Reconcile the set of auto-fetched events against a fresh feed pull.
 
         Adds any incoming event whose external_id is not already tracked, and
@@ -668,7 +664,7 @@ class NewsManager:
 # ---------------------------------------------------------------------------
 
 
-def parse_news_command(args_str: str) -> Tuple[str, datetime, int, str, bool]:
+def parse_news_command(args_str: str) -> tuple[str, datetime, int, str, bool]:
     """
     Parse the argument string from !news and return
     (category, news_time_utc, window_minutes, display_tz_label, auto_advanced).
@@ -710,9 +706,9 @@ def parse_news_command(args_str: str) -> Tuple[str, datetime, int, str, bool]:
     remaining = tokens[1:]
     tz_label: str = "EST"
     tz_zone: pytz.BaseTzInfo = EST
-    date_override: Optional[datetime] = None
+    date_override: datetime | None = None
     window_minutes: int = 10
-    time_str: Optional[str] = None
+    time_str: str | None = None
 
     non_tag_tokens = []
     for tok in remaining:
@@ -735,8 +731,10 @@ def parse_news_command(args_str: str) -> Tuple[str, datetime, int, str, bool]:
     if len(non_tag_tokens) >= 2:
         try:
             window_minutes = int(non_tag_tokens[1])
-        except ValueError:
-            raise ValueError(f"Window minutes must be an integer, got '{non_tag_tokens[1]}'")
+        except ValueError as e:
+            raise ValueError(
+                f"Window minutes must be an integer, got '{non_tag_tokens[1]}'"
+            ) from e
 
     # Parse the time, using date_override if provided
     news_time_local = _parse_time(time_str, tz_zone, date_override)
@@ -803,17 +801,14 @@ def _parse_date(date_str: str, tz_zone: pytz.BaseTzInfo) -> datetime:
 def _parse_time(
     time_str: str,
     tz_zone: pytz.BaseTzInfo,
-    date_override: Optional[datetime] = None,
+    date_override: datetime | None = None,
 ) -> datetime:
     """
     Parse a time string into a timezone-aware datetime in tz_zone.
     If date_override is given, use that date; otherwise use today in tz_zone.
     Accepts: 12:30pm, 12:30PM, 8:30am, 14:00, 9:30, 930am, 2pm, etc.
     """
-    if date_override is not None:
-        base = date_override.astimezone(tz_zone)
-    else:
-        base = datetime.now(tz_zone)
+    base = date_override.astimezone(tz_zone) if date_override is not None else datetime.now(tz_zone)
 
     time_str = time_str.strip()
 
@@ -845,9 +840,3 @@ def _parse_time(
         microsecond=0,
     )
     return result
-
-
-# Keep legacy name for any external callers
-def _parse_time_est(time_str: str) -> datetime:
-    """Legacy wrapper — parses time as EST for today."""
-    return _parse_time(time_str, EST)

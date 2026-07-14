@@ -14,7 +14,6 @@ from __future__ import annotations
 
 import asyncio
 from datetime import datetime
-from typing import List
 
 import aiohttp
 import pytz
@@ -51,8 +50,10 @@ class NewsFetcher:
         try:
             timeout = aiohttp.ClientTimeout(total=_REQUEST_TIMEOUT)
             headers = {"User-Agent": _USER_AGENT}
-            async with aiohttp.ClientSession(timeout=timeout, headers=headers) as session:
-                async with session.get(FEED_URL) as resp:
+            async with (
+                aiohttp.ClientSession(timeout=timeout, headers=headers) as session,
+                session.get(FEED_URL) as resp,
+            ):
                     if resp.status != 200:
                         logger.warning(f"ForexFactory feed returned HTTP {resp.status}")
                         return None
@@ -62,7 +63,7 @@ class NewsFetcher:
             logger.warning(f"Failed to fetch ForexFactory feed: {e}")
             return None
 
-    def _parse(self, raw: list) -> List[NewsEvent]:
+    def _parse(self, raw: list) -> list[NewsEvent]:
         """Filter feed entries and merge releases that share a currency and time.
 
         ForexFactory often lists several releases at the same moment (e.g. the
@@ -75,7 +76,7 @@ class NewsFetcher:
         window = self._config.window_minutes
 
         # Group by (currency, exact time) → list of titles, preserving feed order
-        groups: dict[tuple[str, datetime], List[str]] = {}
+        groups: dict[tuple[str, datetime], list[str]] = {}
         for item in raw:
             country = str(item.get("country", "")).upper()
             impact = str(item.get("impact", "")).lower()
@@ -95,7 +96,7 @@ class NewsFetcher:
             if title and title not in titles:
                 titles.append(title)
 
-        events: List[NewsEvent] = []
+        events: list[NewsEvent] = []
         for (country, news_time), titles in groups.items():
             events.append(
                 NewsEvent(

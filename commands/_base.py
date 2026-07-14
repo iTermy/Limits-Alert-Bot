@@ -8,6 +8,7 @@ import discord
 from discord.ext import commands
 
 from utils.formatting import get_channel_name as _get_channel_name
+from utils.permissions import is_admin as _is_admin
 from utils.permissions import is_signal_manager as _is_signal_manager
 
 
@@ -21,9 +22,8 @@ class BaseCog(commands.Cog):
         self.signal_db = bot.services.signal_db
 
     def is_admin(self, user: discord.User) -> bool:
-        if hasattr(user, "guild_permissions"):
-            return user.id in self.bot.admin_ids or user.guild_permissions.administrator
-        return user.id in self.bot.admin_ids
+        """True if the user is a configured bot admin or server administrator."""
+        return _is_admin(self.bot, user)
 
     def is_signal_manager(self, user: discord.User) -> bool:
         """True if the user may manage signals (admins + configured roles/IDs)."""

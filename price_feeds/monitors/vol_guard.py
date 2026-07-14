@@ -1,7 +1,7 @@
 """Volatility guard — informational alerts when a market moves sharply.
 
 Self-contained: registers as a price-stream subscriber, samples mid-price into a
-rolling window per subscribed symbol, and posts an embed when a currency (or the
+rolling window per subscribed symbol, and posts an embed when a pair (or the
 whole board, via gold) becomes volatile. It has no effect on signal processing —
 nothing is cancelled or paused; it only announces.
 
@@ -16,28 +16,29 @@ Guard lifecycle, per symbol:
     window; calm -> release.
 
 Reference counting, per key:
-  - A forex pair guards both of its currencies (EURUSD -> EUR, USD).
+  - A forex pair guards itself (EURUSD -> EURUSD), so only that pair is paused.
   - Gold (asset class "metals") guards the special key "ALL" (market-wide).
-  - A key stays guarded while at least one contributing symbol is guarded, so EUR
-    holds until both EURUSD and EURGBP have released. The activation embed fires
-    on the empty -> guarded transition; the ended embed on guarded -> empty.
+  - A key stays guarded while at least one contributing symbol is guarded (for a
+    forex pair that is the pair itself; "ALL" holds while any metal is guarded).
+    The activation embed fires on the empty -> guarded transition; the ended embed
+    on guarded -> empty.
 """
 
 from __future__ import annotations
 
 import asyncio
+import contextlib
 import json
 from collections import deque
 from datetime import datetime, timezone
 from datetime import time as dtime
 from pathlib import Path
 from time import monotonic
-from typing import Deque, Dict, Optional, Set, Tuple
 
 import discord
 import pytz
 
-from price_feeds.symbol_mapper import SymbolMapper
+from price_feeds.config.symbol_mapper import SymbolMapper
 from utils.logger import get_logger
 
 logger = get_logger("vol_guard")
@@ -50,7 +51,7 @@ _MAX_TICK_AGE_SECONDS = 5
 
 # Pip size per asset class — forex/forex_jpy thresholds are expressed in pips,
 # everything else in dollars (pip size 1.0).
-_PIP_SIZES: Dict[str, float] = {
+_PIP_SIZES: dict[str, float] = {
     "forex": 0.0001,
     "forex_jpy": 0.01,
     "metals": 1.0,
@@ -67,10 +68,10 @@ _EVAL_INTERVAL_SECONDS = 5
 # Edited "ended" embeds are removed after this delay to keep channels tidy.
 _ENDED_DELETE_AFTER_SECONDS = 300
 
-_CONFIG_PATH = Path(__file__).resolve().parent.parent / "config" / "vol_guard.json"
+_CONFIG_PATH = Path(__file__).resolve().parent.parent.parent / "config" / "vol_guard.json"
 
 
-def _load_config() -> Dict:
+def _load_config() -> dict:
     """Load vol_guard.json, falling back to safe defaults if absent/malformed."""
     defaults = {
         "enabled": True,
@@ -92,30 +93,37 @@ def _load_config() -> Dict:
 
 
 class VolatilityGuard:
-    """Watches subscribed-symbol ticks and announces volatility per currency."""
+    """Watches subscribed-symbol ticks and announces volatility per pair."""
 
-    def __init__(self, bot, stream_manager, channel: discord.abc.Messageable):
+    def __init__(self, bot, stream_manager, channel: discord.abc.Messageable, db=None):
         self.bot = bot
         self.stream_manager = stream_manager
         self.channel = channel
+        self.db = db
         self.symbol_mapper: SymbolMapper = stream_manager.symbol_mapper
 
         config = _load_config()
         self.enabled: bool = bool(config.get("enabled", True))
         self.lookback_seconds: float = float(config.get("lookback_seconds", 180))
         self.guard_seconds: float = float(config.get("guard_minutes", 15)) * 60.0
-        self.thresholds: Dict[str, float] = config.get("thresholds", {})
+        self.thresholds: dict[str, float] = config.get("thresholds", {})
 
         # symbol -> rolling (monotonic_ts, mid_price) samples within the lookback
-        self._samples: Dict[str, Deque[Tuple[float, float]]] = {}
+        self._samples: dict[str, deque[tuple[float, float]]] = {}
         # symbol -> monotonic expiry of its current guard window (present == guarded)
-        self._symbol_guards: Dict[str, float] = {}
+        self._symbol_guards: dict[str, float] = {}
         # key (currency or "ALL") -> set of guarded symbols contributing to it
-        self._key_members: Dict[str, Set[str]] = {}
+        self._key_members: dict[str, set[str]] = {}
         # key -> the activation embed message, for editing to "ended"
-        self._key_messages: Dict[str, discord.Message] = {}
+        self._key_messages: dict[str, discord.Message] = {}
 
-        self._eval_task: Optional[asyncio.Task] = None
+        self._eval_task: asyncio.Task | None = None
+
+        # Last value written to bot_mode_status.vol_guard. None before the first
+        # write; the first reconcile always writes so a stale value left by a crash
+        # is corrected.
+        self._last_vol_guard_mode: str | None = None
+        self._vol_guard_synced: bool = False
 
         # Cache for the spread-hour check so the per-tick path doesn't build a
         # tz-aware datetime on every print.
@@ -146,7 +154,7 @@ class VolatilityGuard:
     # Hot path — sampling only
     # ------------------------------------------------------------------
 
-    async def on_price_update(self, symbol: str, price_data: Dict) -> None:
+    async def on_price_update(self, symbol: str, price_data: dict) -> None:
         """Record a mid-price sample. Keep this cheap — logic runs in the loop."""
         bid = price_data.get("bid")
         ask = price_data.get("ask")
@@ -179,7 +187,7 @@ class VolatilityGuard:
         samples.append((now, mid))
         self._prune(samples, now)
 
-    def _prune(self, samples: Deque[Tuple[float, float]], now: float) -> None:
+    def _prune(self, samples: deque[tuple[float, float]], now: float) -> None:
         cutoff = now - self.lookback_seconds
         while samples and samples[0][0] < cutoff:
             samples.popleft()
@@ -195,10 +203,7 @@ class VolatilityGuard:
             return self._spread_hour_cached
 
         now_est = datetime.now(_EST_TZ)
-        if now_est.weekday() >= 5:
-            result = False
-        else:
-            result = dtime(17, 0) <= now_est.time() < dtime(18, 0)
+        result = False if now_est.weekday() >= 5 else dtime(17, 0) <= now_est.time() < dtime(18, 0)
 
         cache_seconds = 5.0
         for hh in (17, 18):
@@ -246,8 +251,10 @@ class VolatilityGuard:
             if not samples and symbol not in self._symbol_guards:
                 del self._samples[symbol]
 
+        await self._reconcile_vol_guard_mode()
+
     @staticmethod
-    def _is_volatile(samples: Deque[Tuple[float, float]], threshold: float) -> bool:
+    def _is_volatile(samples: deque[tuple[float, float]], threshold: float) -> bool:
         if len(samples) < 2:
             return False
         prices = [p for _, p in samples]
@@ -276,10 +283,39 @@ class VolatilityGuard:
                 await self._send_ended(key)
 
     # ------------------------------------------------------------------
+    # DB state — mirror active keys to bot_mode_status.vol_guard
+    # ------------------------------------------------------------------
+
+    def _compute_vol_guard_value(self) -> str | None:
+        """Comma-separated active keys (pairs and/or 'ALL'), or None if calm."""
+        keys = [k for k, members in self._key_members.items() if members]
+        if not keys:
+            return None
+        return ", ".join(sorted(keys))
+
+    async def _reconcile_vol_guard_mode(self) -> None:
+        """Sync bot_mode_status.vol_guard to the active guard keys.
+
+        Writes only when the value changes (the first call always writes, so a
+        stale value left by a crash is corrected).
+        """
+        if self.db is None:
+            return
+        value = self._compute_vol_guard_value()
+        if self._vol_guard_synced and value == self._last_vol_guard_mode:
+            return
+        try:
+            await self.db.set_vol_guard_mode(value)
+            self._last_vol_guard_mode = value
+            self._vol_guard_synced = True
+        except Exception as e:
+            logger.error(f"Failed to reconcile vol_guard in DB: {e}")
+
+    # ------------------------------------------------------------------
     # Threshold + key mapping
     # ------------------------------------------------------------------
 
-    def _threshold_price_units(self, symbol: str) -> Optional[float]:
+    def _threshold_price_units(self, symbol: str) -> float | None:
         """Threshold in absolute price units, or None if the asset class is unmonitored."""
         asset_class = self.symbol_mapper.determine_asset_class(symbol)
         configured = self.thresholds.get(asset_class)
@@ -288,11 +324,11 @@ class VolatilityGuard:
         pip_size = _PIP_SIZES.get(asset_class, 1.0)
         return float(configured) * pip_size
 
-    def _keys_for(self, symbol: str) -> Set[str]:
+    def _keys_for(self, symbol: str) -> set[str]:
         """Guard keys a volatile symbol contributes to.
 
-        Gold (metals) flags the whole board as "ALL"; a forex pair flags both of
-        its currencies literally.
+        Gold (metals) flags the whole board as "ALL"; a forex pair flags itself,
+        so only that pair is paused (EURUSD volatility does not touch USDJPY).
         """
         asset_class = self.symbol_mapper.determine_asset_class(symbol)
         if asset_class == "metals":
@@ -300,7 +336,7 @@ class VolatilityGuard:
         if asset_class in ("forex", "forex_jpy"):
             clean = symbol.upper().replace("/", "")
             if len(clean) == 6:
-                return {clean[:3], clean[3:]}
+                return {clean}
         return set()
 
     # ------------------------------------------------------------------
@@ -314,7 +350,7 @@ class VolatilityGuard:
         title = "⚡ Volatility Guard — Market-Wide" if is_all else f"⚡ Volatility Guard — {key}"
         if is_all:
             description = (
-                f"Sharp move detected on **{symbol}** — flagging the whole board as volatile."
+                f"Sharp move detected on **{symbol}** — flagging market as volatile."
             )
         else:
             description = f"Sharp move detected on **{key}**."
@@ -352,9 +388,7 @@ class VolatilityGuard:
 
         async def _delete_later():
             await asyncio.sleep(_ENDED_DELETE_AFTER_SECONDS)
-            try:
+            with contextlib.suppress(Exception):
                 await msg.delete()
-            except Exception:
-                pass
 
         asyncio.ensure_future(_delete_later())

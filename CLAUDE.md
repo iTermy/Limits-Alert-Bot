@@ -19,7 +19,7 @@ The bot monitors trading-signal messages in designated Discord channels, parses 
 - **Discord**: discord.py 2.3.0+, `commands.Bot` with cog extensions
 - **Database**: PostgreSQL via Supabase; `asyncpg` pool (min 2, max 10 connections, 30 s timeout)
 - **Price Feeds**: ICMarkets/MT5 (polling 100 ms/symbol), OANDA (REST streaming), Binance (WebSocket bookTicker), Exness/MT5 (child-process polling for oil)
-- **Models**: Pydantic v2 for domain objects (`SignalData`, `LimitData`, `BotSettings`) with dict-protocol methods for backward compat
+- **Models**: Pydantic v2 for domain objects (`SignalData`, `LimitData`, `BotSettings`); attribute access only (the transitional dict-protocol was removed in stage 20)
 - **AI Fallback Parser**: OpenAI `gpt-4o-mini`; disabled by default (`enable_openai_fallback: false` in `settings.json`)
 - **Config**: `.env` for secrets; JSON files in `config/` for runtime settings; Pydantic validation on load
 
@@ -34,7 +34,6 @@ models/
   __init__.py                   Re-exports SignalData, LimitData, BotSettings, enums
   enums.py                      SignalStatus, LimitStatus, ChangeType, Direction (str enums)
   signal.py                     SignalData, LimitData (Pydantic); computed pending_limits/hit_limits;
-                                  dict-protocol methods (__getitem__, get, etc.) for transition;
                                   from_db_row() handles id→signal_id normalization
   config.py                     BotSettings, SpreadBufferConfig, ChannelSettings, ThresholdEntry (Pydantic)
 
@@ -69,61 +68,24 @@ database/
                                   update_signal_status (validates transitions), mark_limit_hit,
                                   get_active_signals_for_tracking (returns List[SignalData]),
                                   get_hit_limits_for_signal, expiry ops, bot_mode_status
-  schema.py                     DDL for all 7 tables + indexes + idempotent migrations
-  signal_ops.py                 SignalDatabase — flattened CRUD + Lifecycle + Analytics in one file;
+  schema.py                     DDL for all tables + indexes + idempotent migrations
+  report_queries.py             Read-only reporting/presentation queries (!active rows, !report
+                                  period queries, statistics) — returns plain dicts, not models
+  signal_ops.py                 SignalDatabase — CRUD + lifecycle operations;
                                   get_signal_with_limits() returns Optional[SignalData];
                                   save_signal, cancel, reactivate, manually_set_signal_status,
-                                  process_limit_hit, expire_old_signals, get_statistics;
+                                  process_limit_hit, expire_old_signals;
                                   get_overlapping_signals() — range-intersection query used on save;
                                   check_reactivation_guard() — compares cancelled limits vs live price;
                                   _get_live_price() — reads bid/ask from live_prices table
   utils.py                      calculate_expiry() (day_end → 4:45 PM EST), _parse_dt()
 
 price_feeds/
-  price_stream_manager.py       Coordinates all four feeds; calculates spread if missing (ask − bid);
+  feeds/                        Feed clients + stream coordination
+    price_stream_manager.py     Coordinates all four feeds; calculates spread if missing (ask − bid);
                                   stamps price_data["updated_at"] (UTC) from broker tick time (ICMarkets/Exness)
                                   or wall-clock (OANDA/Binance) before calling subscribers;
                                   routes symbols to feeds via SymbolMapper; notifies all subscribers
-  streaming_monitor.py          Per-tick signal evaluation; receives all deps via constructor;
-                                  react_to_original_signal() as module-level function;
-                                  _MAX_TICK_AGE_SECONDS = 5 — drops stale ticks before signal evaluation;
-                                  refresh_signal_in_memory(signal_id) — re-fetches a single signal
-                                  from DB and syncs active_signals + alert_system._live_embeds
-                                  (called from edit / reactivate paths to avoid 30 s drift);
-                                  check order documented below
-  alert_system.py               Persistent embed orchestrator; 4 data dicts + _live_embeds;
-                                  5-channel routing; 15 s live-refresh background task;
-                                  hydrate_from_db / recover_pending_archives / recover_finished_embeds
-                                  re-attach existing embeds on restart; retract_approaching_embed
-                                  drops the embed when price drifts back past the alert window;
-                                  delegates embed building and archiving
-  embed_builders.py             Pure functions: _build_signal_embed(), _build_profit_archive_embed(),
-                                  _set_archive_footer() + formatting helpers
-  archive_manager.py            ArchiveManager — schedule_end_state_move(), cancel_pending_move(),
-                                  delayed move/delete for finished signals
-  _base_config.py               BaseThresholdConfig — shared JSON load/save/validate/override management;
-                                  shared SymbolMapper singleton across all config types
-  alert_config.py               AlertDistanceConfig(BaseThresholdConfig) — approaching distance thresholds
-  tp_config.py                  TPConfig(BaseThresholdConfig) — per-signal-type TP thresholds (type_defaults / type_overrides);
-                                  calculate_pnl(); accepts signal_type kwarg (or legacy scalp bool)
-  tp_monitor.py                 AutoTPMonitor — checks HIT-status signals per tick; per-signal limit cache
-  nm_config.py                  NMConfig(BaseThresholdConfig) — max_proximity + base_bounce per asset class
-  nm_monitor.py                 NearMissMonitor — in-memory NMTrackingState; _nm_immune set;
-                                  mark_immune(signal_id) called on every reactivation;
-                                  signal.type == "swing" short-circuits NM (swing is not near-missable)
-  feed_health_monitor.py        Stale threshold 300 s; 3 max reconnect attempts; 120 s startup grace;
-                                  15 min alert cooldown; DMs health_alert_admin_id from settings.json;
-                                  spread hour (17–18 ET) treated as market-closed for forex/metals/indices/oil;
-                                  first_stale_time tracks real stall start for accurate recovery downtime;
-                                  reconnects only the stale feed (reconnect_feed), never all feeds;
-                                  price-flow watchdog force-restarts the bot when a subscribed market is
-                                  open but no feed has ticked for WATCHDOG_SILENCE_SECONDS;
-                                  all knobs are module-level constants (no config file)
-  live_price_writer.py          Writes bid/ask/feed to live_prices table every 5 s for every signal-bearing
-                                  symbol (ICMarkets/OANDA/Binance/Exness); the EX bot derives its own broker
-                                  offset from its MT5 feed vs the stored price, so no IC reference price is written
-  symbol_mapper.py              Internal ↔ feed-specific symbol translation; always returns UPPERCASE
-  feeds/
     icmarkets_stream.py         MT5 polling 100 ms/symbol — Windows only;
                                   tick "timestamp" is UTC-aware (datetime.fromtimestamp(tick.time, tz=utc));
                                   on_poll callback fires on every successful tick fetch (price-change-agnostic)
@@ -135,6 +97,56 @@ price_feeds/
     exness_worker.py            Standalone child process; holds its own MT5 connection to Exness terminal;
                                   polls symbol_info_tick() at 100 ms; writes JSON price lines to stdout;
                                   reads subscribe/unsubscribe/shutdown commands from stdin
+  alerting/                     Persistent embed orchestration + archiving
+    alert_system.py             Persistent embed orchestrator; 4 data dicts + _live_embeds;
+                                  5-channel routing; 15 s live-refresh background task;
+                                  hydrate_from_db / recover_pending_archives / recover_finished_embeds
+                                  re-attach existing embeds on restart; retract_approaching_embed
+                                  drops the embed when price drifts back past the alert window;
+                                  delegates embed building and archiving
+    embed_builders.py           Pure functions: _build_signal_embed(), _build_profit_archive_embed(),
+                                  _set_archive_footer() + formatting helpers
+    archive_manager.py          ArchiveManager — schedule_end_state_move(), cancel_pending_move(),
+                                  delayed move/delete for finished signals
+    info_embeds.py              InfoEmbedManager — static per-channel info/risk embeds;
+                                  message IDs persisted to data/info_embeds.json
+  monitors/                     Per-tick evaluation, health, and market guards
+    streaming_monitor.py        Per-tick signal evaluation; receives all deps via constructor;
+                                  react_to_original_signal() as module-level function;
+                                  _MAX_TICK_AGE_SECONDS = 5 — drops stale ticks before signal evaluation;
+                                  refresh_signal_in_memory(signal_id) — re-fetches a single signal
+                                  from DB and syncs active_signals + alert_system._live_embeds
+                                  (called from edit / reactivate paths to avoid 30 s drift);
+                                  check order documented below
+    tp_monitor.py               AutoTPMonitor — checks HIT-status signals per tick; per-signal limit cache
+    nm_monitor.py               NearMissMonitor — in-memory NMTrackingState; _nm_immune set;
+                                  mark_immune(signal_id) called on every reactivation;
+                                  signal.type == "swing" short-circuits NM (swing is not near-missable)
+    trailing_monitor.py         TrailingStopMonitor — trailing-stop evaluation for HIT signals
+    excursion_monitor.py        ExcursionMonitor — MFE/MAE tracking + post-exit follow-through sampling
+    feed_health_monitor.py      Stale threshold 300 s; 3 max reconnect attempts; 120 s startup grace;
+                                  15 min alert cooldown; DMs health_alert_admin_id from settings.json;
+                                  spread hour (17–18 ET) treated as market-closed for forex/metals/indices/oil;
+                                  first_stale_time tracks real stall start for accurate recovery downtime;
+                                  reconnects only the stale feed (reconnect_feed), never all feeds;
+                                  price-flow watchdog force-restarts the bot when a subscribed market is
+                                  open but no feed has ticked for WATCHDOG_SILENCE_SECONDS;
+                                  all knobs are module-level constants (no config file)
+    vol_guard.py                VolatilityGuard — per-pair volatility pause; reconciles vol_guard bot_mode_status
+    risky_window.py             RiskyWindowAnnouncer — risky-window gating + is_risky_trading_disabled()
+    market_context.py           MarketContextProvider — market session / open-state context
+    live_price_writer.py        Writes bid/ask/feed to live_prices table every 5 s for every signal-bearing
+                                  symbol (ICMarkets/OANDA/Binance/Exness); the EX bot derives its own broker
+                                  offset from its MT5 feed vs the stored price, so no IC reference price is written
+  config/                       Threshold configs + symbol mapping
+    _base_config.py             BaseThresholdConfig — shared JSON load/save/validate/override management;
+                                  shared SymbolMapper singleton across all config types
+    alert_config.py             AlertDistanceConfig(BaseThresholdConfig) — approaching distance thresholds
+    tp_config.py                TPConfig(BaseThresholdConfig) — per-signal-type TP thresholds (type_defaults / type_overrides);
+                                  calculate_pnl(); accepts signal_type kwarg (or legacy scalp bool)
+    nm_config.py                NMConfig(BaseThresholdConfig) — max_proximity + base_bounce per asset class
+    trailing_config.py          TrailingStopConfig(BaseThresholdConfig) — trailing-stop LEVELS per asset class
+    symbol_mapper.py            Internal ↔ feed-specific symbol translation; always returns UPPERCASE
 
 discord_handlers/
   message_handler.py            Handles new/edited/deleted messages; dispatches reply commands for
@@ -302,16 +314,21 @@ All PKs: `BIGINT GENERATED ALWAYS AS IDENTITY`. Timestamps: `TIMESTAMPTZ`. RLS: 
 | expiry_type | TEXT (`day_end` / `week_end` / `month_end` / `no_expiry`) |
 | expiry_time | TIMESTAMPTZ; `day_end` resolves to 4:45 PM EST |
 | status | TEXT; CHECK (active, hit, profit, breakeven, stop_loss, cancelled) |
-| type | TEXT DEFAULT 'standard'; CHECK (standard, scalp, swing, toll, pa, 1-1) |
+| type | TEXT DEFAULT 'standard'; CHECK (standard, scalp, swing, toll, pa, 1-1, risky) |
 | first_limit_hit_time | TIMESTAMPTZ |
 | closed_at / closed_reason | TIMESTAMPTZ / TEXT (`automatic` / `manual` / `expiry`) |
-| tp_price | DOUBLE PRECISION; market close price recorded on profit (auto-TP price for automatic; live bid/ask at command time for manual profit — bid if long, ask if short). NULL for SL / cancel / breakeven / other closures, and for manual profit when `live_prices` has no row for the instrument. Backend-only — not shown in the profit-archive embed for manual profit. |
+| tp_price | DOUBLE PRECISION; market close price recorded on profit (auto-TP price for automatic; live bid/ask at command time for manual profit — bid if long, ask if short). NULL for SL / cancel / breakeven / other closures, and for manual profit when `live_prices` has no row for the instrument. |
+| manual_tp_price | DOUBLE PRECISION (nullable); retrospective manual TP price override set via `!profit <id> <tp_price>`. Kept separate from `tp_price` so the original recorded close is preserved. Both the `!report` P&L and the profit-archive embed (per-limit P&L + the "TP Price" field) use `manual_tp_price` when present, else `tp_price`. |
 | alert_message_id | BIGINT (nullable); Discord message ID of the active-channel alert embed. Persisted so restarts can reuse the existing embed instead of orphaning it. Cleared on archive move, live-update NotFound, and approaching-alert retraction. |
 | alert_channel_id | BIGINT (nullable); Discord channel ID where the alert embed lives. Used at hydration to pin the fetch to the same channel even if `channels.json` was reconfigured. Falls back to `_get_alert_channel(signal)` if missing. |
 | ping_message_id | BIGINT (nullable); Discord message ID of the most recent ping reply to the embed. Refetched on restart so the next event can delete it cleanly before sending a new one. Also added to `alert_messages` on hydration so users can reply to the ping itself, not just the embed. |
 | finished_message_id | BIGINT (nullable); Discord message ID of the archived embed in `finished_signals` / `profit_channel`. Persisted so reply commands against archived embeds (e.g. `reactivate`) still resolve to a signal after restart. Cleared on `reactivate_embed` (which deletes the finished message). |
 | finished_channel_id | BIGINT (nullable); Discord channel ID where the archived embed lives. Used by `recover_finished_embeds` at startup to build a `PartialMessage` reference without an extra API fetch. |
 | total_limits / limits_hit | INTEGER |
+| close_bid / close_ask / close_feed | DOUBLE PRECISION ×2 / TEXT (nullable); live price snapshot taken by `_snapshot_close_prices` whenever a signal with ≥1 hit limit reaches ANY terminal status (auto-TP, SL, NM, news/spread, manual, expiry, message-delete). Gives every entered signal a mark-to-market exit even when `tp_price` is NULL. |
+| tp_threshold_used / tp_threshold_unit | DOUBLE PRECISION / TEXT (nullable); the TP threshold resolved via TPConfig at save time — config-at-time for analysis, immune to later `!tp set` drift. |
+| minutes_to_news | INTEGER (nullable); minutes until the next news event affecting this instrument at save time. |
+| data_version | SMALLINT NOT NULL DEFAULT 2; data-era marker. 1 = pre-2026-07-12 (dirty era), 2 = clean instrumentation. Primary analysis filters `data_version >= 2` (see DATA_ANALYSIS.md). |
 
 ### limits
 | Column | Notes |
@@ -328,17 +345,17 @@ All PKs: `BIGINT GENERATED ALWAYS AS IDENTITY`. Timestamps: `TIMESTAMPTZ`. RLS: 
 ### status_changes
 Audit trail: signal_id FK, old_status, new_status, change_type (`automatic`/`manual`), reason, changed_at.
 
-### performance_metrics
-Daily aggregates per instrument (total, profitable, breakeven, stop_loss, cancelled, win_rate). UNIQUE(date, instrument).
+### config_history
+Audit log of runtime config changes: `changed_at`, `config_family` (`tp` / `alertdist` / `nm` / `settings`), `key` (e.g. `toll/metals`, `XAUUSD`, `gold_tolls_sl_offset`), `old_value` / `new_value` (JSON text), `set_by`. Appended by the config cogs via `database/config_history_ops.py::log_config_change` (best-effort — a failed write never breaks the command).
 
 ### live_prices
-`symbol TEXT PK`, bid, ask, feed, updated_at. Written every 5 s by `LivePriceWriter` for every signal-bearing symbol, sourced from whichever feed serves it (icmarkets/oanda/binance/exness). The EX bot reads these prices and computes its broker offset against its own MT5 feed, so no ICMarkets reference price is stored.
+`symbol TEXT PK`, bid, ask, feed, updated_at. Written by `LivePriceWriter` for every signal-bearing symbol, sourced from whichever feed serves it (icmarkets/oanda/binance/exness). Flushes every 5 s but skips unchanged prices; an unchanged price is still re-written every 30 s (heartbeat) so the EX bot's 120 s staleness gate never trips on a quiet market, and the heartbeat stops when ticks stop so a dead feed ages out honestly. The EX bot reads these prices and computes its broker offset against its own MT5 feed, so no ICMarkets reference price is stored.
 
 ### feed_health
-`feed TEXT PRIMARY KEY` (`icmarkets` / `oanda` / `binance` / `exness`), `status TEXT` (`idle` / `healthy` / `down`), `stale_seconds INTEGER`, `last_seen TIMESTAMPTZ`, `updated_at TIMESTAMPTZ`. Upserted by `FeedHealthMonitor._write_feed_health()` on every status transition. Read by the EX bot each cycle to skip placement on stale feeds. `down` only fires when **every** subscribed symbol on a feed has stalled — a single quiet symbol no longer poisons unrelated signals.
+`feed TEXT PRIMARY KEY` (`icmarkets` / `oanda` / `binance` / `exness`), `status TEXT` (`idle` / `healthy` / `down`), `stale_seconds INTEGER`, `last_seen TIMESTAMPTZ`, `updated_at TIMESTAMPTZ`. Upserted by `FeedHealthMonitor._write_feed_health()` on status transitions (unchanged rows are refreshed at most every 10 min). Read by the EX bot each cycle to skip placement on stale feeds. `down` only fires when **every** subscribed symbol on a feed has stalled — a single quiet symbol no longer poisons unrelated signals.
 
 ### bot_mode_status
-Singleton row (id=1, enforced by CHECK). `news_mode TEXT` (nullable — comma-separated active news categories like `EUR, GOLD` or `ALL`; NULL when no news), `spread_hour BOOLEAN`. `news_mode` is reconciled by `NewsManager.reconcile_news_mode()` (startup, every news command, and the 30 s cleanup loop); `spread_hour` is updated in real-time by streaming_monitor on spread-hour state transitions. Consumers (including the EX bot) read `news_mode` for truthiness, so it is NULL — never the string `'FALSE'` — when inactive.
+Singleton row (id=1, enforced by CHECK). `news_mode TEXT` (nullable — comma-separated active news categories like `EUR, GOLD` or `ALL`; NULL when no news), `vol_guard TEXT` (nullable — comma-separated volatile pairs like `EURUSD, GBPUSD`, or `ALL` for gold; NULL when calm), `spread_hour BOOLEAN`. `news_mode` is reconciled by `NewsManager.reconcile_news_mode()` (startup, every news command, and the 30 s cleanup loop); `vol_guard` is reconciled by `VolatilityGuard._reconcile_vol_guard_mode()` once per 5 s eval cycle from the active guard keys; `spread_hour` is updated in real-time by streaming_monitor on spread-hour state transitions. Consumers (including the EX bot) read `news_mode` / `vol_guard` for truthiness, so they are NULL — never the string `'FALSE'` — when inactive.
 
 ### licenses / license_allowances
 License management for the Signal Subscriber role. Managed via `!activate`, `!grantkey`, `!revoke`, `!licenses` commands. Not involved in signal processing.
@@ -452,8 +469,8 @@ self.services.tp_config      # instead of bot.monitor.tp_config
 
 ## Critical Conventions / Gotchas
 
-### Pydantic models with dict-protocol
-`SignalData` and `LimitData` in `models/signal.py` have `__getitem__`, `__setitem__`, `get`, `__contains__`, and `pop` methods so existing dict-style access (`signal["instrument"]`) continues to work alongside attribute access (`signal.instrument`). New code should prefer attribute access.
+### Pydantic models use attribute access only
+`SignalData` and `LimitData` in `models/signal.py` are plain Pydantic models — the transitional dict-protocol (`signal["instrument"]`) was removed in stage 20. All model access is attribute style (`signal.instrument`). Raw asyncpg rows and the `!active` presentation dicts (from `database/report_queries.py`) are still dicts; local variables holding them are named `row` to keep the two shapes visually distinct.
 
 ### id normalization
 - DB column is `signals.id`, but the domain name is `signal_id`. `SignalData.from_db_row()` and `SignalData._normalise_id` handle this automatically.
@@ -490,7 +507,7 @@ Spread-hour and news cancels **edit the persistent embed** when one already exis
 `NewsEvent.instrument_affected` matches per currency (CHF news never touches EURUSD). A `USD` category additionally pauses US equities (`.NAS`/`.NYSE`) and US indices (`US_INDEX_KEYWORDS`: NAS100/US30/US500/SPX500/SPX/USTEC/US2000/…), and pauses gold when `affects_gold` is set (auto-fetched high-impact USD events). Auto-fetched events carry a merged `title` ("EUR — ECB Rate / Press Conf"); `NewsEvent.display_label` is used in all news alerts (activation, cancel, ended), falling back to the bare category for manual events.
 
 ### Signal type taxonomy
-`signals.type` ∈ `{standard, scalp, swing, toll, pa, 1-1}`. Determined by `pattern_parsers.get_signal_type(text, channel_name)`:
+`signals.type` ∈ `{standard, scalp, swing, toll, pa, 1-1, risky}`. Determined by `pattern_parsers.get_signal_type(text, channel_name)`:
 - `CHANNEL_TYPE_MAP` wins first: `scalps` → scalp; `swing-trades`/`gold-swings` → swing; `gold-tolls-map`/`general-tolls`/`oil-tolls` → toll; `gold-pa-signals`/`price-action-trades` → pa; `gold-1-1-rr` → 1-1.
 - Otherwise body keyword: `\bswing\b` → swing, `\bscalp\b` → scalp.
 - Default: standard.
@@ -528,13 +545,13 @@ When `cancel` is replied to the original signal message and no approaching/hit e
 Auto-TP fires when: **last hit limit's P&L ≥ threshold** AND (if 2+ limits hit) **sum of earlier limits' P&L ≥ 0** (epsilon tolerance 1e-9). It is not a simple cumulative P&L check across all limits.
 
 ### react_to_original_signal
-Module-level function in `price_feeds/streaming_monitor.py`. Called from `streaming_monitor`, `expiry_manager`, and `commands/signals/lifecycle.py` to add emoji reactions to original signal messages.
+Module-level function in `price_feeds/monitors/streaming_monitor.py`. Called from `streaming_monitor`, `expiry_manager`, and `commands/signals/lifecycle.py` to add emoji reactions to original signal messages.
 
 ### Overlap detection on signal save
 When a new signal is saved, `signal_ops.get_overlapping_signals()` queries for active/hit signals on the same instrument whose pending-limit price range (`[MIN, MAX]`) intersects the new signal's range. If any are found, `message_handler._handle_overlap_prompt()` is spawned as a background task (non-blocking): it posts a prompt in the same channel, waits up to 30 s for a ✅ (cancel old) or ❌ (keep both) reaction from the signal author or a guild admin. Timeout defaults to cancelling the old signal(s). The prompt is deleted after the outcome.
 
 ### Reactivation guard
-Before reactivating a cancelled signal via reply command or `!setstatus active`, `signal_ops.check_reactivation_guard()` fetches the signal's cancelled limits and compares them against the current mid-price from `live_prices`. A limit is "past" when the hit condition would fire immediately on reactivation (`long: mid ≤ limit`, `short: mid ≥ limit`). If any limits are past, reactivation is blocked with a clear message listing which limits are stale. Returns `None` (fail-open) if price data is unavailable. Admin override: `!setstatus <id> active --force` (requires `guild_permissions.administrator`).
+Before reactivating a cancelled signal via reply command or `!setstatus active`, `signal_ops.check_reactivation_guard()` fetches the signal's cancelled limits and compares them against the current mid-price from `live_prices`. A limit is "past" when the hit condition would fire immediately on reactivation (`long: mid ≤ limit`, `short: mid ≥ limit`). If any limits are past, reactivation is blocked with a clear message listing which limits are stale. Returns `None` (fail-open) if price data is unavailable. Admin override: `!setstatus <id> active --force` (requires a configured bot admin or `guild_permissions.administrator`).
 
 ### Tick staleness gate
 `streaming_monitor._on_price_update` drops ticks older than `_MAX_TICK_AGE_SECONDS` (5 s) before any signal evaluation. The timestamp comes from `price_data["updated_at"]`, which is stamped by `price_stream_manager._process_price_update`: UTC broker tick time for ICMarkets and Exness (from `tick.time`), current wall-clock for OANDA/Binance. Spread-hour transition tracking still runs on stale ticks — only per-signal checks are skipped.
@@ -552,7 +569,7 @@ All updates in `manager.mark_limit_hit` (limit row, signal counter, status→HIT
 `streaming_monitor._load_and_subscribe_signals` fetches hit limits for every HIT-status signal (via `get_hit_limits_for_signal`) and appends them as `LimitData(status="hit")` to `signal.limits`. After restart, `signal.hit_limits` is non-empty so embed builders see the complete limit history without waiting for the next event.
 
 ### live_prices is written for every feed (no IC reference columns)
-`LivePriceWriter.TRACKED_FEEDS` includes `icmarkets`, so every signal-bearing symbol gets a `live_prices` row sourced from its serving feed — including IC-primary instruments (forex, stocks, GCQ26 metals, XTIUSD oil) that previously had no row. IC reference-only symbols never reach the writer (the IC stream only yields signal-bearing ticks), so they are not written. The old `ic_bid`/`ic_ask` columns were dropped (migration `ALTER TABLE live_prices DROP COLUMN IF EXISTS`): the EX bot now derives its broker offset from its own MT5 feed against the stored price at the same timestamp.
+`LivePriceWriter.TRACKED_FEEDS` includes `icmarkets`, so every signal-bearing symbol gets a `live_prices` row sourced from its serving feed — including IC-primary instruments (forex, stocks, GCQ26 metals, XTIUSD oil) that previously had no row. The old `ic_bid`/`ic_ask` columns were dropped (migration `ALTER TABLE live_prices DROP COLUMN IF EXISTS`), and the IC reference-only symbol machinery that fed them (`subscribe_reference`, 15-min slow polling) was removed with them: the EX bot now derives its broker offset from its own MT5 feed against the stored price at the same timestamp.
 
 ### Price-flow watchdog
 `FeedHealthMonitor._check_price_flow_watchdog` force-restarts the bot (graceful `bot.close()` → `main.py` supervisor relaunch) only when ALL hold: past `WATCHDOG_GRACE_SECONDS`, at least one subscribed symbol whose market is open now (via `is_market_open`, which already excludes weekends/holidays/spread hour), and zero ticks across every feed for `WATCHDOG_SILENCE_SECONDS` (180 s). Fires at most once (`_watchdog_fired`). Runs the shutdown in a separate task so it doesn't await its own monitor task.
@@ -577,6 +594,24 @@ IDs are cleared in `_clear_persisted_alert_ids` on live-update NotFound (`alert_
 
 ### Approaching alert retraction
 Once `limits.approaching_alert_sent=TRUE`, the embed used to linger until hit, SL, NM, expiry, or manual cancel. A new check in `streaming_monitor._check_limit` gated on `signal.status=='active' AND limit.sequence_number==1 AND limit.approaching_alert_sent` retracts the embed when `abs(distance) > _APPROACHING_RETRACTION_MULTIPLIER × alert_distance` (default `2.0`, module-level constant in `streaming_monitor.py`). `_retract_approaching_alert` calls `alert_system.retract_approaching_embed` (deletes embed + ping, removes from all dicts, clears persisted IDs), resets `approaching_alert_sent=FALSE` on the limit, evicts `nm_monitor` tracking state. Next time price re-enters the alert distance the approaching alert fires fresh. Applies to all signal types (no swing carve-out — retraction is cosmetic, not a cancel). NM tracking starts cleanly on re-approach because `nm_monitor.update` bails when `approaching_alert_sent` is False (`nm_monitor.py:151`).
+
+### Close-price snapshot on every terminal transition
+`signal_ops._snapshot_close_prices(signal_id, instrument)` writes `close_bid/close_ask/close_feed` from `live_prices` whenever a signal with ≥1 hit limit closes. Hooked in `manually_set_signal_status` (covers auto-TP, NM, news/spread/risky cancels, SL, admin commands), `cancel_signal_by_message`, and the cancel branch of `expire_old_signals`. Best-effort: wrapped in try/except; a missing live price logs a warning and skips.
+
+### Save-time context stamps
+`message_handler._build_save_context()` stamps `tp_threshold_used/tp_threshold_unit` (resolved TPConfig threshold) and `minutes_to_news` (next affecting news event) onto every new signal via `save_signal(..., context=)`. Best-effort; reactivated signals keep their original stamps.
+
+### config_history on every config command
+`!tp set/remove`, `!alertdist set/remove`, `!nmconfig set/remove`, `!goldtollssl`, `!riskygoldsl` append old/new values to `config_history`. When adding a new runtime-config command, hook `log_config_change` the same way.
+
+### Pip sizes are canonical in `BaseThresholdConfig.get_pip_size`
+Stocks (.NAS/.NYSE) 0.01, forex 0.0001 (JPY 0.01), XAU/GC futures 0.01, XAG 0.001, BTC 1.0, other crypto 0.1, indices 1.0, oil 0.01. The stock branch must stay ABOVE the index-keyword branch (".NAS" contains "NAS"). Unknown symbols fall back to 0.0001 — when adding a new asset class, add a branch here FIRST or `signal_excursions` pips will be wrong (this exact bug corrupted era-1 excursion rows; backfilled 2026-07-12).
+
+### Excursion ordering flag + post-exit window
+`ExcursionMonitor` (now constructed with `tp_config`) decides `mae_before_mfe` when either excursion first exceeds 25% of the TP threshold (`_ORDERING_BAR_FRACTION`). After close, entered signals move to a `_post_exit` dict sampled by the same 60 s loop: favorable follow-through beyond the exit price from M1 bars ratchets `post_exit_mfe_pips` for 60 min (`_POST_EXIT_WINDOW_SECONDS`), then `post_exit_end_time` is stamped. Post-exit state does not survive a restart.
+
+### Data-era marker
+`signals.data_version` = 1 for rows created before 2026-07-12, 2 for the clean-instrumentation era. Analysis conventions live in **DATA_ANALYSIS.md** — keep that file current when changing analytics-relevant schema or semantics.
 
 ---
 
