@@ -236,6 +236,15 @@ STOCK_SKIP_WORDS = {
 }
 
 
+# Ticker aliases for names that would otherwise match multiple symbols by
+# description (e.g. "GOOGLE" matches both GOOG.NAS and GOOGL.NAS). Maps an
+# upper-cased word to the canonical ticker to prefer.
+STOCK_TICKER_ALIASES = {
+    "GOOGLE": "GOOG",
+    "GOOGL": "GOOG",
+}
+
+
 # ============================================================================
 # UTILITY FUNCTIONS
 # ============================================================================
@@ -1000,17 +1009,25 @@ class StockPatternParser:
             logger.warning("No stock symbols found in MT5")
             return None
 
+        tickers_to_symbol = {symbol.split(".")[0]: symbol for symbol in stock_symbols}
+
+        # Step 0: Alias match — resolve ambiguous names to a canonical ticker
+        for word in words_upper:
+            alias = STOCK_TICKER_ALIASES.get(word)
+            if alias and alias in tickers_to_symbol:
+                symbol = tickers_to_symbol[alias]
+                logger.info(f"Found ticker alias match: {word} -> {symbol}")
+                return symbol
+
         # Step 1: Direct ticker match
         for word in words_upper:
             if word in STOCK_SKIP_WORDS:
                 continue
 
-            # Check if this word is a ticker
-            for symbol in stock_symbols:
-                ticker = symbol.split(".")[0]
-                if word == ticker:
-                    logger.info(f"Found exact ticker match: {word} -> {symbol}")
-                    return symbol
+            if word in tickers_to_symbol:
+                symbol = tickers_to_symbol[word]
+                logger.info(f"Found exact ticker match: {word} -> {symbol}")
+                return symbol
 
         # Step 2: Check with exchange suffix
         for word in words_upper:
