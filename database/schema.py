@@ -486,6 +486,38 @@ async def _run_migrations(conn):
         """
         DROP TABLE IF EXISTS performance_metrics;
         """,
+        # signals_rev watermark: the EX bot polls this single row every sync cycle
+        # and refetches its heavy signal-set/status queries only when the rev has
+        # moved, instead of re-pulling them on short intervals (pooler-egress guard).
+        """
+        ALTER TABLE bot_mode_status ADD COLUMN IF NOT EXISTS signals_rev BIGINT NOT NULL DEFAULT 0;
+        """,
+        # Statement-level triggers bump the watermark on every signals/limits write.
+        # The bump swallows its own failure so an egress optimization can never roll
+        # back the signal write it rides on; the EX bot's fallback max-age covers a
+        # missed bump.
+        """
+        CREATE OR REPLACE FUNCTION bump_signals_rev() RETURNS trigger
+        LANGUAGE plpgsql AS $fn$
+        BEGIN
+            UPDATE bot_mode_status SET signals_rev = signals_rev + 1 WHERE id = 1;
+            RETURN NULL;
+        EXCEPTION WHEN OTHERS THEN
+            RETURN NULL;
+        END $fn$;
+        """,
+        """
+        DROP TRIGGER IF EXISTS signals_rev_bump ON signals;
+        CREATE TRIGGER signals_rev_bump
+            AFTER INSERT OR UPDATE OR DELETE ON signals
+            FOR EACH STATEMENT EXECUTE FUNCTION bump_signals_rev();
+        """,
+        """
+        DROP TRIGGER IF EXISTS limits_rev_bump ON limits;
+        CREATE TRIGGER limits_rev_bump
+            AFTER INSERT OR UPDATE OR DELETE ON limits
+            FOR EACH STATEMENT EXECUTE FUNCTION bump_signals_rev();
+        """,
     ]
 
     for migration in migrations:
