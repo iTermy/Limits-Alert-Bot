@@ -22,6 +22,10 @@ from ..views import ActiveSignalsView
 
 logger = get_logger("lifecycle_commands")
 
+# Gold spot instruments and the gold futures contract they convert to.
+GOLD_INSTRUMENTS = {"XAUUSD", "GOLD"}
+GOLD_FUTURES_SYMBOL = "GCQ26"
+
 
 class LifecycleCog(BaseCog):
     """Signal lifecycle commands: create, view, status changes, bulk cancels"""
@@ -291,6 +295,84 @@ class LifecycleCog(BaseCog):
             created_at = created_at.strftime("%Y-%m-%d %H:%M UTC")
         embed.set_footer(text=f"Created {created_at}")
 
+        await ctx.send(embed=embed)
+
+    @commands.command(name="futures", description="Convert a gold signal to futures prices")
+    async def futures_conversion(self, ctx: commands.Context, signal_id: int):
+        """
+        Convert a gold (XAUUSD) signal's limits and stop loss to the equivalent
+        GCQ26 futures prices, using the live spot-to-futures price difference.
+        """
+        signal = await self.signal_db.get_signal_with_limits(signal_id)
+        if not signal:
+            await ctx.send(f"❌ Signal #{signal_id} not found")
+            return
+
+        if signal.instrument.upper() not in GOLD_INSTRUMENTS:
+            await ctx.send(
+                f"❌ `!futures` only works on gold signals. Signal #{signal_id} is "
+                f"**{signal.instrument}**."
+            )
+            return
+
+        stream_manager = self.services.stream_manager
+
+        # GCQ26 is only subscribed on demand — ensure it's live before reading it.
+        await stream_manager.subscribe_symbol(GOLD_FUTURES_SYMBOL)
+
+        spot_price = await stream_manager.get_latest_price(signal.instrument)
+        futures_price = await stream_manager.get_latest_price(GOLD_FUTURES_SYMBOL)
+
+        if not spot_price:
+            await ctx.send(f"❌ No live {signal.instrument} price available right now.")
+            return
+        if not futures_price:
+            await ctx.send(f"❌ No live {GOLD_FUTURES_SYMBOL} price available right now.")
+            return
+
+        spot_mid = (spot_price["bid"] + spot_price["ask"]) / 2
+        futures_mid = (futures_price["bid"] + futures_price["ask"]) / 2
+        offset = spot_mid - futures_mid
+
+        limits = sorted(signal.limits, key=lambda lim: lim.sequence_number)
+        spot_lines = [
+            f"Limit {lim.sequence_number}: {format_price(lim.price_level, signal.instrument)}"
+            for lim in limits
+        ]
+        futures_lines = [
+            f"Limit {lim.sequence_number}: "
+            f"{format_price(lim.price_level - offset, GOLD_FUTURES_SYMBOL)}"
+            for lim in limits
+        ]
+        spot_lines.append(f"Stop Loss: {format_price(signal.stop_loss, signal.instrument)}")
+        futures_lines.append(
+            f"Stop Loss: {format_price(signal.stop_loss - offset, GOLD_FUTURES_SYMBOL)}"
+        )
+
+        direction_word = "above" if offset >= 0 else "below"
+
+        embed = discord.Embed(
+            title=f"🔮 Futures Conversion — Signal #{signal_id}",
+            description=(
+                f"**{signal.instrument} {signal.direction.upper()}** converted to "
+                f"**{GOLD_FUTURES_SYMBOL}** futures prices."
+            ),
+            color=0x00BFFF,
+        )
+        embed.add_field(name=f"📍 Spot ({signal.instrument})", value="\n".join(spot_lines), inline=True)
+        embed.add_field(
+            name=f"🔮 Futures ({GOLD_FUTURES_SYMBOL})", value="\n".join(futures_lines), inline=True
+        )
+        embed.add_field(
+            name="Difference",
+            value=(
+                f"{signal.instrument} is **${abs(offset):.2f}** {direction_word} "
+                f"{GOLD_FUTURES_SYMBOL}\n"
+                f"Spot {format_price(spot_mid, signal.instrument)} · "
+                f"Futures {format_price(futures_mid, GOLD_FUTURES_SYMBOL)}"
+            ),
+            inline=False,
+        )
         await ctx.send(embed=embed)
 
     @commands.command(name="setstatus", description="Set signal status")
