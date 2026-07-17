@@ -146,9 +146,14 @@ INSTRUMENT_MAPPINGS = {
     "djia": "US30USD",
     "jp225": "JP225",
     "nikkei": "JP225",
+    # DAX/FTSE resolve to the OANDA-fed symbols by default; DE40 and UK100 name the
+    # ICMarkets contracts and are only used when a message says so literally. The two
+    # families price ~2 points apart, so keeping them distinct lets the EX bot pick the
+    # right frame — an OANDA-fed symbol it doesn't know is offset gets placed raw.
     "dax": "DE30EUR",
     "dax30": "DE30EUR",
     "de30": "DE30EUR",
+    "de40": "DE40",
     "russell": "US2000USD",
     "us2000": "US2000USD",
     "rut": "US2000USD",
@@ -156,8 +161,9 @@ INSTRUMENT_MAPPINGS = {
     "asx": "AUS2000",
     "f40": "F40",
     "cac": "F40",
-    "uk100": "UK100GBP",
+    "uk100": "UK100",
     "uk100gbp": "UK100GBP",
+    "uk100usd": "UK100GBP",
     "ftse": "UK100GBP",
     # Crypto (keep main ones, alt coins handled by auto-append)
     "btc": "BTCUSDT",

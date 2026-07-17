@@ -47,10 +47,26 @@ class TestFeedRouting:
             ("BTCUSDT", "binance"),
             ("USOILSPOT", "exness"),
             ("XTIUSD", "icmarkets"),  # IC oil stays on ICMarkets
+            # DAX/FTSE come in two symbol families that must not converge: the
+            # OANDA-fed canonical pair, and the ICMarkets contracts named literally.
+            ("DE30EUR", "oanda"),
+            ("DE40", "icmarkets"),
+            ("UK100GBP", "oanda"),
+            ("UK100", "icmarkets"),
         ],
     )
     def test_get_best_feed(self, mapper, symbol, feed):
         assert mapper.get_best_feed(symbol) == feed
+
+    def test_broker_native_indices_map_to_their_own_contract(self, mapper):
+        # The ICMarkets symbols must resolve to themselves, not to the OANDA
+        # instrument — routing DE40 to OANDA's DE30_EUR delivered ticks under
+        # DE30EUR, so a DE40 subscription never produced a DE40 price.
+        assert mapper.get_feed_symbol("DE40", "icmarkets") == "DE40"
+        assert mapper.get_feed_symbol("UK100", "icmarkets") == "UK100"
+        # The OANDA-fed pair keeps its own feed symbols.
+        assert mapper.get_feed_symbol("DE30EUR", "oanda") == "DE30_EUR"
+        assert mapper.get_feed_symbol("UK100GBP", "oanda") == "UK100_GBP"
 
 
 class TestFeedSymbolTranslation:

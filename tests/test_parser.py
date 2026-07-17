@@ -8,7 +8,7 @@ the local config.
 
 import pytest
 
-from core.parser import LimitsOrderError, RejectedSignal, SignalParser
+from core.parser import INSTRUMENT_MAPPINGS, LimitsOrderError, RejectedSignal, SignalParser
 from core.parser import pattern_parsers as pp
 from core.parser.pattern_parsers import (
     CorePatternParser,
@@ -123,7 +123,10 @@ class TestDetermineLimitsAndStop:
 
     def test_gold_tolls_auto_sl_short(self, pinned_offsets):
         _, stop = determine_limits_and_stop(
-            [3305.0, 3310.0], "short", channel_name="gold-tolls-map", raw_text="gold short 3305 3310"
+            [3305.0, 3310.0],
+            "short",
+            channel_name="gold-tolls-map",
+            raw_text="gold short 3305 3310",
         )
         assert stop == 3315.0  # max + 5.0 offset
 
@@ -152,20 +155,29 @@ class TestDetermineLimitsAndStop:
 
     def test_general_tolls_auto_sl_per_instrument(self):
         _, stop_spx = determine_limits_and_stop(
-            [6000.0], "long", channel_name="general-tolls", raw_text="spx long 6000",
+            [6000.0],
+            "long",
+            channel_name="general-tolls",
+            raw_text="spx long 6000",
             instrument="SPX500USD",
         )
         assert stop_spx == 5990.0  # SPX offset $10
         _, stop_nas = determine_limits_and_stop(
-            [21000.0], "long", channel_name="general-tolls", raw_text="nas long 21000",
+            [21000.0],
+            "long",
+            channel_name="general-tolls",
+            raw_text="nas long 21000",
             instrument="NAS100USD",
         )
         assert stop_nas == 20970.0  # NAS offset $30
 
     def test_general_tolls_explicit_sl(self):
         limits, stop = determine_limits_and_stop(
-            [6000.0, 5980.0], "long", channel_name="general-tolls",
-            raw_text="spx long 6000 sl 5980", instrument="SPX500USD",
+            [6000.0, 5980.0],
+            "long",
+            channel_name="general-tolls",
+            raw_text="spx long 6000 sl 5980",
+            instrument="SPX500USD",
         )
         assert limits == [6000.0]
         assert stop == 5980.0
@@ -255,10 +267,46 @@ class TestSignalParserRouting:
 
     def test_default_instrument_from_channel_config(self):
         parser = SignalParser(
-            config_loader=_StubConfigLoader(
-                {"my-gold-room": {"default_instrument": "XAUUSD"}}
-            )
+            config_loader=_StubConfigLoader({"my-gold-room": {"default_instrument": "XAUUSD"}})
         )
         signal = parser.parse("long 3310 3305 sl 3300", "my-gold-room")
         assert signal is not None
         assert signal.instrument == "XAUUSD"
+
+
+class TestIndexSymbolCanonicalization:
+    """DAX/FTSE mentions must canonicalize to the OANDA-fed symbols, while DE40 and
+    UK100 stay as the ICMarkets contracts they literally name. The two families price
+    ~2 points apart, and the EX bot decides whether to apply a broker offset from the
+    symbol alone — so collapsing them puts orders in the wrong price frame."""
+
+    @pytest.mark.parametrize(
+        "text,expected",
+        [
+            ("dax long 24500 sl 24400", "DE30EUR"),
+            ("dax30 long 24500 sl 24400", "DE30EUR"),
+            ("de30 long 24500 sl 24400", "DE30EUR"),
+            ("de40 long 24500 sl 24400", "DE40"),
+            ("ftse short 10500 sl 10550", "UK100GBP"),
+            ("uk100gbp short 10500 sl 10550", "UK100GBP"),
+            ("uk100 short 10500 sl 10550", "UK100"),
+        ],
+    )
+    def test_explicit_instrument_keeps_families_distinct(self, text, expected):
+        assert pp._find_explicit_instrument(text) == expected
+
+    @pytest.mark.parametrize(
+        "raw,expected",
+        [
+            ("DE40", "DE40"),
+            ("UK100", "UK100"),
+            ("DAX", "DE30EUR"),
+            ("FTSE", "UK100GBP"),
+            ("UK100GBP", "UK100GBP"),
+            # The model has emitted this non-existent symbol; it reached the DB raw
+            # and produced a signal with no feed behind it.
+            ("UK100USD", "UK100GBP"),
+        ],
+    )
+    def test_ai_output_canonicalizes(self, raw, expected):
+        assert INSTRUMENT_MAPPINGS.get(raw.lower(), raw) == expected
