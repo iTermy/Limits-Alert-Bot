@@ -1,14 +1,23 @@
-"""Volatility guard — informational alerts when a market moves sharply.
+"""Volatility guard — flags instruments that are moving sharply.
 
 Self-contained: registers as a price-stream subscriber, samples mid-price into a
-rolling window per subscribed symbol, and posts an embed when a pair (or the
-whole board, via gold) becomes volatile. It has no effect on signal processing —
-nothing is cancelled or paused; it only announces.
+rolling window per subscribed symbol, and mirrors the active guard keys to
+`bot_mode_status.vol_guard` plus a single live Discord embed.
+
+The DB column is consumed by each user's execution bot, but only when that user
+opts in (`config.volatility_guard`, off by default). When they do, a flagged
+instrument has its pending limits cancelled and its filled positions force-closed,
+so a false positive costs real money — thresholds are deliberately conservative.
 
 Detection: a symbol is "volatile" when its price range over the trailing
-`lookback_seconds` is at least the configured threshold for its asset class
-(20 pips for forex, $20 for gold by default). Thresholds are per asset class;
-asset classes without a configured threshold are not monitored.
+`lookback_seconds` (180 = 3 min) is at least its threshold. Thresholds resolve
+per symbol first (`symbol_thresholds`), then per asset class (`thresholds`);
+an asset class with no configured threshold is not monitored at all.
+
+Non-forex thresholds are ~2x the execution bot's proximity distance — the same
+distance it uses to decide a limit is close enough to place — so an instrument
+only flags on a move twice as large as the band its limits sit in. Forex (20
+pips) and gold ($20) predate that formula and stay at their tuned values.
 
 Guard lifecycle, per symbol:
   - First volatility detection arms a guard lasting `guard_minutes` (15 by default).
@@ -16,18 +25,17 @@ Guard lifecycle, per symbol:
     window; calm -> release.
 
 Reference counting, per key:
-  - A forex pair guards itself (EURUSD -> EURUSD), so only that pair is paused.
+  - Every non-metal symbol guards itself (EURUSD -> EURUSD, NAS100USD ->
+    NAS100USD), so only that instrument is gated.
   - Gold (asset class "metals") guards the special key "ALL" (market-wide).
-  - A key stays guarded while at least one contributing symbol is guarded (for a
-    forex pair that is the pair itself; "ALL" holds while any metal is guarded).
-    The activation embed fires on the empty -> guarded transition; the ended embed
-    on guarded -> empty.
+  - A key stays guarded while at least one contributing symbol is guarded ("ALL"
+    holds while any metal is guarded). The embed lists every active key and is
+    deleted once none remain.
 """
 
 from __future__ import annotations
 
 import asyncio
-import contextlib
 import json
 from collections import deque
 from datetime import datetime, timezone
@@ -65,10 +73,41 @@ _PIP_SIZES: dict[str, float] = {
 # all arming/release decisions happen here, off the hot path.
 _EVAL_INTERVAL_SECONDS = 5
 
-# Edited "ended" embeds are removed after this delay to keep channels tidy.
-_ENDED_DELETE_AFTER_SECONDS = 300
-
 _CONFIG_PATH = Path(__file__).resolve().parent.parent.parent / "config" / "vol_guard.json"
+
+# Identifies our own embed in the channel, for the startup purge.
+_EMBED_TITLE = "⚡ Volatility Guard"
+
+_DEFAULT_THRESHOLDS = {
+    "forex": 20.0,
+    "forex_jpy": 20.0,
+    "metals": 20.0,
+    "indices": 200.0,
+    "crypto": 2000.0,
+    "oil": 2.0,
+    "stocks": 10.0,
+}
+
+# Per-symbol thresholds for instruments whose proximity distance differs from their
+# asset-class norm — every index (the class default suits the 100-point majority),
+# ETH (the crypto default is BTC-priced), and the per-stock distances. Keyed by
+# internal (DB) symbol. The shipped vol_guard.json carries the full set derived from
+# the execution bot's proximity tables; these are the fallback if it can't be read.
+_DEFAULT_SYMBOL_THRESHOLDS = {
+    "SPX500USD": 80.0,
+    "US500": 80.0,
+    "NAS100USD": 200.0,
+    "USTEC": 200.0,
+    "DE30EUR": 200.0,
+    "DE40": 200.0,
+    "US30USD": 200.0,
+    "US2000USD": 40.0,
+    "UK100GBP": 100.0,
+    "UK100": 100.0,
+    "JP225": 400.0,
+    "F40": 80.0,
+    "ETHUSDT": 80.0,
+}
 
 
 def _load_config() -> dict:
@@ -77,7 +116,8 @@ def _load_config() -> dict:
         "enabled": True,
         "lookback_seconds": 180,
         "guard_minutes": 15,
-        "thresholds": {"forex": 20.0, "forex_jpy": 20.0, "metals": 20.0},
+        "thresholds": _DEFAULT_THRESHOLDS,
+        "symbol_thresholds": _DEFAULT_SYMBOL_THRESHOLDS,
     }
     try:
         raw = json.loads(_CONFIG_PATH.read_text(encoding="utf-8"))
@@ -89,6 +129,7 @@ def _load_config() -> dict:
         return defaults
     merged = {**defaults, **raw}
     merged["thresholds"] = raw.get("thresholds", defaults["thresholds"])
+    merged["symbol_thresholds"] = raw.get("symbol_thresholds", defaults["symbol_thresholds"])
     return merged
 
 
@@ -107,15 +148,19 @@ class VolatilityGuard:
         self.lookback_seconds: float = float(config.get("lookback_seconds", 180))
         self.guard_seconds: float = float(config.get("guard_minutes", 15)) * 60.0
         self.thresholds: dict[str, float] = config.get("thresholds", {})
+        self.symbol_thresholds: dict[str, float] = {
+            k.upper(): v for k, v in config.get("symbol_thresholds", {}).items()
+        }
 
         # symbol -> rolling (monotonic_ts, mid_price) samples within the lookback
         self._samples: dict[str, deque[tuple[float, float]]] = {}
         # symbol -> monotonic expiry of its current guard window (present == guarded)
         self._symbol_guards: dict[str, float] = {}
-        # key (currency or "ALL") -> set of guarded symbols contributing to it
+        # key (instrument or "ALL") -> set of guarded symbols contributing to it
         self._key_members: dict[str, set[str]] = {}
-        # key -> the activation embed message, for editing to "ended"
-        self._key_messages: dict[str, discord.Message] = {}
+        # The single live embed listing every active key, and the keys it shows.
+        self._message: discord.Message | None = None
+        self._displayed_keys: list[str] = []
 
         self._eval_task: asyncio.Task | None = None
 
@@ -220,12 +265,35 @@ class VolatilityGuard:
     # ------------------------------------------------------------------
 
     async def _eval_loop(self) -> None:
+        await self._purge_stale_embeds()
         while True:
             await asyncio.sleep(_EVAL_INTERVAL_SECONDS)
             try:
                 await self._evaluate_all()
             except Exception as e:
                 logger.error(f"Volatility guard eval loop error: {e}", exc_info=True)
+
+    async def _purge_stale_embeds(self) -> None:
+        """Delete any guard embed a previous run left behind.
+
+        Guard state is in-memory, so a restart mid-volatility would otherwise strand
+        an embed listing symbols that are no longer flagged, with nothing left to
+        edit or delete it. Mirrors the first _reconcile_vol_guard_mode write, which
+        likewise always corrects a stale column.
+        """
+        if self.channel is None or self.bot is None or self.bot.user is None:
+            return
+        try:
+            async for msg in self.channel.history(limit=50):
+                if (
+                    msg.author.id == self.bot.user.id
+                    and msg.embeds
+                    and msg.embeds[0].title == _EMBED_TITLE
+                ):
+                    await msg.delete()
+                    logger.info("Purged stale volatility embed from a previous run")
+        except Exception as e:
+            logger.warning(f"Could not purge stale volatility embeds: {e}")
 
     async def _evaluate_all(self) -> None:
         now = monotonic()
@@ -239,19 +307,20 @@ class VolatilityGuard:
 
             if guard_expiry is None:
                 if volatile:
-                    await self._arm(symbol, now)
+                    self._arm(symbol, now)
             elif now >= guard_expiry:
                 if volatile:
                     self._symbol_guards[symbol] = now + self.guard_seconds
                     logger.info("Volatility guard re-armed for %s (still volatile)", symbol)
                 else:
-                    await self._release(symbol)
+                    self._release(symbol)
 
             # Drop idle samples to bound memory once a symbol stops ticking.
             if not samples and symbol not in self._symbol_guards:
                 del self._samples[symbol]
 
         await self._reconcile_vol_guard_mode()
+        await self._refresh_embed()
 
     @staticmethod
     def _is_volatile(samples: deque[tuple[float, float]], threshold: float) -> bool:
@@ -260,17 +329,13 @@ class VolatilityGuard:
         prices = [p for _, p in samples]
         return (max(prices) - min(prices)) >= threshold
 
-    async def _arm(self, symbol: str, now: float) -> None:
+    def _arm(self, symbol: str, now: float) -> None:
         self._symbol_guards[symbol] = now + self.guard_seconds
         logger.info("Volatility guard armed for %s", symbol)
         for key in self._keys_for(symbol):
-            members = self._key_members.setdefault(key, set())
-            was_empty = not members
-            members.add(symbol)
-            if was_empty:
-                await self._send_activation(key, symbol)
+            self._key_members.setdefault(key, set()).add(symbol)
 
-    async def _release(self, symbol: str) -> None:
+    def _release(self, symbol: str) -> None:
         self._symbol_guards.pop(symbol, None)
         logger.info("Volatility guard released for %s", symbol)
         for key in self._keys_for(symbol):
@@ -280,7 +345,6 @@ class VolatilityGuard:
             members.discard(symbol)
             if not members:
                 del self._key_members[key]
-                await self._send_ended(key)
 
     # ------------------------------------------------------------------
     # DB state — mirror active keys to bot_mode_status.vol_guard
@@ -316,79 +380,90 @@ class VolatilityGuard:
     # ------------------------------------------------------------------
 
     def _threshold_price_units(self, symbol: str) -> float | None:
-        """Threshold in absolute price units, or None if the asset class is unmonitored."""
+        """Threshold in absolute price units, or None if the symbol is unmonitored.
+
+        A per-symbol entry wins over its asset class; both are expressed in the
+        class's own unit (pips for forex, price units elsewhere).
+        """
         asset_class = self.symbol_mapper.determine_asset_class(symbol)
-        configured = self.thresholds.get(asset_class)
+        configured = self.symbol_thresholds.get(symbol.upper())
+        if configured is None:
+            configured = self.thresholds.get(asset_class)
         if configured is None:
             return None
-        pip_size = _PIP_SIZES.get(asset_class, 1.0)
-        return float(configured) * pip_size
+        return float(configured) * _PIP_SIZES.get(asset_class, 1.0)
 
     def _keys_for(self, symbol: str) -> set[str]:
         """Guard keys a volatile symbol contributes to.
 
-        Gold (metals) flags the whole board as "ALL"; a forex pair flags itself,
-        so only that pair is paused (EURUSD volatility does not touch USDJPY).
+        Gold (metals) flags the whole board as "ALL"; every other instrument flags
+        itself, so only that instrument is gated (EURUSD volatility does not touch
+        USDJPY, and NAS100USD does not touch SPX500USD). The key is the internal
+        (DB) symbol, which is what each execution bot matches against.
         """
-        asset_class = self.symbol_mapper.determine_asset_class(symbol)
-        if asset_class == "metals":
+        if self.symbol_mapper.determine_asset_class(symbol) == "metals":
             return {"ALL"}
-        if asset_class in ("forex", "forex_jpy"):
-            clean = symbol.upper().replace("/", "")
-            if len(clean) == 6:
-                return {clean}
-        return set()
+        return {symbol.upper().replace("/", "")}
 
     # ------------------------------------------------------------------
     # Embeds
     # ------------------------------------------------------------------
 
-    async def _send_activation(self, key: str, symbol: str) -> None:
-        if self.channel is None:
-            return
-        is_all = key == "ALL"
-        title = "⚡ Volatility Guard — Market-Wide" if is_all else f"⚡ Volatility Guard — {key}"
-        if is_all:
-            description = (
-                f"Sharp move detected on **{symbol}** — flagging market as volatile."
-            )
-        else:
-            description = f"Sharp move detected on **{key}**."
+    @staticmethod
+    def _build_embed(keys: list[str]) -> discord.Embed:
+        listed = ", ".join("Market-wide (gold)" if k == "ALL" else k for k in keys)
         embed = discord.Embed(
-            title=title,
-            description=description,
+            title=_EMBED_TITLE,
+            description=f"Sharp moves detected on:\n**{listed}**",
             color=0xE67E22,
             timestamp=datetime.now(timezone.utc),
         )
-        embed.set_footer(text="Informational only • signals are unaffected")
-        try:
-            msg = await self.channel.send(embed=embed)
-            self._key_messages[key] = msg
-        except Exception as e:
-            logger.error(f"Failed to send volatility activation embed for {key}: {e}")
+        embed.set_footer(text="Updates live • clears once markets settle")
+        return embed
 
-    async def _send_ended(self, key: str) -> None:
-        msg = self._key_messages.pop(key, None)
-        if msg is None:
+    async def _refresh_embed(self) -> None:
+        """Drive the single live embed to match the active keys.
+
+        One message for the whole guard: edited as instruments come and go, and
+        deleted once nothing is volatile. Skipped entirely when the key list is
+        unchanged, so a quiet market costs no API calls.
+        """
+        if self.channel is None:
             return
-        ended_ts = int(datetime.now(timezone.utc).timestamp())
-        label = "Market-Wide" if key == "ALL" else key
-        embed = discord.Embed(
-            title="⚡ Volatility Guard Ended",
-            description=f"Volatility on **{label}** has settled.\n**Ended at <t:{ended_ts}:t>**",
-            color=0x808080,
-            timestamp=datetime.now(timezone.utc),
-        )
-        embed.set_footer(text="This message will be deleted in 5 minutes")
-        try:
-            await msg.edit(embed=embed)
-        except Exception as e:
-            logger.warning(f"Could not edit volatility embed for {key}: {e}")
+        keys = sorted(k for k, members in self._key_members.items() if members)
+        if keys == self._displayed_keys:
             return
 
-        async def _delete_later():
-            await asyncio.sleep(_ENDED_DELETE_AFTER_SECONDS)
-            with contextlib.suppress(Exception):
-                await msg.delete()
+        if not keys:
+            await self._clear_embed()
+            self._displayed_keys = []
+            return
 
-        asyncio.ensure_future(_delete_later())
+        embed = self._build_embed(keys)
+        if self._message is not None:
+            try:
+                await self._message.edit(embed=embed)
+                self._displayed_keys = keys
+                return
+            except discord.NotFound:
+                self._message = None  # deleted out from under us — repost below
+            except Exception as e:
+                logger.error(f"Failed to edit volatility embed: {e}")
+                return
+
+        try:
+            self._message = await self.channel.send(embed=embed)
+            self._displayed_keys = keys
+        except Exception as e:
+            logger.error(f"Failed to post volatility embed: {e}")
+
+    async def _clear_embed(self) -> None:
+        if self._message is None:
+            return
+        try:
+            await self._message.delete()
+        except discord.NotFound:
+            pass
+        except Exception as e:
+            logger.warning(f"Could not delete volatility embed: {e}")
+        self._message = None
