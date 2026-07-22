@@ -787,7 +787,9 @@ class LifecycleCog(BaseCog):
                     # delete the original signal message immediately (nothing to archive).
                     if not embed_existed and signal_dict:
                         try:
-                            await alert_system._maybe_delete_original_message(signal_dict, sid)
+                            signal_model = await self.signal_db.get_signal_with_limits(sid)
+                            if signal_model:
+                                await alert_system._maybe_delete_original_message(signal_model, sid)
                         except Exception as _td:
                             logger.warning(
                                 f"Could not delete original message for signal {sid} (no embed): {_td}"

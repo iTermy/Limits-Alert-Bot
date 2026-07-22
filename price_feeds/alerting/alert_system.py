@@ -14,6 +14,7 @@ from typing import Optional
 
 import discord
 
+from models import SignalData
 from price_feeds.alerting.archive_manager import (
     END_STATE_DELETE_MINUTES,
     ArchiveManager,
@@ -458,7 +459,7 @@ class AlertSystem:
     def _get_finished_channel(self):
         return self._archive_manager._get_finished_channel()
 
-    async def _maybe_delete_original_message(self, signal: dict, signal_id: int) -> None:
+    async def _maybe_delete_original_message(self, signal: SignalData, signal_id: int) -> None:
         await self._archive_manager.maybe_delete_original_message(signal, signal_id)
 
     # ── Tracking ─────────────────────────────────────────────────────────────
