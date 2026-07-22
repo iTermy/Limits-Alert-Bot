@@ -33,7 +33,7 @@ _SPREAD_HOUR_CACHE_SECONDS = 5
 _EST_TZ = pytz.timezone("America/New_York")
 
 
-async def react_to_original_signal(bot, signal: dict, emoji: str):
+async def react_to_original_signal(bot, signal: SignalData, emoji: str):
     """
     Add a reaction to the original signal message.
 
@@ -177,7 +177,7 @@ class StreamingPriceMonitor:
             logger.error(f"Failed to initialize monitor: {e}")
             raise
 
-    def _react_async(self, signal: dict, emoji: str) -> None:
+    def _react_async(self, signal: SignalData, emoji: str) -> None:
         """Add an emoji reaction to the original signal off the tick hot path.
 
         Reactions are cosmetic and order-independent, so fetching the message
