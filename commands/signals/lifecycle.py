@@ -760,12 +760,18 @@ class LifecycleCog(BaseCog):
                 monitor.nm_monitor.evict_signal(sid)
                 monitor.tp_monitor.evict_signal(sid)
 
+            # react_to_original_signal and _maybe_delete_original_message both
+            # need a SignalData model (attribute access), so fetch it once here.
+            signal_model = (
+                await self.signal_db.get_signal_with_limits(sid) if signal_dict else None
+            )
+
             # 2. React to the original signal message
-            if signal_dict and monitor:
+            if signal_model and monitor:
                 try:
                     from price_feeds.monitors.streaming_monitor import react_to_original_signal
 
-                    await react_to_original_signal(self.bot, signal_dict, "❌")
+                    await react_to_original_signal(self.bot, signal_model, "❌")
                 except Exception as _re:
                     logger.warning(f"Could not react to original message for signal {sid}: {_re}")
 
@@ -785,11 +791,9 @@ class LifecycleCog(BaseCog):
                     )
                     # For signals with no persistent embed in auto-purge channels,
                     # delete the original signal message immediately (nothing to archive).
-                    if not embed_existed and signal_dict:
+                    if not embed_existed and signal_model:
                         try:
-                            signal_model = await self.signal_db.get_signal_with_limits(sid)
-                            if signal_model:
-                                await alert_system._maybe_delete_original_message(signal_model, sid)
+                            await alert_system._maybe_delete_original_message(signal_model, sid)
                         except Exception as _td:
                             logger.warning(
                                 f"Could not delete original message for signal {sid} (no embed): {_td}"
