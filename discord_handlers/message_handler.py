@@ -27,11 +27,40 @@ logger = get_logger("message_handler")
 # Auto-delete delay for transient bot replies in monitored / alert channels.
 _REPLY_DELETE_AFTER = 15.0
 
+# Failure/timeout notices linger longer so a command that did NOT apply to a
+# live signal can't vanish before the user notices it.
+_ERROR_REPLY_DELETE_AFTER = 60.0
+
+# Status-change reply commands retry once on timeout: a transient event-loop
+# stall can blow the per-attempt window, and a missed cancel on a live signal
+# is worse than a second attempt.
+_STATUS_CALL_TIMEOUT = 5.0
+_STATUS_CALL_ATTEMPTS = 2
+_STATUS_RETRY_DELAY = 0.5
+
 # DM sent when a non-manager tries to manage a signal via reply.
 _NO_PERMISSION_DM = (
     "You don't have permission to manage signals. "
     "If you'd like access, please ask an admin."
 )
+
+
+async def _await_with_retry(coro_factory, *, label: str):
+    """Await a coroutine under a timeout, retrying once on TimeoutError.
+
+    coro_factory must return a fresh coroutine on each call (a coroutine can
+    only be awaited once). Raises TimeoutError if every attempt times out.
+    """
+    for attempt in range(1, _STATUS_CALL_ATTEMPTS + 1):
+        try:
+            return await asyncio.wait_for(coro_factory(), timeout=_STATUS_CALL_TIMEOUT)
+        except asyncio.TimeoutError:
+            if attempt >= _STATUS_CALL_ATTEMPTS:
+                raise
+            logger.warning(
+                f"{label} timed out (attempt {attempt}/{_STATUS_CALL_ATTEMPTS}) — retrying"
+            )
+            await asyncio.sleep(_STATUS_RETRY_DELAY)
 
 
 class MessageHandler:
@@ -283,8 +312,9 @@ class MessageHandler:
         except asyncio.TimeoutError:
             logger.error(f"Operation timed out for command: {command}")
             await message.reply(
-                f"❌ {command.title()} operation timed out. Please try again.",
-                delete_after=_REPLY_DELETE_AFTER,
+                f"❌ {command.title()} timed out after retries and was NOT applied. "
+                f"The signal is unchanged — please try again.",
+                delete_after=_ERROR_REPLY_DELETE_AFTER,
             )
             await self._safe_delete(message)
             return
@@ -292,13 +322,15 @@ class MessageHandler:
             logger.error(f"Error processing command '{command}': {e}", exc_info=True)
             await message.reply(
                 f"❌ Error processing {command} command.",
-                delete_after=_REPLY_DELETE_AFTER,
+                delete_after=_ERROR_REPLY_DELETE_AFTER,
             )
             await self._safe_delete(message)
             return
 
         if not (success and action_taken):
-            await message.reply("❌ Failed to process command.", delete_after=_REPLY_DELETE_AFTER)
+            await message.reply(
+                "❌ Failed to process command.", delete_after=_ERROR_REPLY_DELETE_AFTER
+            )
             logger.warning(f"Failed to process command '{command}' for signal {signal_id}")
             await self._safe_delete(message)
             return
@@ -324,13 +356,13 @@ class MessageHandler:
         """Apply a manual status change plus the in-memory sync every terminal
         reply command shares."""
         verb = "Cancelled" if status == "cancelled" else "Set"
-        success = await asyncio.wait_for(
-            self.signal_db.manually_set_signal_status(
+        success = await _await_with_retry(
+            lambda: self.signal_db.manually_set_signal_status(
                 signal_id,
                 status,
                 f"{verb} via {path} reply by {message.author.name}",
             ),
-            timeout=5.0,
+            label=f"set-status {status} for signal {signal_id}",
         )
         if success and self.bot.services.monitor:
             self.bot.services.monitor.sync_signal_status_in_memory(signal_id, status)
@@ -360,11 +392,11 @@ class MessageHandler:
         """Mark a signal HIT via reply, re-adding it to the monitor if it was
         cancelled (limits resubscribed so ticks see it immediately)."""
         was_cancelled = signal.status == "cancelled"
-        transitioned = await asyncio.wait_for(
-            self.signal_db.manually_set_signal_to_hit(
+        transitioned = await _await_with_retry(
+            lambda: self.signal_db.manually_set_signal_to_hit(
                 signal_id, f"Set via {path} reply by {message.author.name}"
             ),
-            timeout=5.0,
+            label=f"set-hit for signal {signal_id}",
         )
         if not transitioned:
             return False
