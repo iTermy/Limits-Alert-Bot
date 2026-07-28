@@ -10,7 +10,7 @@ import os
 from collections.abc import AsyncIterator
 from concurrent.futures import ThreadPoolExecutor
 from datetime import datetime, timezone
-from typing import Callable, Optional
+from typing import Any, Callable, Optional
 
 import MetaTrader5 as mt5
 
@@ -20,10 +20,13 @@ logger = logging.getLogger(__name__)
 # thread pool (rather than asyncio's shared default executor) keeps a hung MT5
 # terminal — common during the broker's spread-hour rollover — from starving the
 # machinery the rest of the loop depends on (DNS resolution, feed reconnects,
-# Discord I/O). A per-call timeout lets the poll loop abandon a wedged tick fetch
-# and keep serving the symbols that are still responding.
+# Discord I/O). A timeout lets the poll loop abandon a wedged sweep and retry.
+#
+# The whole symbol sweep runs on one hand-off: at ~30 subscribed symbols, a
+# hand-off per symbol cost hundreds of thread wake-ups a second and was a
+# standing source of event-loop latency for everything else on the loop.
 _MT5_EXECUTOR_WORKERS = 4
-_MT5_CALL_TIMEOUT_SECONDS = 5
+_MT5_SWEEP_TIMEOUT_SECONDS = 10
 
 
 class ICMarketsStream:
@@ -69,6 +72,24 @@ class ICMarketsStream:
         """Run a blocking MT5 call on the dedicated pool, never on the loop thread."""
         loop = asyncio.get_running_loop()
         return await loop.run_in_executor(self._mt5_executor, func, *args)
+
+    def _poll_symbols(self, symbols: list[str]) -> list[tuple[str, Any]]:
+        """Fetch the current tick for each symbol. Runs on the MT5 executor.
+
+        Returns (symbol, tick) pairs for the symbols that responded; a symbol
+        that errors or has no tick is skipped so one bad symbol can't cost the
+        rest of the sweep.
+        """
+        ticks = []
+        for symbol in symbols:
+            try:
+                tick = mt5.symbol_info_tick(symbol)
+            except Exception as e:
+                logger.debug("MT5 tick fetch failed for %s: %s", symbol, e)
+                continue
+            if tick is not None:
+                ticks.append((symbol, tick))
+        return ticks
 
     def _reset_mt5_executor(self):
         """Swap in a fresh MT5 pool, abandoning any threads wedged on a hung
@@ -214,25 +235,24 @@ class ICMarketsStream:
 
         while self.streaming:
             try:
-                for symbol in set(self.subscribed_symbols):
-                    # Fetch current tick. Bound the call so a wedged terminal
-                    # (e.g. spread-hour rollover) can't stall polling for the
-                    # symbols that are still responding.
+                symbols = sorted(self.subscribed_symbols)
+                ticks = []
+                if symbols:
+                    # Sweep every symbol on one thread hand-off. Bound the sweep
+                    # so a wedged terminal (e.g. spread-hour rollover) can't stall
+                    # polling indefinitely.
                     try:
-                        tick = await asyncio.wait_for(
-                            self._run_mt5(mt5.symbol_info_tick, symbol),
-                            timeout=_MT5_CALL_TIMEOUT_SECONDS,
+                        ticks = await asyncio.wait_for(
+                            self._run_mt5(self._poll_symbols, symbols),
+                            timeout=_MT5_SWEEP_TIMEOUT_SECONDS,
                         )
                     except asyncio.TimeoutError:
                         logger.warning(
-                            "MT5 tick fetch for %s timed out after %ss; skipping",
-                            symbol, _MT5_CALL_TIMEOUT_SECONDS,
+                            "MT5 sweep of %d symbol(s) timed out after %ss; skipping cycle",
+                            len(symbols), _MT5_SWEEP_TIMEOUT_SECONDS,
                         )
-                        continue
 
-                    if tick is None:
-                        continue
-
+                for symbol, tick in ticks:
                     # Refresh health-monitor liveness on every successful poll,
                     # even when bid/ask are unchanged — quiet markets still mean
                     # the feed is alive.

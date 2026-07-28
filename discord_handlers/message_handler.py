@@ -34,9 +34,16 @@ _ERROR_REPLY_DELETE_AFTER = 60.0
 # Status-change reply commands retry once on timeout: a transient event-loop
 # stall can blow the per-attempt window, and a missed cancel on a live signal
 # is worse than a second attempt.
-_STATUS_CALL_TIMEOUT = 5.0
+#
+# The budget has to clear the round-trip cost of a full status transition
+# against the Supabase pooler, which measured 2-5s in production — a 5s window
+# left no headroom and timed out on the heaviest path (profit on a hit signal).
+_STATUS_CALL_TIMEOUT = 15.0
 _STATUS_CALL_ATTEMPTS = 2
 _STATUS_RETRY_DELAY = 0.5
+
+# Budget for the post-timeout status re-read (see _status_already_applied).
+_STATUS_VERIFY_TIMEOUT = 5.0
 
 # DM sent when a non-manager tries to manage a signal via reply.
 _NO_PERMISSION_DM = (
@@ -312,8 +319,7 @@ class MessageHandler:
         except asyncio.TimeoutError:
             logger.error(f"Operation timed out for command: {command}")
             await message.reply(
-                f"❌ {command.title()} timed out after retries and was NOT applied. "
-                f"The signal is unchanged — please try again.",
+                await self._describe_timeout_outcome(signal_id, command),
                 delete_after=_ERROR_REPLY_DELETE_AFTER,
             )
             await self._safe_delete(message)
@@ -350,20 +356,93 @@ class MessageHandler:
 
         logger.info(f"Signal {signal_id} {action_taken} via {path} reply by {message.author.name}")
 
+    def _timeout_target_status(self, command: str) -> Optional[str]:
+        """The status a reply command drives a signal to, or None if it has no
+        single target (e.g. reactivate, which lands on active or hit)."""
+        if command in self._REPLY_STATUS_COMMANDS:
+            return self._REPLY_STATUS_COMMANDS[command][0]
+        if command == "hit":
+            return "hit"
+        return None
+
+    async def _status_already_applied(self, signal_id: int, target: str) -> Optional[bool]:
+        """Whether a timed-out status change actually landed.
+
+        asyncio.wait_for cancels the DB call mid-statement, but a cancel issued
+        through the Supabase session pooler does not reliably reach the backend:
+        the transaction can commit after the client has given up. Without this
+        check the bot reported "NOT applied" on writes that had succeeded, which
+        sent users into retry loops against already-updated signals.
+
+        Returns True if the signal now holds the target status, False if it
+        demonstrably does not, and None if the status could not be re-read.
+        """
+        try:
+            signal = await asyncio.wait_for(
+                self.signal_db.get_signal_with_limits(signal_id),
+                timeout=_STATUS_VERIFY_TIMEOUT,
+            )
+        except Exception as e:
+            logger.warning(f"Could not verify status of signal {signal_id} after timeout: {e}")
+            return None
+        if signal is None:
+            return None
+        return signal.status == target
+
+    async def _describe_timeout_outcome(self, signal_id: int, command: str) -> str:
+        """Build the user-facing notice for a command that exhausted its retries."""
+        target = self._timeout_target_status(command)
+        if target is None:
+            return (
+                f"⚠️ {command.title()} timed out. Check the signal before retrying — "
+                f"the change may or may not have applied."
+            )
+
+        applied = await self._status_already_applied(signal_id, target)
+        if applied is None:
+            return (
+                f"⚠️ {command.title()} timed out and the outcome could not be verified. "
+                f"Check signal {signal_id} before retrying."
+            )
+        if applied:
+            # The commit landed between _reply_set_status's check and this one.
+            # Say so rather than sending the user into a retry loop; the embed
+            # may lag until the next refresh, but the status itself is correct.
+            return (
+                f"⚠️ {command.title()} timed out, but the change **did apply** — "
+                f"signal {signal_id} is now {target.upper()}. No need to retry."
+            )
+        return (
+            f"❌ {command.title()} timed out and was NOT applied — signal {signal_id} is "
+            f"unchanged. Please try again."
+        )
+
     async def _reply_set_status(
         self, message: discord.Message, path: str, signal_id: int, status: str
     ) -> bool:
         """Apply a manual status change plus the in-memory sync every terminal
         reply command shares."""
         verb = "Cancelled" if status == "cancelled" else "Set"
-        success = await _await_with_retry(
-            lambda: self.signal_db.manually_set_signal_status(
-                signal_id,
-                status,
-                f"{verb} via {path} reply by {message.author.name}",
-            ),
-            label=f"set-status {status} for signal {signal_id}",
-        )
+        try:
+            success = await _await_with_retry(
+                lambda: self.signal_db.manually_set_signal_status(
+                    signal_id,
+                    status,
+                    f"{verb} via {path} reply by {message.author.name}",
+                ),
+                label=f"set-status {status} for signal {signal_id}",
+            )
+        except asyncio.TimeoutError:
+            # The write may have committed after the client gave up. Treat a
+            # confirmed commit as success so the follow-through the caller owns
+            # — embed edit, reactions, in-memory sync — still runs.
+            if not await self._status_already_applied(signal_id, status):
+                raise
+            logger.warning(
+                f"set-status {status} for signal {signal_id} timed out but the write "
+                f"landed — continuing with the success path"
+            )
+            success = True
         if success and self.bot.services.monitor:
             self.bot.services.monitor.sync_signal_status_in_memory(signal_id, status)
             await self.bot.services.monitor.finalize_trailing_on_manual_close(signal_id)
@@ -392,12 +471,21 @@ class MessageHandler:
         """Mark a signal HIT via reply, re-adding it to the monitor if it was
         cancelled (limits resubscribed so ticks see it immediately)."""
         was_cancelled = signal.status == "cancelled"
-        transitioned = await _await_with_retry(
-            lambda: self.signal_db.manually_set_signal_to_hit(
-                signal_id, f"Set via {path} reply by {message.author.name}"
-            ),
-            label=f"set-hit for signal {signal_id}",
-        )
+        try:
+            transitioned = await _await_with_retry(
+                lambda: self.signal_db.manually_set_signal_to_hit(
+                    signal_id, f"Set via {path} reply by {message.author.name}"
+                ),
+                label=f"set-hit for signal {signal_id}",
+            )
+        except asyncio.TimeoutError:
+            if not await self._status_already_applied(signal_id, "hit"):
+                raise
+            logger.warning(
+                f"set-hit for signal {signal_id} timed out but the write landed — "
+                f"continuing with the success path"
+            )
+            transitioned = True
         if not transitioned:
             return False
 

@@ -417,7 +417,7 @@ class SignalDatabase:
                         "manual",
                         "User cancelled",
                     )
-                await self._snapshot_close_prices(row["id"], row["instrument"])
+                    await self._snapshot_close_prices(conn, row["id"], row["instrument"])
                 logger.info(f"Successfully cancelled signal {row['id']}")
                 return True
 
@@ -544,31 +544,68 @@ class SignalDatabase:
         )
         return dict(row) if row else None
 
-    async def _snapshot_close_prices(self, signal_id: int, instrument: str) -> None:
+    async def _snapshot_close_prices(
+        self,
+        conn,
+        signal_id: int,
+        instrument: str,
+        price: Optional[dict[str, Any]] = None,
+    ) -> None:
         """
         Record live bid/ask/feed on a signal at close time.
 
         Only applies to signals that entered a position (>=1 hit limit) — the
         snapshot gives every such close a mark-to-market exit price, including
-        manual cancels and breakevens that otherwise record nothing. Failures
-        are logged and swallowed: a missing snapshot must never break a status
-        transition.
+        manual cancels and breakevens that otherwise record nothing.
+
+        Runs on the caller's transaction connection rather than acquiring its
+        own, so it costs statements instead of a second pool acquire plus its
+        own BEGIN/COMMIT pair. Callers that already hold a live price (the
+        manual-profit path, which derives tp_price from it) pass it in: that
+        skips a redundant round-trip and makes close_bid/close_ask describe the
+        same tick as tp_price.
+
+        Failures are logged and swallowed: a missing snapshot must never break
+        a status transition. Because the work shares the caller's transaction,
+        it runs in a nested one — asyncpg maps that to a SAVEPOINT, so a failed
+        statement rolls back the snapshot alone instead of poisoning the
+        transaction and taking the status change down with it.
         """
         try:
-            has_hit = await self.db.fetch_one(
-                "SELECT 1 FROM limits WHERE signal_id = $1 AND status = 'hit' LIMIT 1",
-                (signal_id,),
-            )
-            if not has_hit:
-                return
-            price = await self._get_live_price(instrument)
-            if not price or price.get("bid") is None or price.get("ask") is None:
-                logger.warning(f"No live price for {instrument} — close snapshot skipped for signal {signal_id}")
-                return
-            await self.db.execute(
-                "UPDATE signals SET close_bid = $1, close_ask = $2, close_feed = $3 WHERE id = $4",
-                (float(price["bid"]), float(price["ask"]), price.get("feed"), signal_id),
-            )
+            async with conn.transaction():
+                if price is None:
+                    has_hit = await conn.fetchval(
+                        "SELECT 1 FROM limits WHERE signal_id = $1 AND status = 'hit' LIMIT 1",
+                        signal_id,
+                    )
+                    if not has_hit:
+                        return
+                    row = await conn.fetchrow(
+                        "SELECT bid, ask, feed FROM live_prices WHERE symbol = $1",
+                        instrument.upper(),
+                    )
+                    price = dict(row) if row else None
+                if not price or price.get("bid") is None or price.get("ask") is None:
+                    logger.warning(
+                        f"No live price for {instrument} — close snapshot skipped for signal {signal_id}"
+                    )
+                    return
+                # The EXISTS clause carries the entered-position rule for callers
+                # that supplied a price and so skipped the probe above.
+                await conn.execute(
+                    """
+                    UPDATE signals
+                    SET close_bid = $1, close_ask = $2, close_feed = $3
+                    WHERE id = $4
+                      AND EXISTS (
+                          SELECT 1 FROM limits WHERE signal_id = $4 AND status = 'hit'
+                      )
+                    """,
+                    float(price["bid"]),
+                    float(price["ask"]),
+                    price.get("feed"),
+                    signal_id,
+                )
         except Exception as e:
             logger.warning(f"Close-price snapshot failed for signal {signal_id}: {e}")
 
@@ -671,6 +708,8 @@ class SignalDatabase:
 
             # Record the market price at the time of a manual profit so the DB always
             # captures the close price (auto-TP supplies its own; manual paths fall here).
+            # Reused by the close snapshot below so the transition costs one price read.
+            price_data = None
             if new_status == SignalStatus.PROFIT and tp_price is None:
                 price_data = await self._get_live_price(row["instrument"])
                 if price_data and price_data.get("bid") is not None and price_data.get("ask") is not None:
@@ -767,8 +806,10 @@ class SignalDatabase:
                         effective_closed_reason,
                         reason or "Manual override",
                     )
-                if SignalStatus.is_final(new_status):
-                    await self._snapshot_close_prices(signal_id, row["instrument"])
+                    if SignalStatus.is_final(new_status):
+                        await self._snapshot_close_prices(
+                            conn, signal_id, row["instrument"], price_data
+                        )
                 logger.info(
                     f"Successfully set signal {signal_id} status: {old_status} -> {new_status}"
                     + (f" (tp_price={tp_price:.5f})" if tp_price is not None else "")
@@ -1106,7 +1147,7 @@ class SignalDatabase:
                             "automatic",
                             "Expired",
                         )
-                    await self._snapshot_close_prices(signal_id, instrument)
+                        await self._snapshot_close_prices(conn, signal_id, instrument)
                     count += 1
                 except Exception as e:
                     logger.error(f"Error expiring signal {signal_id}: {e}", exc_info=True)
