@@ -86,6 +86,8 @@ class SymbolMapper:
                 "DAX",
                 "UK100",
                 "CHINA50",
+                "CHINAH",
+                "CN50",
                 "US500",
                 "USTEC",
                 "US30",
@@ -97,6 +99,11 @@ class SymbolMapper:
                 "DE40",
                 "JP225",
                 "NIKKEI",
+                "F40",
+                "HK50",
+                "HK33",
+                "AU200",
+                "EU50",
             ]
         ):
             return "indices"

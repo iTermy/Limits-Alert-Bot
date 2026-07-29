@@ -184,7 +184,13 @@ class OANDAStream:
                 # Open streaming connection
                 async with self.session.get(self.stream_url, params=params) as response:
                     if response.status != 200:
-                        logger.debug(f"OANDA stream failed: {response.status}")
+                        # A single unrecognised instrument rejects the whole
+                        # request, silencing every OANDA symbol — log the body
+                        # so the offending name is identifiable.
+                        body = (await response.text())[:300]
+                        logger.warning(
+                            "OANDA stream request rejected (%s): %s", response.status, body
+                        )
                         await asyncio.sleep(5)
                         continue
 

@@ -134,6 +134,8 @@ class BaseThresholdConfig:
                 "DOW",
                 "DAX",
                 "CHINA50",
+                "CHINAH",
+                "CN50",
                 "US500",
                 "USTEC",
                 "US30",
@@ -145,6 +147,12 @@ class BaseThresholdConfig:
                 "JP225",
                 "NIKKEI",
                 "FTSE",
+                "UK100",
+                "F40",
+                "HK50",
+                "HK33",
+                "AU200",
+                "EU50",
             ]
         ):
             return "indices"
@@ -174,7 +182,8 @@ class BaseThresholdConfig:
         if any(x in s for x in ["SPX", "NAS", "DOW", "DAX", "US500", "USTEC", "US30"]):
             return 1.0
         if any(x in s for x in ["JP225", "NIKKEI", "DE30", "DE40", "GER", "US2000",
-                                "RUSSELL", "UK100", "FTSE", "HK50", "CHINA50"]):
+                                "RUSSELL", "UK100", "FTSE", "HK50", "HK33", "CHINA50",
+                                "CHINAH", "CN50", "F40", "AU200", "EU50"]):
             return 1.0
         if any(x in s for x in ["OIL", "XTI", "WTI", "BRENT", "BCO"]):
             return 0.01

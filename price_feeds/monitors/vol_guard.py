@@ -106,6 +106,10 @@ _DEFAULT_SYMBOL_THRESHOLDS = {
     "UK100": 100.0,
     "JP225": 400.0,
     "F40": 80.0,
+    "HK50": 200.0,
+    "CHINA50": 120.0,
+    "CHINAH": 80.0,
+    "AUS2000": 80.0,
     "ETHUSDT": 80.0,
 }
 

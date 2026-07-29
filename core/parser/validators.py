@@ -31,30 +31,41 @@ def uses_gold_tolls_sl(channel_name: Optional[str]) -> bool:
         return True
     return "toll" in name and name != "general-tolls"
 
-INDEX_SYMBOL_BLACKLIST = [
-    "spx500usd",
-    "nas100usd",
-    "us30usd",
-    "us2000usd",
-    "jp225",
-    "nas100",
-    "us30",
-    "spx500",
-    "sp500",
-    "us2000",
-    "de30",
-    "dax30",
-    "ger30",
-    "china50",
-    "russel2000",
-    "aus200",
-    "f40",
-    "cac40",
-    "ftse100",
-    "hk50",
-    "asx200",
-    "gcq26",
-]
+# Index tickers whose digits would otherwise be read as price levels. Sorted
+# longest-first so a shorter entry can never eat part of a longer one (stripping
+# "us2000" before "aus2000" would leave a stray "a0").
+INDEX_SYMBOL_BLACKLIST = sorted(
+    [
+        "spx500usd",
+        "nas100usd",
+        "us30usd",
+        "us2000usd",
+        "jp225",
+        "nas100",
+        "us30",
+        "spx500",
+        "sp500",
+        "us2000",
+        "de30",
+        "dax30",
+        "ger30",
+        "china50",
+        "cn50",
+        "russel2000",
+        "aus2000",
+        "aus200",
+        "f40",
+        "fr40",
+        "cac40",
+        "ftse100",
+        "hk50",
+        "hk33",
+        "asx200",
+        "gcq26",
+    ],
+    key=len,
+    reverse=True,
+)
 
 # ============================================================================
 # MAIN VALIDATION FUNCTIONS (for __init__.py)

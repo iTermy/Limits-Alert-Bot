@@ -115,7 +115,17 @@
       "Bash(curl -s -m 5 -o /dev/null -w \"frontend HTTP %{http_code}\\\\n\" http://127.0.0.1:8501/)",
       "Bash(curl -s -m 5 -X POST http://127.0.0.1:8501/api/shutdown)",
       "Bash(curl -s -m 3 http://127.0.0.1:8501/api/status)",
-      "Bash(curl -s -m 5 -X POST http://127.0.0.1:8501/api/engine/shutdown)"
+      "Bash(curl -s -m 5 -X POST http://127.0.0.1:8501/api/engine/shutdown)",
+      "Bash(git hash-object *)",
+      "Bash(git rev-parse *)",
+      "Bash(git archive *)",
+      "Bash(tar -x -C \"dist/TM_BOT_PRODUCTION\")",
+      "Bash(echo \"exit: $?\")",
+      "Bash(git pull *)",
+      "Bash(git stash *)",
+      "Bash(awk '/2026-07-27 16:25:5[0-9]/{f=1} f; /2026-07-27 16:26:3[0-9]/{if\\(f\\)exit}' bot.production.log)",
+      "Bash(echo \"exit=$?\")",
+      "Bash(git log *)"
     ],
     "additionalDirectories": [
       "C:\\Personal Projects\\MT5-Auto-Execution-Bot"

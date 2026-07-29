@@ -354,6 +354,30 @@
       "value": 20.0,
       "set_by": "itermy",
       "set_at": "2026-07-13T00:00:00+00:00"
+    },
+    "HK50": {
+      "type": "dollars",
+      "value": 50.0,
+      "set_by": "itermy",
+      "set_at": "2026-07-29T00:00:00+00:00"
+    },
+    "CHINA50": {
+      "type": "dollars",
+      "value": 20.0,
+      "set_by": "itermy",
+      "set_at": "2026-07-29T00:00:00+00:00"
+    },
+    "CHINAH": {
+      "type": "dollars",
+      "value": 20.0,
+      "set_by": "itermy",
+      "set_at": "2026-07-29T00:00:00+00:00"
+    },
+    "AUS2000": {
+      "type": "dollars",
+      "value": 20.0,
+      "set_by": "itermy",
+      "set_at": "2026-07-29T00:00:00+00:00"
     }
   }
 }

@@ -14,8 +14,8 @@
       "examples": ["EURUSD", "GBPJPY", "AUDUSD"]
     },
     "indices": {
-      "keywords": ["spx", "nas", "dax", "jp225", "china", "us2000", "de30", "fra40", "uk100", "aus200"],
-      "patterns": ["(spx|nas|dax|jp|china|us2000|de|fra|uk|aus)\\d+"],
+      "keywords": ["spx", "nas", "dax", "jp225", "china", "chinah", "us2000", "de30", "f40", "fr40", "uk100", "aus2000", "hk50", "cn50", "eu50"],
+      "patterns": ["(spx|nas|dax|jp|china|us2000|de|fr|uk|aus|hk|cn|eu)\\d+"],
       "examples": ["spx500usd", "nas100usd", "jp225", "de30eur"]
     },
     "crypto": {
@@ -83,19 +83,26 @@
         "china50": "CN50_USD",
         "china50usd": "CN50_USD",
         "cn50": "CN50_USD",
+        "chinah": "CHINAH_HKD",
+        "chinahhkd": "CHINAH_HKD",
+        "hscei": "CHINAH_HKD",
         "us2000usd": "US2000_USD",
         "us2000": "US2000_USD",
         "russell": "US2000_USD",
+        "f40": "FR40_EUR",
+        "fr40": "FR40_EUR",
         "fra40": "FR40_EUR",
         "fra40eur": "FR40_EUR",
         "cac": "FR40_EUR",
         "uk100gbp": "UK100_GBP",
         "ftse": "UK100_GBP",
+        "aus2000": "AU200_AUD",
         "aus200": "AU200_AUD",
         "aus200aud": "AU200_AUD",
         "asx": "AU200_AUD",
         "hk50": "HK33_HKD",
         "hk33": "HK33_HKD",
+        "hsi": "HK33_HKD",
         "eu50": "EU50_EUR",
         "eu50eur": "EU50_EUR",
         "stoxx": "EU50_EUR",
@@ -173,11 +180,12 @@
       "JP225_USD": "jp225",
       "DE30_EUR": "de30eur",
       "CN50_USD": "china50",
+      "CHINAH_HKD": "chinah",
       "US2000_USD": "us2000usd",
-      "FR40_EUR": "fra40",
+      "FR40_EUR": "f40",
       "UK100_GBP": "uk100gbp",
-      "AU200_AUD": "aus200",
-      "HK33_HKD": "hk33",
+      "AU200_AUD": "aus2000",
+      "HK33_HKD": "hk50",
       "EU50_EUR": "eu50"
     }
   }
