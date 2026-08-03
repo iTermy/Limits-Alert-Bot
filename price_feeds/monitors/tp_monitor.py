@@ -152,6 +152,15 @@ class AutoTPMonitor:
         )
         return success
 
+    async def _did_profit_land(self, signal_id: int) -> bool:
+        """Re-fetch a signal after a write timeout; True if it committed as profit."""
+        try:
+            current = await self.signal_db.get_signal_with_limits(signal_id)
+        except Exception as e:
+            logger.error(f"Signal {signal_id}: could not verify status after timeout: {e}")
+            return False
+        return bool(current and current.status == "profit")
+
     async def _trigger_auto_profit(
         self,
         signal: SignalData,
@@ -202,8 +211,19 @@ class AutoTPMonitor:
                 timeout=5.0,
             )
         except asyncio.TimeoutError:
-            logger.error(f"Signal {signal_id}: DB timeout while marking auto-TP profit")
-            return False
+            # The Supabase pooler write can exceed the timeout yet still commit.
+            # Verify the actual status: if it landed as profit, continue to the
+            # embed edit so the DB and the embed don't diverge (which otherwise
+            # leaves the embed showing HIT forever, since the next tick's status
+            # guard evicts the signal before anything retries the alert).
+            logger.warning(
+                f"Signal {signal_id}: DB timeout while marking auto-TP profit — verifying"
+            )
+            success = await self._did_profit_land(signal_id)
+            if not success:
+                logger.error(f"Signal {signal_id}: auto-TP profit write did not land after timeout")
+                return False
+            logger.info(f"Signal {signal_id}: auto-TP profit write landed despite timeout")
         except Exception as e:
             logger.error(f"Signal {signal_id}: error marking auto-TP profit: {e}", exc_info=True)
             return False
