@@ -132,7 +132,7 @@ Guidelines for Robust Parsing:
 - Only return null when:
   * Symbol, direction, and both limits & stop loss cannot be confidently determined after reasonable corrections.
   * Multiple conflicting possibilities remain after trying to resolve.
-- **DO NOT PARSE IF IT'S A FUTURES SIGNAL, UNLESS IT IS GOLD FUTURES. Gold futures should use instrument GCQ26. RETURN NULL FOR ALL OTHER FUTURES.**
+- **DO NOT PARSE IF IT'S A FUTURES SIGNAL, UNLESS IT IS GOLD FUTURES. Gold futures should use instrument GCZ26_CFD. RETURN NULL FOR ALL OTHER FUTURES.**
 - **"vth" in text means week_end**
 
 Stock-specific rules:

@@ -319,7 +319,7 @@ class BotManagementCog(BaseCog):
                 "`!active [instrument] [sort:method]` - Show active signals\n"
                 "  └ Sort options: recent, oldest, distance, progress\n"
                 "`!info <id>` - Signal details\n"
-                "`!futures <id>` - Convert a gold signal to GCQ26 futures prices\n"
+                "`!futures <id>` - Convert a gold signal to GCZ26_CFD futures prices\n"
                 "`!report [day/week/month] [risky]` - Trading report (add `risky` for risky trades)\n"
                 "`!profit <id>` - Mark as profit\n"
                 "`!sl <id>` - Mark as stop loss\n"

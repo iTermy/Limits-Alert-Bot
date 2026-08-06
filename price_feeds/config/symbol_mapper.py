@@ -66,7 +66,7 @@ class SymbolMapper:
             return "crypto"
 
         # Check metals
-        if any(metal in symbol_upper for metal in ["XAU", "XAG", "GOLD", "SILVER", "GCQ"]):
+        if any(metal in symbol_upper for metal in ["XAU", "XAG", "GOLD", "SILVER", "GCZ"]):
             return "metals"
 
         # Check oil

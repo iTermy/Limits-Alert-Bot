@@ -314,7 +314,7 @@ def extract_instrument(text: str, channel_name: str, channel_config: dict) -> Op
     if _FUTURES_RE.search(text_lower):
         is_gold_channel = channel_name and "gold" in channel_name.lower()
         if is_gold_channel or _GOLD_KW_RE.search(text_lower):
-            return "GCQ26"
+            return "GCZ26_CFD"
 
     # Check if this is a crypto-alt channel (has both "crypto" and "alt")
     is_crypto_alt = False

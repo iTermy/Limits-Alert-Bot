@@ -19,7 +19,7 @@ class TestAssetClass:
             ("EURUSD", "forex"),
             ("USDJPY", "forex_jpy"),
             ("XAUUSD", "metals"),
-            ("GCQ26", "metals"),
+            ("GCZ26_CFD", "metals"),
             ("XAGUSD", "metals"),
             ("BTCUSDT", "crypto"),
             ("SOLUSDT", "crypto"),

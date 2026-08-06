@@ -24,7 +24,7 @@ logger = get_logger("lifecycle_commands")
 
 # Gold spot instruments and the gold futures contract they convert to.
 GOLD_INSTRUMENTS = {"XAUUSD", "GOLD"}
-GOLD_FUTURES_SYMBOL = "GCQ26"
+GOLD_FUTURES_SYMBOL = "GCZ26_CFD"
 
 
 class LifecycleCog(BaseCog):
@@ -301,7 +301,7 @@ class LifecycleCog(BaseCog):
     async def futures_conversion(self, ctx: commands.Context, signal_id: int):
         """
         Convert a gold (XAUUSD) signal's limits and stop loss to the equivalent
-        GCQ26 futures prices, using the live spot-to-futures price difference.
+        GCZ26_CFD futures prices, using the live spot-to-futures price difference.
         """
         signal = await self.signal_db.get_signal_with_limits(signal_id)
         if not signal:
@@ -317,7 +317,7 @@ class LifecycleCog(BaseCog):
 
         stream_manager = self.services.stream_manager
 
-        # GCQ26 is only subscribed on demand — ensure it's live before reading it.
+        # GCZ26_CFD is only subscribed on demand — ensure it's live before reading it.
         await stream_manager.subscribe_symbol(GOLD_FUTURES_SYMBOL)
 
         spot_price = await stream_manager.get_latest_price(signal.instrument)

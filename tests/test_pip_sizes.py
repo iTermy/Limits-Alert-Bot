@@ -25,7 +25,7 @@ get_pip_size = BaseThresholdConfig.get_pip_size
         ("EURJPY", 0.01),
         # Metals
         ("XAUUSD", 0.01),
-        ("GCQ26", 0.01),
+        ("GCZ26_CFD", 0.01),
         ("XAGUSD", 0.001),
         # Crypto
         ("BTCUSDT", 1.0),

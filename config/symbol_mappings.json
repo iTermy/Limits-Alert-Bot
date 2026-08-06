@@ -24,9 +24,9 @@
       "examples": ["BTCUSDT", "ETHUSDT", "DOGEUSDT"]
     },
     "metals": {
-      "keywords": ["xau", "xag", "gold", "silver", "gcq"],
-      "patterns": ["^XA[UG]USD$", "^GOLD$", "^SILVER$", "^GCQ\\d+$"],
-      "examples": ["XAUUSD", "XAGUSD", "GOLD", "SILVER", "GCQ26"]
+      "keywords": ["xau", "xag", "gold", "silver", "gcz"],
+      "patterns": ["^XA[UG]USD$", "^GOLD$", "^SILVER$", "^GC[A-Z]\\d+(_CFD)?$"],
+      "examples": ["XAUUSD", "XAGUSD", "GOLD", "SILVER", "GCZ26_CFD"]
     },
     "stocks": {
       "patterns": ["\\.(NAS|NYSE)$"],
