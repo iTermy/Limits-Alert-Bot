@@ -62,8 +62,14 @@ class ExcursionState:
     entry_time: Optional[datetime] = None
     atr_at_hit: Optional[float] = None
 
+    # Extremes are held in memory as well as written per ratchet, so the close
+    # can repair a row whose intermediate updates were dropped.
     mfe_pips: float = 0.0
+    mfe_price: Optional[float] = None
+    mfe_time: Optional[datetime] = None
     mae_pips: float = 0.0
+    mae_price: Optional[float] = None
+    mae_time: Optional[datetime] = None
     started_at: float = 0.0  # monotonic; bounds the volume sampler window
 
     ordering_bar: Optional[float] = None  # price-unit bar for mae_before_mfe
@@ -233,6 +239,8 @@ class ExcursionMonitor:
         fav_pips = favorable / state.pip_size
         if fav_pips > state.mfe_pips:
             state.mfe_pips = fav_pips
+            state.mfe_price = close_price
+            state.mfe_time = now
             try:
                 await self._db.update_mfe(
                     state.signal_id, close_price, fav_pips, self._atr_mult(state, favorable), now
@@ -243,6 +251,8 @@ class ExcursionMonitor:
         adv_pips = adverse / state.pip_size
         if adv_pips > state.mae_pips:
             state.mae_pips = adv_pips
+            state.mae_price = close_price
+            state.mae_time = now
             try:
                 await self._db.update_mae(
                     state.signal_id, close_price, adv_pips, self._atr_mult(state, adverse), now
@@ -256,13 +266,28 @@ class ExcursionMonitor:
         The DB write runs whether or not in-memory state survives — a restart or
         an eviction mid-trade must not cost the row its exit. The UPDATE is
         scoped to still-open rows, so it is a no-op for anything already closed.
+
+        The in-memory extremes ride along: per-ratchet updates are best-effort
+        and a dropped one would otherwise leave the row understating MFE/MAE for
+        good, so the close re-asserts them and the DB keeps whichever is larger.
         """
+        state = self._tracking.get(signal_id)
         try:
-            await self._db.finalize(signal_id, exit_price, datetime.now(timezone.utc), reason)
+            await self._db.finalize(
+                signal_id,
+                exit_price,
+                datetime.now(timezone.utc),
+                reason,
+                mfe_pips=state.mfe_pips if state else None,
+                mfe_price=state.mfe_price if state else None,
+                mfe_time=state.mfe_time if state else None,
+                mae_pips=state.mae_pips if state else None,
+                mae_price=state.mae_price if state else None,
+                mae_time=state.mae_time if state else None,
+            )
         except Exception as e:
             logger.error("Failed to finalize excursion for %s: %s", signal_id, e)
 
-        state = self._tracking.get(signal_id)
         if state is None:
             return
 
@@ -310,7 +335,9 @@ class ExcursionMonitor:
             entry_time=row["entry_time"],
             atr_at_hit=row["atr_at_hit"],
             mfe_pips=row["mfe_pips"] or 0.0,
+            mfe_price=row["mfe_price"],
             mae_pips=row["mae_pips"] or 0.0,
+            mae_price=row["mae_price"],
             started_at=asyncio.get_event_loop().time(),
             ordering_bar=self._ordering_bar(row["instrument"], row["signal_type"], row["pip_size"]),
             ordering_decided=row["mae_before_mfe"] is not None,
