@@ -274,6 +274,7 @@ class StreamingPriceMonitor:
 
         asyncio.create_task(self._periodic_signal_refresh())
         asyncio.create_task(self.excursion_monitor.run_volume_sampler())
+        asyncio.create_task(self.excursion_monitor.run_reconciler())
 
         self.live_price_writer.start()
 
@@ -1123,19 +1124,11 @@ class StreamingPriceMonitor:
         self._apply_status_to_signal(signal, new_status)
 
     async def finalize_trailing_on_manual_close(self, signal_id: int) -> None:
-        """Close out trailing-stop and excursion tracking after a manual status
-        override (setstatus/profit/cancel/bulk-cancel) that doesn't have a
-        precise tick price on hand. No-op for whichever isn't tracking this
-        signal — trailing only starts at HIT, excursion starts at approach.
+        """Close out trailing-stop and excursion tracking after a close that has
+        no precise tick price on hand (setstatus/profit/cancel/bulk-cancel,
+        expiry, message deletion). Uses the last live price as the exit.
         """
-        tracking_trailing = self.trailing_monitor.is_tracking(signal_id)
-        tracking_excursion = self.excursion_monitor.is_tracking(signal_id)
-        if not tracking_trailing and not tracking_excursion:
-            return
-
-        signal = self.active_signals.get(signal_id)
-        instrument = signal.instrument if signal else None
-        direction = (signal.direction if signal else "") or ""
+        instrument, direction = await self._closing_instrument(signal_id)
 
         price = None
         if instrument:
@@ -1145,17 +1138,39 @@ class StreamingPriceMonitor:
             if price_row:
                 price = price_row["bid"] if direction.lower() == "long" else price_row["ask"]
 
-        if tracking_trailing and price is not None:
+        if price is not None:
             await self.trailing_monitor.finalize_with_price(
                 signal_id, price, reason="manual_close"
             )
+            await self.excursion_monitor.finalize(signal_id, price, "manual_close")
+        else:
+            # No price to mark against; the excursion reconciler derives the exit
+            # from the signal's recorded close instead.
+            logger.warning(
+                f"No live price for signal {signal_id} ({instrument}) — exit price "
+                f"left to the excursion reconciler"
+            )
         self.trailing_monitor.evict_signal(signal_id)
+        self.excursion_monitor.evict_signal(signal_id)
 
-        if tracking_excursion:
-            if price is not None:
-                await self.excursion_monitor.finalize(signal_id, price, "manual_close")
-            else:
-                self.excursion_monitor.evict_signal(signal_id)
+    async def _closing_instrument(self, signal_id: int) -> tuple[Optional[str], str]:
+        """Instrument + direction for a signal being closed.
+
+        Prefers the in-memory copy, but a status write can take seconds on the
+        pooler, which is long enough for the periodic refresh to drop the signal
+        from active_signals first. Falling back to the DB is what keeps the
+        analytics exit from silently going missing in that window.
+        """
+        signal = self.active_signals.get(signal_id)
+        if signal is not None:
+            return signal.instrument, (signal.direction or "")
+
+        row = await self.db.fetch_one(
+            "SELECT instrument, direction FROM signals WHERE id = $1", (signal_id,)
+        )
+        if row is None:
+            return None, ""
+        return row["instrument"], (row["direction"] or "")
 
     async def refresh_signal_in_memory(self, signal_id: int) -> bool:
         """Re-fetch a signal from the DB and bring all in-memory caches in

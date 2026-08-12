@@ -61,6 +61,7 @@ class ExpiryManager:
     async def _handle_expired_signal(self, sig_id, row, alert_system, monitor):
         """
         Perform all post-expiry actions for a single signal:
+          • Finalize the trailing / excursion analytics trackers
           • Update / cancel the approaching alert embed
           • Schedule the 15-minute move to finished-signals channel
           • Add ❌ reaction to the original signal message
@@ -72,7 +73,16 @@ class ExpiryManager:
             self.logger.warning(f"Could not fetch signal {sig_id} after expiry")
             return
 
-        # ── 3a. Update the persistent embed (approaching alert or hit embed) ──
+        # ── 3a. Close out the analytics trackers at the expiry price ─────────
+        if monitor:
+            try:
+                await monitor.finalize_trailing_on_manual_close(sig_id)
+            except Exception as _fin:
+                self.logger.warning(
+                    f"Could not finalize trackers for expired signal {sig_id}: {_fin}"
+                )
+
+        # ── 3b. Update the persistent embed (approaching alert or hit embed) ──
         if alert_system and sig_id in alert_system.signal_messages:
             try:
                 # Stop live price refresh for this signal
@@ -106,7 +116,7 @@ class ExpiryManager:
             ):
                 await self._delete_original_message(src_channel_id, src_message_id, sig_id)
 
-        # ── 3b. Add ❌ reaction to the original signal message ────────────────
+        # ── 3c. Add ❌ reaction to the original signal message ────────────────
         if monitor:
             try:
                 from price_feeds.monitors.streaming_monitor import react_to_original_signal

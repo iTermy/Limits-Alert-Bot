@@ -1115,6 +1115,18 @@ class MessageHandler:
 
         if result:
             self.logger.info(f"Signal cancelled due to message deletion: {payload.message_id}")
+            monitor = self.bot.services.monitor
+            if monitor:
+                try:
+                    deleted_signal = await self.signal_db.get_signal_by_message_id(
+                        str(payload.message_id)
+                    )
+                    if deleted_signal:
+                        await monitor.finalize_trailing_on_manual_close(deleted_signal["id"])
+                except Exception as _fe:
+                    self.logger.warning(
+                        f"Could not finalize trackers after message delete cancel: {_fe}"
+                    )
             if self.alert_system:
                 try:
                     cancelled_signal = await self.signal_db.get_signal_by_message_id(

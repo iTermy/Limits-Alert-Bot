@@ -38,6 +38,12 @@ _ORDERING_BAR_FRACTION = 0.25
 # long — quantifies pips left on the table beyond the exit.
 _POST_EXIT_WINDOW_SECONDS = 60 * 60
 
+# How often the reconciler closes rows whose signal finished without one of the
+# live paths finalizing them. One UPDATE per cycle that usually matches nothing,
+# so the interval only has to be short enough that analysis never reads a stale
+# open row — it is not a hot path.
+_RECONCILE_INTERVAL_SECONDS = 15 * 60
+
 
 @dataclass
 class ExcursionState:
@@ -86,9 +92,6 @@ class ExcursionMonitor:
         self._post_exit: dict[int, PostExitState] = {}
         self._snapshot_tasks: set = set()
         self._running = True
-
-    def is_tracking(self, signal_id: int) -> bool:
-        return signal_id in self._tracking
 
     # === Lifecycle ===
 
@@ -248,14 +251,20 @@ class ExcursionMonitor:
                 logger.debug("mae update failed for %s: %s", state.signal_id, e)
 
     async def finalize(self, signal_id: int, exit_price: float, reason: str) -> None:
-        """Record the exit, stop tracking, and start the post-exit window."""
-        state = self._tracking.get(signal_id)
-        if state is None:
-            return
+        """Record the exit, stop tracking, and start the post-exit window.
+
+        The DB write runs whether or not in-memory state survives — a restart or
+        an eviction mid-trade must not cost the row its exit. The UPDATE is
+        scoped to still-open rows, so it is a no-op for anything already closed.
+        """
         try:
             await self._db.finalize(signal_id, exit_price, datetime.now(timezone.utc), reason)
         except Exception as e:
             logger.error("Failed to finalize excursion for %s: %s", signal_id, e)
+
+        state = self._tracking.get(signal_id)
+        if state is None:
+            return
 
         # Entered signals keep a bounded post-exit watch to measure favourable
         # follow-through beyond the exit (M1 bars — no tick feed dependency).
@@ -321,6 +330,19 @@ class ExcursionMonitor:
 
     def stop(self) -> None:
         self._running = False
+
+    # === Reconciler ===
+
+    async def run_reconciler(self) -> None:
+        """Periodically close rows the live paths could not finalize."""
+        while self._running:
+            try:
+                closed = await self._db.close_orphaned()
+                if closed:
+                    logger.info("Reconciled %s excursion row(s) left open at close", closed)
+            except Exception as e:
+                logger.error("Excursion reconcile cycle failed: %s", e)
+            await asyncio.sleep(_RECONCILE_INTERVAL_SECONDS)
 
     async def _sample_all(self) -> None:
         if not self._tracking and not self._post_exit:

@@ -175,6 +175,43 @@ class ExcursionDatabase:
             (exit_price, exit_time, exit_reason, signal_id),
         )
 
+    async def close_orphaned(self) -> int:
+        """Close excursion rows whose signal has already reached a final status.
+
+        Every close path finalizes its own row with the tick price that closed
+        the trade; this is the safety net for the closes that have no tick price
+        to offer — expiry, message deletion, or a manual command issued after the
+        signal left the monitor's in-memory set. Without it those rows sit in
+        'approach'/'in_trade' forever and silently drop out of any analysis that
+        filters on a recorded exit.
+
+        The derived exit follows the same rules as the analysis exit price:
+        stop-losses take the stop level, everything else prefers tp_price and
+        falls back to the close-snapshot mid. exit_reason carries a ':reconciled'
+        suffix so a derived exit is never mistaken for an observed one.
+
+        Returns the number of rows closed.
+        """
+        return await self.db.execute(
+            """
+            UPDATE signal_excursions e
+            SET phase = 'closed',
+                exit_price = COALESCE(
+                    e.exit_price,
+                    CASE
+                        WHEN s.status = 'stop_loss' THEN s.stop_loss
+                        ELSE COALESCE(s.tp_price, (s.close_bid + s.close_ask) / 2)
+                    END
+                ),
+                exit_time = COALESCE(e.exit_time, s.closed_at, NOW()),
+                exit_reason = COALESCE(s.closed_reason, s.status) || ':reconciled'
+            FROM signals s
+            WHERE s.id = e.signal_id
+              AND e.phase <> 'closed'
+              AND s.status IN ('profit', 'breakeven', 'stop_loss', 'cancelled')
+            """
+        )
+
     async def set_mae_before_mfe(self, signal_id: int, mae_first: bool) -> None:
         """One-shot ordering verdict; never overwrites an existing value."""
         await self.db.execute(

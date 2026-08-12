@@ -20,7 +20,9 @@ Two bots write to this DB:
 - **1** = created before 2026-07-12. Known problems: no exit price on manual/cancel closes, TP-config drift unrecorded (toll-metals TP was $4 before 2026-06-06, $5 after), excursion pip-size bug (fixed + backfilled, see §6), assorted manual corrections.
 - **2** = created 2026-07-12 or later, with full instrumentation.
 
-**Primary analysis uses `data_version >= 2` only.** Era-1 data may be referenced for context but not for optimization decisions. The 2026-07-11 full analysis of era-1 data (+19.7…+29.3R over 4.3 months, toll/gold = the edge, 6+ limit signals negative, 8–9 AM ET and Thursdays weak, trailing > fixed TP in execution) lives in git history — `git show 642f4d2:STRATEGY_ANALYSIS.md`.
+**Primary analysis uses `data_version >= 2` only.** Era-1 data may be referenced for context but not for optimization decisions.
+
+One wrinkle inside era 2: the column defaults to 2, so the ~28 signals created on **2026-07-13 before the instrumentation code was deployed that day** are marked era 2 but carry no `tp_threshold_used` / `tp_threshold_unit`. Add `AND created_at >= '2026-07-14'` whenever the analysis needs the config-at-time stamps; every signal from that date on has them. The 2026-07-11 full analysis of era-1 data (+19.7…+29.3R over 4.3 months, toll/gold = the edge, 6+ limit signals negative, 8–9 AM ET and Thursdays weak, trailing > fixed TP in execution) lives in git history — `git show 642f4d2:STRATEGY_ANALYSIS.md`.
 
 ## 3. Outcome definitions and exit-price rules
 
@@ -57,6 +59,7 @@ Tracks from first approaching alert: approach velocity, pre-hit MAE, then from e
 New in era 2:
 - `mae_before_mfe` — TRUE if the adverse excursion crossed 25% of the TP threshold before the favorable one did. This is the key input for evaluating break-even-move rules (era-1 data couldn't order the extremes).
 - `post_exit_mfe_pips` / `post_exit_end_time` — favorable follow-through beyond the exit price for 60 min after close (M1 bars). Directly measures pips left on the table; compare against `tp_threshold_used` to size trailing benefit.
+- **`exit_reason` ending in `:reconciled`** means the exit was *derived* at close time, not observed on a tick. A background reconciler (15 min cadence, `ExcursionDatabase.close_orphaned`) closes any row whose signal reached a final status without a live path finalizing it — expiry, message-deletion, or a manual command issued after the signal left the monitor's in-memory set. The exit price follows the §3 rules (stop level for SL, else `tp_price`, else the close-snapshot mid); the reason is the signal's `closed_reason` plus the suffix. **On these rows treat `mfe_pips` / `mae_pips` as lower bounds** — the excursion stopped ratcheting when the in-memory state was lost, so the recorded extremes can sit well inside the true ones (one 2026-08-03 auto-TP recorded 6 pips of MFE against a 56-pip realized exit). Exclude reconciled rows from MFE/MAE-magnitude work; they are still sound for entry-context and outcome joins. Before the reconciler shipped (2026-08-11) these rows stayed in `approach`/`in_trade` indefinitely — 61 historical rows were closed by the first sweep.
 - **Pips are pips of the row's own `pip_size`** — always multiply by `pip_size` to get price units before cross-instrument comparison. A 2026-07-12 backfill rescaled rows written with wrong pip sizes (DE30EUR, GCQ26, USOILSPOT, all stocks). If the bot ran with pre-fix code after the backfill, re-run the rescale (idempotent, keyed on `pip_size <>` expected; template in git history / trivial to reconstruct — factor = old_pip/new_pip on `approach_velocity, pre_hit_mae, mfe_pips, mae_pips`). Snapshot table `signal_excursions_backup_20260712` holds pre-backfill values.
 - Canonical pip sizes: forex 0.0001 (JPY pairs 0.01), XAU/GC 0.01, XAG 0.001, BTC 1.0, other crypto 0.1, indices 1.0, oil 0.01, stocks 0.01.
 
@@ -90,7 +93,7 @@ Cleaning rules that mattered on era-1 data (keep applying):
 6. **Slippage cost** — entry/exit slippage vs the modeled edge (~0.08R avg — slippage could eat a big share).
 7. **6+ limit skip validation** — exec bots now skip them by default (`skip_limits_at=6`); compare filled depth distributions before/after v1.6.0.
 8. **Session/day effects** — era-1 found 8–9 AM ET negative and Thursday negative; re-test on era 2 before acting.
-9. **NM-cancel counterfactuals** — still NOT instrumented (deferred); the 387+ near-miss cancels remain unevaluated.
+9. **NM-cancel counterfactuals** — still NOT instrumented (deferred); the 387+ near-miss cancels remain unevaluated. Era-2 adds 53 more. The excursion row for a near-miss closes at `approach` phase with no exit price (nothing was entered), so nothing records whether price went on to reach limit 1 after the cancel. Answering this needs new instrumentation: a bounded post-cancel watch on non-entered closes, mirroring `post_exit_mfe_pips`.
 
 ## 9. Schema quick-reference (analysis-relevant deltas from CLAUDE.md)
 

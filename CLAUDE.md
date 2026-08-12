@@ -123,7 +123,8 @@ price_feeds/
                                   mark_immune(signal_id) called on every reactivation;
                                   signal.type == "swing" short-circuits NM (swing is not near-missable)
     trailing_monitor.py         TrailingStopMonitor — trailing-stop evaluation for HIT signals
-    excursion_monitor.py        ExcursionMonitor — MFE/MAE tracking + post-exit follow-through sampling
+    excursion_monitor.py        ExcursionMonitor — MFE/MAE tracking + post-exit follow-through sampling;
+                                  run_reconciler() closes rows the live paths missed (15 min)
     feed_health_monitor.py      Stale threshold 300 s; 3 max reconnect attempts; 120 s startup grace;
                                   15 min alert cooldown; DMs health_alert_admin_id from settings.json;
                                   spread hour (17–18 ET) treated as market-closed for forex/metals/indices/oil;
@@ -610,6 +611,13 @@ Stocks (.NAS/.NYSE) 0.01, forex 0.0001 (JPY 0.01), XAU/GC futures 0.01, XAG 0.00
 
 ### Excursion ordering flag + post-exit window
 `ExcursionMonitor` (now constructed with `tp_config`) decides `mae_before_mfe` when either excursion first exceeds 25% of the TP threshold (`_ORDERING_BAR_FRACTION`). After close, entered signals move to a `_post_exit` dict sampled by the same 60 s loop: favorable follow-through beyond the exit price from M1 bars ratchets `post_exit_mfe_pips` for 60 min (`_POST_EXIT_WINDOW_SECONDS`), then `post_exit_end_time` is stamped. Post-exit state does not survive a restart.
+
+### Every terminal close must finalize the analytics trackers
+`monitor.finalize_trailing_on_manual_close(signal_id)` is the single hook for closes that have no tick price on hand — reply commands, `!setstatus`/`!profit`/bulk cancel, expiry (`expiry_manager`), and message-deletion cancel (`message_handler.handle_message_delete`). It reads the last `live_prices` row and finalizes both the trailing sim and the excursion row. **When adding a new close path, call it.** Two supports make a miss non-fatal:
+- `_closing_instrument` falls back to a DB lookup when the signal has already left `active_signals` — a pooler status write can take seconds, long enough for the periodic refresh to drop it first.
+- `ExcursionMonitor.finalize` writes to the DB regardless of in-memory state (the UPDATE is scoped to still-open rows), and `run_reconciler` sweeps every 15 min for rows whose signal is already final, deriving the exit from `tp_price` / the close snapshot and suffixing `exit_reason` with `:reconciled`.
+
+Losing in-memory excursion state mid-trade also freezes `mfe_pips`/`mae_pips` at their last value, so a missed hook costs more than a NULL exit — see DATA_ANALYSIS.md §5.
 
 ### Data-era marker
 `signals.data_version` = 1 for rows created before 2026-07-12, 2 for the clean-instrumentation era. Analysis conventions live in **DATA_ANALYSIS.md** — keep that file current when changing analytics-relevant schema or semantics.
