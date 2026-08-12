@@ -428,6 +428,11 @@ async def _run_migrations(conn):
         """
         ALTER TABLE signals ADD COLUMN IF NOT EXISTS manual_tp_price DOUBLE PRECISION;
         """,
+        # Fixed take-profit price for instant-entry signals. When set it replaces
+        # the TPConfig threshold as the exit condition.
+        """
+        ALTER TABLE signals ADD COLUMN IF NOT EXISTS take_profit DOUBLE PRECISION;
+        """,
         # Widen the type CHECK constraint to include 'risky'. Runs every startup
         # (drop-if-exists then re-add) so DBs migrated before the risky type
         # existed pick up the new value without a manual step.

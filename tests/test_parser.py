@@ -14,6 +14,7 @@ from core.parser.pattern_parsers import (
     CorePatternParser,
     determine_limits_and_stop,
     get_signal_type,
+    parse_instant_signal,
     validate_limits_order,
 )
 from core.parser.validators import detect_channel_type, uses_gold_tolls_sl
@@ -310,3 +311,78 @@ class TestIndexSymbolCanonicalization:
     )
     def test_ai_output_canonicalizes(self, raw, expected):
         assert INSTRUMENT_MAPPINGS.get(raw.lower(), raw) == expected
+
+
+class TestInstantEntryParsing:
+    """semi-swing-pa-signals enters at the market: the message names an
+    instrument, a direction and labelled SL/TP, and carries no limits."""
+
+    CHANNEL = "semi-swing-pa-signals"
+    CONFIG = {CHANNEL: {"default_expiry": "no_expiry"}}
+
+    def _parse(self, text):
+        return parse_instant_signal(text, self.CHANNEL, self.CONFIG)
+
+    @pytest.mark.parametrize(
+        "text,direction,sl,tp",
+        [
+            ("short gold sl 5001 tp 4080", "short", 5001.0, 4080.0),
+            ("long gold tp 5100 sl 4990", "long", 4990.0, 5100.0),
+            ("gold buy stop loss 4990 take profit 5100", "long", 4990.0, 5100.0),
+            ("sell gold sl: 5001 tp: 4080", "short", 5001.0, 4080.0),
+        ],
+    )
+    def test_labels_parse_in_any_order(self, text, direction, sl, tp):
+        signal = self._parse(text)
+        assert signal is not None
+        assert (signal.instrument, signal.direction) == ("XAUUSD", direction)
+        assert (signal.stop_loss, signal.take_profit) == (sl, tp)
+        assert signal.instant_entry is True
+        assert signal.limits == []
+
+    def test_type_and_expiry_come_from_channel(self):
+        signal = self._parse("short gold sl 5001 tp 4080")
+        assert signal.type == "pa"
+        assert signal.expiry_type == "no_expiry"
+
+    @pytest.mark.parametrize(
+        "text",
+        [
+            "short gold sl 5001",  # no take profit
+            "short gold tp 4080",  # no stop loss
+            "gold sl 5001 tp 4080",  # no direction
+            "short sl 5001 tp 4080",  # no instrument
+        ],
+    )
+    def test_incomplete_signals_are_not_parsed(self, text):
+        assert self._parse(text) is None
+
+    @pytest.mark.parametrize(
+        "text",
+        [
+            "short gold sl 4080 tp 5001",  # TP above SL on a short
+            "long gold sl 5001 tp 4080",  # TP below SL on a long
+        ],
+    )
+    def test_take_profit_on_losing_side_is_rejected(self, text):
+        with pytest.raises(LimitsOrderError):
+            self._parse(text)
+
+    def test_routed_from_the_channel(self):
+        parser = SignalParser(config_loader=_StubConfigLoader(self.CONFIG))
+        signal = parser.parse("short gold sl 5001 tp 4080", self.CHANNEL)
+        assert signal.parse_method == "instant"
+        assert signal.take_profit == 4080.0
+
+    def test_typo_reaches_the_caller_as_a_rejection(self):
+        parser = SignalParser(config_loader=_StubConfigLoader(self.CONFIG))
+        assert isinstance(
+            parser.parse("short gold sl 4080 tp 5001", self.CHANNEL), RejectedSignal
+        )
+
+    def test_other_channels_keep_limit_parsing(self, pinned_offsets):
+        parser = SignalParser(config_loader=_StubConfigLoader({}))
+        signal = parser.parse("gold long 4000 3990 sl 3980", "gold-swings")
+        assert signal.instant_entry is False
+        assert signal.take_profit is None
+        assert signal.limits == [4000.0, 3990.0]

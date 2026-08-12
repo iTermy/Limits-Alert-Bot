@@ -47,6 +47,7 @@ class SignalData(BaseModel):
     first_limit_hit_time: datetime | None = None
     closed_at: datetime | None = None
     closed_reason: str | None = None
+    take_profit: float | None = None
     tp_price: float | None = None
     manual_tp_price: float | None = None
     total_limits: int = 0

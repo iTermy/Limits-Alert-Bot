@@ -45,6 +45,11 @@ _STATUS_RETRY_DELAY = 0.5
 # Budget for the post-timeout status re-read (see _status_already_applied).
 _STATUS_VERIFY_TIMEOUT = 5.0
 
+# Oldest live price accepted as the entry for an instant-entry signal. Healthy
+# feeds tick several times a second; anything older means the market is closed
+# or the feed has stalled, and entering there would book a fictional price.
+_INSTANT_ENTRY_MAX_PRICE_AGE = 15.0
+
 # DM sent when a non-manager tries to manage a signal via reply.
 _NO_PERMISSION_DM = (
     "You don't have permission to manage signals. "
@@ -788,6 +793,96 @@ class MessageHandler:
             self.logger.warning(f"minutes_to_news stamp failed for {parsed.instrument}: {e}")
         return context
 
+    async def _live_entry_price(self, instrument: str, direction: str) -> Optional[float]:
+        """Current market price to enter at: the ask for a long, the bid for a
+        short. Subscribes the symbol first if no signal was watching it yet.
+
+        Returns None when no fresh price is available, which blocks the entry —
+        an instant signal is only meaningful at a price we actually observed.
+        """
+        stream_manager = self.bot.services.stream_manager
+        if stream_manager is None:
+            return None
+
+        price = await stream_manager.get_latest_price(instrument)
+        if price is None:
+            await stream_manager.bulk_subscribe([instrument])
+            price = await stream_manager.get_latest_price(instrument)
+        if price is None:
+            return None
+
+        updated_at = price.get("updated_at")
+        if updated_at is not None and updated_at.tzinfo is not None:
+            age = (datetime.now(pytz.UTC) - updated_at).total_seconds()
+            if age > _INSTANT_ENTRY_MAX_PRICE_AGE:
+                self.logger.warning(
+                    f"Instant entry for {instrument} rejected: price is {age:.0f}s old"
+                )
+                return None
+
+        return price["ask"] if direction == "long" else price["bid"]
+
+    async def _resolve_instant_entry(self, message: discord.Message, parsed) -> Optional[float]:
+        """Entry price for an instant-entry signal, or None when it can't be taken.
+
+        Rejects the signal (⚠️ plus a reply) when no live price is available or
+        when price already sits past the stated stop loss or take profit — that
+        trade would open only to close on the next tick.
+        """
+        entry = await self._live_entry_price(parsed.instrument, parsed.direction)
+        if entry is None:
+            await self.safe_add_reaction(message, "⚠️")
+            await message.reply(
+                f"⚠️ No live price for **{parsed.instrument}** — signal not opened.",
+                delete_after=_ERROR_REPLY_DELETE_AFTER,
+            )
+            return None
+
+        low, high = sorted((parsed.stop_loss, parsed.take_profit))
+        if not low < entry < high:
+            await self.safe_add_reaction(message, "⚠️")
+            await message.reply(
+                f"⚠️ **{parsed.instrument}** is at {format_price(entry, parsed.instrument)}, "
+                f"already past the stop loss or take profit — signal not opened.",
+                delete_after=_ERROR_REPLY_DELETE_AFTER,
+            )
+            self.logger.info(
+                f"Instant signal rejected for message {message.id}: entry {entry} outside "
+                f"SL {parsed.stop_loss} / TP {parsed.take_profit}"
+            )
+            return None
+
+        return entry
+
+    async def _open_instant_position(self, signal_id: int, entry_price: float) -> None:
+        """Fill an instant signal's single limit at the market and open its embed
+        as HIT — these signals have no waiting phase to alert on."""
+        signal = await self.signal_db.get_signal_with_limits(signal_id)
+        if not signal or not signal.limits:
+            self.logger.error(f"Instant signal {signal_id} has no entry limit to fill")
+            return
+
+        # A reactivated signal comes back with its entry already filled; filling
+        # it a second time would double-count limits_hit.
+        if signal.limits[0].status == "pending":
+            await db.mark_limit_hit(signal.limits[0].id, entry_price)
+
+        monitor = self.bot.services.monitor
+        if monitor:
+            await monitor.refresh_signal_in_memory(signal_id)
+            signal = monitor.active_signals.get(signal_id, signal)
+        if signal.guild_id is None and self.bot.guilds:
+            signal.guild_id = self.bot.guilds[0].id
+
+        alert_system = self.alert_system or self.bot.services.alert_system
+        if alert_system:
+            await alert_system.send_limit_hit_alert(signal, signal.limits[0], entry_price)
+
+        self.logger.info(
+            f"Instant signal {signal_id} opened at {entry_price} "
+            f"({signal.instrument} {signal.direction})"
+        )
+
     async def process_signal(self, message: discord.Message):
         """Process a potential trading signal with enhanced parsing"""
         try:
@@ -804,6 +899,12 @@ class MessageHandler:
                 )
                 return
 
+            if parsed and parsed.instant_entry:
+                entry_price = await self._resolve_instant_entry(message, parsed)
+                if entry_price is None:
+                    return
+                parsed.limits = [entry_price]
+
             if parsed:
                 context = self._build_save_context(parsed)
                 success, signal_id = await self.signal_db.save_signal(
@@ -816,7 +917,12 @@ class MessageHandler:
                         f"Signal #{signal_id} processed: {parsed.instrument} {parsed.direction}"
                     )
 
-                    if parsed.limits and signal_id:
+                    if parsed.instant_entry and signal_id:
+                        # Overlap detection is skipped: this signal's only limit
+                        # fills immediately, so it never competes for a fill with
+                        # the pending limits of another signal.
+                        await self._open_instant_position(signal_id, parsed.limits[0])
+                    elif parsed.limits and signal_id:
                         min_limit = min(parsed.limits)
                         max_limit = max(parsed.limits)
                         try:

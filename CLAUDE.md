@@ -55,6 +55,8 @@ core/
     __init__.py                 parse_signal(message, channel_name) entry point;
                                   ParsedSignal / RejectedSignal types; lazy sub-parser init
     pattern_parsers.py          CorePatternParser / StockPatternParser / CryptoPatternParser;
+                                  parse_instant_signal() — market-entry signals (instrument + direction
+                                  + labelled sl/tp, no limits) for instant-entry channels;
                                   CHANNEL_TYPE_MAP + get_signal_type() (channel → standard/scalp/swing/toll/pa/1-1);
                                   get_gold_tolls_sl_offset() (settings.json, 30 s cache)
     validators.py               is_potential_signal(), should_exclude(), validate_signal(),
@@ -319,6 +321,7 @@ All PKs: `BIGINT GENERATED ALWAYS AS IDENTITY`. Timestamps: `TIMESTAMPTZ`. RLS: 
 | type | TEXT DEFAULT 'standard'; CHECK (standard, scalp, swing, toll, pa, 1-1, risky) |
 | first_limit_hit_time | TIMESTAMPTZ |
 | closed_at / closed_reason | TIMESTAMPTZ / TEXT (`automatic` / `manual` / `expiry`) |
+| take_profit | DOUBLE PRECISION (nullable); the sender's fixed TP price, set only by instant-entry channels. When present it *replaces* the TPConfig threshold as the exit condition (`tp_monitor._fixed_tp_reached`, evaluated on the bid like every other TP). |
 | tp_price | DOUBLE PRECISION; market close price recorded on profit (for automatic, the bid at auto-TP trigger — see "Auto-TP is evaluated on the bid"; for manual profit, the live bid/ask at command time — bid if long, ask if short). NULL for SL / cancel / breakeven / other closures, and for manual profit when `live_prices` has no row for the instrument. |
 | manual_tp_price | DOUBLE PRECISION (nullable); retrospective manual TP price override set via `!profit <id> <tp_price>`. Kept separate from `tp_price` so the original recorded close is preserved. Both the `!report` P&L and the profit-archive embed (per-limit P&L + the "TP Price" field) use `manual_tp_price` when present, else `tp_price`. |
 | alert_message_id | BIGINT (nullable); Discord message ID of the active-channel alert embed. Persisted so restarts can reuse the existing embed instead of orphaning it. Cleared on archive move, live-update NotFound, and approaching-alert retraction. |
@@ -508,9 +511,16 @@ Spread-hour and news cancels **edit the persistent embed** when one already exis
 ### News matching is per-currency; USD also covers US markets
 `NewsEvent.instrument_affected` matches per currency (CHF news never touches EURUSD). A `USD` category additionally pauses US equities (`.NAS`/`.NYSE`) and US indices (`US_INDEX_KEYWORDS`: NAS100/US30/US500/SPX500/SPX/USTEC/US2000/…), and pauses gold when `affects_gold` is set (auto-fetched high-impact USD events). Auto-fetched events carry a merged `title` ("EUR — ECB Rate / Press Conf"); `NewsEvent.display_label` is used in all news alerts (activation, cancel, ended), falling back to the bare category for manual events.
 
+### Instant-entry channels enter at market, not at a limit
+`semi-swing-pa-signals` (listed in `validators._INSTANT_ENTRY_CHANNELS`) posts signals of the form `short gold sl 5001 tp 4080`: an instrument, a direction, and labelled SL/TP with **no limits**. `parse_instant_signal()` produces a `ParsedSignal` with `instant_entry=True`, `take_profit` set, and `limits=[]`; the AI fallback is skipped for these channels.
+
+`message_handler` resolves the entry before saving: `_live_entry_price()` reads the feed via `stream_manager.get_latest_price()` (subscribing the symbol first if nothing was watching it), takes the **ask for a long / bid for a short**, and rejects prices older than `_INSTANT_ENTRY_MAX_PRICE_AGE` (15 s). `_resolve_instant_entry()` then rejects with ⚠️ plus a reply when there is no live price, or when price already sits outside the SL↔TP band — that trade would open only to close on the next tick. The resolved price becomes the signal's single limit; `_open_instant_position()` marks it hit and opens the embed directly as HIT. Overlap detection is skipped (the limit fills immediately, so it never competes with another signal's resting limits).
+
+Downstream everything is shared machinery: `type='pa'` routes the embed to the PA alert channel and the signal into the PA report section; SL, manual reply commands, archiving, trailing and excursion analytics are unchanged. The guards land where they should without special-casing — an already-HIT signal rides out spread hour and the late-market hour, and is cancelled when a news window opens (only `swing` is exempt from that). Edits to an instant signal update **SL/TP and expiry only** (`signal_ops._update_instant_from_edit`); the entry limit records a real fill and is never re-derived. The EX bot ignores these signals — it keys off pending limits, and there is never one.
+
 ### Signal type taxonomy
 `signals.type` ∈ `{standard, scalp, swing, toll, pa, 1-1, risky}`. Determined by `pattern_parsers.get_signal_type(text, channel_name)`:
-- `CHANNEL_TYPE_MAP` wins first: `scalps` → scalp; `swing-trades`/`gold-swings` → swing; `gold-tolls-map`/`general-tolls`/`oil-tolls` → toll; `gold-pa-signals`/`price-action-trades` → pa; `gold-1-1-rr` → 1-1.
+- `CHANNEL_TYPE_MAP` wins first: `scalps` → scalp; `swing-trades`/`gold-swings` → swing; `gold-tolls-map`/`general-tolls`/`oil-tolls` → toll; `gold-pa-signals`/`price-action-trades`/`semi-swing-pa-signals` → pa; `gold-1-1-rr` → 1-1.
 - Otherwise body keyword: `\bswing\b` → swing, `\bscalp\b` → scalp.
 - Default: standard.
 

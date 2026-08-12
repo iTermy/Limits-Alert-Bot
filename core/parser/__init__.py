@@ -8,7 +8,12 @@ from typing import Optional
 
 from utils.logger import get_logger
 
-from .validators import detect_channel_type, is_potential_signal, should_exclude
+from .validators import (
+    detect_channel_type,
+    is_potential_signal,
+    should_exclude,
+    uses_instant_entry,
+)
 
 logger = get_logger("parser")
 
@@ -28,10 +33,14 @@ class ParsedSignal:
     stop_loss: float
     expiry_type: str  # week_end, no_expiry, day_end, month_end
     raw_text: str
-    parse_method: str  # high_confidence/stock/ai
+    parse_method: str  # high_confidence/stock/ai/instant
     keywords: list[str] = field(default_factory=list)
     channel_name: str = None
     type: str = "standard"  # standard, scalp, swing, toll, pa, 1-1, risky
+    take_profit: Optional[float] = None  # fixed TP price; overrides the TP threshold
+    # Enters at the market price instead of a limit. `limits` is empty until the
+    # save path resolves the live entry price and fills it with that single level.
+    instant_entry: bool = False
 
 
 class RejectedSignal:
@@ -277,7 +286,10 @@ class SignalParser:
 
         # Try channel-specific parser first
         try:
-            if channel_type == "stock":
+            if uses_instant_entry(channel_name):
+                logger.debug("Routing to instant-entry parser")
+                result = self._parse_instant(message, channel_name)
+            elif channel_type == "stock":
                 logger.debug("Routing to StockPatternParser")
                 result = self._parse_with_stock_parser(message, channel_name)
             elif channel_type == "crypto":
@@ -290,8 +302,9 @@ class SignalParser:
             logger.info(f"Signal rejected — limits out of order (likely typo): {e}")
             return RejectedSignal(reason=str(e))
 
-        # Step 4: AI fallback if pattern parsing failed
-        if not result:
+        # Step 4: AI fallback if pattern parsing failed. Instant-entry channels
+        # are excluded — the AI parser only produces limit-based signals.
+        if not result and not uses_instant_entry(channel_name):
             logger.debug("Pattern parsing failed, trying AI fallback")
             result = self._parse_with_ai(message, channel_name)
 
@@ -312,6 +325,12 @@ class SignalParser:
             self._core_parser = CorePatternParser(self.channel_config)
 
         return self._core_parser.parse(message, channel_name)
+
+    def _parse_instant(self, message: str, channel_name: str) -> Optional[ParsedSignal]:
+        """Parse a market-entry signal carrying an explicit stop loss and take profit"""
+        from .pattern_parsers import parse_instant_signal
+
+        return parse_instant_signal(message, channel_name, self.channel_config)
 
     def _parse_with_stock_parser(self, message: str, channel_name: str) -> Optional[ParsedSignal]:
         """Parse using stock-specific parser"""

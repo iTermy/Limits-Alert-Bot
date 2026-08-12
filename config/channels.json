@@ -54,6 +54,9 @@
       "default_instrument": "XAUUSD",
       "default_expiry": "week_end"
     },
+    "semi-swing-pa-signals": {
+      "default_expiry": "no_expiry"
+    },
     "oil-trades": {
       "default_instrument": "USOILSPOT",
       "default_expiry": "week_end"

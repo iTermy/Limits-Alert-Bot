@@ -24,6 +24,17 @@ from utils.logger import get_logger
 logger = get_logger("tp_monitor")
 
 
+def _fixed_tp_reached(direction: str, close_price: float, take_profit: float) -> bool:
+    """Whether price has reached a signal's own take-profit level.
+
+    Measured on the bid like every other TP evaluation, so the level fires where
+    the chart shows it rather than a spread away.
+    """
+    if direction == "long":
+        return close_price >= take_profit
+    return close_price <= take_profit
+
+
 class AutoTPMonitor:
     """
     Evaluates auto take-profit conditions on every price tick.
@@ -104,25 +115,33 @@ class AutoTPMonitor:
         last_pnl = self.tp_config.calculate_pnl(
             instrument, direction, last_limit.price_level, close_price, signal_type=signal_type
         )
-        tp_threshold = self.tp_config.get_tp_value(instrument, signal_type=signal_type)
 
         # Tiny epsilon to guard against floating-point rounding errors
         EPSILON = 1e-9
 
-        # Last limit must clear the TP threshold
-        if last_pnl < tp_threshold - EPSILON:
-            return False
-
-        # If there are earlier limits, their COMBINED P&L must be >= 0
-        if earlier_limits:
-            combined_earlier_pnl = sum(
-                self.tp_config.calculate_pnl(
-                    instrument, direction, lim.price_level, close_price, signal_type=signal_type
-                )
-                for lim in earlier_limits
-            )
-            if combined_earlier_pnl < -EPSILON:
+        if signal.take_profit is not None:
+            # A signal carrying its own take-profit price exits there and nowhere
+            # else — the configured threshold does not apply to it.
+            if not _fixed_tp_reached(direction, close_price, signal.take_profit):
                 return False
+        else:
+            tp_threshold = self.tp_config.get_tp_value(instrument, signal_type=signal_type)
+
+            # Last limit must clear the TP threshold
+            if last_pnl < tp_threshold - EPSILON:
+                return False
+
+            # If there are earlier limits, their COMBINED P&L must be >= 0
+            if earlier_limits:
+                combined_earlier_pnl = sum(
+                    self.tp_config.calculate_pnl(
+                        instrument, direction, lim.price_level, close_price,
+                        signal_type=signal_type,
+                    )
+                    for lim in earlier_limits
+                )
+                if combined_earlier_pnl < -EPSILON:
+                    return False
 
         # Cumulative P&L = last limit P&L + all earlier limits P&L at current price
         cumulative_pnl = last_pnl + sum(

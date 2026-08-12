@@ -203,6 +203,13 @@ class LifecycleCog(BaseCog):
         )
         embed.add_field(name="Stop Loss", value=stop_loss_formatted, inline=True)
 
+        if signal.take_profit is not None:
+            embed.add_field(
+                name="Take Profit",
+                value=format_price(signal.take_profit, signal.instrument),
+                inline=True,
+            )
+
         # Take-profit price — prefer the manual override, else the recorded close.
         tp_price = signal.manual_tp_price
         if tp_price is None:

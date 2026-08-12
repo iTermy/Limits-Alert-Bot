@@ -10,7 +10,11 @@ from typing import Optional
 from utils.logger import get_logger
 
 from . import INSTRUMENT_MAPPINGS, ParsedSignal
-from .validators import INDEX_SYMBOL_BLACKLIST, uses_gold_tolls_sl, validate_signal
+from .validators import (
+    INDEX_SYMBOL_BLACKLIST,
+    uses_gold_tolls_sl,
+    validate_signal,
+)
 
 logger = get_logger("parser.pattern_parsers")
 
@@ -177,6 +181,7 @@ CHANNEL_TYPE_MAP = {
     "price-action-trades": "pa",
     "gold-1-1-rr": "1-1",
     "risky-gold": "risky",
+    "semi-swing-pa-signals": "pa",
 }
 
 # Expiry patterns
@@ -744,6 +749,95 @@ def get_signal_type(text: str, channel_name: Optional[str] = None) -> str:
     if re.search(r"\bscalp\b", text, re.IGNORECASE):
         return "scalp"
     return "standard"
+
+
+# ============================================================================
+# INSTANT ENTRY PARSER
+# ============================================================================
+
+# Labelled price capture for instant-entry signals ("short gold sl 5001 tp 4080").
+# Both labels are mandatory and may appear in either order.
+_INSTANT_SL_RE = re.compile(r"\b(?:sl|stops?|stop\s*loss)\b\s*[:=@]?\s*(\d+(?:\.\d+)?)", re.IGNORECASE)
+_INSTANT_TP_RE = re.compile(
+    r"\b(?:tp|target|take\s*profit)\b\s*[:=@]?\s*(\d+(?:\.\d+)?)", re.IGNORECASE
+)
+
+
+def _instant_price(pattern: re.Pattern, text: str) -> Optional[float]:
+    """First labelled price matched by `pattern`, or None when the label is absent."""
+    match = pattern.search(text)
+    if not match:
+        return None
+    try:
+        return float(match.group(1))
+    except ValueError:
+        return None
+
+
+def parse_instant_signal(
+    message: str, channel_name: Optional[str], channel_config: Optional[dict] = None
+) -> Optional[ParsedSignal]:
+    """
+    Parse a market-entry signal: an instrument, a direction, and labelled stop
+    loss and take profit prices ("short gold sl 5001 tp 4080").
+
+    No limits are produced — the entry is the live market price, resolved by the
+    save path. Raises LimitsOrderError when the take profit sits on the losing
+    side of the stop loss, which is always a typo.
+    """
+    from . import LimitsOrderError
+
+    cleaned = clean_message(message)
+
+    instrument = extract_instrument(cleaned, channel_name, channel_config or {})
+    if not instrument:
+        logger.debug(f"Instant parse: no instrument found for channel {channel_name}")
+        return None
+
+    direction = extract_direction(cleaned)
+    if not direction:
+        logger.debug("Instant parse: no direction found")
+        return None
+
+    stop_loss = _instant_price(_INSTANT_SL_RE, cleaned)
+    take_profit = _instant_price(_INSTANT_TP_RE, cleaned)
+    if stop_loss is None or take_profit is None:
+        logger.debug(
+            f"Instant parse: needs both SL and TP (got sl={stop_loss}, tp={take_profit})"
+        )
+        return None
+
+    stop_loss, take_profit = scale_forex_numbers([stop_loss, take_profit], instrument)
+
+    tp_is_profitable = take_profit > stop_loss if direction == "long" else take_profit < stop_loss
+    if not tp_is_profitable:
+        raise LimitsOrderError(
+            f"{direction} take profit {take_profit} is on the wrong side of stop loss {stop_loss}"
+        )
+
+    signal = ParsedSignal(
+        instrument=instrument,
+        direction=direction,
+        limits=[],
+        stop_loss=stop_loss,
+        take_profit=take_profit,
+        instant_entry=True,
+        expiry_type=extract_expiry(cleaned, channel_name, channel_config or {}),
+        raw_text=message,
+        parse_method="instant",
+        keywords=extract_keywords(cleaned),
+        channel_name=channel_name,
+        type=get_signal_type(message, channel_name),
+    )
+
+    if not validate_signal(signal):
+        logger.debug("Instant signal validation failed")
+        return None
+
+    logger.info(
+        f"Instant parse success: {instrument} {direction} sl={stop_loss} tp={take_profit}"
+    )
+    return signal
 
 
 # ============================================================================

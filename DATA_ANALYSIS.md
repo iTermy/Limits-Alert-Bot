@@ -48,7 +48,8 @@ Exit price per close type (era 2):
 
 ## 4. Config-at-time
 
-- `signals.tp_threshold_used` / `tp_threshold_unit` — the TP threshold resolved for this signal at save time. Use this, never today's `tp_configuration.json`, for historical modeling.
+- `signals.tp_threshold_used` / `tp_threshold_unit` — the TP threshold resolved for this signal at save time. Use this, never today's `tp_configuration.json`, for historical modeling. **Ignore it when `take_profit` is non-NULL** — that signal exits at its own price and the threshold never applied to it.
+- `signals.take_profit` — the sender's fixed TP price (instant-entry signals only; NULL everywhere else). These signals also enter at market rather than at a limit, so their single `limits` row records the fill price, not a resting order. Filter on `take_profit IS NOT NULL` to separate them from limit-based PA signals, which share `type = 'pa'`.
 - `signals.minutes_to_news` — minutes until the next news event affecting this instrument at save time (NULL = none upcoming/unknown).
 - `config_history` — every `!tp set/remove`, `!alertdist set/remove`, `!nmconfig set/remove`, `!goldtollssl`, `!riskygoldsl` change with old/new values, timestamp, who.
 

@@ -149,6 +149,11 @@ def _build_signal_embed(
     if event == "auto_tp" and tp_price is not None:
         embed.add_field(name="TP Price", value=f"**{_fmt(float(tp_price))}**", inline=True)
 
+    # ── Take profit target (instant-entry signals carry their own) ───────────
+    take_profit = signal.take_profit
+    if take_profit:
+        embed.add_field(name="Take Profit", value=_fmt(float(take_profit)), inline=True)
+
     # ── Stop loss ────────────────────────────────────────────────────────────
     sl = signal.stop_loss
     if sl:

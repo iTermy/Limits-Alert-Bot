@@ -23,7 +23,7 @@ logger = get_logger("signal_db")
 SIGNAL_COLUMNS = (
     "id, message_id, channel_id, instrument, direction, stop_loss, expiry_type, "
     "expiry_time, status, type, first_limit_hit_time, closed_at, closed_reason, "
-    "tp_price, manual_tp_price, total_limits, limits_hit, alert_message_id, "
+    "take_profit, tp_price, manual_tp_price, total_limits, limits_hit, alert_message_id, "
     "alert_channel_id, ping_message_id, finished_message_id, finished_channel_id, "
     "created_at, updated_at"
 )
@@ -126,9 +126,9 @@ class SignalDatabase:
                     INSERT INTO signals (
                         message_id, channel_id, instrument, direction,
                         stop_loss, expiry_type, expiry_time, total_limits, status, type,
-                        tp_threshold_used, tp_threshold_unit, minutes_to_news
+                        take_profit, tp_threshold_used, tp_threshold_unit, minutes_to_news
                     )
-                    VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13)
+                    VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13, $14)
                     ON CONFLICT (message_id) DO NOTHING
                     RETURNING id
                     """,
@@ -142,6 +142,7 @@ class SignalDatabase:
                     len(parsed_signal.limits) if parsed_signal.limits else 0,
                     SignalStatus.ACTIVE,
                     getattr(parsed_signal, "type", "standard"),
+                    parsed_signal.take_profit,
                     context.get("tp_threshold_used"),
                     context.get("tp_threshold_unit"),
                     context.get("minutes_to_news"),
@@ -241,6 +242,12 @@ class SignalDatabase:
             if parsed_signal.expiry_type != existing.get("expiry_type"):
                 new_expiry_time = _parse_dt(calculate_expiry(parsed_signal.expiry_type))
 
+            if parsed_signal.instant_entry:
+                await self._update_instant_from_edit(
+                    signal_id, existing, parsed_signal, new_expiry_time
+                )
+                return True, False
+
             async with self.db.get_connection() as conn:
                 existing_limits = await conn.fetch(
                     "SELECT id, price_level, sequence_number, status, "
@@ -283,6 +290,47 @@ class SignalDatabase:
         except Exception as e:
             logger.error(f"Error updating signal from edit: {e}", exc_info=True)
             return False, False
+
+    async def _update_instant_from_edit(
+        self,
+        signal_id: int,
+        existing: dict[str, Any],
+        parsed_signal: ParsedSignal,
+        new_expiry_time: Any,
+    ) -> None:
+        """Apply an edit to an instant-entry signal: stop loss, take profit and
+        expiry only.
+
+        The entry limit records the market price at which the position was taken,
+        so it is never re-derived from an edit — and with it the instrument and
+        direction, which the entry price only means anything against.
+        """
+        if (
+            parsed_signal.instrument != existing["instrument"]
+            or parsed_signal.direction != existing["direction"]
+        ):
+            logger.warning(
+                f"Edit to instant signal {signal_id} changes instrument/direction "
+                f"({existing['instrument']} {existing['direction']} -> "
+                f"{parsed_signal.instrument} {parsed_signal.direction}); "
+                f"only SL/TP were applied"
+            )
+
+        async with self.db.get_connection() as conn:
+            await conn.execute(
+                """
+                UPDATE signals
+                SET stop_loss = $1, take_profit = $2, expiry_type = $3,
+                    expiry_time = $4, updated_at = CURRENT_TIMESTAMP
+                WHERE id = $5
+                """,
+                parsed_signal.stop_loss,
+                parsed_signal.take_profit,
+                parsed_signal.expiry_type,
+                new_expiry_time,
+                signal_id,
+            )
+        logger.info(f"Updated instant signal {signal_id} SL/TP from edited message")
 
     @staticmethod
     async def _apply_limit_diff(conn, signal_id: int, diff: dict[str, Any]) -> None:
