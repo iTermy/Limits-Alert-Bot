@@ -606,9 +606,7 @@ class StreamingPriceMonitor:
         # Check auto take-profit (runs for any HIT signal that has hit limits cached)
         if signal.status == "hit":
             tp_triggered = await self.tp_monitor.check_signal(
-                signal,
-                current_bid=price_data["bid"],
-                current_ask=price_data["ask"],
+                signal, current_bid=price_data["bid"]
             )
 
             signal_id = signal.signal_id
@@ -619,7 +617,9 @@ class StreamingPriceMonitor:
             await self.excursion_monitor.update(signal, price_data["bid"], price_data["ask"])
 
             if tp_triggered:
-                close_price = price_data["bid"] if direction == "long" else price_data["ask"]
+                # Auto-TP evaluates on the bid, so the trailing sim and the
+                # excursion exit start from that same price.
+                close_price = price_data["bid"]
                 # Trailing begins here, at the TP price — the what-if is whether
                 # trailing the runner beats taking this fixed auto-TP.
                 await self.trailing_monitor.start(signal, close_price)

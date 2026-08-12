@@ -293,7 +293,7 @@ Every incoming price update calls `streaming_monitor._on_price_update()` → `_c
    → cancel signal → send_near_miss_cancel_alert()
 
 7. Auto-TP check (HIT-status signals only)
-   tp_monitor.check_signal(signal, bid, ask)
+   tp_monitor.check_signal(signal, bid) — no spread buffer; evaluated on the bid
    last_hit_limit_pnl ≥ threshold AND sum(earlier_limits_pnl) ≥ 0 (ε=1e-9)
    → send_auto_tp_alert() → signal→profit
 ```
@@ -319,7 +319,7 @@ All PKs: `BIGINT GENERATED ALWAYS AS IDENTITY`. Timestamps: `TIMESTAMPTZ`. RLS: 
 | type | TEXT DEFAULT 'standard'; CHECK (standard, scalp, swing, toll, pa, 1-1, risky) |
 | first_limit_hit_time | TIMESTAMPTZ |
 | closed_at / closed_reason | TIMESTAMPTZ / TEXT (`automatic` / `manual` / `expiry`) |
-| tp_price | DOUBLE PRECISION; market close price recorded on profit (auto-TP price for automatic; live bid/ask at command time for manual profit — bid if long, ask if short). NULL for SL / cancel / breakeven / other closures, and for manual profit when `live_prices` has no row for the instrument. |
+| tp_price | DOUBLE PRECISION; market close price recorded on profit (for automatic, the bid at auto-TP trigger — see "Auto-TP is evaluated on the bid"; for manual profit, the live bid/ask at command time — bid if long, ask if short). NULL for SL / cancel / breakeven / other closures, and for manual profit when `live_prices` has no row for the instrument. |
 | manual_tp_price | DOUBLE PRECISION (nullable); retrospective manual TP price override set via `!profit <id> <tp_price>`. Kept separate from `tp_price` so the original recorded close is preserved. Both the `!report` P&L and the profit-archive embed (per-limit P&L + the "TP Price" field) use `manual_tp_price` when present, else `tp_price`. |
 | alert_message_id | BIGINT (nullable); Discord message ID of the active-channel alert embed. Persisted so restarts can reuse the existing embed instead of orphaning it. Cleared on archive move, live-update NotFound, and approaching-alert retraction. |
 | alert_channel_id | BIGINT (nullable); Discord channel ID where the alert embed lives. Used at hydration to pin the fetch to the same channel even if `channels.json` was reconfigured. Falls back to `_get_alert_channel(signal)` if missing. |
@@ -546,6 +546,12 @@ When `cancel` is replied to the original signal message and no approaching/hit e
 ### TP logic is per-limit, not fully cumulative
 Auto-TP fires when: **last hit limit's P&L ≥ threshold** AND (if 2+ limits hit) **sum of earlier limits' P&L ≥ 0** (epsilon tolerance 1e-9). It is not a simple cumulative P&L check across all limits.
 
+### Auto-TP is evaluated on the bid, both directions
+`tp_monitor.check_signal` measures P&L from the limit's `price_level` to the **bid**, long and short alike, so a $4 threshold fires on $4 of movement as displayed on the chart — never $4 + spread. Shorts previously closed on the ask, which silently required the extra spread. The spread buffer still applies to approaching/hit checks (`spread_buffer_config`); it is deliberately absent from TP and stop-loss. The bid at trigger is what lands in `tp_price`, and `streaming_monitor` starts the trailing sim and the excursion exit from that same price so all three agree.
+
+### The auto-TP status guard runs at trigger, not per tick
+`check_signal` does a cheap in-memory `signal.status` check on every tick, and only re-reads the DB (`_closed_elsewhere`) once the threshold has actually been cleared. The DB read is what prevents double-marking a signal that a command closed within the last periodic-refresh cycle, so it must stay — but it belongs after the threshold test. Reinstating a per-tick DB round-trip here serialises into the feed dispatch loop (`price_stream_manager._process_price_update` awaits subscribers in order) and throttles tick sampling for every symbol on that feed, not just this one.
+
 ### react_to_original_signal
 Module-level function in `price_feeds/monitors/streaming_monitor.py`. Called from `streaming_monitor`, `expiry_manager`, and `commands/signals/lifecycle.py` to add emoji reactions to original signal messages.
 
@@ -608,6 +614,9 @@ Once `limits.approaching_alert_sent=TRUE`, the embed used to linger until hit, S
 
 ### Pip sizes are canonical in `BaseThresholdConfig.get_pip_size`
 Stocks (.NAS/.NYSE) 0.01, forex 0.0001 (JPY 0.01), XAU/GC futures 0.01, XAG 0.001, BTC 1.0, other crypto 0.1, indices 1.0, oil 0.01. The stock branch must stay ABOVE the index-keyword branch (".NAS" contains "NAS"). Unknown symbols fall back to 0.0001 — when adding a new asset class, add a branch here FIRST or `signal_excursions` pips will be wrong (this exact bug corrupted era-1 excursion rows; backfilled 2026-07-12).
+
+### Excursion ratchet writes are flushed on an interval, never per tick
+`pre_hit_mae` / MFE / MAE ratchet in memory on every tick; the DB write is deferred to a background flush at most every `_RATCHET_FLUSH_INTERVAL_SECONDS` (5 s), plus one awaited flush at the top of `finalize`. During a fast run nearly every tick sets a new extreme, so writing per ratchet put a DB round-trip in the feed dispatch loop precisely when price was moving fastest. Accuracy is unaffected — the extremes are in-memory truth, `finalize` re-asserts them, and the DB keeps whichever is larger. Only the flush carries the ATR multiples, which is why `finalize` flushes before writing. Keep new per-tick excursion fields on the same dirty-flag path.
 
 ### Excursion ordering flag + post-exit window
 `ExcursionMonitor` (now constructed with `tp_config`) decides `mae_before_mfe` when either excursion first exceeds 25% of the TP threshold (`_ORDERING_BAR_FRACTION`). After close, entered signals move to a `_post_exit` dict sampled by the same 60 s loop: favorable follow-through beyond the exit price from M1 bars ratchets `post_exit_mfe_pips` for 60 min (`_POST_EXIT_WINDOW_SECONDS`), then `post_exit_end_time` is stamped. Post-exit state does not survive a restart.

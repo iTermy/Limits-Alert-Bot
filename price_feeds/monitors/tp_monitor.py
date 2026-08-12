@@ -11,7 +11,8 @@ Logic per price tick:
   - If 2+ limits hit: last_pnl >= tp_threshold AND sum(pnl of all others) >= 0.
 
 P&L is in native units (pips for forex, dollars for everything else).
-Uses bid price for long P&L (what you could close at), ask for short.
+Both directions are measured on the bid — the price the chart shows — so a $4
+threshold fires on $4 of visible movement rather than $4 plus the spread.
 """
 
 import asyncio
@@ -71,12 +72,7 @@ class AutoTPMonitor:
     # Core evaluation
     # ------------------------------------------------------------------
 
-    async def check_signal(
-        self,
-        signal: SignalData,
-        current_bid: float,
-        current_ask: float,
-    ) -> bool:
+    async def check_signal(self, signal: SignalData, current_bid: float) -> bool:
         """
         Evaluate TP conditions for a signal on a price tick.
 
@@ -91,20 +87,9 @@ class AutoTPMonitor:
         if not hit_limits:
             return False
 
-        # Guard: re-fetch current signal status before doing any TP evaluation.
-        # If the signal was manually closed (profit, cancelled, stop_loss, breakeven)
-        # between ticks, evict it from cache and abort — prevents double-marking.
-        try:
-            current = await self.signal_db.get_signal_with_limits(signal_id)
-            if current and current.status not in ("hit", "active"):
-                logger.info(
-                    f"Signal {signal_id}: status is '{current.status}', "
-                    f"skipping auto-TP and evicting from cache"
-                )
-                self.evict_signal(signal_id)
-                return False
-        except Exception as e:
-            logger.warning(f"Signal {signal_id}: could not verify status before auto-TP: {e}")
+        if signal.status not in ("hit", "active"):
+            self.evict_signal(signal_id)
+            return False
 
         num_hit = len(hit_limits)
 
@@ -112,8 +97,8 @@ class AutoTPMonitor:
         last_limit = hit_limits[-1]
         earlier_limits = hit_limits[:-1]
 
-        # Long: close at bid; Short: close at ask
-        close_price = current_bid if direction == "long" else current_ask
+        # Both directions close on the bid, matching what the chart displays.
+        close_price = current_bid
 
         signal_type = signal.type
         last_pnl = self.tp_config.calculate_pnl(
@@ -147,10 +132,36 @@ class AutoTPMonitor:
             for lim in earlier_limits
         )
 
+        # The threshold is cleared, so confirm against the DB that nothing closed
+        # this signal since the last tick — a manual close from a command can take
+        # up to a periodic-refresh cycle to reach the in-memory copy, and acting on
+        # a stale one would double-mark the signal. This runs once per trigger, not
+        # once per tick, so it stays off the hot path.
+        if await self._closed_elsewhere(signal_id):
+            return False
+
         success = await self._trigger_auto_profit(
             signal, hit_limits, last_pnl, num_hit, cumulative_pnl, close_price
         )
         return success
+
+    async def _closed_elsewhere(self, signal_id: int) -> bool:
+        """True if the DB shows this signal already closed; evicts it when so."""
+        try:
+            current = await self.signal_db.get_signal_with_limits(signal_id)
+        except Exception as e:
+            logger.warning(f"Signal {signal_id}: could not verify status before auto-TP: {e}")
+            return False
+
+        if current is None or current.status in ("hit", "active"):
+            return False
+
+        logger.info(
+            f"Signal {signal_id}: status is '{current.status}', "
+            f"skipping auto-TP and evicting from cache"
+        )
+        self.evict_signal(signal_id)
+        return True
 
     async def _did_profit_land(self, signal_id: int) -> bool:
         """Re-fetch a signal after a write timeout; True if it committed as profit."""
