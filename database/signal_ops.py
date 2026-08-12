@@ -120,15 +120,25 @@ class SignalDatabase:
             existing_status = None
             signal_id = None
 
+            # An instant signal's limit is a fill that already happened, so the row is
+            # born filled rather than being inserted pending and marked hit a moment
+            # later. That gap was real — a pooler status write takes seconds — and for
+            # its duration the signal was indistinguishable from an ordinary one
+            # resting a limit at the market price, which is what execution clients
+            # keying on l.status='pending' acted on.
+            instant = parsed_signal.instant_entry
+            now = datetime.now(pytz.UTC)
+
             async with self.db.get_connection() as conn:
                 signal_id = await conn.fetchval(
                     """
                     INSERT INTO signals (
                         message_id, channel_id, instrument, direction,
                         stop_loss, expiry_type, expiry_time, total_limits, status, type,
-                        take_profit, tp_threshold_used, tp_threshold_unit, minutes_to_news
+                        take_profit, tp_threshold_used, tp_threshold_unit, minutes_to_news,
+                        limits_hit, first_limit_hit_time
                     )
-                    VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13, $14)
+                    VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13, $14, $15, $16)
                     ON CONFLICT (message_id) DO NOTHING
                     RETURNING id
                     """,
@@ -140,12 +150,14 @@ class SignalDatabase:
                     parsed_signal.expiry_type,
                     _parse_dt(expiry_time),
                     len(parsed_signal.limits) if parsed_signal.limits else 0,
-                    SignalStatus.ACTIVE,
+                    SignalStatus.HIT if instant else SignalStatus.ACTIVE,
                     getattr(parsed_signal, "type", "standard"),
                     parsed_signal.take_profit,
                     context.get("tp_threshold_used"),
                     context.get("tp_threshold_unit"),
                     context.get("minutes_to_news"),
+                    1 if instant else 0,
+                    now if instant else None,
                 )
 
                 if signal_id is None:
@@ -156,6 +168,20 @@ class SignalDatabase:
                     if row is not None:
                         existing_id = row["id"]
                         existing_status = row["status"]
+                elif instant:
+                    await conn.execute(
+                        """
+                        INSERT INTO limits (
+                            signal_id, price_level, sequence_number, status,
+                            hit_time, hit_price, hit_alert_sent
+                        )
+                        VALUES ($1, $2, 1, $3, $4, $2, TRUE)
+                        """,
+                        signal_id,
+                        parsed_signal.limits[0],
+                        LimitStatus.HIT,
+                        now,
+                    )
                 elif parsed_signal.limits:
                     await conn.executemany(
                         """

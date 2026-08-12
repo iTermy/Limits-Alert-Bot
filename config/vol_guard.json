@@ -4,7 +4,7 @@
   "guard_minutes": 15,
   "thresholds": {
     "forex": 20.0,
-    "forex_jpy": 20.0,
+    "forex_jpy": 30.0,
     "metals": 20.0,
     "indices": 200.0,
     "crypto": 2000.0,
@@ -44,7 +44,7 @@
     "HK50": 200.0,
     "INTC.NAS": 2.0,
     "ISRG.NAS": 6.0,
-    "JP225": 400.0,
+    "JP225": 500.0,
     "LIN.NAS": 6.0,
     "LRCX.NAS": 4.0,
     "MARA.NAS": 0.4,

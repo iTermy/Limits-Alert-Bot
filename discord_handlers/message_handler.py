@@ -862,8 +862,9 @@ class MessageHandler:
             self.logger.error(f"Instant signal {signal_id} has no entry limit to fill")
             return
 
-        # A reactivated signal comes back with its entry already filled; filling
-        # it a second time would double-count limits_hit.
+        # save_signal writes the entry already filled, and a reactivated signal comes
+        # back that way too; filling it again would double-count limits_hit. The mark
+        # remains for a signal whose limit somehow arrived pending.
         if signal.limits[0].status == "pending":
             await db.mark_limit_hit(signal.limits[0].id, entry_price)
 

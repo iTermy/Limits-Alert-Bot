@@ -125,7 +125,14 @@
       "Bash(git stash *)",
       "Bash(awk '/2026-07-27 16:25:5[0-9]/{f=1} f; /2026-07-27 16:26:3[0-9]/{if\\(f\\)exit}' bot.production.log)",
       "Bash(echo \"exit=$?\")",
-      "Bash(git log *)"
+      "Bash(git log *)",
+      "PowerShell(& \"C:\\\\Python Stuff\\\\TM Bot\\\\.venv\\\\Scripts\\\\python.exe\" \"C:\\\\Users\\\\ripyo\\\\AppData\\\\Local\\\\Temp\\\\claude\\\\C--Python-Stuff-TM-Bot\\\\88ef4062-e773-470b-8bcd-4b77bc191145\\\\scratchpad\\\\audit.py\")",
+      "PowerShell(& \"C:\\\\Python Stuff\\\\TM Bot\\\\.venv\\\\Scripts\\\\python.exe\" \"C:\\\\Users\\\\ripyo\\\\AppData\\\\Local\\\\Temp\\\\claude\\\\C--Python-Stuff-TM-Bot\\\\88ef4062-e773-470b-8bcd-4b77bc191145\\\\scratchpad\\\\audit2.py\")",
+      "PowerShell(& \"C:\\\\Python Stuff\\\\TM Bot\\\\.venv\\\\Scripts\\\\python.exe\" \"C:\\\\Users\\\\ripyo\\\\AppData\\\\Local\\\\Temp\\\\claude\\\\C--Python-Stuff-TM-Bot\\\\88ef4062-e773-470b-8bcd-4b77bc191145\\\\scratchpad\\\\verify_reconcile.py\")",
+      "PowerShell(& \"C:\\\\Python Stuff\\\\TM Bot\\\\.venv\\\\Scripts\\\\python.exe\" \"C:\\\\Users\\\\ripyo\\\\AppData\\\\Local\\\\Temp\\\\claude\\\\C--Python-Stuff-TM-Bot\\\\88ef4062-e773-470b-8bcd-4b77bc191145\\\\scratchpad\\\\drive_monitor.py\")",
+      "PowerShell(& \"C:\\\\Python Stuff\\\\TM Bot\\\\.venv\\\\Scripts\\\\python.exe\" \"C:\\\\Users\\\\ripyo\\\\AppData\\\\Local\\\\Temp\\\\claude\\\\C--Python-Stuff-TM-Bot\\\\88ef4062-e773-470b-8bcd-4b77bc191145\\\\scratchpad\\\\verify_finalize.py\")",
+      "PowerShell(& \"C:\\\\Python Stuff\\\\TM Bot\\\\.venv\\\\Scripts\\\\python.exe\" \"C:\\\\Users\\\\ripyo\\\\AppData\\\\Local\\\\Temp\\\\claude\\\\C--Python-Stuff-TM-Bot\\\\88ef4062-e773-470b-8bcd-4b77bc191145\\\\scratchpad\\\\inspect_3476.py\")",
+      "Bash(./.venv/Scripts/python.exe \"C:/Users/ripyo/AppData/Local/Temp/claude/C--Python-Stuff-TM-Bot/b067ad50-3403-4098-8436-8fc7a08bec89/scratchpad/prep_check.py\")"
     ],
     "additionalDirectories": [
       "C:\\Personal Projects\\MT5-Auto-Execution-Bot"
