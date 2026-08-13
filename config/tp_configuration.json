@@ -1227,6 +1227,12 @@
         "value": 4.0,
         "set_by": "itermy",
         "set_at": "2026-07-08T00:47:52.149586+00:00"
+      },
+      "GCZ26_CFD": {
+        "type": "dollars",
+        "value": 3.0,
+        "set_by": "itermy",
+        "set_at": "2026-08-12T00:00:00+00:00"
       }
     }
   }
