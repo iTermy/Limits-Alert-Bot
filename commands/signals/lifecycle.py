@@ -22,6 +22,10 @@ from ..views import ActiveSignalsView
 
 logger = get_logger("lifecycle_commands")
 
+# Gold spot instruments and the gold futures contract they convert to.
+GOLD_INSTRUMENTS = {"XAUUSD", "GOLD"}
+GOLD_FUTURES_SYMBOL = "GCZ26_CFD"
+
 
 class LifecycleCog(BaseCog):
     """Signal lifecycle commands: create, view, status changes, bulk cancels"""
@@ -199,6 +203,13 @@ class LifecycleCog(BaseCog):
         )
         embed.add_field(name="Stop Loss", value=stop_loss_formatted, inline=True)
 
+        if signal.take_profit is not None:
+            embed.add_field(
+                name="Take Profit",
+                value=format_price(signal.take_profit, signal.instrument),
+                inline=True,
+            )
+
         # Take-profit price — prefer the manual override, else the recorded close.
         tp_price = signal.manual_tp_price
         if tp_price is None:
@@ -291,6 +302,84 @@ class LifecycleCog(BaseCog):
             created_at = created_at.strftime("%Y-%m-%d %H:%M UTC")
         embed.set_footer(text=f"Created {created_at}")
 
+        await ctx.send(embed=embed)
+
+    @commands.command(name="futures", description="Convert a gold signal to futures prices")
+    async def futures_conversion(self, ctx: commands.Context, signal_id: int):
+        """
+        Convert a gold (XAUUSD) signal's limits and stop loss to the equivalent
+        GCZ26_CFD futures prices, using the live spot-to-futures price difference.
+        """
+        signal = await self.signal_db.get_signal_with_limits(signal_id)
+        if not signal:
+            await ctx.send(f"❌ Signal #{signal_id} not found")
+            return
+
+        if signal.instrument.upper() not in GOLD_INSTRUMENTS:
+            await ctx.send(
+                f"❌ `!futures` only works on gold signals. Signal #{signal_id} is "
+                f"**{signal.instrument}**."
+            )
+            return
+
+        stream_manager = self.services.stream_manager
+
+        # GCZ26_CFD is only subscribed on demand — ensure it's live before reading it.
+        await stream_manager.subscribe_symbol(GOLD_FUTURES_SYMBOL)
+
+        spot_price = await stream_manager.get_latest_price(signal.instrument)
+        futures_price = await stream_manager.get_latest_price(GOLD_FUTURES_SYMBOL)
+
+        if not spot_price:
+            await ctx.send(f"❌ No live {signal.instrument} price available right now.")
+            return
+        if not futures_price:
+            await ctx.send(f"❌ No live {GOLD_FUTURES_SYMBOL} price available right now.")
+            return
+
+        spot_mid = (spot_price["bid"] + spot_price["ask"]) / 2
+        futures_mid = (futures_price["bid"] + futures_price["ask"]) / 2
+        offset = spot_mid - futures_mid
+
+        limits = sorted(signal.limits, key=lambda lim: lim.sequence_number)
+        spot_lines = [
+            f"Limit {lim.sequence_number}: {format_price(lim.price_level, signal.instrument)}"
+            for lim in limits
+        ]
+        futures_lines = [
+            f"Limit {lim.sequence_number}: "
+            f"{format_price(lim.price_level - offset, GOLD_FUTURES_SYMBOL)}"
+            for lim in limits
+        ]
+        spot_lines.append(f"Stop Loss: {format_price(signal.stop_loss, signal.instrument)}")
+        futures_lines.append(
+            f"Stop Loss: {format_price(signal.stop_loss - offset, GOLD_FUTURES_SYMBOL)}"
+        )
+
+        direction_word = "above" if offset >= 0 else "below"
+
+        embed = discord.Embed(
+            title=f"🔮 Futures Conversion — Signal #{signal_id}",
+            description=(
+                f"**{signal.instrument} {signal.direction.upper()}** converted to "
+                f"**{GOLD_FUTURES_SYMBOL}** futures prices."
+            ),
+            color=0x00BFFF,
+        )
+        embed.add_field(name=f"📍 Spot ({signal.instrument})", value="\n".join(spot_lines), inline=True)
+        embed.add_field(
+            name=f"🔮 Futures ({GOLD_FUTURES_SYMBOL})", value="\n".join(futures_lines), inline=True
+        )
+        embed.add_field(
+            name="Difference",
+            value=(
+                f"{signal.instrument} is **${abs(offset):.2f}** {direction_word} "
+                f"{GOLD_FUTURES_SYMBOL}\n"
+                f"Spot {format_price(spot_mid, signal.instrument)} · "
+                f"Futures {format_price(futures_mid, GOLD_FUTURES_SYMBOL)}"
+            ),
+            inline=False,
+        )
         await ctx.send(embed=embed)
 
     @commands.command(name="setstatus", description="Set signal status")
@@ -678,12 +767,18 @@ class LifecycleCog(BaseCog):
                 monitor.nm_monitor.evict_signal(sid)
                 monitor.tp_monitor.evict_signal(sid)
 
+            # react_to_original_signal and _maybe_delete_original_message both
+            # need a SignalData model (attribute access), so fetch it once here.
+            signal_model = (
+                await self.signal_db.get_signal_with_limits(sid) if signal_dict else None
+            )
+
             # 2. React to the original signal message
-            if signal_dict and monitor:
+            if signal_model and monitor:
                 try:
                     from price_feeds.monitors.streaming_monitor import react_to_original_signal
 
-                    await react_to_original_signal(self.bot, signal_dict, "❌")
+                    await react_to_original_signal(self.bot, signal_model, "❌")
                 except Exception as _re:
                     logger.warning(f"Could not react to original message for signal {sid}: {_re}")
 
@@ -703,9 +798,9 @@ class LifecycleCog(BaseCog):
                     )
                     # For signals with no persistent embed in auto-purge channels,
                     # delete the original signal message immediately (nothing to archive).
-                    if not embed_existed and signal_dict:
+                    if not embed_existed and signal_model:
                         try:
-                            await alert_system._maybe_delete_original_message(signal_dict, sid)
+                            await alert_system._maybe_delete_original_message(signal_model, sid)
                         except Exception as _td:
                             logger.warning(
                                 f"Could not delete original message for signal {sid} (no embed): {_td}"

@@ -55,6 +55,8 @@ core/
     __init__.py                 parse_signal(message, channel_name) entry point;
                                   ParsedSignal / RejectedSignal types; lazy sub-parser init
     pattern_parsers.py          CorePatternParser / StockPatternParser / CryptoPatternParser;
+                                  parse_instant_signal() — market-entry signals (instrument + direction
+                                  + labelled sl/tp, no limits) for instant-entry channels;
                                   CHANNEL_TYPE_MAP + get_signal_type() (channel → standard/scalp/swing/toll/pa/1-1);
                                   get_gold_tolls_sl_offset() (settings.json, 30 s cache)
     validators.py               is_potential_signal(), should_exclude(), validate_signal(),
@@ -123,7 +125,8 @@ price_feeds/
                                   mark_immune(signal_id) called on every reactivation;
                                   signal.type == "swing" short-circuits NM (swing is not near-missable)
     trailing_monitor.py         TrailingStopMonitor — trailing-stop evaluation for HIT signals
-    excursion_monitor.py        ExcursionMonitor — MFE/MAE tracking + post-exit follow-through sampling
+    excursion_monitor.py        ExcursionMonitor — MFE/MAE tracking + post-exit follow-through sampling;
+                                  run_reconciler() closes rows the live paths missed (15 min)
     feed_health_monitor.py      Stale threshold 300 s; 3 max reconnect attempts; 120 s startup grace;
                                   15 min alert cooldown; DMs health_alert_admin_id from settings.json;
                                   spread hour (17–18 ET) treated as market-closed for forex/metals/indices/oil;
@@ -132,7 +135,8 @@ price_feeds/
                                   price-flow watchdog force-restarts the bot when a subscribed market is
                                   open but no feed has ticked for WATCHDOG_SILENCE_SECONDS;
                                   all knobs are module-level constants (no config file)
-    vol_guard.py                VolatilityGuard — per-pair volatility pause; reconciles vol_guard bot_mode_status
+    vol_guard.py                VolatilityGuard — per-instrument volatility flag across forex/gold/indices/
+                                  crypto/oil/stocks; reconciles vol_guard bot_mode_status + one live embed
     risky_window.py             RiskyWindowAnnouncer — risky-window gating + is_risky_trading_disabled()
     market_context.py           MarketContextProvider — market session / open-state context
     live_price_writer.py        Writes bid/ask/feed to live_prices table every 5 s for every signal-bearing
@@ -155,7 +159,9 @@ discord_handlers/
                                   reply are auto-deleted after _REPLY_DELETE_AFTER (15 s) to keep
                                   monitored / alert channels tidy;
                                   _handle_overlap_prompt() — 30 s reaction prompt when new signal overlaps
-                                  an existing one (✅ cancel old / ❌ keep both / timeout = cancel old)
+                                  an existing one (✅ cancel old / ❌ keep both / timeout = cancel old);
+                                  _reply_breakeven_stop() — `set be` / `unset be` arms or clears a
+                                  signal's breakeven stop (protection, not a status change)
 
 commands/
   __init__.py
@@ -290,8 +296,13 @@ Every incoming price update calls `streaming_monitor._on_price_update()` → `_c
    nm_monitor.update(signal, current_price) → True if bounce confirmed.
    → cancel signal → send_near_miss_cancel_alert()
 
-7. Auto-TP check (HIT-status signals only)
-   tp_monitor.check_signal(signal, bid, ask)
+7. Breakeven-stop check (HIT-status signals only, and only once armed)
+   Runs after the stop loss so a tick gapping through both books the real SL.
+   _check_breakeven_stop(signal, bid) — evaluated on the bid, no spread buffer
+   → send_breakeven_stop_alert() → signal→breakeven
+
+8. Auto-TP check (HIT-status signals only)
+   tp_monitor.check_signal(signal, bid) — no spread buffer; evaluated on the bid
    last_hit_limit_pnl ≥ threshold AND sum(earlier_limits_pnl) ≥ 0 (ε=1e-9)
    → send_auto_tp_alert() → signal→profit
 ```
@@ -317,7 +328,9 @@ All PKs: `BIGINT GENERATED ALWAYS AS IDENTITY`. Timestamps: `TIMESTAMPTZ`. RLS: 
 | type | TEXT DEFAULT 'standard'; CHECK (standard, scalp, swing, toll, pa, 1-1, risky) |
 | first_limit_hit_time | TIMESTAMPTZ |
 | closed_at / closed_reason | TIMESTAMPTZ / TEXT (`automatic` / `manual` / `expiry`) |
-| tp_price | DOUBLE PRECISION; market close price recorded on profit (auto-TP price for automatic; live bid/ask at command time for manual profit — bid if long, ask if short). NULL for SL / cancel / breakeven / other closures, and for manual profit when `live_prices` has no row for the instrument. |
+| be_stop_armed_at | TIMESTAMPTZ (nullable); when a breakeven stop was armed via the `set be` reply. NULL = not armed. A timestamp rather than a flag so analysis can see how far into a trade protection went on. |
+| take_profit | DOUBLE PRECISION (nullable); the sender's fixed TP price, set only by instant-entry channels. When present it *replaces* the TPConfig threshold as the exit condition (`tp_monitor._fixed_tp_reached`, evaluated on the bid like every other TP). |
+| tp_price | DOUBLE PRECISION; market close price recorded on profit (for automatic, the bid at auto-TP trigger — see "Auto-TP is evaluated on the bid"; for manual profit, the live bid/ask at command time — bid if long, ask if short). NULL for SL / cancel / breakeven / other closures, and for manual profit when `live_prices` has no row for the instrument. |
 | manual_tp_price | DOUBLE PRECISION (nullable); retrospective manual TP price override set via `!profit <id> <tp_price>`. Kept separate from `tp_price` so the original recorded close is preserved. Both the `!report` P&L and the profit-archive embed (per-limit P&L + the "TP Price" field) use `manual_tp_price` when present, else `tp_price`. |
 | alert_message_id | BIGINT (nullable); Discord message ID of the active-channel alert embed. Persisted so restarts can reuse the existing embed instead of orphaning it. Cleared on archive move, live-update NotFound, and approaching-alert retraction. |
 | alert_channel_id | BIGINT (nullable); Discord channel ID where the alert embed lives. Used at hydration to pin the fetch to the same channel even if `channels.json` was reconfigured. Falls back to `_get_alert_channel(signal)` if missing. |
@@ -355,7 +368,7 @@ Audit log of runtime config changes: `changed_at`, `config_family` (`tp` / `aler
 `feed TEXT PRIMARY KEY` (`icmarkets` / `oanda` / `binance` / `exness`), `status TEXT` (`idle` / `healthy` / `down`), `stale_seconds INTEGER`, `last_seen TIMESTAMPTZ`, `updated_at TIMESTAMPTZ`. Upserted by `FeedHealthMonitor._write_feed_health()` on status transitions (unchanged rows are refreshed at most every 10 min). Read by the EX bot each cycle to skip placement on stale feeds. `down` only fires when **every** subscribed symbol on a feed has stalled — a single quiet symbol no longer poisons unrelated signals.
 
 ### bot_mode_status
-Singleton row (id=1, enforced by CHECK). `news_mode TEXT` (nullable — comma-separated active news categories like `EUR, GOLD` or `ALL`; NULL when no news), `vol_guard TEXT` (nullable — comma-separated volatile pairs like `EURUSD, GBPUSD`, or `ALL` for gold; NULL when calm), `spread_hour BOOLEAN`. `news_mode` is reconciled by `NewsManager.reconcile_news_mode()` (startup, every news command, and the 30 s cleanup loop); `vol_guard` is reconciled by `VolatilityGuard._reconcile_vol_guard_mode()` once per 5 s eval cycle from the active guard keys; `spread_hour` is updated in real-time by streaming_monitor on spread-hour state transitions. Consumers (including the EX bot) read `news_mode` / `vol_guard` for truthiness, so they are NULL — never the string `'FALSE'` — when inactive.
+Singleton row (id=1, enforced by CHECK). `news_mode TEXT` (nullable — comma-separated active news categories like `EUR, GOLD` or `ALL`; NULL when no news), `vol_guard TEXT` (nullable — comma-separated volatile DB instruments like `EURUSD, NAS100USD, BTCUSDT`, or `ALL` for gold; NULL when calm), `spread_hour BOOLEAN`. `news_mode` is reconciled by `NewsManager.reconcile_news_mode()` (startup, every news command, and the 30 s cleanup loop); `vol_guard` is reconciled by `VolatilityGuard._reconcile_vol_guard_mode()` once per 5 s eval cycle from the active guard keys; `spread_hour` is updated in real-time by streaming_monitor on spread-hour state transitions. Consumers (including the EX bot) read `news_mode` / `vol_guard` for truthiness, so they are NULL — never the string `'FALSE'` — when inactive. `signals_rev BIGINT` is a write watermark bumped by statement-level triggers (`signals_rev_bump` / `limits_rev_bump` → `bump_signals_rev()`) on every `signals`/`limits` INSERT/UPDATE/DELETE: the EX bot polls this row once per sync cycle and refetches its heavy signal-set/status queries only when the rev moves, which is what keeps shared-pooler egress flat. The bump function swallows its own failures so it can never roll back the signal write it rides on.
 
 ### licenses / license_allowances
 License management for the Signal Subscriber role. Managed via `!activate`, `!grantkey`, `!revoke`, `!licenses` commands. Not involved in signal processing.
@@ -506,13 +519,48 @@ Spread-hour and news cancels **edit the persistent embed** when one already exis
 ### News matching is per-currency; USD also covers US markets
 `NewsEvent.instrument_affected` matches per currency (CHF news never touches EURUSD). A `USD` category additionally pauses US equities (`.NAS`/`.NYSE`) and US indices (`US_INDEX_KEYWORDS`: NAS100/US30/US500/SPX500/SPX/USTEC/US2000/…), and pauses gold when `affects_gold` is set (auto-fetched high-impact USD events). Auto-fetched events carry a merged `title` ("EUR — ECB Rate / Press Conf"); `NewsEvent.display_label` is used in all news alerts (activation, cancel, ended), falling back to the bare category for manual events.
 
+### Instant-entry channels enter at market, not at a limit
+`semi-swing-pa-signals` (listed in `validators._INSTANT_ENTRY_CHANNELS`) posts signals of the form `short gold sl 5001 tp 4080`: an instrument, a direction, and labelled SL/TP with **no limits**. `parse_instant_signal()` produces a `ParsedSignal` with `instant_entry=True`, `take_profit` set, and `limits=[]`; the AI fallback is skipped for these channels.
+
+`message_handler` resolves the entry before saving: `_live_entry_price()` reads the feed via `stream_manager.get_latest_price()` (subscribing the symbol first if nothing was watching it), takes the **ask for a long / bid for a short**, and rejects prices older than `_INSTANT_ENTRY_MAX_PRICE_AGE` (15 s). `_resolve_instant_entry()` then rejects with ⚠️ plus a reply when there is no live price, or when price already sits outside the SL↔TP band — that trade would open only to close on the next tick. The resolved price becomes the signal's single limit, and `save_signal` writes it **already hit** — status `hit`, `limits_hit=1`, `first_limit_hit_time` set — in the same transaction as the signal row; `_open_instant_position()` then just opens the embed directly as HIT. Being born filled is load-bearing, not cosmetic: inserting the limit as `pending` and marking it hit on a second round-trip left a multi-second window (a pooler status write is 2–5 s) in which the row was indistinguishable from an ordinary signal resting a limit at the market price. Every released EX bot keys its placeable set on `l.status='pending'`, so during that window even versions that disable this channel would place a real limit order on a user's account. Nothing returns an instant limit to `pending` afterwards — cancels and terminal transitions only touch `pending` rows, reactivation only restores `cancelled` ones, and an edit rewrites SL/TP/expiry only. Overlap detection is skipped (the limit fills immediately, so it never competes with another signal's resting limits).
+
+Downstream everything is shared machinery: `type='pa'` routes the embed to the PA alert channel and the signal into the PA report section; SL, manual reply commands, archiving, trailing and excursion analytics are unchanged. The guards land where they should without special-casing — an already-HIT signal rides out spread hour and the late-market hour, and is cancelled when a news window opens (only `swing` is exempt from that). Edits to an instant signal update **SL/TP and expiry only** (`signal_ops._update_instant_from_edit`); the entry limit records a real fill and is never re-derived. The EX bot ignores these signals — it keys off pending limits, and there is never one.
+
 ### Signal type taxonomy
 `signals.type` ∈ `{standard, scalp, swing, toll, pa, 1-1, risky}`. Determined by `pattern_parsers.get_signal_type(text, channel_name)`:
-- `CHANNEL_TYPE_MAP` wins first: `scalps` → scalp; `swing-trades`/`gold-swings` → swing; `gold-tolls-map`/`general-tolls`/`oil-tolls` → toll; `gold-pa-signals`/`price-action-trades` → pa; `gold-1-1-rr` → 1-1.
+- `CHANNEL_TYPE_MAP` wins first: `scalps` → scalp; `swing-trades`/`gold-swings` → swing; `gold-tolls-map`/`general-tolls`/`oil-tolls` → toll; `gold-pa-signals`/`price-action-trades`/`semi-swing-pa-signals` → pa; `gold-1-1-rr` → 1-1.
 - Otherwise body keyword: `\bswing\b` → swing, `\bscalp\b` → scalp.
 - Default: standard.
 
 Each type has its own `tp_configuration.json` defaults under `type_defaults[<type>]` and per-symbol overrides under `type_overrides[<type>]`. Default initialization: scalp/standard kept as before; toll initialized from scalp; pa initialized from standard; swing = 3× standard; 1-1 metals = $10. The TP resolution order is: per-type symbol override → standard symbol override → per-type asset-class default → standard asset-class default → hard fallback ($5).
+
+### Breakeven stop (`set be`)
+Replying `set be` to an alert embed, its ping, or the original signal message arms a
+breakeven stop on an open (HIT) position: from then on the signal closes flat when
+price reverses to its entry, instead of riding down to the stop loss. `unset be`
+(or `remove be`) disarms it. Distinct from the bare `be` reply, which marks the
+signal breakeven *immediately* — that one is a status command, this one is protection.
+
+- **The BE price is the mean of every filled limit** (`models.signal.breakeven_price`).
+  Lots are equal per limit, so the mean is where the position's combined P&L is
+  exactly zero — the fills above it lose what the fills below it gain. Note this is
+  *not* the trailing sim's anchor, which is the deepest fill (the runner).
+- **Evaluated on the bid in both directions**, like auto-TP, so it fires where the
+  chart shows it rather than a spread away. No spread buffer.
+- **Arming is refused unless the trade is currently in profit on the bid** — arming
+  underwater would close the trade on the very next tick. Also refused when the
+  signal is not HIT, or when no live price is available to check against.
+- **The real stop loss wins a tick that gaps through both.** `_check_stop_loss` runs
+  first and its `sl_alert_sent` flag stands the BE check down, so the DB records the
+  loss the position actually took rather than a flat exit it never got.
+- Take-profit, news/spread/risky guards, expiry and every manual command are
+  unchanged — this only puts a floor under the trade.
+- The flag lives on `signals.be_stop_armed_at` and is selected by BOTH
+  `SIGNAL_COLUMNS` and `manager.get_active_signals_for_tracking` — the tick path is
+  fed by the latter, so a new per-signal column that only lands in `SIGNAL_COLUMNS`
+  is invisible to price ticks after a restart.
+- Arming calls `refresh_signal_in_memory` so ticks see it immediately instead of
+  waiting up to 30 s for the periodic refresh.
 
 ### Swing is not near-missable
 `NearMissMonitor.update` short-circuits when `signal.type == "swing"`. Swing signals can only close via hit, profit, SL, or manual cancel.
@@ -544,6 +592,12 @@ When `cancel` is replied to the original signal message and no approaching/hit e
 ### TP logic is per-limit, not fully cumulative
 Auto-TP fires when: **last hit limit's P&L ≥ threshold** AND (if 2+ limits hit) **sum of earlier limits' P&L ≥ 0** (epsilon tolerance 1e-9). It is not a simple cumulative P&L check across all limits.
 
+### Auto-TP is evaluated on the bid, both directions
+`tp_monitor.check_signal` measures P&L from the limit's `price_level` to the **bid**, long and short alike, so a $4 threshold fires on $4 of movement as displayed on the chart — never $4 + spread. Shorts previously closed on the ask, which silently required the extra spread. The spread buffer still applies to approaching/hit checks (`spread_buffer_config`); it is deliberately absent from TP and stop-loss. The bid at trigger is what lands in `tp_price`, and `streaming_monitor` starts the trailing sim and the excursion exit from that same price so all three agree.
+
+### The auto-TP status guard runs at trigger, not per tick
+`check_signal` does a cheap in-memory `signal.status` check on every tick, and only re-reads the DB (`_closed_elsewhere`) once the threshold has actually been cleared. The DB read is what prevents double-marking a signal that a command closed within the last periodic-refresh cycle, so it must stay — but it belongs after the threshold test. Reinstating a per-tick DB round-trip here serialises into the feed dispatch loop (`price_stream_manager._process_price_update` awaits subscribers in order) and throttles tick sampling for every symbol on that feed, not just this one.
+
 ### react_to_original_signal
 Module-level function in `price_feeds/monitors/streaming_monitor.py`. Called from `streaming_monitor`, `expiry_manager`, and `commands/signals/lifecycle.py` to add emoji reactions to original signal messages.
 
@@ -569,7 +623,7 @@ All updates in `manager.mark_limit_hit` (limit row, signal counter, status→HIT
 `streaming_monitor._load_and_subscribe_signals` fetches hit limits for every HIT-status signal (via `get_hit_limits_for_signal`) and appends them as `LimitData(status="hit")` to `signal.limits`. After restart, `signal.hit_limits` is non-empty so embed builders see the complete limit history without waiting for the next event.
 
 ### live_prices is written for every feed (no IC reference columns)
-`LivePriceWriter.TRACKED_FEEDS` includes `icmarkets`, so every signal-bearing symbol gets a `live_prices` row sourced from its serving feed — including IC-primary instruments (forex, stocks, GCQ26 metals, XTIUSD oil) that previously had no row. The old `ic_bid`/`ic_ask` columns were dropped (migration `ALTER TABLE live_prices DROP COLUMN IF EXISTS`), and the IC reference-only symbol machinery that fed them (`subscribe_reference`, 15-min slow polling) was removed with them: the EX bot now derives its broker offset from its own MT5 feed against the stored price at the same timestamp.
+`LivePriceWriter.TRACKED_FEEDS` includes `icmarkets`, so every signal-bearing symbol gets a `live_prices` row sourced from its serving feed — including IC-primary instruments (forex, stocks, GCZ26_CFD metals, XTIUSD oil) that previously had no row. The old `ic_bid`/`ic_ask` columns were dropped (migration `ALTER TABLE live_prices DROP COLUMN IF EXISTS`), and the IC reference-only symbol machinery that fed them (`subscribe_reference`, 15-min slow polling) was removed with them: the EX bot now derives its broker offset from its own MT5 feed against the stored price at the same timestamp.
 
 ### Price-flow watchdog
 `FeedHealthMonitor._check_price_flow_watchdog` force-restarts the bot (graceful `bot.close()` → `main.py` supervisor relaunch) only when ALL hold: past `WATCHDOG_GRACE_SECONDS`, at least one subscribed symbol whose market is open now (via `is_market_open`, which already excludes weekends/holidays/spread hour), and zero ticks across every feed for `WATCHDOG_SILENCE_SECONDS` (180 s). Fires at most once (`_watchdog_fired`). Runs the shutdown in a separate task so it doesn't await its own monitor task.
@@ -607,8 +661,18 @@ Once `limits.approaching_alert_sent=TRUE`, the embed used to linger until hit, S
 ### Pip sizes are canonical in `BaseThresholdConfig.get_pip_size`
 Stocks (.NAS/.NYSE) 0.01, forex 0.0001 (JPY 0.01), XAU/GC futures 0.01, XAG 0.001, BTC 1.0, other crypto 0.1, indices 1.0, oil 0.01. The stock branch must stay ABOVE the index-keyword branch (".NAS" contains "NAS"). Unknown symbols fall back to 0.0001 — when adding a new asset class, add a branch here FIRST or `signal_excursions` pips will be wrong (this exact bug corrupted era-1 excursion rows; backfilled 2026-07-12).
 
+### Excursion ratchet writes are flushed on an interval, never per tick
+`pre_hit_mae` / MFE / MAE ratchet in memory on every tick; the DB write is deferred to a background flush at most every `_RATCHET_FLUSH_INTERVAL_SECONDS` (5 s), plus one awaited flush at the top of `finalize`. During a fast run nearly every tick sets a new extreme, so writing per ratchet put a DB round-trip in the feed dispatch loop precisely when price was moving fastest. Accuracy is unaffected — the extremes are in-memory truth, `finalize` re-asserts them, and the DB keeps whichever is larger. Only the flush carries the ATR multiples, which is why `finalize` flushes before writing. Keep new per-tick excursion fields on the same dirty-flag path.
+
 ### Excursion ordering flag + post-exit window
 `ExcursionMonitor` (now constructed with `tp_config`) decides `mae_before_mfe` when either excursion first exceeds 25% of the TP threshold (`_ORDERING_BAR_FRACTION`). After close, entered signals move to a `_post_exit` dict sampled by the same 60 s loop: favorable follow-through beyond the exit price from M1 bars ratchets `post_exit_mfe_pips` for 60 min (`_POST_EXIT_WINDOW_SECONDS`), then `post_exit_end_time` is stamped. Post-exit state does not survive a restart.
+
+### Every terminal close must finalize the analytics trackers
+`monitor.finalize_trailing_on_manual_close(signal_id)` is the single hook for closes that have no tick price on hand — reply commands, `!setstatus`/`!profit`/bulk cancel, expiry (`expiry_manager`), and message-deletion cancel (`message_handler.handle_message_delete`). It reads the last `live_prices` row and finalizes both the trailing sim and the excursion row. **When adding a new close path, call it.** Two supports make a miss non-fatal:
+- `_closing_instrument` falls back to a DB lookup when the signal has already left `active_signals` — a pooler status write can take seconds, long enough for the periodic refresh to drop it first.
+- `ExcursionMonitor.finalize` writes to the DB regardless of in-memory state (the UPDATE is scoped to still-open rows), and `run_reconciler` sweeps every 15 min for rows whose signal is already final, deriving the exit from `tp_price` / the close snapshot and suffixing `exit_reason` with `:reconciled`.
+
+Losing in-memory excursion state mid-trade also freezes `mfe_pips`/`mae_pips` at their last value, so a missed hook costs more than a NULL exit — see DATA_ANALYSIS.md §5.
 
 ### Data-era marker
 `signals.data_version` = 1 for rows created before 2026-07-12, 2 for the clean-instrumentation era. Analysis conventions live in **DATA_ANALYSIS.md** — keep that file current when changing analytics-relevant schema or semantics.

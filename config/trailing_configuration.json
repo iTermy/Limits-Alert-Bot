@@ -267,6 +267,30 @@
         "medium": 50.0,
         "loose": 100.0
       },
+      "HK50": {
+        "type": "dollars",
+        "tight": 12.5,
+        "medium": 25.0,
+        "loose": 50.0
+      },
+      "CHINA50": {
+        "type": "dollars",
+        "tight": 7.5,
+        "medium": 15.0,
+        "loose": 30.0
+      },
+      "CHINAH": {
+        "type": "dollars",
+        "tight": 5.0,
+        "medium": 10.0,
+        "loose": 20.0
+      },
+      "AUS2000": {
+        "type": "dollars",
+        "tight": 5.0,
+        "medium": 10.0,
+        "loose": 20.0
+      },
       "JP225": {
         "type": "dollars",
         "tight": 50.0,

@@ -20,7 +20,9 @@ Two bots write to this DB:
 - **1** = created before 2026-07-12. Known problems: no exit price on manual/cancel closes, TP-config drift unrecorded (toll-metals TP was $4 before 2026-06-06, $5 after), excursion pip-size bug (fixed + backfilled, see §6), assorted manual corrections.
 - **2** = created 2026-07-12 or later, with full instrumentation.
 
-**Primary analysis uses `data_version >= 2` only.** Era-1 data may be referenced for context but not for optimization decisions. The 2026-07-11 full analysis of era-1 data (+19.7…+29.3R over 4.3 months, toll/gold = the edge, 6+ limit signals negative, 8–9 AM ET and Thursdays weak, trailing > fixed TP in execution) lives in git history — `git show 642f4d2:STRATEGY_ANALYSIS.md`.
+**Primary analysis uses `data_version >= 2` only.** Era-1 data may be referenced for context but not for optimization decisions.
+
+One wrinkle inside era 2: the column defaults to 2, so the ~28 signals created on **2026-07-13 before the instrumentation code was deployed that day** are marked era 2 but carry no `tp_threshold_used` / `tp_threshold_unit`. Add `AND created_at >= '2026-07-14'` whenever the analysis needs the config-at-time stamps; every signal from that date on has them. The 2026-07-11 full analysis of era-1 data (+19.7…+29.3R over 4.3 months, toll/gold = the edge, 6+ limit signals negative, 8–9 AM ET and Thursdays weak, trailing > fixed TP in execution) lives in git history — `git show 642f4d2:STRATEGY_ANALYSIS.md`.
 
 ## 3. Outcome definitions and exit-price rules
 
@@ -32,7 +34,7 @@ Exit price per close type (era 2):
 | `profit` / `closed_reason='automatic'` | `tp_price` | Auto-TP close price |
 | `profit` / `closed_reason='manual'` | **`tp_price`** (live bid for long / ask for short, captured at command time) | `manual_tp_price` is a retrospective override ("where it should have TP'd") — **advisory only, never the analysis exit**. Compare the two to detect TP thresholds set too far. Manual profit = whole position closed at that price (no trailing assumption). |
 | `stop_loss` | `stop_loss` column | |
-| `breakeven` | mid of `close_bid`/`close_ask` | Typically a small loss; treat as its actual (small) P&L, not 0, when close prices exist |
+| `breakeven` | mid of `close_bid`/`close_ask` | Typically a small loss; treat as its actual (small) P&L, not 0, when close prices exist. Two populations since 2026-08-13: hand-marked (`be` reply) and **breakeven-stop** closes, which carry `be_stop_armed_at IS NOT NULL`, `closed_reason='automatic'`, a `status_changes.reason='breakeven_stop'` row, and `signal_excursions.exit_reason='be_stop'`. Split them — the second is a rule, not a judgement call. |
 | `cancelled` with hits | mid of `close_bid`/`close_ask` | Mark-to-market at cancel time — no more unknown outcomes |
 | any close without hits | not a trade | |
 
@@ -46,7 +48,8 @@ Exit price per close type (era 2):
 
 ## 4. Config-at-time
 
-- `signals.tp_threshold_used` / `tp_threshold_unit` — the TP threshold resolved for this signal at save time. Use this, never today's `tp_configuration.json`, for historical modeling.
+- `signals.tp_threshold_used` / `tp_threshold_unit` — the TP threshold resolved for this signal at save time. Use this, never today's `tp_configuration.json`, for historical modeling. **Ignore it when `take_profit` is non-NULL** — that signal exits at its own price and the threshold never applied to it.
+- `signals.take_profit` — the sender's fixed TP price (instant-entry signals only; NULL everywhere else). These signals also enter at market rather than at a limit, so their single `limits` row records the fill price, not a resting order. Filter on `take_profit IS NOT NULL` to separate them from limit-based PA signals, which share `type = 'pa'`.
 - `signals.minutes_to_news` — minutes until the next news event affecting this instrument at save time (NULL = none upcoming/unknown).
 - `config_history` — every `!tp set/remove`, `!alertdist set/remove`, `!nmconfig set/remove`, `!goldtollssl`, `!riskygoldsl` change with old/new values, timestamp, who.
 
@@ -57,6 +60,8 @@ Tracks from first approaching alert: approach velocity, pre-hit MAE, then from e
 New in era 2:
 - `mae_before_mfe` — TRUE if the adverse excursion crossed 25% of the TP threshold before the favorable one did. This is the key input for evaluating break-even-move rules (era-1 data couldn't order the extremes).
 - `post_exit_mfe_pips` / `post_exit_end_time` — favorable follow-through beyond the exit price for 60 min after close (M1 bars). Directly measures pips left on the table; compare against `tp_threshold_used` to size trailing benefit.
+- **`entry_price` is the FIRST fill; TP and trailing anchor on the DEEPEST fill.** `mark_entry` takes the lowest-`sequence_number` hit limit, while auto-TP measures the last hit limit's P&L and `trailing_monitor._deepest_hit_price` anchors on the deepest one (long: lowest hit price, short: highest). On a multi-fill signal these are far apart and **MFE/MAE are not comparable to the signal's realized P&L or to R**. Worked example — signal 3476 (US30USD short, 6 fills): excursion entry 52982.3 with `mfe_pips` = 6, yet auto-TP fired at 53041.3 for a real profit measured off the 53194.3 fill. The row is correct; reading its MFE as "the trade only ever went 6 pips my way" is not. For per-signal excursion work either restrict to `limits_hit = 1`, or recompute the anchor from `limits` (`MIN/MAX(hit_price)` by direction) and shift `mfe_pips`/`mae_pips` by `(anchor − entry_price)/pip_size`.
+- **`exit_reason` ending in `:reconciled`** means the exit was *derived* at close time, not observed on a tick. A background reconciler (15 min cadence, `ExcursionDatabase.close_orphaned`) closes any row whose signal reached a final status without a live path finalizing it — expiry, message-deletion, or a manual command issued after the signal left the monitor's in-memory set. The exit price follows the §3 rules (stop level for SL, else `tp_price`, else the close-snapshot mid); the reason is the signal's `closed_reason` plus the suffix. Treat `mfe_pips`/`mae_pips` on these rows as lower bounds — a row only needs reconciling because the in-memory state was gone, and ratcheting stops with it. Before the reconciler shipped (2026-08-11) these rows stayed in `approach`/`in_trade` indefinitely; 61 historical rows (5 of them entered signals) were closed by the first sweep. Rows finalized on a live path re-assert their in-memory extremes at close, so a dropped intermediate ratchet write no longer sticks.
 - **Pips are pips of the row's own `pip_size`** — always multiply by `pip_size` to get price units before cross-instrument comparison. A 2026-07-12 backfill rescaled rows written with wrong pip sizes (DE30EUR, GCQ26, USOILSPOT, all stocks). If the bot ran with pre-fix code after the backfill, re-run the rescale (idempotent, keyed on `pip_size <>` expected; template in git history / trivial to reconstruct — factor = old_pip/new_pip on `approach_velocity, pre_hit_mae, mfe_pips, mae_pips`). Snapshot table `signal_excursions_backup_20260712` holds pre-backfill values.
 - Canonical pip sizes: forex 0.0001 (JPY pairs 0.01), XAU/GC 0.01, XAG 0.001, BTC 1.0, other crypto 0.1, indices 1.0, oil 0.01, stocks 0.01.
 
@@ -90,7 +95,7 @@ Cleaning rules that mattered on era-1 data (keep applying):
 6. **Slippage cost** — entry/exit slippage vs the modeled edge (~0.08R avg — slippage could eat a big share).
 7. **6+ limit skip validation** — exec bots now skip them by default (`skip_limits_at=6`); compare filled depth distributions before/after v1.6.0.
 8. **Session/day effects** — era-1 found 8–9 AM ET negative and Thursday negative; re-test on era 2 before acting.
-9. **NM-cancel counterfactuals** — still NOT instrumented (deferred); the 387+ near-miss cancels remain unevaluated.
+9. **NM-cancel counterfactuals** — still NOT instrumented (deferred); the 387+ near-miss cancels remain unevaluated. Era-2 adds 53 more. The excursion row for a near-miss closes at `approach` phase with no exit price (nothing was entered), so nothing records whether price went on to reach limit 1 after the cancel. Answering this needs new instrumentation: a bounded post-cancel watch on non-entered closes, mirroring `post_exit_mfe_pips`.
 
 ## 9. Schema quick-reference (analysis-relevant deltas from CLAUDE.md)
 

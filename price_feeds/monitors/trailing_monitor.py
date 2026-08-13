@@ -45,9 +45,6 @@ class TrailingStopMonitor:
         self._db = trailing_db
         self._tracking: dict[int, TrailingState] = {}
 
-    def is_tracking(self, signal_id: int) -> bool:
-        return signal_id in self._tracking
-
     def has_open_levels(self, signal_id: int) -> bool:
         state = self._tracking.get(signal_id)
         return state is not None and not all(state.stopped.values())

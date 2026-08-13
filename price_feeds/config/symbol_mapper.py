@@ -5,6 +5,11 @@ from typing import Optional
 
 logger = logging.getLogger(__name__)
 
+# Index symbols that name an ICMarkets contract directly rather than the OANDA
+# instrument, so they are priced from ICMarkets. The parser only produces these when a
+# message names them literally; DAX/FTSE mentions canonicalize to DE30EUR/UK100GBP.
+BROKER_NATIVE_INDICES = {"DE40", "UK100"}
+
 
 class SymbolMapper:
     """
@@ -61,7 +66,7 @@ class SymbolMapper:
             return "crypto"
 
         # Check metals
-        if any(metal in symbol_upper for metal in ["XAU", "XAG", "GOLD", "SILVER", "GCQ"]):
+        if any(metal in symbol_upper for metal in ["XAU", "XAG", "GOLD", "SILVER", "GCZ"]):
             return "metals"
 
         # Check oil
@@ -81,6 +86,8 @@ class SymbolMapper:
                 "DAX",
                 "UK100",
                 "CHINA50",
+                "CHINAH",
+                "CN50",
                 "US500",
                 "USTEC",
                 "US30",
@@ -92,6 +99,11 @@ class SymbolMapper:
                 "DE40",
                 "JP225",
                 "NIKKEI",
+                "F40",
+                "HK50",
+                "HK33",
+                "AU200",
+                "EU50",
             ]
         ):
             return "indices"
@@ -154,6 +166,12 @@ class SymbolMapper:
             if "XTI" in symbol_upper or symbol_upper == "XTIUSD":
                 return "icmarkets"
             return "exness"
+
+        # These name the ICMarkets contract itself, so they must be priced from
+        # ICMarkets rather than the OANDA equivalent the indices priority would pick.
+        # Their OANDA-fed counterparts (DE30EUR, UK100GBP) keep the indices priority.
+        if symbol.upper() in BROKER_NATIVE_INDICES:
+            return "icmarkets"
 
         # Get feed priority for this asset class
         feed_priority = self.mappings["feed_priority"].get(asset_class, ["icmarkets"])

@@ -13,6 +13,7 @@ from typing import Optional
 
 import discord
 
+from models import SignalData
 from price_feeds.alerting.embed_builders import (
     _build_profit_archive_embed,
     _build_signal_embed,
@@ -96,7 +97,7 @@ class ArchiveManager:
             return None
         return self.bot.get_channel(int(self._profit_channel_id))
 
-    async def maybe_delete_original_message(self, signal: dict, signal_id: int) -> None:
+    async def maybe_delete_original_message(self, signal: SignalData, signal_id: int) -> None:
         """
         Delete the original signal message if its channel is in auto_purge_channel_ids.
         Safe to call on any signal — silently skips exempt channels and manual signals.

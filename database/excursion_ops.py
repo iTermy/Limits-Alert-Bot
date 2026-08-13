@@ -164,15 +164,82 @@ class ExcursionDatabase:
         )
 
     async def finalize(
-        self, signal_id: int, exit_price: float, exit_time: datetime, exit_reason: str
+        self,
+        signal_id: int,
+        exit_price: float,
+        exit_time: datetime,
+        exit_reason: str,
+        mfe_pips: Optional[float] = None,
+        mfe_price: Optional[float] = None,
+        mfe_time: Optional[datetime] = None,
+        mae_pips: Optional[float] = None,
+        mae_price: Optional[float] = None,
+        mae_time: Optional[datetime] = None,
     ) -> None:
+        """Close the row, keeping the larger of the stored and caller's extremes.
+
+        The caller passes the extremes it observed in memory. Per-tick ratchet
+        writes are best-effort, so the stored value can lag; GREATEST repairs it
+        here, and the matching price/time move only when the caller's excursion
+        is the bigger one (every SET reads the pre-UPDATE row, so the comparison
+        against the old pips value is sound). All extreme arguments may be None
+        — GREATEST skips NULLs and the CASE falls through to the stored value.
+        """
         await self.db.execute(
             """
             UPDATE signal_excursions
-            SET phase = 'closed', exit_price = $1, exit_time = $2, exit_reason = $3
-            WHERE signal_id = $4 AND phase <> 'closed'
+            SET phase = 'closed', exit_price = $1, exit_time = $2, exit_reason = $3,
+                mfe_price = CASE WHEN $4 > COALESCE(mfe_pips, 0) THEN $5 ELSE mfe_price END,
+                mfe_time  = CASE WHEN $4 > COALESCE(mfe_pips, 0) THEN $6 ELSE mfe_time END,
+                mfe_pips  = GREATEST(mfe_pips, $4),
+                mae_price = CASE WHEN $7 > COALESCE(mae_pips, 0) THEN $8 ELSE mae_price END,
+                mae_time  = CASE WHEN $7 > COALESCE(mae_pips, 0) THEN $9 ELSE mae_time END,
+                mae_pips  = GREATEST(mae_pips, $7)
+            WHERE signal_id = $10 AND phase <> 'closed'
             """,
-            (exit_price, exit_time, exit_reason, signal_id),
+            (
+                exit_price, exit_time, exit_reason,
+                mfe_pips, mfe_price, mfe_time,
+                mae_pips, mae_price, mae_time,
+                signal_id,
+            ),
+        )
+
+    async def close_orphaned(self) -> int:
+        """Close excursion rows whose signal has already reached a final status.
+
+        Every close path finalizes its own row with the tick price that closed
+        the trade; this is the safety net for the closes that have no tick price
+        to offer — expiry, message deletion, or a manual command issued after the
+        signal left the monitor's in-memory set. Without it those rows sit in
+        'approach'/'in_trade' forever and silently drop out of any analysis that
+        filters on a recorded exit.
+
+        The derived exit follows the same rules as the analysis exit price:
+        stop-losses take the stop level, everything else prefers tp_price and
+        falls back to the close-snapshot mid. exit_reason carries a ':reconciled'
+        suffix so a derived exit is never mistaken for an observed one.
+
+        Returns the number of rows closed.
+        """
+        return await self.db.execute(
+            """
+            UPDATE signal_excursions e
+            SET phase = 'closed',
+                exit_price = COALESCE(
+                    e.exit_price,
+                    CASE
+                        WHEN s.status = 'stop_loss' THEN s.stop_loss
+                        ELSE COALESCE(s.tp_price, (s.close_bid + s.close_ask) / 2)
+                    END
+                ),
+                exit_time = COALESCE(e.exit_time, s.closed_at, NOW()),
+                exit_reason = COALESCE(s.closed_reason, s.status) || ':reconciled'
+            FROM signals s
+            WHERE s.id = e.signal_id
+              AND e.phase <> 'closed'
+              AND s.status IN ('profit', 'breakeven', 'stop_loss', 'cancelled')
+            """
         )
 
     async def set_mae_before_mfe(self, signal_id: int, mae_first: bool) -> None:

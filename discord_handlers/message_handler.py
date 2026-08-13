@@ -13,7 +13,7 @@ import pytz
 
 from core.parser import RejectedSignal, parse_signal
 from database import db
-from models.signal import SignalData
+from models.signal import SignalData, breakeven_price
 from price_feeds.alerting.embed_builders import _build_signal_embed, _set_archive_footer
 from price_feeds.monitors.streaming_monitor import react_to_original_signal
 from price_feeds.config.tp_config import TPConfig
@@ -27,11 +27,57 @@ logger = get_logger("message_handler")
 # Auto-delete delay for transient bot replies in monitored / alert channels.
 _REPLY_DELETE_AFTER = 15.0
 
+# Failure/timeout notices linger longer so a command that did NOT apply to a
+# live signal can't vanish before the user notices it.
+_ERROR_REPLY_DELETE_AFTER = 60.0
+
+# Status-change reply commands retry once on timeout: a transient event-loop
+# stall can blow the per-attempt window, and a missed cancel on a live signal
+# is worse than a second attempt.
+#
+# The budget has to clear the round-trip cost of a full status transition
+# against the Supabase pooler, which measured 2-5s in production — a 5s window
+# left no headroom and timed out on the heaviest path (profit on a hit signal).
+_STATUS_CALL_TIMEOUT = 15.0
+_STATUS_CALL_ATTEMPTS = 2
+_STATUS_RETRY_DELAY = 0.5
+
+# Budget for the post-timeout status re-read (see _status_already_applied).
+_STATUS_VERIFY_TIMEOUT = 5.0
+
+# Oldest live price accepted as the entry for an instant-entry signal. Healthy
+# feeds tick several times a second; anything older means the market is closed
+# or the feed has stalled, and entering there would book a fictional price.
+_INSTANT_ENTRY_MAX_PRICE_AGE = 15.0
+
+# Reply phrases that arm or disarm a signal's breakeven stop. Kept apart from
+# the bare "be" command, which closes the signal at breakeven right away.
+_ARM_BE_PHRASES = frozenset({"set be", "set breakeven"})
+_DISARM_BE_PHRASES = frozenset({"unset be", "unset breakeven", "remove be"})
+
 # DM sent when a non-manager tries to manage a signal via reply.
 _NO_PERMISSION_DM = (
     "You don't have permission to manage signals. "
     "If you'd like access, please ask an admin."
 )
+
+
+async def _await_with_retry(coro_factory, *, label: str):
+    """Await a coroutine under a timeout, retrying once on TimeoutError.
+
+    coro_factory must return a fresh coroutine on each call (a coroutine can
+    only be awaited once). Raises TimeoutError if every attempt times out.
+    """
+    for attempt in range(1, _STATUS_CALL_ATTEMPTS + 1):
+        try:
+            return await asyncio.wait_for(coro_factory(), timeout=_STATUS_CALL_TIMEOUT)
+        except asyncio.TimeoutError:
+            if attempt >= _STATUS_CALL_ATTEMPTS:
+                raise
+            logger.warning(
+                f"{label} timed out (attempt {attempt}/{_STATUS_CALL_ATTEMPTS}) — retrying"
+            )
+            await asyncio.sleep(_STATUS_RETRY_DELAY)
 
 
 class MessageHandler:
@@ -248,11 +294,20 @@ class MessageHandler:
 
         command_parts = message.content.lower().strip().split()
         command = command_parts[0] if command_parts else ""
+        phrase = " ".join(command_parts)
 
         success = False
         action_taken = None
 
         try:
+            if phrase in _ARM_BE_PHRASES or phrase in _DISARM_BE_PHRASES:
+                # Protection, not a status change — handled end to end here so it
+                # skips the terminal-command tail below.
+                await self._reply_breakeven_stop(
+                    message, path, signal, signal_id, arm=phrase in _ARM_BE_PHRASES
+                )
+                return
+
             if command in self._REPLY_STATUS_COMMANDS:
                 status, action_label = self._REPLY_STATUS_COMMANDS[command]
                 if status == "profit":
@@ -274,7 +329,7 @@ class MessageHandler:
 
             else:
                 await message.reply(
-                    "❓ Unknown command. Valid commands: `cancel`, `profit`, `tp`, `breakeven`, `be`, `sl`, `stop`, `reactivate`",
+                    "❓ Unknown command. Valid commands: `cancel`, `profit`, `tp`, `breakeven`, `be`, `set be`, `sl`, `stop`, `reactivate`",
                     delete_after=_REPLY_DELETE_AFTER,
                 )
                 await self._safe_delete(message)
@@ -283,8 +338,8 @@ class MessageHandler:
         except asyncio.TimeoutError:
             logger.error(f"Operation timed out for command: {command}")
             await message.reply(
-                f"❌ {command.title()} operation timed out. Please try again.",
-                delete_after=_REPLY_DELETE_AFTER,
+                await self._describe_timeout_outcome(signal_id, command),
+                delete_after=_ERROR_REPLY_DELETE_AFTER,
             )
             await self._safe_delete(message)
             return
@@ -292,13 +347,15 @@ class MessageHandler:
             logger.error(f"Error processing command '{command}': {e}", exc_info=True)
             await message.reply(
                 f"❌ Error processing {command} command.",
-                delete_after=_REPLY_DELETE_AFTER,
+                delete_after=_ERROR_REPLY_DELETE_AFTER,
             )
             await self._safe_delete(message)
             return
 
         if not (success and action_taken):
-            await message.reply("❌ Failed to process command.", delete_after=_REPLY_DELETE_AFTER)
+            await message.reply(
+                "❌ Failed to process command.", delete_after=_ERROR_REPLY_DELETE_AFTER
+            )
             logger.warning(f"Failed to process command '{command}' for signal {signal_id}")
             await self._safe_delete(message)
             return
@@ -318,24 +375,208 @@ class MessageHandler:
 
         logger.info(f"Signal {signal_id} {action_taken} via {path} reply by {message.author.name}")
 
+    def _timeout_target_status(self, command: str) -> Optional[str]:
+        """The status a reply command drives a signal to, or None if it has no
+        single target (e.g. reactivate, which lands on active or hit)."""
+        if command in self._REPLY_STATUS_COMMANDS:
+            return self._REPLY_STATUS_COMMANDS[command][0]
+        if command == "hit":
+            return "hit"
+        return None
+
+    async def _status_already_applied(self, signal_id: int, target: str) -> Optional[bool]:
+        """Whether a timed-out status change actually landed.
+
+        asyncio.wait_for cancels the DB call mid-statement, but a cancel issued
+        through the Supabase session pooler does not reliably reach the backend:
+        the transaction can commit after the client has given up. Without this
+        check the bot reported "NOT applied" on writes that had succeeded, which
+        sent users into retry loops against already-updated signals.
+
+        Returns True if the signal now holds the target status, False if it
+        demonstrably does not, and None if the status could not be re-read.
+        """
+        try:
+            signal = await asyncio.wait_for(
+                self.signal_db.get_signal_with_limits(signal_id),
+                timeout=_STATUS_VERIFY_TIMEOUT,
+            )
+        except Exception as e:
+            logger.warning(f"Could not verify status of signal {signal_id} after timeout: {e}")
+            return None
+        if signal is None:
+            return None
+        return signal.status == target
+
+    async def _describe_timeout_outcome(self, signal_id: int, command: str) -> str:
+        """Build the user-facing notice for a command that exhausted its retries."""
+        target = self._timeout_target_status(command)
+        if target is None:
+            return (
+                f"⚠️ {command.title()} timed out. Check the signal before retrying — "
+                f"the change may or may not have applied."
+            )
+
+        applied = await self._status_already_applied(signal_id, target)
+        if applied is None:
+            return (
+                f"⚠️ {command.title()} timed out and the outcome could not be verified. "
+                f"Check signal {signal_id} before retrying."
+            )
+        if applied:
+            # The commit landed between _reply_set_status's check and this one.
+            # Say so rather than sending the user into a retry loop; the embed
+            # may lag until the next refresh, but the status itself is correct.
+            return (
+                f"⚠️ {command.title()} timed out, but the change **did apply** — "
+                f"signal {signal_id} is now {target.upper()}. No need to retry."
+            )
+        return (
+            f"❌ {command.title()} timed out and was NOT applied — signal {signal_id} is "
+            f"unchanged. Please try again."
+        )
+
     async def _reply_set_status(
         self, message: discord.Message, path: str, signal_id: int, status: str
     ) -> bool:
         """Apply a manual status change plus the in-memory sync every terminal
         reply command shares."""
         verb = "Cancelled" if status == "cancelled" else "Set"
-        success = await asyncio.wait_for(
-            self.signal_db.manually_set_signal_status(
-                signal_id,
-                status,
-                f"{verb} via {path} reply by {message.author.name}",
-            ),
-            timeout=5.0,
-        )
+        try:
+            success = await _await_with_retry(
+                lambda: self.signal_db.manually_set_signal_status(
+                    signal_id,
+                    status,
+                    f"{verb} via {path} reply by {message.author.name}",
+                ),
+                label=f"set-status {status} for signal {signal_id}",
+            )
+        except asyncio.TimeoutError:
+            # The write may have committed after the client gave up. Treat a
+            # confirmed commit as success so the follow-through the caller owns
+            # — embed edit, reactions, in-memory sync — still runs.
+            if not await self._status_already_applied(signal_id, status):
+                raise
+            logger.warning(
+                f"set-status {status} for signal {signal_id} timed out but the write "
+                f"landed — continuing with the success path"
+            )
+            success = True
         if success and self.bot.services.monitor:
             self.bot.services.monitor.sync_signal_status_in_memory(signal_id, status)
             await self.bot.services.monitor.finalize_trailing_on_manual_close(signal_id)
         return success
+
+    async def _live_bid(self, instrument: str) -> Optional[float]:
+        """Current bid for a symbol, or None when no live price is available.
+
+        The breakeven stop fires on the bid in both directions, so arming it is
+        validated against the same price it will later be measured on. Unlike an
+        instant entry there is no staleness gate: arming over a closed market is
+        a legitimate thing to do to a position already held.
+        """
+        stream_manager = self.bot.services.stream_manager
+        if stream_manager is None:
+            return None
+        price = await stream_manager.get_latest_price(instrument)
+        return price["bid"] if price else None
+
+    async def _can_arm_breakeven_stop(
+        self,
+        message: discord.Message,
+        signal: SignalData,
+        signal_id: int,
+        be_price: Optional[float],
+    ) -> bool:
+        """Whether a breakeven stop may be armed now; replies with the reason if not."""
+        instrument = signal.instrument
+
+        if signal.status != "hit" or be_price is None:
+            await message.reply(
+                f"❌ A breakeven stop needs an open position — signal {signal_id} is "
+                f"{signal.status.upper()}.",
+                delete_after=_REPLY_DELETE_AFTER,
+            )
+            return False
+
+        bid = await self._live_bid(instrument)
+        if bid is None:
+            await message.reply(
+                f"❌ No live price for **{instrument}** — can't confirm the trade is in "
+                "profit, so the breakeven stop was not armed.",
+                delete_after=_REPLY_DELETE_AFTER,
+            )
+            return False
+
+        in_profit = bid > be_price if signal.direction.lower() == "long" else bid < be_price
+        if not in_profit:
+            await message.reply(
+                f"❌ **{instrument}** is at {format_price(bid, instrument)}, not past "
+                f"breakeven ({format_price(be_price, instrument)}) — arming now would close "
+                "the trade immediately.",
+                delete_after=_REPLY_DELETE_AFTER,
+            )
+            return False
+
+        return True
+
+    async def _reply_breakeven_stop(
+        self,
+        message: discord.Message,
+        path: str,
+        signal: SignalData,
+        signal_id: int,
+        arm: bool,
+    ) -> None:
+        """Arm or disarm a signal's breakeven stop from a reply.
+
+        Once armed the signal closes flat when price reverses to the mean of its
+        filled limits, instead of riding down to the stop loss. Take-profit and
+        every other exit are untouched — this only puts a floor under the trade.
+        """
+        instrument = signal.instrument
+        be_price = breakeven_price(signal.hit_limits)
+
+        if arm and not await self._can_arm_breakeven_stop(message, signal, signal_id, be_price):
+            await self._safe_delete(message)
+            return
+
+        if not await self.signal_db.set_breakeven_stop(signal_id, arm):
+            await message.reply(
+                f"❌ Could not update the breakeven stop for signal {signal_id}.",
+                delete_after=_ERROR_REPLY_DELETE_AFTER,
+            )
+            await self._safe_delete(message)
+            return
+
+        signal.be_stop_armed_at = datetime.now(pytz.UTC) if arm else None
+        monitor = self.bot.services.monitor
+        if monitor:
+            # Without this the tick path would keep evaluating the pre-arm copy
+            # until the next periodic refresh, up to 30s of unprotected trade.
+            await monitor.refresh_signal_in_memory(signal_id)
+
+        if arm:
+            ping = (
+                f"🛡️ **{instrument}** {signal.direction.upper()} — breakeven stop armed at "
+                f"{format_price(be_price, instrument)} (by {message.author.display_name})"
+            )
+        else:
+            ping = (
+                f"🛡️ **{instrument}** {signal.direction.upper()} — breakeven stop removed "
+                f"(by {message.author.display_name})"
+            )
+
+        if self.alert_system:
+            await self.alert_system.update_signal_message(
+                signal=signal, event="hit", ping_text=ping
+            )
+
+        logger.info(
+            f"Signal {signal_id} breakeven stop {'armed' if arm else 'removed'} via "
+            f"{path} reply by {message.author.name}"
+        )
+        await self._safe_delete(message)
 
     async def _auto_hit_first_pending(self, signal: SignalData, signal_id: int) -> SignalData:
         """Before a profit command on a signal with no hits, mark the first
@@ -360,12 +601,21 @@ class MessageHandler:
         """Mark a signal HIT via reply, re-adding it to the monitor if it was
         cancelled (limits resubscribed so ticks see it immediately)."""
         was_cancelled = signal.status == "cancelled"
-        transitioned = await asyncio.wait_for(
-            self.signal_db.manually_set_signal_to_hit(
-                signal_id, f"Set via {path} reply by {message.author.name}"
-            ),
-            timeout=5.0,
-        )
+        try:
+            transitioned = await _await_with_retry(
+                lambda: self.signal_db.manually_set_signal_to_hit(
+                    signal_id, f"Set via {path} reply by {message.author.name}"
+                ),
+                label=f"set-hit for signal {signal_id}",
+            )
+        except asyncio.TimeoutError:
+            if not await self._status_already_applied(signal_id, "hit"):
+                raise
+            logger.warning(
+                f"set-hit for signal {signal_id} timed out but the write landed — "
+                f"continuing with the success path"
+            )
+            transitioned = True
         if not transitioned:
             return False
 
@@ -668,6 +918,97 @@ class MessageHandler:
             self.logger.warning(f"minutes_to_news stamp failed for {parsed.instrument}: {e}")
         return context
 
+    async def _live_entry_price(self, instrument: str, direction: str) -> Optional[float]:
+        """Current market price to enter at: the ask for a long, the bid for a
+        short. Subscribes the symbol first if no signal was watching it yet.
+
+        Returns None when no fresh price is available, which blocks the entry —
+        an instant signal is only meaningful at a price we actually observed.
+        """
+        stream_manager = self.bot.services.stream_manager
+        if stream_manager is None:
+            return None
+
+        price = await stream_manager.get_latest_price(instrument)
+        if price is None:
+            await stream_manager.bulk_subscribe([instrument])
+            price = await stream_manager.get_latest_price(instrument)
+        if price is None:
+            return None
+
+        updated_at = price.get("updated_at")
+        if updated_at is not None and updated_at.tzinfo is not None:
+            age = (datetime.now(pytz.UTC) - updated_at).total_seconds()
+            if age > _INSTANT_ENTRY_MAX_PRICE_AGE:
+                self.logger.warning(
+                    f"Instant entry for {instrument} rejected: price is {age:.0f}s old"
+                )
+                return None
+
+        return price["ask"] if direction == "long" else price["bid"]
+
+    async def _resolve_instant_entry(self, message: discord.Message, parsed) -> Optional[float]:
+        """Entry price for an instant-entry signal, or None when it can't be taken.
+
+        Rejects the signal (⚠️ plus a reply) when no live price is available or
+        when price already sits past the stated stop loss or take profit — that
+        trade would open only to close on the next tick.
+        """
+        entry = await self._live_entry_price(parsed.instrument, parsed.direction)
+        if entry is None:
+            await self.safe_add_reaction(message, "⚠️")
+            await message.reply(
+                f"⚠️ No live price for **{parsed.instrument}** — signal not opened.",
+                delete_after=_ERROR_REPLY_DELETE_AFTER,
+            )
+            return None
+
+        low, high = sorted((parsed.stop_loss, parsed.take_profit))
+        if not low < entry < high:
+            await self.safe_add_reaction(message, "⚠️")
+            await message.reply(
+                f"⚠️ **{parsed.instrument}** is at {format_price(entry, parsed.instrument)}, "
+                f"already past the stop loss or take profit — signal not opened.",
+                delete_after=_ERROR_REPLY_DELETE_AFTER,
+            )
+            self.logger.info(
+                f"Instant signal rejected for message {message.id}: entry {entry} outside "
+                f"SL {parsed.stop_loss} / TP {parsed.take_profit}"
+            )
+            return None
+
+        return entry
+
+    async def _open_instant_position(self, signal_id: int, entry_price: float) -> None:
+        """Fill an instant signal's single limit at the market and open its embed
+        as HIT — these signals have no waiting phase to alert on."""
+        signal = await self.signal_db.get_signal_with_limits(signal_id)
+        if not signal or not signal.limits:
+            self.logger.error(f"Instant signal {signal_id} has no entry limit to fill")
+            return
+
+        # save_signal writes the entry already filled, and a reactivated signal comes
+        # back that way too; filling it again would double-count limits_hit. The mark
+        # remains for a signal whose limit somehow arrived pending.
+        if signal.limits[0].status == "pending":
+            await db.mark_limit_hit(signal.limits[0].id, entry_price)
+
+        monitor = self.bot.services.monitor
+        if monitor:
+            await monitor.refresh_signal_in_memory(signal_id)
+            signal = monitor.active_signals.get(signal_id, signal)
+        if signal.guild_id is None and self.bot.guilds:
+            signal.guild_id = self.bot.guilds[0].id
+
+        alert_system = self.alert_system or self.bot.services.alert_system
+        if alert_system:
+            await alert_system.send_limit_hit_alert(signal, signal.limits[0], entry_price)
+
+        self.logger.info(
+            f"Instant signal {signal_id} opened at {entry_price} "
+            f"({signal.instrument} {signal.direction})"
+        )
+
     async def process_signal(self, message: discord.Message):
         """Process a potential trading signal with enhanced parsing"""
         try:
@@ -684,6 +1025,12 @@ class MessageHandler:
                 )
                 return
 
+            if parsed and parsed.instant_entry:
+                entry_price = await self._resolve_instant_entry(message, parsed)
+                if entry_price is None:
+                    return
+                parsed.limits = [entry_price]
+
             if parsed:
                 context = self._build_save_context(parsed)
                 success, signal_id = await self.signal_db.save_signal(
@@ -696,7 +1043,12 @@ class MessageHandler:
                         f"Signal #{signal_id} processed: {parsed.instrument} {parsed.direction}"
                     )
 
-                    if parsed.limits and signal_id:
+                    if parsed.instant_entry and signal_id:
+                        # Overlap detection is skipped: this signal's only limit
+                        # fills immediately, so it never competes for a fill with
+                        # the pending limits of another signal.
+                        await self._open_instant_position(signal_id, parsed.limits[0])
+                    elif parsed.limits and signal_id:
                         min_limit = min(parsed.limits)
                         max_limit = max(parsed.limits)
                         try:
@@ -995,6 +1347,18 @@ class MessageHandler:
 
         if result:
             self.logger.info(f"Signal cancelled due to message deletion: {payload.message_id}")
+            monitor = self.bot.services.monitor
+            if monitor:
+                try:
+                    deleted_signal = await self.signal_db.get_signal_by_message_id(
+                        str(payload.message_id)
+                    )
+                    if deleted_signal:
+                        await monitor.finalize_trailing_on_manual_close(deleted_signal["id"])
+                except Exception as _fe:
+                    self.logger.warning(
+                        f"Could not finalize trackers after message delete cancel: {_fe}"
+                    )
             if self.alert_system:
                 try:
                     cancelled_signal = await self.signal_db.get_signal_by_message_id(

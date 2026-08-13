@@ -21,6 +21,11 @@ logger = get_logger("parser.validators")
 # listed here explicitly.
 _GOLD_TOLLS_SL_CHANNELS = {"risky-gold"}
 
+# Channels whose signals execute at the current market price instead of waiting
+# for a limit. The message carries an explicit stop loss and take profit; the
+# entry is resolved from the live feed when the signal is saved.
+_INSTANT_ENTRY_CHANNELS = {"semi-swing-pa-signals"}
+
 
 def uses_gold_tolls_sl(channel_name: Optional[str]) -> bool:
     """True for channels that auto-derive SL from the gold-tolls offset."""
@@ -31,30 +36,46 @@ def uses_gold_tolls_sl(channel_name: Optional[str]) -> bool:
         return True
     return "toll" in name and name != "general-tolls"
 
-INDEX_SYMBOL_BLACKLIST = [
-    "spx500usd",
-    "nas100usd",
-    "us30usd",
-    "us2000usd",
-    "jp225",
-    "nas100",
-    "us30",
-    "spx500",
-    "sp500",
-    "us2000",
-    "de30",
-    "dax30",
-    "ger30",
-    "china50",
-    "russel2000",
-    "aus200",
-    "f40",
-    "cac40",
-    "ftse100",
-    "hk50",
-    "asx200",
-    "gcq26",
-]
+
+def uses_instant_entry(channel_name: Optional[str]) -> bool:
+    """True for channels that enter at market with an explicit SL and TP."""
+    return bool(channel_name) and channel_name.lower() in _INSTANT_ENTRY_CHANNELS
+
+# Index tickers whose digits would otherwise be read as price levels. Sorted
+# longest-first so a shorter entry can never eat part of a longer one (stripping
+# "us2000" before "aus2000" would leave a stray "a0").
+INDEX_SYMBOL_BLACKLIST = sorted(
+    [
+        "spx500usd",
+        "nas100usd",
+        "us30usd",
+        "us2000usd",
+        "jp225",
+        "nas100",
+        "us30",
+        "spx500",
+        "sp500",
+        "us2000",
+        "de30",
+        "dax30",
+        "ger30",
+        "china50",
+        "cn50",
+        "russel2000",
+        "aus2000",
+        "aus200",
+        "f40",
+        "fr40",
+        "cac40",
+        "ftse100",
+        "hk50",
+        "hk33",
+        "asx200",
+        "gcq26",
+    ],
+    key=len,
+    reverse=True,
+)
 
 # ============================================================================
 # MAIN VALIDATION FUNCTIONS (for __init__.py)
@@ -134,8 +155,24 @@ def validate_signal(signal) -> bool:
         logger.debug("No signal to validate")
         return False
 
-    # Must have all required fields
-    if not all([signal.instrument, signal.direction, signal.limits, signal.stop_loss is not None]):
+    # Must have all required fields. Instant-entry signals carry no limits —
+    # the entry is the market price at save time — but must name a take profit.
+    if signal.instant_entry:
+        required = [
+            signal.instrument,
+            signal.direction,
+            signal.stop_loss is not None,
+            signal.take_profit is not None,
+        ]
+    else:
+        required = [
+            signal.instrument,
+            signal.direction,
+            signal.limits,
+            signal.stop_loss is not None,
+        ]
+
+    if not all(required):
         logger.debug("Missing required fields in signal")
         return False
 

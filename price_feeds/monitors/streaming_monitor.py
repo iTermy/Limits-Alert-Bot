@@ -10,7 +10,7 @@ from typing import Optional
 import discord
 import pytz
 
-from models.signal import LimitData, SignalData
+from models.signal import LimitData, SignalData, breakeven_price
 from price_feeds.monitors.risky_window import is_risky_trading_disabled
 from utils.config_loader import load_settings
 from utils.logger import get_logger
@@ -33,7 +33,7 @@ _SPREAD_HOUR_CACHE_SECONDS = 5
 _EST_TZ = pytz.timezone("America/New_York")
 
 
-async def react_to_original_signal(bot, signal: dict, emoji: str):
+async def react_to_original_signal(bot, signal: SignalData, emoji: str):
     """
     Add a reaction to the original signal message.
 
@@ -159,6 +159,7 @@ class StreamingPriceMonitor:
             "signals_checked": 0,
             "limits_hit": 0,
             "stop_losses_hit": 0,
+            "breakeven_stops_hit": 0,
             "news_cancelled": 0,
             "errors": 0,
             "buffer_prevented_alerts": 0,
@@ -177,7 +178,7 @@ class StreamingPriceMonitor:
             logger.error(f"Failed to initialize monitor: {e}")
             raise
 
-    def _react_async(self, signal: dict, emoji: str) -> None:
+    def _react_async(self, signal: SignalData, emoji: str) -> None:
         """Add an emoji reaction to the original signal off the tick hot path.
 
         Reactions are cosmetic and order-independent, so fetching the message
@@ -274,6 +275,7 @@ class StreamingPriceMonitor:
 
         asyncio.create_task(self._periodic_signal_refresh())
         asyncio.create_task(self.excursion_monitor.run_volume_sampler())
+        asyncio.create_task(self.excursion_monitor.run_reconciler())
 
         self.live_price_writer.start()
 
@@ -602,12 +604,15 @@ class StreamingPriceMonitor:
                 signal, current_price, direction, is_spread_hour, is_late_market
             )
 
+        # Check the breakeven stop, if one was armed.
+        if signal.status == "hit":
+            if await self._check_breakeven_stop(signal, price_data["bid"]):
+                return
+
         # Check auto take-profit (runs for any HIT signal that has hit limits cached)
         if signal.status == "hit":
             tp_triggered = await self.tp_monitor.check_signal(
-                signal,
-                current_bid=price_data["bid"],
-                current_ask=price_data["ask"],
+                signal, current_bid=price_data["bid"]
             )
 
             signal_id = signal.signal_id
@@ -618,7 +623,9 @@ class StreamingPriceMonitor:
             await self.excursion_monitor.update(signal, price_data["bid"], price_data["ask"])
 
             if tp_triggered:
-                close_price = price_data["bid"] if direction == "long" else price_data["ask"]
+                # Auto-TP evaluates on the bid, so the trailing sim and the
+                # excursion exit start from that same price.
+                close_price = price_data["bid"]
                 # Trailing begins here, at the TP price — the what-if is whether
                 # trailing the runner beats taking this fixed auto-TP.
                 await self.trailing_monitor.start(signal, close_price)
@@ -995,6 +1002,67 @@ class StreamingPriceMonitor:
             await self._process_stop_loss_hit(signal, current_price)
             self.stats["stop_losses_hit"] += 1
 
+    async def _check_breakeven_stop(self, signal: SignalData, bid: float) -> bool:
+        """Close a signal flat once price reverses to its breakeven point.
+
+        Armed by hand with the "set be" reply. Evaluated on the bid in both
+        directions like auto-TP, so the level fires where the chart shows it
+        instead of a spread away. Returns True once the close has been processed.
+
+        A tick that gaps through both this level and the stop loss books the real
+        (worse) SL: it runs first in _check_signal, and its flag stands this one
+        down rather than crediting a flat exit the position never got.
+        """
+        if not signal.be_stop_armed_at or signal.be_stop_alert_sent or signal.sl_alert_sent:
+            return False
+
+        be_price = breakeven_price(signal.hit_limits)
+        if be_price is None:
+            return False
+
+        reached = bid <= be_price if signal.direction.lower() == "long" else bid >= be_price
+        if not reached:
+            return False
+
+        signal.be_stop_alert_sent = True
+        logger.info(
+            f"Signal {signal.signal_id} ({signal.instrument}): breakeven stop hit "
+            f"@ {bid} (BE {be_price})"
+        )
+
+        await self.alert_system.send_breakeven_stop_alert(signal, bid, be_price)
+        self._react_async(signal, "➖")
+        await self._process_breakeven_stop(signal, bid)
+        self.stats["breakeven_stops_hit"] += 1
+        return True
+
+    async def _process_breakeven_stop(self, signal: SignalData, current_price: float):
+        """Record a breakeven-stop close and tear down the per-signal trackers."""
+        try:
+            success = await self.signal_db.manually_set_signal_status(
+                signal.signal_id,
+                "breakeven",
+                reason="breakeven_stop",
+                closed_reason="automatic",
+            )
+        except Exception as e:
+            logger.error(f"Failed to process breakeven stop: {e}")
+            return
+
+        if not success:
+            logger.error(f"Signal {signal.signal_id}: breakeven stop write did not land")
+            return
+
+        self.sync_signal_status_in_memory(signal.signal_id, "breakeven")
+        logger.info(f"Signal {signal.signal_id} marked as breakeven")
+        self.tp_monitor.evict_signal(signal.signal_id)
+        await self.trailing_monitor.finalize_with_price(
+            signal.signal_id, current_price, reason="be_stop"
+        )
+        self.trailing_monitor.evict_signal(signal.signal_id)
+        await self.excursion_monitor.finalize(signal.signal_id, current_price, "be_stop")
+        await self._maybe_unsubscribe_symbol(signal.instrument, signal.signal_id)
+
     async def _cancel_signal_during_guard(
         self, signal: dict, current_price: float, reason: str, news_event=None
     ):
@@ -1123,19 +1191,11 @@ class StreamingPriceMonitor:
         self._apply_status_to_signal(signal, new_status)
 
     async def finalize_trailing_on_manual_close(self, signal_id: int) -> None:
-        """Close out trailing-stop and excursion tracking after a manual status
-        override (setstatus/profit/cancel/bulk-cancel) that doesn't have a
-        precise tick price on hand. No-op for whichever isn't tracking this
-        signal — trailing only starts at HIT, excursion starts at approach.
+        """Close out trailing-stop and excursion tracking after a close that has
+        no precise tick price on hand (setstatus/profit/cancel/bulk-cancel,
+        expiry, message deletion). Uses the last live price as the exit.
         """
-        tracking_trailing = self.trailing_monitor.is_tracking(signal_id)
-        tracking_excursion = self.excursion_monitor.is_tracking(signal_id)
-        if not tracking_trailing and not tracking_excursion:
-            return
-
-        signal = self.active_signals.get(signal_id)
-        instrument = signal.instrument if signal else None
-        direction = (signal.direction if signal else "") or ""
+        instrument, direction = await self._closing_instrument(signal_id)
 
         price = None
         if instrument:
@@ -1145,17 +1205,39 @@ class StreamingPriceMonitor:
             if price_row:
                 price = price_row["bid"] if direction.lower() == "long" else price_row["ask"]
 
-        if tracking_trailing and price is not None:
+        if price is not None:
             await self.trailing_monitor.finalize_with_price(
                 signal_id, price, reason="manual_close"
             )
+            await self.excursion_monitor.finalize(signal_id, price, "manual_close")
+        else:
+            # No price to mark against; the excursion reconciler derives the exit
+            # from the signal's recorded close instead.
+            logger.warning(
+                f"No live price for signal {signal_id} ({instrument}) — exit price "
+                f"left to the excursion reconciler"
+            )
         self.trailing_monitor.evict_signal(signal_id)
+        self.excursion_monitor.evict_signal(signal_id)
 
-        if tracking_excursion:
-            if price is not None:
-                await self.excursion_monitor.finalize(signal_id, price, "manual_close")
-            else:
-                self.excursion_monitor.evict_signal(signal_id)
+    async def _closing_instrument(self, signal_id: int) -> tuple[Optional[str], str]:
+        """Instrument + direction for a signal being closed.
+
+        Prefers the in-memory copy, but a status write can take seconds on the
+        pooler, which is long enough for the periodic refresh to drop the signal
+        from active_signals first. Falling back to the DB is what keeps the
+        analytics exit from silently going missing in that window.
+        """
+        signal = self.active_signals.get(signal_id)
+        if signal is not None:
+            return signal.instrument, (signal.direction or "")
+
+        row = await self.db.fetch_one(
+            "SELECT instrument, direction FROM signals WHERE id = $1", (signal_id,)
+        )
+        if row is None:
+            return None, ""
+        return row["instrument"], (row["direction"] or "")
 
     async def refresh_signal_in_memory(self, signal_id: int) -> bool:
         """Re-fetch a signal from the DB and bring all in-memory caches in

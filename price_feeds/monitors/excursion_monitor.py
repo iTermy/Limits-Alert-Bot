@@ -38,6 +38,19 @@ _ORDERING_BAR_FRACTION = 0.25
 # long — quantifies pips left on the table beyond the exit.
 _POST_EXIT_WINDOW_SECONDS = 60 * 60
 
+# How often the reconciler closes rows whose signal finished without one of the
+# live paths finalizing them. One UPDATE per cycle that usually matches nothing,
+# so the interval only has to be short enough that analysis never reads a stale
+# open row — it is not a hot path.
+_RECONCILE_INTERVAL_SECONDS = 15 * 60
+
+# Ratcheted extremes are written on this interval rather than on every new high
+# water mark. During a fast run nearly every tick sets one, and awaiting a DB
+# round-trip per tick serialises into the feed's dispatch loop — throttling tick
+# sampling exactly when price is moving fastest. The extremes live in memory and
+# are flushed again at close, so the interval costs no accuracy.
+_RATCHET_FLUSH_INTERVAL_SECONDS = 5.0
+
 
 @dataclass
 class ExcursionState:
@@ -56,12 +69,26 @@ class ExcursionState:
     entry_time: Optional[datetime] = None
     atr_at_hit: Optional[float] = None
 
+    # Extremes are held in memory as well as flushed periodically, so the close
+    # can repair a row whose intermediate updates were dropped.
     mfe_pips: float = 0.0
+    mfe_price: Optional[float] = None
+    mfe_time: Optional[datetime] = None
+    mfe_atr_mult: Optional[float] = None
     mae_pips: float = 0.0
+    mae_price: Optional[float] = None
+    mae_time: Optional[datetime] = None
+    mae_atr_mult: Optional[float] = None
     started_at: float = 0.0  # monotonic; bounds the volume sampler window
 
     ordering_bar: Optional[float] = None  # price-unit bar for mae_before_mfe
     ordering_decided: bool = False
+
+    # Which extremes have moved since the last flush, and when that flush ran.
+    pre_hit_mae_dirty: bool = False
+    mfe_dirty: bool = False
+    mae_dirty: bool = False
+    last_flush: float = 0.0  # monotonic
 
 
 @dataclass
@@ -85,10 +112,50 @@ class ExcursionMonitor:
         self._tracking: dict[int, ExcursionState] = {}
         self._post_exit: dict[int, PostExitState] = {}
         self._snapshot_tasks: set = set()
+        self._flush_tasks: set = set()
         self._running = True
 
-    def is_tracking(self, signal_id: int) -> bool:
-        return signal_id in self._tracking
+    # === Ratchet persistence ===
+
+    async def _flush_ratchets(self, state: ExcursionState) -> None:
+        """Write whichever in-memory extremes have moved since the last flush."""
+        if state.pre_hit_mae_dirty:
+            state.pre_hit_mae_dirty = False
+            try:
+                await self._db.update_pre_hit_mae(state.signal_id, state.pre_hit_mae_pips)
+            except Exception as e:
+                logger.debug("pre_hit_mae flush failed for %s: %s", state.signal_id, e)
+
+        if state.mfe_dirty:
+            state.mfe_dirty = False
+            try:
+                await self._db.update_mfe(
+                    state.signal_id, state.mfe_price, state.mfe_pips,
+                    state.mfe_atr_mult, state.mfe_time,
+                )
+            except Exception as e:
+                logger.debug("mfe flush failed for %s: %s", state.signal_id, e)
+
+        if state.mae_dirty:
+            state.mae_dirty = False
+            try:
+                await self._db.update_mae(
+                    state.signal_id, state.mae_price, state.mae_pips,
+                    state.mae_atr_mult, state.mae_time,
+                )
+            except Exception as e:
+                logger.debug("mae flush failed for %s: %s", state.signal_id, e)
+
+    def _schedule_flush(self, state: ExcursionState) -> None:
+        """Flush ratcheted extremes off the tick path, at most once per interval."""
+        now = asyncio.get_event_loop().time()
+        if now - state.last_flush < _RATCHET_FLUSH_INTERVAL_SECONDS:
+            return
+        state.last_flush = now
+
+        task = asyncio.create_task(self._flush_ratchets(state))
+        self._flush_tasks.add(task)
+        task.add_done_callback(self._flush_tasks.discard)
 
     # === Lifecycle ===
 
@@ -139,10 +206,8 @@ class ExcursionMonitor:
         adverse_pips = max(0.0, adverse / state.pip_size)
         if adverse_pips > state.pre_hit_mae_pips:
             state.pre_hit_mae_pips = adverse_pips
-            try:
-                await self._db.update_pre_hit_mae(state.signal_id, adverse_pips)
-            except Exception as e:
-                logger.debug("pre_hit_mae update failed for %s: %s", state.signal_id, e)
+            state.pre_hit_mae_dirty = True
+            self._schedule_flush(state)
 
     async def mark_entry(self, signal: dict) -> None:
         """Transition to in_trade at the first hit limit's price. No-op if already entered."""
@@ -230,32 +295,56 @@ class ExcursionMonitor:
         fav_pips = favorable / state.pip_size
         if fav_pips > state.mfe_pips:
             state.mfe_pips = fav_pips
-            try:
-                await self._db.update_mfe(
-                    state.signal_id, close_price, fav_pips, self._atr_mult(state, favorable), now
-                )
-            except Exception as e:
-                logger.debug("mfe update failed for %s: %s", state.signal_id, e)
+            state.mfe_price = close_price
+            state.mfe_time = now
+            state.mfe_atr_mult = self._atr_mult(state, favorable)
+            state.mfe_dirty = True
 
         adv_pips = adverse / state.pip_size
         if adv_pips > state.mae_pips:
             state.mae_pips = adv_pips
-            try:
-                await self._db.update_mae(
-                    state.signal_id, close_price, adv_pips, self._atr_mult(state, adverse), now
-                )
-            except Exception as e:
-                logger.debug("mae update failed for %s: %s", state.signal_id, e)
+            state.mae_price = close_price
+            state.mae_time = now
+            state.mae_atr_mult = self._atr_mult(state, adverse)
+            state.mae_dirty = True
+
+        if state.mfe_dirty or state.mae_dirty:
+            self._schedule_flush(state)
 
     async def finalize(self, signal_id: int, exit_price: float, reason: str) -> None:
-        """Record the exit, stop tracking, and start the post-exit window."""
+        """Record the exit, stop tracking, and start the post-exit window.
+
+        The DB write runs whether or not in-memory state survives — a restart or
+        an eviction mid-trade must not cost the row its exit. The UPDATE is
+        scoped to still-open rows, so it is a no-op for anything already closed.
+
+        The in-memory extremes ride along: ratchet flushes are best-effort and a
+        dropped one would otherwise leave the row understating MFE/MAE for good,
+        so the close re-asserts them and the DB keeps whichever is larger. The
+        pending flush runs first, since only it carries the ATR multiples.
+        """
         state = self._tracking.get(signal_id)
-        if state is None:
-            return
+        if state is not None:
+            await self._flush_ratchets(state)
+
         try:
-            await self._db.finalize(signal_id, exit_price, datetime.now(timezone.utc), reason)
+            await self._db.finalize(
+                signal_id,
+                exit_price,
+                datetime.now(timezone.utc),
+                reason,
+                mfe_pips=state.mfe_pips if state else None,
+                mfe_price=state.mfe_price if state else None,
+                mfe_time=state.mfe_time if state else None,
+                mae_pips=state.mae_pips if state else None,
+                mae_price=state.mae_price if state else None,
+                mae_time=state.mae_time if state else None,
+            )
         except Exception as e:
             logger.error("Failed to finalize excursion for %s: %s", signal_id, e)
+
+        if state is None:
+            return
 
         # Entered signals keep a bounded post-exit watch to measure favourable
         # follow-through beyond the exit (M1 bars — no tick feed dependency).
@@ -301,7 +390,9 @@ class ExcursionMonitor:
             entry_time=row["entry_time"],
             atr_at_hit=row["atr_at_hit"],
             mfe_pips=row["mfe_pips"] or 0.0,
+            mfe_price=row["mfe_price"],
             mae_pips=row["mae_pips"] or 0.0,
+            mae_price=row["mae_price"],
             started_at=asyncio.get_event_loop().time(),
             ordering_bar=self._ordering_bar(row["instrument"], row["signal_type"], row["pip_size"]),
             ordering_decided=row["mae_before_mfe"] is not None,
@@ -321,6 +412,19 @@ class ExcursionMonitor:
 
     def stop(self) -> None:
         self._running = False
+
+    # === Reconciler ===
+
+    async def run_reconciler(self) -> None:
+        """Periodically close rows the live paths could not finalize."""
+        while self._running:
+            try:
+                closed = await self._db.close_orphaned()
+                if closed:
+                    logger.info("Reconciled %s excursion row(s) left open at close", closed)
+            except Exception as e:
+                logger.error("Excursion reconcile cycle failed: %s", e)
+            await asyncio.sleep(_RECONCILE_INTERVAL_SECONDS)
 
     async def _sample_all(self) -> None:
         if not self._tracking and not self._post_exit:

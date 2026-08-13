@@ -289,7 +289,7 @@
       "set_by": "itermy",
       "set_at": "2026-02-03T15:19:36.579130+00:00"
     },
-    "GCQ26": {
+    "GCZ26_CFD": {
       "type": "dollars",
       "value": 15.0,
       "set_by": "itermy",
@@ -354,6 +354,30 @@
       "value": 20.0,
       "set_by": "itermy",
       "set_at": "2026-07-13T00:00:00+00:00"
+    },
+    "HK50": {
+      "type": "dollars",
+      "value": 50.0,
+      "set_by": "itermy",
+      "set_at": "2026-07-29T00:00:00+00:00"
+    },
+    "CHINA50": {
+      "type": "dollars",
+      "value": 20.0,
+      "set_by": "itermy",
+      "set_at": "2026-07-29T00:00:00+00:00"
+    },
+    "CHINAH": {
+      "type": "dollars",
+      "value": 20.0,
+      "set_by": "itermy",
+      "set_at": "2026-07-29T00:00:00+00:00"
+    },
+    "AUS2000": {
+      "type": "dollars",
+      "value": 20.0,
+      "set_by": "itermy",
+      "set_at": "2026-07-29T00:00:00+00:00"
     }
   }
 }

@@ -134,6 +134,7 @@ class ChannelCleaner:
             return
 
         cutoff = datetime.now(tz=timezone.utc) - timedelta(days=MESSAGE_AGE_DAYS)
+        notice_ids = info_embed_message_ids()
 
         for name, raw_id in monitored.items():
             if name.lower() in EXEMPT_MONITORED_NAMES:
@@ -159,7 +160,7 @@ class ChannelCleaner:
                 )
                 continue
 
-            await self._purge_channel_preserving(channel, cutoff, preserve)
+            await self._purge_channel_preserving(channel, cutoff, preserve | notice_ids)
 
     # ── channel-level helpers ─────────────────────────────────────────────────
 
