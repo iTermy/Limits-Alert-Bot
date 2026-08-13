@@ -159,7 +159,9 @@ discord_handlers/
                                   reply are auto-deleted after _REPLY_DELETE_AFTER (15 s) to keep
                                   monitored / alert channels tidy;
                                   _handle_overlap_prompt() — 30 s reaction prompt when new signal overlaps
-                                  an existing one (✅ cancel old / ❌ keep both / timeout = cancel old)
+                                  an existing one (✅ cancel old / ❌ keep both / timeout = cancel old);
+                                  _reply_breakeven_stop() — `set be` / `unset be` arms or clears a
+                                  signal's breakeven stop (protection, not a status change)
 
 commands/
   __init__.py
@@ -294,7 +296,12 @@ Every incoming price update calls `streaming_monitor._on_price_update()` → `_c
    nm_monitor.update(signal, current_price) → True if bounce confirmed.
    → cancel signal → send_near_miss_cancel_alert()
 
-7. Auto-TP check (HIT-status signals only)
+7. Breakeven-stop check (HIT-status signals only, and only once armed)
+   Runs after the stop loss so a tick gapping through both books the real SL.
+   _check_breakeven_stop(signal, bid) — evaluated on the bid, no spread buffer
+   → send_breakeven_stop_alert() → signal→breakeven
+
+8. Auto-TP check (HIT-status signals only)
    tp_monitor.check_signal(signal, bid) — no spread buffer; evaluated on the bid
    last_hit_limit_pnl ≥ threshold AND sum(earlier_limits_pnl) ≥ 0 (ε=1e-9)
    → send_auto_tp_alert() → signal→profit
@@ -321,6 +328,7 @@ All PKs: `BIGINT GENERATED ALWAYS AS IDENTITY`. Timestamps: `TIMESTAMPTZ`. RLS: 
 | type | TEXT DEFAULT 'standard'; CHECK (standard, scalp, swing, toll, pa, 1-1, risky) |
 | first_limit_hit_time | TIMESTAMPTZ |
 | closed_at / closed_reason | TIMESTAMPTZ / TEXT (`automatic` / `manual` / `expiry`) |
+| be_stop_armed_at | TIMESTAMPTZ (nullable); when a breakeven stop was armed via the `set be` reply. NULL = not armed. A timestamp rather than a flag so analysis can see how far into a trade protection went on. |
 | take_profit | DOUBLE PRECISION (nullable); the sender's fixed TP price, set only by instant-entry channels. When present it *replaces* the TPConfig threshold as the exit condition (`tp_monitor._fixed_tp_reached`, evaluated on the bid like every other TP). |
 | tp_price | DOUBLE PRECISION; market close price recorded on profit (for automatic, the bid at auto-TP trigger — see "Auto-TP is evaluated on the bid"; for manual profit, the live bid/ask at command time — bid if long, ask if short). NULL for SL / cancel / breakeven / other closures, and for manual profit when `live_prices` has no row for the instrument. |
 | manual_tp_price | DOUBLE PRECISION (nullable); retrospective manual TP price override set via `!profit <id> <tp_price>`. Kept separate from `tp_price` so the original recorded close is preserved. Both the `!report` P&L and the profit-archive embed (per-limit P&L + the "TP Price" field) use `manual_tp_price` when present, else `tp_price`. |
@@ -525,6 +533,34 @@ Downstream everything is shared machinery: `type='pa'` routes the embed to the P
 - Default: standard.
 
 Each type has its own `tp_configuration.json` defaults under `type_defaults[<type>]` and per-symbol overrides under `type_overrides[<type>]`. Default initialization: scalp/standard kept as before; toll initialized from scalp; pa initialized from standard; swing = 3× standard; 1-1 metals = $10. The TP resolution order is: per-type symbol override → standard symbol override → per-type asset-class default → standard asset-class default → hard fallback ($5).
+
+### Breakeven stop (`set be`)
+Replying `set be` to an alert embed, its ping, or the original signal message arms a
+breakeven stop on an open (HIT) position: from then on the signal closes flat when
+price reverses to its entry, instead of riding down to the stop loss. `unset be`
+(or `remove be`) disarms it. Distinct from the bare `be` reply, which marks the
+signal breakeven *immediately* — that one is a status command, this one is protection.
+
+- **The BE price is the mean of every filled limit** (`models.signal.breakeven_price`).
+  Lots are equal per limit, so the mean is where the position's combined P&L is
+  exactly zero — the fills above it lose what the fills below it gain. Note this is
+  *not* the trailing sim's anchor, which is the deepest fill (the runner).
+- **Evaluated on the bid in both directions**, like auto-TP, so it fires where the
+  chart shows it rather than a spread away. No spread buffer.
+- **Arming is refused unless the trade is currently in profit on the bid** — arming
+  underwater would close the trade on the very next tick. Also refused when the
+  signal is not HIT, or when no live price is available to check against.
+- **The real stop loss wins a tick that gaps through both.** `_check_stop_loss` runs
+  first and its `sl_alert_sent` flag stands the BE check down, so the DB records the
+  loss the position actually took rather than a flat exit it never got.
+- Take-profit, news/spread/risky guards, expiry and every manual command are
+  unchanged — this only puts a floor under the trade.
+- The flag lives on `signals.be_stop_armed_at` and is selected by BOTH
+  `SIGNAL_COLUMNS` and `manager.get_active_signals_for_tracking` — the tick path is
+  fed by the latter, so a new per-signal column that only lands in `SIGNAL_COLUMNS`
+  is invisible to price ticks after a restart.
+- Arming calls `refresh_signal_in_memory` so ticks see it immediately instead of
+  waiting up to 30 s for the periodic refresh.
 
 ### Swing is not near-missable
 `NearMissMonitor.update` short-circuits when `signal.type == "swing"`. Swing signals can only close via hit, profit, SL, or manual cancel.

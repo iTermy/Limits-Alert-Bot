@@ -34,7 +34,7 @@ Exit price per close type (era 2):
 | `profit` / `closed_reason='automatic'` | `tp_price` | Auto-TP close price |
 | `profit` / `closed_reason='manual'` | **`tp_price`** (live bid for long / ask for short, captured at command time) | `manual_tp_price` is a retrospective override ("where it should have TP'd") — **advisory only, never the analysis exit**. Compare the two to detect TP thresholds set too far. Manual profit = whole position closed at that price (no trailing assumption). |
 | `stop_loss` | `stop_loss` column | |
-| `breakeven` | mid of `close_bid`/`close_ask` | Typically a small loss; treat as its actual (small) P&L, not 0, when close prices exist |
+| `breakeven` | mid of `close_bid`/`close_ask` | Typically a small loss; treat as its actual (small) P&L, not 0, when close prices exist. Two populations since 2026-08-13: hand-marked (`be` reply) and **breakeven-stop** closes, which carry `be_stop_armed_at IS NOT NULL`, `closed_reason='automatic'`, a `status_changes.reason='breakeven_stop'` row, and `signal_excursions.exit_reason='be_stop'`. Split them — the second is a rule, not a judgement call. |
 | `cancelled` with hits | mid of `close_bid`/`close_ask` | Mark-to-market at cancel time — no more unknown outcomes |
 | any close without hits | not a trade | |
 

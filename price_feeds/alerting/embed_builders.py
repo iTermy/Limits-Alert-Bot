@@ -9,7 +9,7 @@ from typing import Optional
 
 import discord
 
-from models.signal import LimitData, SignalData
+from models.signal import LimitData, SignalData, breakeven_price
 from price_feeds.config.tp_config import TPConfig
 from utils.logger import get_logger
 
@@ -159,6 +159,13 @@ def _build_signal_embed(
     if sl:
         sl_label = f"~~{_fmt(sl)}~~ 🛑" if event == "stop_loss" else _fmt(sl)
         embed.add_field(name="Stop Loss", value=sl_label, inline=True)
+
+    # ── Breakeven stop (only once armed) ─────────────────────────────────────
+    if signal.be_stop_armed_at:
+        be_price = breakeven_price([lim for lim in sorted_limits if _is_hit(lim)])
+        if be_price is not None:
+            be_label = f"~~{_fmt(be_price)}~~ ➖" if event == "breakeven" else _fmt(be_price)
+            embed.add_field(name="BE Stop", value=be_label, inline=True)
 
     # ── Current price ────────────────────────────────────────────────────────
     if current_price is not None:

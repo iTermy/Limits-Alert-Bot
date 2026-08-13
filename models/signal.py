@@ -33,6 +33,17 @@ class LimitData(BaseModel):
         return values
 
 
+def breakeven_price(hit_limits: list[LimitData]) -> float | None:
+    """Price at which the combined P&L of every filled limit is exactly zero.
+
+    Lots are equal per limit, so the flat point is the mean entry: what the fills
+    above it lose, the fills below it gain. Returns None when nothing is filled.
+    """
+    if not hit_limits:
+        return None
+    return sum(lim.price_level for lim in hit_limits) / len(hit_limits)
+
+
 class SignalData(BaseModel):
     signal_id: int = 0
     message_id: str | None = None
@@ -48,6 +59,7 @@ class SignalData(BaseModel):
     closed_at: datetime | None = None
     closed_reason: str | None = None
     take_profit: float | None = None
+    be_stop_armed_at: datetime | None = None
     tp_price: float | None = None
     manual_tp_price: float | None = None
     total_limits: int = 0
@@ -66,6 +78,7 @@ class SignalData(BaseModel):
     guild_id: int | None = None
     current_spread: float | None = None
     sl_alert_sent: bool = False
+    be_stop_alert_sent: bool = False
     asset_class: str | None = None
     shadow_only: bool = False
 

@@ -10,7 +10,7 @@ from typing import Optional
 import discord
 import pytz
 
-from models.signal import LimitData, SignalData
+from models.signal import LimitData, SignalData, breakeven_price
 from price_feeds.monitors.risky_window import is_risky_trading_disabled
 from utils.config_loader import load_settings
 from utils.logger import get_logger
@@ -159,6 +159,7 @@ class StreamingPriceMonitor:
             "signals_checked": 0,
             "limits_hit": 0,
             "stop_losses_hit": 0,
+            "breakeven_stops_hit": 0,
             "news_cancelled": 0,
             "errors": 0,
             "buffer_prevented_alerts": 0,
@@ -603,6 +604,11 @@ class StreamingPriceMonitor:
                 signal, current_price, direction, is_spread_hour, is_late_market
             )
 
+        # Check the breakeven stop, if one was armed.
+        if signal.status == "hit":
+            if await self._check_breakeven_stop(signal, price_data["bid"]):
+                return
+
         # Check auto take-profit (runs for any HIT signal that has hit limits cached)
         if signal.status == "hit":
             tp_triggered = await self.tp_monitor.check_signal(
@@ -995,6 +1001,67 @@ class StreamingPriceMonitor:
             self._react_async(signal, "🛑")
             await self._process_stop_loss_hit(signal, current_price)
             self.stats["stop_losses_hit"] += 1
+
+    async def _check_breakeven_stop(self, signal: SignalData, bid: float) -> bool:
+        """Close a signal flat once price reverses to its breakeven point.
+
+        Armed by hand with the "set be" reply. Evaluated on the bid in both
+        directions like auto-TP, so the level fires where the chart shows it
+        instead of a spread away. Returns True once the close has been processed.
+
+        A tick that gaps through both this level and the stop loss books the real
+        (worse) SL: it runs first in _check_signal, and its flag stands this one
+        down rather than crediting a flat exit the position never got.
+        """
+        if not signal.be_stop_armed_at or signal.be_stop_alert_sent or signal.sl_alert_sent:
+            return False
+
+        be_price = breakeven_price(signal.hit_limits)
+        if be_price is None:
+            return False
+
+        reached = bid <= be_price if signal.direction.lower() == "long" else bid >= be_price
+        if not reached:
+            return False
+
+        signal.be_stop_alert_sent = True
+        logger.info(
+            f"Signal {signal.signal_id} ({signal.instrument}): breakeven stop hit "
+            f"@ {bid} (BE {be_price})"
+        )
+
+        await self.alert_system.send_breakeven_stop_alert(signal, bid, be_price)
+        self._react_async(signal, "➖")
+        await self._process_breakeven_stop(signal, bid)
+        self.stats["breakeven_stops_hit"] += 1
+        return True
+
+    async def _process_breakeven_stop(self, signal: SignalData, current_price: float):
+        """Record a breakeven-stop close and tear down the per-signal trackers."""
+        try:
+            success = await self.signal_db.manually_set_signal_status(
+                signal.signal_id,
+                "breakeven",
+                reason="breakeven_stop",
+                closed_reason="automatic",
+            )
+        except Exception as e:
+            logger.error(f"Failed to process breakeven stop: {e}")
+            return
+
+        if not success:
+            logger.error(f"Signal {signal.signal_id}: breakeven stop write did not land")
+            return
+
+        self.sync_signal_status_in_memory(signal.signal_id, "breakeven")
+        logger.info(f"Signal {signal.signal_id} marked as breakeven")
+        self.tp_monitor.evict_signal(signal.signal_id)
+        await self.trailing_monitor.finalize_with_price(
+            signal.signal_id, current_price, reason="be_stop"
+        )
+        self.trailing_monitor.evict_signal(signal.signal_id)
+        await self.excursion_monitor.finalize(signal.signal_id, current_price, "be_stop")
+        await self._maybe_unsubscribe_symbol(signal.instrument, signal.signal_id)
 
     async def _cancel_signal_during_guard(
         self, signal: dict, current_price: float, reason: str, news_event=None

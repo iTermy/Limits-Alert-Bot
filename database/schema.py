@@ -463,6 +463,13 @@ async def _run_migrations(conn):
         """
         ALTER TABLE signals ADD COLUMN IF NOT EXISTS minutes_to_news INTEGER;
         """,
+        # Breakeven stop: armed by hand once a position is in profit ("set be"
+        # reply). From then on the signal closes flat on a reversal instead of
+        # riding down to its stop loss. NULL = not armed; the timestamp is kept
+        # rather than a flag so analysis can see when protection went on.
+        """
+        ALTER TABLE signals ADD COLUMN IF NOT EXISTS be_stop_armed_at TIMESTAMPTZ;
+        """,
         # Data-era marker: rows created before 2026-07-12 predate the clean-data
         # instrumentation and are excluded from primary analysis (see DATA_ANALYSIS.md).
         """

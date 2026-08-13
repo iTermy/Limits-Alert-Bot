@@ -1080,6 +1080,35 @@ class AlertSystem:
             self.stats["errors"] += 1
         return False
 
+    async def send_breakeven_stop_alert(
+        self, signal: dict, current_price: float, be_price: float
+    ) -> bool:
+        """Edit the persistent embed to show an armed breakeven stop closing flat."""
+        try:
+            signal_id = signal.signal_id
+            self._unregister_live_embed(signal_id)
+            limits = await self._fetch_limits(signal)
+            ping = (
+                f"➖ **{signal.instrument}** {signal.direction.upper()} — "
+                f"breakeven stop hit @ {_fmt(current_price)} (BE: {_fmt(be_price)})"
+            )
+            msg = await self._upsert_signal_message(
+                signal=signal,
+                limits=limits,
+                event="breakeven",
+                current_price=current_price,
+                ping_text=ping,
+                delete_after_minutes=END_STATE_DELETE_MINUTES,
+            )
+            if msg:
+                self._archive_manager.schedule_end_state_move(signal_id, event="breakeven")
+                self.stats["total_alerts"] += 1
+                return True
+        except Exception as e:
+            logger.error(f"Failed to send breakeven stop alert: {e}", exc_info=True)
+            self.stats["errors"] += 1
+        return False
+
     async def send_auto_tp_alert(
         self,
         signal: dict,

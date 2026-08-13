@@ -23,7 +23,7 @@ logger = get_logger("signal_db")
 SIGNAL_COLUMNS = (
     "id, message_id, channel_id, instrument, direction, stop_loss, expiry_type, "
     "expiry_time, status, type, first_limit_hit_time, closed_at, closed_reason, "
-    "take_profit, tp_price, manual_tp_price, total_limits, limits_hit, alert_message_id, "
+    "take_profit, be_stop_armed_at, tp_price, manual_tp_price, total_limits, limits_hit, alert_message_id, "
     "alert_channel_id, ping_message_id, finished_message_id, finished_channel_id, "
     "created_at, updated_at"
 )
@@ -744,6 +744,27 @@ class SignalDatabase:
             "instrument": row["instrument"],
             "direction": direction,
         }
+
+    async def set_breakeven_stop(self, signal_id: int, armed: bool) -> bool:
+        """Arm or disarm a signal's breakeven stop. Returns True if a row changed.
+
+        Only a signal holding an open position can carry one, so the update is
+        scoped to status 'hit' — that also makes a late duplicate command against
+        an already-closed signal a no-op rather than a resurrection.
+        """
+        try:
+            updated = await self.db.execute(
+                """
+                UPDATE signals
+                SET be_stop_armed_at = $1, updated_at = NOW()
+                WHERE id = $2 AND status = 'hit'
+                """,
+                (datetime.now(pytz.UTC) if armed else None, signal_id),
+            )
+            return bool(updated)
+        except Exception as e:
+            logger.error(f"Failed to set breakeven stop on signal {signal_id}: {e}")
+            return False
 
     async def manually_set_signal_status(
         self,

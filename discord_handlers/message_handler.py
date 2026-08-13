@@ -13,7 +13,7 @@ import pytz
 
 from core.parser import RejectedSignal, parse_signal
 from database import db
-from models.signal import SignalData
+from models.signal import SignalData, breakeven_price
 from price_feeds.alerting.embed_builders import _build_signal_embed, _set_archive_footer
 from price_feeds.monitors.streaming_monitor import react_to_original_signal
 from price_feeds.config.tp_config import TPConfig
@@ -49,6 +49,11 @@ _STATUS_VERIFY_TIMEOUT = 5.0
 # feeds tick several times a second; anything older means the market is closed
 # or the feed has stalled, and entering there would book a fictional price.
 _INSTANT_ENTRY_MAX_PRICE_AGE = 15.0
+
+# Reply phrases that arm or disarm a signal's breakeven stop. Kept apart from
+# the bare "be" command, which closes the signal at breakeven right away.
+_ARM_BE_PHRASES = frozenset({"set be", "set breakeven"})
+_DISARM_BE_PHRASES = frozenset({"unset be", "unset breakeven", "remove be"})
 
 # DM sent when a non-manager tries to manage a signal via reply.
 _NO_PERMISSION_DM = (
@@ -289,11 +294,20 @@ class MessageHandler:
 
         command_parts = message.content.lower().strip().split()
         command = command_parts[0] if command_parts else ""
+        phrase = " ".join(command_parts)
 
         success = False
         action_taken = None
 
         try:
+            if phrase in _ARM_BE_PHRASES or phrase in _DISARM_BE_PHRASES:
+                # Protection, not a status change — handled end to end here so it
+                # skips the terminal-command tail below.
+                await self._reply_breakeven_stop(
+                    message, path, signal, signal_id, arm=phrase in _ARM_BE_PHRASES
+                )
+                return
+
             if command in self._REPLY_STATUS_COMMANDS:
                 status, action_label = self._REPLY_STATUS_COMMANDS[command]
                 if status == "profit":
@@ -315,7 +329,7 @@ class MessageHandler:
 
             else:
                 await message.reply(
-                    "❓ Unknown command. Valid commands: `cancel`, `profit`, `tp`, `breakeven`, `be`, `sl`, `stop`, `reactivate`",
+                    "❓ Unknown command. Valid commands: `cancel`, `profit`, `tp`, `breakeven`, `be`, `set be`, `sl`, `stop`, `reactivate`",
                     delete_after=_REPLY_DELETE_AFTER,
                 )
                 await self._safe_delete(message)
@@ -452,6 +466,117 @@ class MessageHandler:
             self.bot.services.monitor.sync_signal_status_in_memory(signal_id, status)
             await self.bot.services.monitor.finalize_trailing_on_manual_close(signal_id)
         return success
+
+    async def _live_bid(self, instrument: str) -> Optional[float]:
+        """Current bid for a symbol, or None when no live price is available.
+
+        The breakeven stop fires on the bid in both directions, so arming it is
+        validated against the same price it will later be measured on. Unlike an
+        instant entry there is no staleness gate: arming over a closed market is
+        a legitimate thing to do to a position already held.
+        """
+        stream_manager = self.bot.services.stream_manager
+        if stream_manager is None:
+            return None
+        price = await stream_manager.get_latest_price(instrument)
+        return price["bid"] if price else None
+
+    async def _can_arm_breakeven_stop(
+        self,
+        message: discord.Message,
+        signal: SignalData,
+        signal_id: int,
+        be_price: Optional[float],
+    ) -> bool:
+        """Whether a breakeven stop may be armed now; replies with the reason if not."""
+        instrument = signal.instrument
+
+        if signal.status != "hit" or be_price is None:
+            await message.reply(
+                f"❌ A breakeven stop needs an open position — signal {signal_id} is "
+                f"{signal.status.upper()}.",
+                delete_after=_REPLY_DELETE_AFTER,
+            )
+            return False
+
+        bid = await self._live_bid(instrument)
+        if bid is None:
+            await message.reply(
+                f"❌ No live price for **{instrument}** — can't confirm the trade is in "
+                "profit, so the breakeven stop was not armed.",
+                delete_after=_REPLY_DELETE_AFTER,
+            )
+            return False
+
+        in_profit = bid > be_price if signal.direction.lower() == "long" else bid < be_price
+        if not in_profit:
+            await message.reply(
+                f"❌ **{instrument}** is at {format_price(bid, instrument)}, not past "
+                f"breakeven ({format_price(be_price, instrument)}) — arming now would close "
+                "the trade immediately.",
+                delete_after=_REPLY_DELETE_AFTER,
+            )
+            return False
+
+        return True
+
+    async def _reply_breakeven_stop(
+        self,
+        message: discord.Message,
+        path: str,
+        signal: SignalData,
+        signal_id: int,
+        arm: bool,
+    ) -> None:
+        """Arm or disarm a signal's breakeven stop from a reply.
+
+        Once armed the signal closes flat when price reverses to the mean of its
+        filled limits, instead of riding down to the stop loss. Take-profit and
+        every other exit are untouched — this only puts a floor under the trade.
+        """
+        instrument = signal.instrument
+        be_price = breakeven_price(signal.hit_limits)
+
+        if arm and not await self._can_arm_breakeven_stop(message, signal, signal_id, be_price):
+            await self._safe_delete(message)
+            return
+
+        if not await self.signal_db.set_breakeven_stop(signal_id, arm):
+            await message.reply(
+                f"❌ Could not update the breakeven stop for signal {signal_id}.",
+                delete_after=_ERROR_REPLY_DELETE_AFTER,
+            )
+            await self._safe_delete(message)
+            return
+
+        signal.be_stop_armed_at = datetime.now(pytz.UTC) if arm else None
+        monitor = self.bot.services.monitor
+        if monitor:
+            # Without this the tick path would keep evaluating the pre-arm copy
+            # until the next periodic refresh, up to 30s of unprotected trade.
+            await monitor.refresh_signal_in_memory(signal_id)
+
+        if arm:
+            ping = (
+                f"🛡️ **{instrument}** {signal.direction.upper()} — breakeven stop armed at "
+                f"{format_price(be_price, instrument)} (by {message.author.display_name})"
+            )
+        else:
+            ping = (
+                f"🛡️ **{instrument}** {signal.direction.upper()} — breakeven stop removed "
+                f"(by {message.author.display_name})"
+            )
+
+        if self.alert_system:
+            await self.alert_system.update_signal_message(
+                signal=signal, event="hit", ping_text=ping
+            )
+
+        logger.info(
+            f"Signal {signal_id} breakeven stop {'armed' if arm else 'removed'} via "
+            f"{path} reply by {message.author.name}"
+        )
+        await self._safe_delete(message)
 
     async def _auto_hit_first_pending(self, signal: SignalData, signal_id: int) -> SignalData:
         """Before a profit command on a signal with no hits, mark the first
