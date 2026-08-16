@@ -9,12 +9,33 @@ from logging.handlers import RotatingFileHandler
 from pathlib import Path
 
 
+# Third-party loggers that would otherwise flood the root handlers at INFO.
+_NOISY_LIBRARIES = (
+    "discord",
+    "aiohttp",
+    "asyncio",
+    "asyncpg",
+    "httpx",
+    "httpcore",
+    "openai",
+    "urllib3",
+    "websockets",
+)
+
+
 def setup_logger(name: str = "trading_bot", log_dir: str = "data/logs") -> logging.Logger:
     """
-    Set up a logger with both file and console handlers
+    Attach the console and rotating-file handlers to the ROOT logger.
+
+    Handlers go on the root rather than on `trading_bot` so that modules using
+    the plain `logging.getLogger(__name__)` idiom — every price feed client, the
+    trailing/excursion monitors, the config loaders — reach the log files too.
+    With handlers on `trading_bot` alone their records fell through to
+    `logging.lastResort`: INFO dropped entirely, WARNING+ to bare stderr, so a
+    feed that failed to connect left no trace on disk.
 
     Args:
-        name: Logger name
+        name: Logger name to return for the caller's convenience
         log_dir: Directory for log files
 
     Returns:
@@ -23,15 +44,17 @@ def setup_logger(name: str = "trading_bot", log_dir: str = "data/logs") -> loggi
     # Create logs directory if it doesn't exist
     Path(log_dir).mkdir(parents=True, exist_ok=True)
 
-    # Create logger
-    logger = logging.getLogger(name)
+    root = logging.getLogger()
 
     # Clear any existing handlers
-    logger.handlers.clear()
+    root.handlers.clear()
 
     # Set level from environment or default to INFO
     log_level = os.getenv("LOG_LEVEL", "INFO")
-    logger.setLevel(getattr(logging, log_level))
+    root.setLevel(getattr(logging, log_level))
+
+    for library in _NOISY_LIBRARIES:
+        logging.getLogger(library).setLevel(logging.WARNING)
 
     # Create formatters
     detailed_formatter = logging.Formatter(
@@ -56,7 +79,7 @@ def setup_logger(name: str = "trading_bot", log_dir: str = "data/logs") -> loggi
             # Reconfigure stdout to handle UTF-8
             sys.stdout.reconfigure(encoding="utf-8")
 
-    logger.addHandler(console_handler)
+    root.addHandler(console_handler)
 
     # File handler for all logs (with UTF-8 encoding)
     file_handler = RotatingFileHandler(
@@ -67,7 +90,7 @@ def setup_logger(name: str = "trading_bot", log_dir: str = "data/logs") -> loggi
     )
     file_handler.setLevel(logging.DEBUG)
     file_handler.setFormatter(detailed_formatter)
-    logger.addHandler(file_handler)
+    root.addHandler(file_handler)
 
     # Error file handler (with UTF-8 encoding)
     error_handler = RotatingFileHandler(
@@ -78,7 +101,9 @@ def setup_logger(name: str = "trading_bot", log_dir: str = "data/logs") -> loggi
     )
     error_handler.setLevel(logging.ERROR)
     error_handler.setFormatter(detailed_formatter)
-    logger.addHandler(error_handler)
+    root.addHandler(error_handler)
+
+    logger = logging.getLogger(name)
 
     # Add a custom exception handler to prevent logger crashes
     def handle_exception(exc_type, exc_value, exc_traceback):
