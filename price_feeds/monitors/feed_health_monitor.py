@@ -14,7 +14,7 @@ import threading
 import time
 from collections import defaultdict
 from datetime import datetime, timedelta
-from datetime import time as dtime
+
 from typing import Optional
 
 import pytz
@@ -75,38 +75,44 @@ def _relaunch_process():
 WATCHDOG_SILENCE_SECONDS = 180
 WATCHDOG_GRACE_SECONDS = 180
 
-# Spread hour: 5–6 PM EST weekdays (matches streaming_monitor._is_spread_hour)
-_SPREAD_START = dtime(17, 0)
-_SPREAD_END = dtime(18, 0)
-
+# `open_days` lists the weekdays a session STARTS on (Mon=0), not every weekday
+# the market is open. For the classes whose session wraps past midnight
+# (open 18:00, close 17:00 the next day) those differ: a session starting
+# Thursday 18:00 keeps Friday open until 17:00, but Friday itself starts no
+# session, which is what closes the market for the weekend. Sun-Thu opens
+# therefore give the continuous Sunday 18:00 -> Friday 17:00 ET week.
+#
+# The daily 17:00-18:00 ET gap between close and open is the spread hour
+# (matches streaming_monitor._is_spread_hour); the wrap logic in
+# is_market_open reports it closed without needing a separate carve-out.
 MARKET_HOURS = {
     "crypto": {"always_open": True},
     "stocks": {
-        "days": [1, 2, 3, 4, 5],
+        "open_days": [0, 1, 2, 3, 4],
         "open_time": "09:30",
         "close_time": "17:00",
         "timezone": "America/New_York",
     },
     "forex": {
-        "days": [0, 1, 2, 3, 4, 6],
+        "open_days": [6, 0, 1, 2, 3],
         "open_time": "18:00",
         "close_time": "17:00",
         "timezone": "America/New_York",
     },
     "metals": {
-        "days": [0, 1, 2, 3, 4, 6],
+        "open_days": [6, 0, 1, 2, 3],
         "open_time": "18:00",
         "close_time": "17:00",
         "timezone": "America/New_York",
     },
     "indices": {
-        "days": [0, 1, 2, 3, 4, 6],
+        "open_days": [6, 0, 1, 2, 3],
         "open_time": "18:00",
         "close_time": "17:00",
         "timezone": "America/New_York",
     },
     "oil": {
-        "days": [0, 1, 2, 3, 4, 6],
+        "open_days": [6, 0, 1, 2, 3],
         "open_time": "18:00",
         "close_time": "17:00",
         "timezone": "America/New_York",
@@ -692,29 +698,28 @@ class FeedHealthMonitor:
         if market_config.get("always_open"):
             return True
 
-        if now.weekday() not in market_config.get("days", []):
-            return False
-
-        if asset_class == "stocks":
-            today_str = now.strftime("%Y-%m-%d")
-            if today_str in self.us_market_holidays:
-                return False
-
-        # Spread hour (5–6 PM EST) is an expected-quiet window for forex, metals,
-        # and indices. Liquidity drops and price ticks slow or stop — treating it
-        # as "open" would generate false-positive stale-feed alerts. Mirror the
-        # weekend skip above and treat it as closed.
-        if (
-            asset_class in ("forex", "metals", "indices", "oil")
-            and _SPREAD_START <= now.time() < _SPREAD_END
-        ):
-            return False
-
+        open_days = market_config["open_days"]
         open_time = datetime.strptime(market_config["open_time"], "%H:%M").time()
         close_time = datetime.strptime(market_config["close_time"], "%H:%M").time()
 
         if close_time < open_time:
-            return now.time() >= open_time or now.time() < close_time
+            # Session wraps past midnight, so the weekday test has to follow the
+            # session rather than the calendar: past the open we are in one that
+            # starts today, before the close we are still in the one that started
+            # yesterday. Testing day and time independently would call Sunday
+            # daytime and Friday night open when both are still the weekend.
+            if now.time() >= open_time:
+                return now.weekday() in open_days
+            if now.time() < close_time:
+                return (now.weekday() - 1) % 7 in open_days
+            return False  # 17:00-18:00 ET daily break (spread hour)
+
+        if now.weekday() not in open_days:
+            return False
+
+        if asset_class == "stocks" and now.strftime("%Y-%m-%d") in self.us_market_holidays:
+            return False
+
         return open_time <= now.time() < close_time
 
     def _format_duration(self, duration: timedelta) -> str:
