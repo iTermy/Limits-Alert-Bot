@@ -32,6 +32,10 @@ LIMIT_COLUMNS = (
     "approaching_alert_sent, hit_alert_sent, created_at"
 )
 
+# Entries an instant-entry signal may hold: the one it opens with, plus at most
+# one averaged in later via the `add` reply.
+MAX_INSTANT_ENTRIES = 2
+
 
 def _is_crypto_symbol(symbol: str) -> bool:
     """Lightweight crypto detector for DB-layer use (avoids importing the live mapper)."""
@@ -357,6 +361,52 @@ class SignalDatabase:
                 signal_id,
             )
         logger.info(f"Updated instant signal {signal_id} SL/TP from edited message")
+
+    async def add_instant_entry(self, signal_id: int, entry_price: float) -> Optional[int]:
+        """Average an instant-entry signal in at the market, already filled.
+
+        Returns the new limit's id, or None when the signal already holds the
+        maximum number of entries. The row count is read under a row lock on the
+        signal so two `add` replies racing can't push it past the maximum.
+        """
+        now = datetime.now(pytz.UTC)
+        async with self.db.get_connection() as conn:
+            async with conn.transaction():
+                row = await conn.fetchrow(
+                    "SELECT total_limits FROM signals WHERE id = $1 FOR UPDATE", signal_id
+                )
+                if row is None or row["total_limits"] >= MAX_INSTANT_ENTRIES:
+                    return None
+
+                sequence = row["total_limits"] + 1
+                limit_id = await conn.fetchval(
+                    """
+                    INSERT INTO limits (
+                        signal_id, price_level, sequence_number, status,
+                        hit_time, hit_price, hit_alert_sent
+                    )
+                    VALUES ($1, $2, $3, $4, $5, $2, TRUE)
+                    RETURNING id
+                    """,
+                    signal_id,
+                    entry_price,
+                    sequence,
+                    LimitStatus.HIT,
+                    now,
+                )
+                await conn.execute(
+                    """
+                    UPDATE signals
+                    SET total_limits = $1, limits_hit = limits_hit + 1,
+                        updated_at = CURRENT_TIMESTAMP
+                    WHERE id = $2
+                    """,
+                    sequence,
+                    signal_id,
+                )
+
+        logger.info(f"Added entry #{sequence} to instant signal {signal_id} at {entry_price}")
+        return limit_id
 
     @staticmethod
     async def _apply_limit_diff(conn, signal_id: int, diff: dict[str, Any]) -> None:

@@ -77,6 +77,8 @@ database/
                                   get_signal_with_limits() returns Optional[SignalData];
                                   save_signal, cancel, reactivate, manually_set_signal_status,
                                   process_limit_hit, expire_old_signals;
+                                  add_instant_entry() — appends a second already-filled market entry
+                                    to an instant signal (MAX_INSTANT_ENTRIES, row-locked);
                                   get_overlapping_signals() — range-intersection query used on save;
                                   check_reactivation_guard() — compares cancelled limits vs live price;
                                   _get_live_price() — reads bid/ask from live_prices table
@@ -161,7 +163,9 @@ discord_handlers/
                                   _handle_overlap_prompt() — 30 s reaction prompt when new signal overlaps
                                   an existing one (✅ cancel old / ❌ keep both / timeout = cancel old);
                                   _reply_breakeven_stop() — `set be` / `unset be` arms or clears a
-                                  signal's breakeven stop (protection, not a status change)
+                                  signal's breakeven stop (protection, not a status change);
+                                  _reply_add_entry() — `add` averages a second market entry into an
+                                  instant-entry signal (see Instant-entry channels)
 
 commands/
   __init__.py
@@ -523,6 +527,8 @@ Spread-hour and news cancels **edit the persistent embed** when one already exis
 `semi-swing-pa-signals` (listed in `validators._INSTANT_ENTRY_CHANNELS`) posts signals of the form `short gold sl 5001 tp 4080`: an instrument, a direction, and labelled SL/TP with **no limits**. `parse_instant_signal()` produces a `ParsedSignal` with `instant_entry=True`, `take_profit` set, and `limits=[]`; the AI fallback is skipped for these channels.
 
 `message_handler` resolves the entry before saving: `_live_entry_price()` reads the feed via `stream_manager.get_latest_price()` (subscribing the symbol first if nothing was watching it), takes the **ask for a long / bid for a short**, and rejects prices older than `_INSTANT_ENTRY_MAX_PRICE_AGE` (15 s). `_resolve_instant_entry()` then rejects with ⚠️ plus a reply when there is no live price, or when price already sits outside the SL↔TP band — that trade would open only to close on the next tick. The resolved price becomes the signal's single limit, and `save_signal` writes it **already hit** — status `hit`, `limits_hit=1`, `first_limit_hit_time` set — in the same transaction as the signal row; `_open_instant_position()` then just opens the embed directly as HIT. Being born filled is load-bearing, not cosmetic: inserting the limit as `pending` and marking it hit on a second round-trip left a multi-second window (a pooler status write is 2–5 s) in which the row was indistinguishable from an ordinary signal resting a limit at the market price. Every released EX bot keys its placeable set on `l.status='pending'`, so during that window even versions that disable this channel would place a real limit order on a user's account. Nothing returns an instant limit to `pending` afterwards — cancels and terminal transitions only touch `pending` rows, reactivation only restores `cancelled` ones, and an edit rewrites SL/TP/expiry only. Overlap detection is skipped (the limit fills immediately, so it never competes with another signal's resting limits).
+
+**A second entry can be averaged in** by replying `add` to the alert embed, its ping, or the original signal message. `signal_ops.add_instant_entry` appends a limit at the live market price in the same already-filled shape (`status='hit'`, `hit_time`/`hit_price` stamped), bumps `total_limits`/`limits_hit`, and the embed re-renders as 2/2 hit. Same entry gates as the original: fresh live price, and price still inside the SL↔TP band. `MAX_INSTANT_ENTRIES` (2) is enforced inside the write under `SELECT … FOR UPDATE` on the signal row — two replies arriving together would otherwise both read one entry and both add. Only instant signals accept it: an ordinary signal enters on limits the sender chose, and a market fill bolted onto those is a level nobody asked for. Everything downstream just sees a second filled limit — auto-TP averages it in, `breakeven_price` moves to the mean of both fills, exits are unchanged.
 
 Downstream everything is shared machinery: `type='pa'` routes the embed to the PA alert channel and the signal into the PA report section; SL, manual reply commands, archiving, trailing and excursion analytics are unchanged. The guards land where they should without special-casing — an already-HIT signal rides out spread hour and the late-market hour, and is cancelled when a news window opens (only `swing` is exempt from that). Edits to an instant signal update **SL/TP and expiry only** (`signal_ops._update_instant_from_edit`); the entry limit records a real fill and is never re-derived. The EX bot ignores these signals — it keys off pending limits, and there is never one.
 

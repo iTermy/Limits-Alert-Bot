@@ -13,6 +13,7 @@ import pytz
 
 from core.parser import RejectedSignal, parse_signal
 from database import db
+from database.signal_ops import MAX_INSTANT_ENTRIES
 from models.signal import SignalData, breakeven_price
 from price_feeds.alerting.embed_builders import _build_signal_embed, _set_archive_footer
 from price_feeds.monitors.streaming_monitor import react_to_original_signal
@@ -308,6 +309,12 @@ class MessageHandler:
                 )
                 return
 
+            if command == "add":
+                # Averages into an open position rather than changing its status,
+                # so it skips the terminal-command tail below like `set be` does.
+                await self._reply_add_entry(message, path, signal, signal_id)
+                return
+
             if command in self._REPLY_STATUS_COMMANDS:
                 status, action_label = self._REPLY_STATUS_COMMANDS[command]
                 if status == "profit":
@@ -329,7 +336,7 @@ class MessageHandler:
 
             else:
                 await message.reply(
-                    "❓ Unknown command. Valid commands: `cancel`, `profit`, `tp`, `breakeven`, `be`, `set be`, `sl`, `stop`, `reactivate`",
+                    "❓ Unknown command. Valid commands: `cancel`, `profit`, `tp`, `breakeven`, `be`, `set be`, `add`, `sl`, `stop`, `reactivate`",
                     delete_after=_REPLY_DELETE_AFTER,
                 )
                 await self._safe_delete(message)
@@ -575,6 +582,92 @@ class MessageHandler:
         logger.info(
             f"Signal {signal_id} breakeven stop {'armed' if arm else 'removed'} via "
             f"{path} reply by {message.author.name}"
+        )
+        await self._safe_delete(message)
+
+    async def _reply_add_entry(
+        self,
+        message: discord.Message,
+        path: str,
+        signal: SignalData,
+        signal_id: int,
+    ) -> None:
+        """Average an instant-entry signal in with a second market entry.
+
+        Only instant signals can take one: an ordinary signal enters on limits
+        the sender chose, and a market fill added to those would be a level
+        nobody asked for. The new entry shares the signal's stop loss and take
+        profit, so everything downstream — TP, breakeven, exits — just sees a
+        second filled limit.
+        """
+        instrument = signal.instrument
+
+        if signal.take_profit is None:
+            await message.reply(
+                f"❌ Signal {signal_id} is not a market-entry signal — `add` only applies "
+                "to those.",
+                delete_after=_REPLY_DELETE_AFTER,
+            )
+            await self._safe_delete(message)
+            return
+
+        if signal.status != "hit":
+            await message.reply(
+                f"❌ Adding an entry needs an open position — signal {signal_id} is "
+                f"{signal.status.upper()}.",
+                delete_after=_REPLY_DELETE_AFTER,
+            )
+            await self._safe_delete(message)
+            return
+
+        if len(signal.limits) >= MAX_INSTANT_ENTRIES:
+            await message.reply(
+                f"❌ Signal {signal_id} already holds {MAX_INSTANT_ENTRIES} entries.",
+                delete_after=_REPLY_DELETE_AFTER,
+            )
+            await self._safe_delete(message)
+            return
+
+        entry, reason = await self._market_entry_price(
+            instrument, signal.direction, signal.stop_loss, signal.take_profit
+        )
+        if entry is None:
+            await message.reply(
+                f"❌ {reason} — no entry added.", delete_after=_ERROR_REPLY_DELETE_AFTER
+            )
+            await self._safe_delete(message)
+            return
+
+        limit_id = await self.signal_db.add_instant_entry(signal_id, entry)
+        if limit_id is None:
+            await message.reply(
+                f"❌ Could not add an entry to signal {signal_id}.",
+                delete_after=_ERROR_REPLY_DELETE_AFTER,
+            )
+            await self._safe_delete(message)
+            return
+
+        monitor = self.bot.services.monitor
+        if monitor:
+            # The tick path, the TP monitor's hit-limit cache and the 15s embed
+            # refresh all read cached copies that predate this fill.
+            await monitor.refresh_signal_in_memory(signal_id)
+        refreshed = await self.signal_db.get_signal_with_limits(signal_id) or signal
+
+        ping = (
+            f"➕ **{instrument}** {signal.direction.upper()} — entry added @ "
+            f"{format_price(entry, instrument)} "
+            f"({len(refreshed.hit_limits)}/{refreshed.total_limits} filled, "
+            f"by {message.author.display_name})"
+        )
+        if self.alert_system:
+            await self.alert_system.update_signal_message(
+                signal=refreshed, event="hit", current_price=entry, ping_text=ping
+            )
+
+        logger.info(
+            f"Signal {signal_id} took an added entry at {entry} via {path} reply "
+            f"by {message.author.name}"
         )
         await self._safe_delete(message)
 
@@ -947,34 +1040,41 @@ class MessageHandler:
 
         return price["ask"] if direction == "long" else price["bid"]
 
-    async def _resolve_instant_entry(self, message: discord.Message, parsed) -> Optional[float]:
-        """Entry price for an instant-entry signal, or None when it can't be taken.
+    async def _market_entry_price(
+        self, instrument: str, direction: str, stop_loss: float, take_profit: float
+    ) -> tuple[Optional[float], Optional[str]]:
+        """Market price to enter an instant signal at, or (None, reason).
 
-        Rejects the signal (⚠️ plus a reply) when no live price is available or
-        when price already sits past the stated stop loss or take profit — that
-        trade would open only to close on the next tick.
+        An entry is refused when no live price is available, or when price
+        already sits past the stated stop loss or take profit — that trade would
+        open only to close on the next tick.
         """
-        entry = await self._live_entry_price(parsed.instrument, parsed.direction)
+        entry = await self._live_entry_price(instrument, direction)
+        if entry is None:
+            return None, f"No live price for **{instrument}**"
+
+        low, high = sorted((stop_loss, take_profit))
+        if not low < entry < high:
+            return None, (
+                f"**{instrument}** is at {format_price(entry, instrument)}, already past "
+                f"the stop loss or take profit"
+            )
+
+        return entry, None
+
+    async def _resolve_instant_entry(self, message: discord.Message, parsed) -> Optional[float]:
+        """Entry price for a new instant-entry signal, or None when it can't be
+        taken — in which case the message is rejected with ⚠️ plus a reply."""
+        entry, reason = await self._market_entry_price(
+            parsed.instrument, parsed.direction, parsed.stop_loss, parsed.take_profit
+        )
         if entry is None:
             await self.safe_add_reaction(message, "⚠️")
             await message.reply(
-                f"⚠️ No live price for **{parsed.instrument}** — signal not opened.",
+                f"⚠️ {reason} — signal not opened.",
                 delete_after=_ERROR_REPLY_DELETE_AFTER,
             )
-            return None
-
-        low, high = sorted((parsed.stop_loss, parsed.take_profit))
-        if not low < entry < high:
-            await self.safe_add_reaction(message, "⚠️")
-            await message.reply(
-                f"⚠️ **{parsed.instrument}** is at {format_price(entry, parsed.instrument)}, "
-                f"already past the stop loss or take profit — signal not opened.",
-                delete_after=_ERROR_REPLY_DELETE_AFTER,
-            )
-            self.logger.info(
-                f"Instant signal rejected for message {message.id}: entry {entry} outside "
-                f"SL {parsed.stop_loss} / TP {parsed.take_profit}"
-            )
+            self.logger.info(f"Instant signal rejected for message {message.id}: {reason}")
             return None
 
         return entry
