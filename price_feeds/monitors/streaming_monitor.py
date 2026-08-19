@@ -606,7 +606,7 @@ class StreamingPriceMonitor:
 
         # Check the breakeven stop, if one was armed.
         if signal.status == "hit":
-            if await self._check_breakeven_stop(signal, price_data["bid"]):
+            if await self._check_breakeven_stop(signal, price_data["bid"], is_spread_hour):
                 return
 
         # Check auto take-profit (runs for any HIT signal that has hit limits cached)
@@ -1002,7 +1002,9 @@ class StreamingPriceMonitor:
             await self._process_stop_loss_hit(signal, current_price)
             self.stats["stop_losses_hit"] += 1
 
-    async def _check_breakeven_stop(self, signal: SignalData, bid: float) -> bool:
+    async def _check_breakeven_stop(
+        self, signal: SignalData, bid: float, is_spread_hour: bool
+    ) -> bool:
         """Close a signal flat once price reverses to its breakeven point.
 
         Armed by hand with the "set be" reply. Evaluated on the bid in both
@@ -1014,6 +1016,13 @@ class StreamingPriceMonitor:
         down rather than crediting a flat exit the position never got.
         """
         if not signal.be_stop_armed_at or signal.be_stop_alert_sent or signal.sl_alert_sent:
+            return False
+
+        # A non-crypto signal rides out spread hour, exactly as its stop loss does:
+        # the bid blows out there, and a long fires on `bid <= be_price`, so the
+        # widened spread alone would close the trade. The level is re-evaluated on
+        # the first tick after the window on a bid that means something again.
+        if is_spread_hour and not self._is_crypto_signal(signal):
             return False
 
         be_price = breakeven_price(signal.hit_limits)
