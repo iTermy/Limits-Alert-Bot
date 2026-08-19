@@ -362,20 +362,32 @@ class SignalDatabase:
             )
         logger.info(f"Updated instant signal {signal_id} SL/TP from edited message")
 
-    async def add_instant_entry(self, signal_id: int, entry_price: float) -> Optional[int]:
+    async def add_instant_entry(
+        self, signal_id: int, entry_price: float, disarm_breakeven: bool = False
+    ) -> Optional[int]:
         """Average an instant-entry signal in at the market, already filled.
 
-        Returns the new limit's id, or None when the signal already holds the
-        maximum number of entries. The row count is read under a row lock on the
-        signal so two `add` replies racing can't push it past the maximum.
+        Returns the new limit's id, or None when the signal is no longer open or
+        already holds the maximum number of entries. Both are read under a row lock
+        on the signal: two `add` replies racing would otherwise each see one entry
+        and each add one, and a signal auto-TP'd between the handler's read and this
+        write would take a fill it can no longer act on — and count it in limits_hit.
+
+        `disarm_breakeven` clears an armed breakeven stop in the same statement that
+        records the fill, because the new average is what that stop would be measured
+        against; see `_breakeven_disarm_note` for when the caller asks for it.
         """
         now = datetime.now(pytz.UTC)
         async with self.db.get_connection() as conn:
             async with conn.transaction():
                 row = await conn.fetchrow(
-                    "SELECT total_limits FROM signals WHERE id = $1 FOR UPDATE", signal_id
+                    "SELECT total_limits, status FROM signals WHERE id = $1 FOR UPDATE",
+                    signal_id,
                 )
                 if row is None or row["total_limits"] >= MAX_INSTANT_ENTRIES:
+                    return None
+                if row["status"] != SignalStatus.HIT:
+                    logger.info(f"Signal {signal_id} is {row['status']} — no entry added")
                     return None
 
                 sequence = row["total_limits"] + 1
@@ -398,14 +410,18 @@ class SignalDatabase:
                     """
                     UPDATE signals
                     SET total_limits = $1, limits_hit = limits_hit + 1,
+                        be_stop_armed_at = CASE WHEN $3 THEN NULL ELSE be_stop_armed_at END,
                         updated_at = CURRENT_TIMESTAMP
                     WHERE id = $2
                     """,
                     sequence,
                     signal_id,
+                    disarm_breakeven,
                 )
 
         logger.info(f"Added entry #{sequence} to instant signal {signal_id} at {entry_price}")
+        if disarm_breakeven:
+            logger.info(f"Signal {signal_id}: breakeven stop disarmed by the added entry")
         return limit_id
 
     @staticmethod

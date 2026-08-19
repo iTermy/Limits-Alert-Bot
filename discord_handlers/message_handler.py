@@ -14,7 +14,7 @@ import pytz
 from core.parser import RejectedSignal, parse_signal
 from database import db
 from database.signal_ops import MAX_INSTANT_ENTRIES
-from models.signal import SignalData, breakeven_price
+from models.signal import LimitData, SignalData, breakeven_price
 from price_feeds.alerting.embed_builders import _build_signal_embed, _set_archive_footer
 from price_feeds.monitors.streaming_monitor import react_to_original_signal
 from price_feeds.config.tp_config import TPConfig
@@ -527,6 +527,39 @@ class MessageHandler:
 
         return True
 
+    async def _breakeven_disarm_note(self, signal: SignalData, entry: float) -> Optional[str]:
+        """The ping line explaining why an added entry disarmed the breakeven stop,
+        or None when the stop stays armed (or was never armed).
+
+        Averaging in moves the breakeven point to the new mean, and averaging down
+        is the main reason to add at all — so the mean lands on the far side of the
+        market and the stop would close the trade on the next tick. That is exactly
+        what `_can_arm_breakeven_stop` refuses to set up at arm time, arriving from
+        the other direction, so the add takes precedence and the floor comes off.
+        """
+        if not signal.be_stop_armed_at:
+            return None
+
+        instrument = signal.instrument
+        new_be = breakeven_price(signal.hit_limits + [LimitData(price_level=entry)])
+        bid = await self._live_bid(instrument)
+
+        if bid is None:
+            return (
+                "🛡️ Breakeven stop removed — no live price to confirm the new average "
+                f"({format_price(new_be, instrument)}) is still safe."
+            )
+
+        still_safe = bid > new_be if signal.direction.lower() == "long" else bid < new_be
+        if still_safe:
+            return None
+
+        return (
+            f"🛡️ Breakeven stop removed — the new average "
+            f"({format_price(new_be, instrument)}) is past the current price "
+            f"({format_price(bid, instrument)})."
+        )
+
     async def _reply_breakeven_stop(
         self,
         message: discord.Message,
@@ -638,7 +671,14 @@ class MessageHandler:
             await self._safe_delete(message)
             return
 
-        limit_id = await self.signal_db.add_instant_entry(signal_id, entry)
+        disarm_note = await self._breakeven_disarm_note(signal, entry)
+
+        # The disarm rides in the same locked write as the fill: a signal that is
+        # briefly both averaged and still armed is a signal a tick can close flat
+        # on the spot, which is the whole thing being avoided here.
+        limit_id = await self.signal_db.add_instant_entry(
+            signal_id, entry, disarm_breakeven=disarm_note is not None
+        )
         if limit_id is None:
             await message.reply(
                 f"❌ Could not add an entry to signal {signal_id}.",
@@ -660,6 +700,8 @@ class MessageHandler:
             f"({len(refreshed.hit_limits)}/{refreshed.total_limits} filled, "
             f"by {message.author.display_name})"
         )
+        if disarm_note:
+            ping += f"\n{disarm_note}"
         if self.alert_system:
             await self.alert_system.update_signal_message(
                 signal=refreshed, event="hit", current_price=entry, ping_text=ping
