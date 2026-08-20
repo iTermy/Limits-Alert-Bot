@@ -16,6 +16,41 @@ from backtest.symbols import ARCHIVE_DIR
 CACHE_WEEKS = 8
 
 
+class PolledSeries:
+    """A window sub-sampled to a polling timer, queried like the full series.
+
+    Indices returned are indices into the parent window, so a caller can move
+    between the polled view and the tick-exact one without translating.
+    """
+
+    __slots__ = ("idx", "val", "_cummax", "_cummin")
+
+    def __init__(self, idx: np.ndarray, val: np.ndarray):
+        self.idx = idx
+        self.val = val
+        self._cummax = self._cummin = None
+
+    def _from(self, start: int) -> int:
+        """First polled position whose tick index is at or after `start`."""
+        return int(np.searchsorted(self.idx, start, side="left"))
+
+    def first_at_or_above(self, level: float, start: int = 0) -> int:
+        j = self._from(start)
+        seg = self.val[j:]
+        if not len(seg):
+            return -1
+        hit = np.flatnonzero(np.maximum.accumulate(seg) >= level)
+        return int(self.idx[j + hit[0]]) if len(hit) else -1
+
+    def first_at_or_below(self, level: float, start: int = 0) -> int:
+        j = self._from(start)
+        seg = self.val[j:]
+        if not len(seg):
+            return -1
+        hit = np.flatnonzero(np.minimum.accumulate(seg) <= level)
+        return int(self.idx[j + hit[0]]) if len(hit) else -1
+
+
 class TickWindow:
     """Bid/ask arrays for one time window, with cumulative extrema for level queries.
 
@@ -25,7 +60,7 @@ class TickWindow:
     """
 
     __slots__ = ("time_ms", "bid", "ask", "_cummax_bid", "_cummin_bid",
-                 "_cummax_ask", "_cummin_ask")
+                 "_cummax_ask", "_cummin_ask", "_polled")
 
     def __init__(self, time_ms: np.ndarray, bid: np.ndarray, ask: np.ndarray):
         self.time_ms = time_ms
@@ -33,6 +68,28 @@ class TickWindow:
         self.ask = ask
         self._cummax_bid = self._cummin_bid = None
         self._cummax_ask = self._cummin_ask = None
+        self._polled = {}
+
+    def polled(self, seconds: float, series: str) -> "PolledSeries":
+        """The window as a process polling `series` every `seconds` would see it.
+
+        The execution bot closes a take-profit by checking price on a timer and
+        then selling at market, so it cannot act on a spike that lives and dies
+        between two checks. Replaying such an exit tick-exact credits the
+        strategy with prices no order ever got.
+        """
+        key = (seconds, series)
+        view = self._polled.get(key)
+        if view is None:
+            src = self.bid if series == "bid" else self.ask
+            step = int(seconds * 1000)
+            grid = np.arange(self.time_ms[0], self.time_ms[-1] + step, step, dtype=np.int64)
+            # The price a poll sees is the last tick at or before it.
+            idx = np.searchsorted(self.time_ms, grid, side="right") - 1
+            idx = np.unique(idx[idx >= 0])
+            view = PolledSeries(idx, src[idx])
+            self._polled[key] = view
+        return view
 
     def __len__(self) -> int:
         return len(self.time_ms)
@@ -121,9 +178,10 @@ class TickStore:
 
         # Files are named by the server-time week they were requested for, but
         # their contents are true UTC, so a file can hold ticks up to 3h either
-        # side of its nominal week. One extra week of slack on each end covers it.
-        weeks, cur = [], self._week_key(start) - timedelta(days=7)
-        last = self._week_key(end) + timedelta(days=7)
+        # side of its nominal week. A day of slack covers that; a full week of it
+        # made every short window concatenate three files' worth of ticks.
+        weeks, cur = [], self._week_key(start - timedelta(days=1))
+        last = self._week_key(end + timedelta(days=1))
         while cur <= last:
             weeks.append(cur)
             cur += timedelta(days=7)

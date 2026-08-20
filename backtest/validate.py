@@ -15,6 +15,7 @@ import numpy as np
 import pandas as pd
 
 sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
+from backtest.basis import BasisModel
 from backtest.dataset import build
 from backtest.engine import Policy, pip_size, simulate
 from backtest.ticks import TickStore
@@ -22,17 +23,15 @@ from backtest.ticks import TickStore
 LIVE = Policy(spread_buffer=True, tp_mode="fixed", honor_expiry=True, horizon_hours=400)
 
 
-def load_basis() -> dict:
-    path = os.path.join(r"C:\Python Stuff\TM-Backtest-Data\signals", "calibration.pkl")
-    if not os.path.exists(path):
-        return {}
-    cal = pd.read_pickle(path)
-    return dict(zip(cal.symbol, cal.basis_price))
-
-
 def main() -> int:
     signals, limits = build()
-    basis = load_basis()
+    model = BasisModel.load()
+
+    def basis_of(s):
+        # Leave-one-out: a signal's own fills are excluded from its basis, so the
+        # replay is never scored against a level calibrated on the answer.
+        return model.basis_for(s["instrument"], s["created_at"], s["id"])[0]
+
     print(f"replayable signals: {len(signals):,}")
 
     truth = [s for s in signals
@@ -54,7 +53,7 @@ def main() -> int:
             agree = fills = 0
             for s in truth:
                 o = simulate(s, limits[s["id"]], store, pol,
-                             basis=basis.get(s["instrument"], 0.0) if use_basis else 0.0)
+                             basis=basis_of(s) if use_basis else 0.0)
                 agree += o.status == ("tp" if s["status"] == "profit" else "stopped")
                 fills += o.n_fills == s["limits_hit"]
             tag = "with basis" if use_basis else "no basis  "
@@ -65,7 +64,7 @@ def main() -> int:
     rows = []
     t0 = time.time()
     for s in truth:
-        out = simulate(s, limits[s["id"]], store, LIVE, basis=basis.get(s["instrument"], 0.0))
+        out = simulate(s, limits[s["id"]], store, LIVE, basis=basis_of(s))
         expected = "tp" if s["status"] == "profit" else "stopped"
         rows.append(dict(
             signal_id=s["id"], instrument=s["instrument"], type=s["type"],

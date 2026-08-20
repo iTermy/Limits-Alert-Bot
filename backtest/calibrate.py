@@ -24,6 +24,7 @@ import pandas as pd
 
 sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 from backtest.engine import pip_size
+from backtest.symbols import NON_NATIVE
 from backtest.ticks import TickStore
 
 SIG_DIR = r"C:\Python Stuff\TM-Backtest-Data\signals"
@@ -112,6 +113,35 @@ def main() -> int:
             basis_pips=float(np.median(d_side)) / p,
             iqr_mid_pips=float(np.subtract(*np.percentile(d_mid, [75, 25]))) / p,
         ))
+
+    # --- 4. does the basis hold still? ---
+    # A single constant is only defensible if the offset is stable. Index and
+    # crypto CFDs carry financing and dividend adjustments that drift, and a
+    # basis that moves by more than the TP threshold would make every exit
+    # decision on that symbol meaningless.
+    drift = []
+    for sym in sorted(NON_NATIVE & set(hits.instrument.unique())):
+        grp = hits[hits.instrument == sym].copy()
+        vals = []
+        for _, r in grp.iterrows():
+            px = price_at(store, sym, r.hit_time + timedelta(seconds=WRITE_LATENCY_S), best_off)
+            if px:
+                side = px[1] if r.direction == "long" else px[0]
+                vals.append((r.hit_time, side - r.hit_price))
+        if len(vals) < 6:
+            continue
+        s = pd.Series([v for _, v in vals],
+                      index=pd.DatetimeIndex([t for t, _ in vals])).sort_index()
+        monthly = s.resample("MS").median().dropna()
+        drift.append(dict(symbol=sym, n=len(s), basis=round(float(s.median()), 2),
+                          spread_of_monthly=round(float(monthly.max() - monthly.min()), 2),
+                          months=len(monthly),
+                          by_month=" ".join(f"{m:%b}:{v:.1f}" for m, v in monthly.items())))
+    if drift:
+        print("\nbasis stability on non-IC-native symbols (price units):")
+        print(pd.DataFrame(drift).to_string(index=False))
+        print("a spread_of_monthly comparable to the TP threshold means a constant")
+        print("basis is not good enough and that symbol's exits are unreliable.")
 
     out = pd.DataFrame(rows).sort_values("n", ascending=False)
     out[["med_mid_pips", "med_bid_pips", "med_ask_pips", "iqr_mid_pips", "basis_pips"]] =         out[["med_mid_pips", "med_bid_pips", "med_ask_pips", "iqr_mid_pips", "basis_pips"]].round(2)

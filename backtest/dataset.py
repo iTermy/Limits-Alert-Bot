@@ -57,6 +57,13 @@ def build(only_archived: bool = True) -> tuple:
             limits_hit=r.limits_hit, total_limits=r.total_limits,
             tp_price=r.tp_price, take_profit=r.take_profit, closed_at=r.closed_at,
             tp_threshold=float(thr), threshold_stamped=bool(stamped),
+            channel_id=r.channel_id, expiry_type=r.expiry_type,
+            minutes_to_news=r.minutes_to_news, data_version=r.data_version,
+            first_limit_hit_time=r.first_limit_hit_time,
+            # When the bot pulled the order. Replaying with and without this is
+            # what prices the cancel machinery (near-miss, news, spread hour)
+            # instead of assuming it helps.
+            cancel_at=r.closed_at if r.status == "cancelled" else None,
         ))
 
     limits_by_signal = {}
