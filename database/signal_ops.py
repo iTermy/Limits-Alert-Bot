@@ -4,6 +4,7 @@ Signal-specific database operations — CRUD, lifecycle, and analytics
 
 from collections import defaultdict
 from datetime import datetime
+from time import monotonic
 from typing import Any, Optional
 
 import pytz
@@ -35,6 +36,14 @@ LIMIT_COLUMNS = (
 # Entries an instant-entry signal may hold: the one it opens with, plus at most
 # one averaged in later via the `add` reply.
 MAX_INSTANT_ENTRIES = 2
+
+# Ceiling for a status write against the Supabase session pooler, for callers
+# that have to bound one (the price-tick monitors). Deliberately far above the
+# measured cost: a cancel issued through the pooler does not reliably reach the
+# backend, so a write that times out can still commit and leave the caller
+# believing a signal is open when the DB has already closed it. The budget is
+# there to stop a hang, not to pace a healthy write.
+STATUS_WRITE_TIMEOUT = 15.0
 
 
 def _is_crypto_symbol(symbol: str) -> bool:
@@ -698,53 +707,75 @@ class SignalDatabase:
         snapshot gives every such close a mark-to-market exit price, including
         manual cancels and breakevens that otherwise record nothing.
 
-        Runs on the caller's transaction connection rather than acquiring its
-        own, so it costs statements instead of a second pool acquire plus its
-        own BEGIN/COMMIT pair. Callers that already hold a live price (the
-        manual-profit path, which derives tp_price from it) pass it in: that
-        skips a redundant round-trip and makes close_bid/close_ask describe the
-        same tick as tp_price.
+        Pass `conn` when the caller holds an open transaction on this signal's
+        row: the snapshot has to ride that same connection, since a second one
+        would block on the row lock the caller is holding and deadlock against a
+        transaction that cannot commit until this returns. Pass None to run it
+        standalone on its own pooled connection.
 
-        Failures are logged and swallowed: a missing snapshot must never break
-        a status transition. Because the work shares the caller's transaction,
-        it runs in a nested one — asyncpg maps that to a SAVEPOINT, so a failed
-        statement rolls back the snapshot alone instead of poisoning the
+        Callers that already hold a live price (the manual-profit path, which
+        derives tp_price from it) pass it in: that skips a lookup and makes
+        close_bid/close_ask describe the same tick as tp_price. Otherwise the
+        price is read from live_prices by the UPDATE itself — as a join rather
+        than a separate SELECT, because each extra statement is a pooler
+        round-trip on a path that is already the slowest thing the bot does.
+
+        The EXISTS clause carries the entered-position rule, so a signal that
+        never filled is a no-op rather than a bad snapshot.
+
+        Failures are logged and swallowed: a missing snapshot must never break a
+        status transition. On the `conn` path the work runs in a nested
+        transaction — asyncpg maps that to a SAVEPOINT, so a failed statement
+        rolls back the snapshot alone instead of poisoning the caller's
         transaction and taking the status change down with it.
         """
+        if price is not None and (price.get("bid") is None or price.get("ask") is None):
+            logger.warning(
+                f"No live price for {instrument} — close snapshot skipped for signal {signal_id}"
+            )
+            return
+
+        if price is not None:
+            query = """
+                UPDATE signals
+                SET close_bid = $1, close_ask = $2, close_feed = $3
+                WHERE id = $4
+                  AND EXISTS (
+                      SELECT 1 FROM limits WHERE signal_id = $4 AND status = 'hit'
+                  )
+            """
+            params = (
+                float(price["bid"]),
+                float(price["ask"]),
+                price.get("feed"),
+                signal_id,
+            )
+        else:
+            query = """
+                UPDATE signals
+                SET close_bid = lp.bid, close_ask = lp.ask, close_feed = lp.feed
+                FROM live_prices lp
+                WHERE signals.id = $1
+                  AND lp.symbol = $2
+                  AND lp.bid IS NOT NULL
+                  AND lp.ask IS NOT NULL
+                  AND EXISTS (
+                      SELECT 1 FROM limits WHERE signal_id = $1 AND status = 'hit'
+                  )
+            """
+            params = (signal_id, instrument.upper())
+
         try:
-            async with conn.transaction():
-                if price is None:
-                    has_hit = await conn.fetchval(
-                        "SELECT 1 FROM limits WHERE signal_id = $1 AND status = 'hit' LIMIT 1",
-                        signal_id,
-                    )
-                    if not has_hit:
-                        return
-                    row = await conn.fetchrow(
-                        "SELECT bid, ask, feed FROM live_prices WHERE symbol = $1",
-                        instrument.upper(),
-                    )
-                    price = dict(row) if row else None
-                if not price or price.get("bid") is None or price.get("ask") is None:
-                    logger.warning(
-                        f"No live price for {instrument} — close snapshot skipped for signal {signal_id}"
-                    )
-                    return
-                # The EXISTS clause carries the entered-position rule for callers
-                # that supplied a price and so skipped the probe above.
-                await conn.execute(
-                    """
-                    UPDATE signals
-                    SET close_bid = $1, close_ask = $2, close_feed = $3
-                    WHERE id = $4
-                      AND EXISTS (
-                          SELECT 1 FROM limits WHERE signal_id = $4 AND status = 'hit'
-                      )
-                    """,
-                    float(price["bid"]),
-                    float(price["ask"]),
-                    price.get("feed"),
-                    signal_id,
+            if conn is None:
+                updated = await self.db.execute(query, params)
+            else:
+                async with conn.transaction():
+                    status = await conn.execute(query, *params)
+                updated = int(status.split()[-1])
+            if not updated:
+                logger.debug(
+                    f"Close snapshot no-op for signal {signal_id} ({instrument}) — "
+                    f"no hit limits or no live price"
                 )
         except Exception as e:
             logger.warning(f"Close-price snapshot failed for signal {signal_id}: {e}")
@@ -887,93 +918,92 @@ class SignalDatabase:
                     )
 
             try:
-                async with self.db.get_connection() as conn:
-                    now = datetime.now(pytz.UTC)
+                started = monotonic()
+                now = datetime.now(pytz.UTC)
+                is_final = SignalStatus.is_final(new_status)
 
-                    # C3 invariant: for cancel paths, update limits before signal status
-                    # so EX's Supabase query stops seeing pending limits before the signal
-                    # transitions to a final status.
-                    if SignalStatus.is_final(new_status):
-                        await conn.execute(
-                            """
-                            UPDATE limits
-                            SET status = 'cancelled'
+                # The limit rewrite, the signal row and the audit record go out as
+                # a single statement. Each used to be its own round-trip against
+                # the session pooler, on top of a BEGIN and a COMMIT: nine for a
+                # cancel, eleven for a close with a snapshot, now two and three.
+                # A single statement is atomic on its own, so the explicit
+                # transaction goes with them.
+                #
+                # C3 invariant: EX must never see a signal in a final status while
+                # its limits still read pending. A single statement satisfies that
+                # by construction — there is no intermediate state to observe.
+                if is_final:
+                    await self.db.execute(
+                        """
+                        WITH cancelled_limits AS (
+                            UPDATE limits SET status = 'cancelled'
                             WHERE signal_id = $1 AND status = 'pending'
-                        """,
-                            signal_id,
-                        )
-                    elif new_status in (SignalStatus.ACTIVE, SignalStatus.HIT):
-                        # Restore limits that were cancelled by a prior final-status
-                        # transition (e.g. stop_loss or manual cancel) so reactivation
-                        # picks them back up as pending.
-                        await conn.execute(
-                            """
-                            UPDATE limits
-                            SET status = 'pending'
-                            WHERE signal_id = $1 AND status = 'cancelled'
-                        """,
-                            signal_id,
-                        )
-
-                    if SignalStatus.is_final(new_status):
-                        if tp_price is not None:
-                            await conn.execute(
-                                """
-                                UPDATE signals
-                                SET status = $1, updated_at = $2, closed_at = $3,
-                                    closed_reason = $4, tp_price = $5
-                                WHERE id = $6
-                            """,
-                                new_status,
-                                now,
-                                now,
-                                effective_closed_reason,
-                                tp_price,
-                                signal_id,
-                            )
-                        else:
-                            await conn.execute(
-                                """
-                                UPDATE signals
-                                SET status = $1, updated_at = $2, closed_at = $3, closed_reason = $4
-                                WHERE id = $5
-                            """,
-                                new_status,
-                                now,
-                                now,
-                                effective_closed_reason,
-                                signal_id,
-                            )
-                    else:
-                        await conn.execute(
-                            """
+                        ),
+                        updated_signal AS (
                             UPDATE signals
-                            SET status = $1, updated_at = $2, closed_at = NULL,
-                                closed_reason = NULL, tp_price = NULL
-                            WHERE id = $3
+                            SET status = $2, updated_at = $3, closed_at = $3,
+                                closed_reason = $4, tp_price = COALESCE($5, tp_price)
+                            WHERE id = $1
+                        )
+                        INSERT INTO status_changes
+                            (signal_id, old_status, new_status, change_type, reason)
+                        VALUES ($1, $6, $2, $4, $7)
                         """,
+                        (
+                            signal_id,
                             new_status,
                             now,
-                            signal_id,
-                        )
-                    await conn.execute(
-                        """
-                        INSERT INTO status_changes (signal_id, old_status, new_status, change_type, reason)
-                        VALUES ($1, $2, $3, $4, $5)
-                    """,
-                        signal_id,
-                        old_status,
-                        new_status,
-                        effective_closed_reason,
-                        reason or "Manual override",
+                            effective_closed_reason,
+                            tp_price,
+                            old_status,
+                            reason or "Manual override",
+                        ),
                     )
-                    if SignalStatus.is_final(new_status):
-                        await self._snapshot_close_prices(
-                            conn, signal_id, row["instrument"], price_data
+                else:
+                    # Restore limits that were cancelled by a prior final-status
+                    # transition (e.g. stop_loss or manual cancel) so reactivation
+                    # picks them back up as pending.
+                    await self.db.execute(
+                        """
+                        WITH restored_limits AS (
+                            UPDATE limits SET status = 'pending'
+                            WHERE signal_id = $1 AND status = 'cancelled'
+                        ),
+                        updated_signal AS (
+                            UPDATE signals
+                            SET status = $2, updated_at = $3, closed_at = NULL,
+                                closed_reason = NULL, tp_price = NULL
+                            WHERE id = $1
                         )
+                        INSERT INTO status_changes
+                            (signal_id, old_status, new_status, change_type, reason)
+                        VALUES ($1, $4, $2, $5, $6)
+                        """,
+                        (
+                            signal_id,
+                            new_status,
+                            now,
+                            old_status,
+                            effective_closed_reason,
+                            reason or "Manual override",
+                        ),
+                    )
+
+                # A signal that never filled has nothing to mark to market, and
+                # limits_hit only ever counts up — so zero rules the snapshot out
+                # without paying for the probe. Cancels are the common case.
+                if is_final and row["limits_hit"]:
+                    await self._snapshot_close_prices(
+                        None, signal_id, row["instrument"], price_data
+                    )
+                # Timed because every timeout bug on this path has come down to
+                # how long the write actually takes, and the answer is not
+                # reproducible off the VPS. Logged on the existing success line
+                # so a slow write leaves evidence without extra noise.
                 logger.info(
                     f"Successfully set signal {signal_id} status: {old_status} -> {new_status}"
                     + (f" (tp_price={tp_price:.5f})" if tp_price is not None else "")
+                    + f" in {monotonic() - started:.1f}s"
                 )
                 return True
 

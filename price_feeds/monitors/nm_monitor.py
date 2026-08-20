@@ -24,16 +24,10 @@ import asyncio
 from dataclasses import dataclass
 from typing import Optional
 
+from database.signal_ops import STATUS_WRITE_TIMEOUT
 from utils.logger import get_logger
 
 logger = get_logger("nm_monitor")
-
-# A full status transition against the Supabase session pooler measures 2-5 s
-# wall-clock, and the near-miss cancel sits at the heavy end of that range: it
-# rewrites every pending limit (nine of them on a gold map), inserts the audit
-# row, and probes for a close snapshot. The old 5 s budget sat on top of the
-# median and timed out on cancels that were simply still in flight.
-_CANCEL_WRITE_TIMEOUT = 15.0
 
 
 @dataclass
@@ -271,7 +265,7 @@ class NearMissMonitor:
                     reason=f"near_miss_auto_cancel:closest={closest_str}",
                     closed_reason="near_miss",
                 ),
-                timeout=_CANCEL_WRITE_TIMEOUT,
+                timeout=STATUS_WRITE_TIMEOUT,
             )
         except asyncio.TimeoutError:
             # A cancel issued through the session pooler does not reliably reach

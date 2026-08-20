@@ -18,6 +18,7 @@ threshold fires on $4 of visible movement rather than $4 plus the spread.
 import asyncio
 from typing import Optional
 
+from database.signal_ops import STATUS_WRITE_TIMEOUT
 from models.signal import LimitData, SignalData
 from utils.logger import get_logger
 
@@ -238,7 +239,7 @@ class AutoTPMonitor:
                     tp_price=close_price,
                     closed_reason="automatic",
                 ),
-                timeout=5.0,
+                timeout=STATUS_WRITE_TIMEOUT,
             )
         except asyncio.TimeoutError:
             # The Supabase pooler write can exceed the timeout yet still commit.
@@ -246,6 +247,10 @@ class AutoTPMonitor:
             # embed edit so the DB and the embed don't diverge (which otherwise
             # leaves the embed showing HIT forever, since the next tick's status
             # guard evicts the signal before anything retries the alert).
+            #
+            # The budget matters as much as the verify: on the old 5 s one the
+            # write was routinely still in flight when this re-read ran, so the
+            # check reported a false negative on a profit that did land.
             logger.warning(
                 f"Signal {signal_id}: DB timeout while marking auto-TP profit — verifying"
             )
