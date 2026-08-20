@@ -19,9 +19,24 @@ git push
 1. Stop the bot (Ctrl+C in its window).
 2. Double-click `update.bat` (or run it from the terminal).
 
-It pulls, prints the commits it picked up, reinstalls dependencies if
-`requirements.txt` changed, and starts `main.py`. If the pull fails it says so and
-does **not** start the bot, so you never end up running a half-updated tree.
+It fetches, **hard-resets to `origin/stage20_professionalize`**, prints the commits
+it picked up, reinstalls dependencies if `requirements.txt` changed, and starts
+`main.py`. GitHub is the source of truth: local changes to tracked files are
+discarded, so the deploy can never be blocked by a dirty tree or a missing upstream.
+
+Not touched by the reset: `.env`, the venv and logs (gitignored), and the seven
+pinned config files below (`reset --hard` respects their `skip-worktree` flags).
+
+Two details that make it safe to run at any time:
+
+- **It re-execs itself from `%TEMP%` first.** The reset can rewrite `update.bat`
+  while it is running, and cmd.exe reads batch files by byte offset — a file that
+  changes underneath it corrupts execution from that point on. Running from a copy
+  sidesteps that. The freshly pulled version takes effect on the next run.
+- **`.gitattributes` forces `*.bat` to CRLF on checkout.** A batch file with LF-only
+  line endings mis-parses in ways that are hard to spot (silently empty variables,
+  `if` blocks running when they shouldn't), and the VPS's `core.autocrlf` setting
+  can't be relied on.
 
 ---
 

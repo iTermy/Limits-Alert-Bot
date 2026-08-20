@@ -1,27 +1,45 @@
 @echo off
-REM Pull the latest code from GitHub, install any new dependencies, start the bot.
+REM Force the VPS to match GitHub, then start the bot.
 REM Stop the running bot (Ctrl+C) before running this.
 REM
-REM Live config (config/*.json, data/news_events.json, data/info_embeds.json) is
-REM marked skip-worktree on the VPS, so runtime edits made there by !tp / !alertdist
-REM / !nmconfig / !news survive every pull. See DEPLOY.md for the one-time setup.
+REM Local changes to tracked files are DISCARDED - GitHub is the source of truth.
+REM Not affected: .env, the venv and logs (gitignored), and the live config files
+REM pinned with skip-worktree (see DEPLOY.md), which reset --hard leaves alone.
+
+REM Re-exec from a temp copy first: this script runs "git reset --hard", which can
+REM rewrite update.bat itself mid-run, and cmd.exe reads batch files by byte offset -
+REM a file that changes underneath it corrupts execution from that point on.
+if /i not "%~1"=="__from_temp" (
+    copy /y "%~f0" "%TEMP%\tmbot_update.bat" >nul
+    call "%TEMP%\tmbot_update.bat" __from_temp "%~dp0"
+    exit /b %errorlevel%
+)
 
 setlocal
-cd /d "%~dp0"
+cd /d "%~2"
+
+set "BRANCH=stage20_professionalize"
 
 REM Use the venv interpreter if present, else fall back to PATH python.
 set "PYTHON=python"
-if exist "%~dp0venv\Scripts\python.exe"  set "PYTHON=%~dp0venv\Scripts\python.exe"
-if exist "%~dp0.venv\Scripts\python.exe" set "PYTHON=%~dp0.venv\Scripts\python.exe"
+if exist "venv\Scripts\python.exe"  set "PYTHON=venv\Scripts\python.exe"
+if exist ".venv\Scripts\python.exe" set "PYTHON=.venv\Scripts\python.exe"
 
-for /f "delims=" %%H in ('git rev-parse HEAD') do set "BEFORE=%%H"
+for /f "delims=" %%H in ('git rev-parse HEAD 2^>nul') do set "BEFORE=%%H"
+if not defined BEFORE goto notarepo
 
-echo Pulling latest from GitHub...
-git pull --ff-only
-if errorlevel 1 goto pullfailed
+echo Fetching %BRANCH% from GitHub...
+git fetch origin %BRANCH%
+if errorlevel 1 goto fetchfailed
+
+git reset --hard origin/%BRANCH%
+if errorlevel 1 goto resetfailed
 
 for /f "delims=" %%H in ('git rev-parse HEAD') do set "AFTER=%%H"
-if "%BEFORE%"=="%AFTER%" echo Already up to date.& goto run
+if "%BEFORE%"=="%AFTER%" (
+    echo Already up to date.
+    goto run
+)
 
 echo.
 echo Updated:
@@ -41,9 +59,19 @@ echo Starting bot...
 "%PYTHON%" main.py
 goto :eof
 
-:pullfailed
+:notarepo
+echo This folder is not a git clone - see DEPLOY.md for the one-time setup.
+pause
+exit /b 1
+
+:fetchfailed
 echo.
-echo Pull failed - the VPS has local commits or modified tracked files.
-echo Run "git status" here and resolve before deploying. Bot NOT started.
+echo Fetch failed - check the network and GitHub credentials. Bot NOT started.
+pause
+exit /b 1
+
+:resetfailed
+echo.
+echo Reset failed. Bot NOT started.
 pause
 exit /b 1
