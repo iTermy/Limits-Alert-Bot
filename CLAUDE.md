@@ -77,6 +77,8 @@ database/
                                   get_signal_with_limits() returns Optional[SignalData];
                                   save_signal, cancel, reactivate, manually_set_signal_status,
                                   process_limit_hit, expire_old_signals;
+                                  add_instant_entry() — appends a second already-filled market entry
+                                    to an instant signal (MAX_INSTANT_ENTRIES, row-locked);
                                   get_overlapping_signals() — range-intersection query used on save;
                                   check_reactivation_guard() — compares cancelled limits vs live price;
                                   _get_live_price() — reads bid/ask from live_prices table
@@ -161,7 +163,9 @@ discord_handlers/
                                   _handle_overlap_prompt() — 30 s reaction prompt when new signal overlaps
                                   an existing one (✅ cancel old / ❌ keep both / timeout = cancel old);
                                   _reply_breakeven_stop() — `set be` / `unset be` arms or clears a
-                                  signal's breakeven stop (protection, not a status change)
+                                  signal's breakeven stop (protection, not a status change);
+                                  _reply_add_entry() — `add` averages a second market entry into an
+                                  instant-entry signal (see Instant-entry channels)
 
 commands/
   __init__.py
@@ -298,7 +302,8 @@ Every incoming price update calls `streaming_monitor._on_price_update()` → `_c
 
 7. Breakeven-stop check (HIT-status signals only, and only once armed)
    Runs after the stop loss so a tick gapping through both books the real SL.
-   _check_breakeven_stop(signal, bid) — evaluated on the bid, no spread buffer
+   _check_breakeven_stop(signal, bid, is_spread_hour) — on the bid, no spread buffer
+   Skipped for non-crypto during spread hour, like the SL — re-evaluated after.
    → send_breakeven_stop_alert() → signal→breakeven
 
 8. Auto-TP check (HIT-status signals only)
@@ -524,6 +529,10 @@ Spread-hour and news cancels **edit the persistent embed** when one already exis
 
 `message_handler` resolves the entry before saving: `_live_entry_price()` reads the feed via `stream_manager.get_latest_price()` (subscribing the symbol first if nothing was watching it), takes the **ask for a long / bid for a short**, and rejects prices older than `_INSTANT_ENTRY_MAX_PRICE_AGE` (15 s). `_resolve_instant_entry()` then rejects with ⚠️ plus a reply when there is no live price, or when price already sits outside the SL↔TP band — that trade would open only to close on the next tick. The resolved price becomes the signal's single limit, and `save_signal` writes it **already hit** — status `hit`, `limits_hit=1`, `first_limit_hit_time` set — in the same transaction as the signal row; `_open_instant_position()` then just opens the embed directly as HIT. Being born filled is load-bearing, not cosmetic: inserting the limit as `pending` and marking it hit on a second round-trip left a multi-second window (a pooler status write is 2–5 s) in which the row was indistinguishable from an ordinary signal resting a limit at the market price. Every released EX bot keys its placeable set on `l.status='pending'`, so during that window even versions that disable this channel would place a real limit order on a user's account. Nothing returns an instant limit to `pending` afterwards — cancels and terminal transitions only touch `pending` rows, reactivation only restores `cancelled` ones, and an edit rewrites SL/TP/expiry only. Overlap detection is skipped (the limit fills immediately, so it never competes with another signal's resting limits).
 
+**A second entry can be averaged in** by replying `add` to the alert embed, its ping, or the original signal message. `signal_ops.add_instant_entry` appends a limit at the live market price in the same already-filled shape (`status='hit'`, `hit_time`/`hit_price` stamped), bumps `total_limits`/`limits_hit`, and the embed re-renders as 2/2 hit. Same entry gates as the original: fresh live price, and price still inside the SL↔TP band. `MAX_INSTANT_ENTRIES` (2) **and the signal's `status`** are both re-read inside the write under `SELECT … FOR UPDATE` on the signal row: two replies arriving together would otherwise each see one entry and each add one, and an auto-TP landing between the handler's status check and this write would append a fill to a closed signal and inflate `limits_hit`. Only instant signals accept it: an ordinary signal enters on limits the sender chose, and a market fill bolted onto those is a level nobody asked for. Everything downstream just sees a second filled limit — auto-TP averages it in, `breakeven_price` moves to the mean of both fills, exits are unchanged.
+
+**An armed breakeven stop is disarmed by an add that moves the mean past the market**, and the ping says so. Averaging *down* is the main reason to add, so the new mean routinely lands on the far side of the bid — which is precisely the state `_can_arm_breakeven_stop` refuses to create at arm time, reached from the other direction; left armed, the next tick would close the trade flat. `_breakeven_disarm_note` runs the arm-time profitability test against the post-add mean (on the bid, like the stop itself) and disarms when it fails or when no live bid is available to check. The clear rides in the same locked write as the fill (`add_instant_entry(..., disarm_breakeven=True)`) — a signal that is briefly both averaged and still armed is one a tick can close on the spot. Re-arm with `set be` once the trade is back in profit against the new average.
+
 Downstream everything is shared machinery: `type='pa'` routes the embed to the PA alert channel and the signal into the PA report section; SL, manual reply commands, archiving, trailing and excursion analytics are unchanged. The guards land where they should without special-casing — an already-HIT signal rides out spread hour and the late-market hour, and is cancelled when a news window opens (only `swing` is exempt from that). Edits to an instant signal update **SL/TP and expiry only** (`signal_ops._update_instant_from_edit`); the entry limit records a real fill and is never re-derived. The EX bot ignores these signals — it keys off pending limits, and there is never one.
 
 ### Signal type taxonomy
@@ -553,7 +562,16 @@ signal breakeven *immediately* — that one is a status command, this one is pro
 - **The real stop loss wins a tick that gaps through both.** `_check_stop_loss` runs
   first and its `sl_alert_sent` flag stands the BE check down, so the DB records the
   loss the position actually took rather than a flat exit it never got.
-- Take-profit, news/spread/risky guards, expiry and every manual command are
+- **Non-crypto signals ride out spread hour**, mirroring the SL rule: the bid blows
+  out in the window and a long fires on `bid <= be_price`, so the spread alone would
+  close the trade. Cross-repo this matters more than it looks — the EX bot strips its
+  stop-losses over the same window to survive the spike, so a BE fired by a spread
+  artifact would force-close its position at exactly the price the stripping exists
+  to dodge (the EX also defers `breakeven` force-exits through the window, but the
+  artifact belongs stopped here, at the source).
+- **An `add` that moves the mean past the current bid disarms the stop** rather than
+  firing it — see the `add` reply in Instant-entry channels.
+- Take-profit, news/risky guards, expiry and every manual command are
   unchanged — this only puts a floor under the trade.
 - The flag lives on `signals.be_stop_armed_at` and is selected by BOTH
   `SIGNAL_COLUMNS` and `manager.get_active_signals_for_tracking` — the tick path is

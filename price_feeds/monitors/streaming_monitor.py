@@ -135,9 +135,9 @@ class StreamingPriceMonitor:
         self.active_signals: dict[int, dict] = {}  # signal_id -> signal_data
         self.symbol_to_signals: dict[str, list[int]] = {}  # symbol -> [signal_ids]
 
-        # Strong refs to fire-and-forget reaction tasks so they aren't GC'd
-        # mid-flight; discarded on completion.
-        self._reaction_tasks: set = set()
+        # Strong refs to fire-and-forget tasks so they aren't GC'd mid-flight;
+        # discarded on completion.
+        self._background_tasks: set = set()
 
         # Spread buffer cache: refreshed by _refresh_spread_buffer_loop every 30 s,
         # never read from disk on the price-tick hot path.
@@ -185,9 +185,13 @@ class StreamingPriceMonitor:
         and adding the reaction (two API round-trips) must not block per-tick
         signal evaluation or delay the embed edit.
         """
-        task = asyncio.create_task(react_to_original_signal(self.bot, signal, emoji))
-        self._reaction_tasks.add(task)
-        task.add_done_callback(self._reaction_tasks.discard)
+        self._spawn(react_to_original_signal(self.bot, signal, emoji))
+
+    def _spawn(self, coro) -> None:
+        """Run a coroutine off the tick hot path, holding a ref until it finishes."""
+        task = asyncio.create_task(coro)
+        self._background_tasks.add(task)
+        task.add_done_callback(self._background_tasks.discard)
 
     def _is_spread_hour(self) -> bool:
         """
@@ -583,19 +587,9 @@ class StreamingPriceMonitor:
         # Near-miss check: only for active signals (not hit) with approaching alert sent
         if signal.status in ("active", None):
             await self.excursion_monitor.update_approach(signal, current_price)
-            nm_triggered = self.nm_monitor.update(signal, current_price)
-            if nm_triggered:
-                signal_id = signal.signal_id
-                self.active_signals.pop(signal_id, None)
-                self._react_async(signal, "❌")
-                success = await self.nm_monitor.trigger_near_miss(signal)
-                if success:
-                    self._apply_status_to_signal(signal, "cancelled")
-                    self.nm_monitor.evict_signal(signal_id)
-                    self.tp_monitor.evict_signal(signal_id)
-                    await self.excursion_monitor.finalize(signal_id, current_price, "near_miss")
-                    await self._maybe_unsubscribe_symbol(signal.instrument, signal_id)
-                    self.stats["nm_cancels"] = self.stats.get("nm_cancels", 0) + 1
+            if self.nm_monitor.update(signal, current_price):
+                self.active_signals.pop(signal.signal_id, None)
+                self._spawn(self._execute_near_miss_cancel(signal, current_price))
                 return
 
         # Check stop loss
@@ -606,7 +600,7 @@ class StreamingPriceMonitor:
 
         # Check the breakeven stop, if one was armed.
         if signal.status == "hit":
-            if await self._check_breakeven_stop(signal, price_data["bid"]):
+            if await self._check_breakeven_stop(signal, price_data["bid"], is_spread_hour):
                 return
 
         # Check auto take-profit (runs for any HIT signal that has hit limits cached)
@@ -1002,7 +996,9 @@ class StreamingPriceMonitor:
             await self._process_stop_loss_hit(signal, current_price)
             self.stats["stop_losses_hit"] += 1
 
-    async def _check_breakeven_stop(self, signal: SignalData, bid: float) -> bool:
+    async def _check_breakeven_stop(
+        self, signal: SignalData, bid: float, is_spread_hour: bool
+    ) -> bool:
         """Close a signal flat once price reverses to its breakeven point.
 
         Armed by hand with the "set be" reply. Evaluated on the bid in both
@@ -1014,6 +1010,13 @@ class StreamingPriceMonitor:
         down rather than crediting a flat exit the position never got.
         """
         if not signal.be_stop_armed_at or signal.be_stop_alert_sent or signal.sl_alert_sent:
+            return False
+
+        # A non-crypto signal rides out spread hour, exactly as its stop loss does:
+        # the bid blows out there, and a long fires on `bid <= be_price`, so the
+        # widened spread alone would close the trade. The level is re-evaluated on
+        # the first tick after the window on a bid that means something again.
+        if is_spread_hour and not self._is_crypto_signal(signal):
             return False
 
         be_price = breakeven_price(signal.hit_limits)
@@ -1062,6 +1065,32 @@ class StreamingPriceMonitor:
         self.trailing_monitor.evict_signal(signal.signal_id)
         await self.excursion_monitor.finalize(signal.signal_id, current_price, "be_stop")
         await self._maybe_unsubscribe_symbol(signal.instrument, signal.signal_id)
+
+    async def _execute_near_miss_cancel(self, signal: SignalData, current_price: float):
+        """Cancel a signal whose near-miss bounce was confirmed, then clean up.
+
+        Runs off the tick hot path: the status write costs several pooler
+        round-trips, and awaiting it inline stalled price dispatch for every
+        symbol on the feed — long enough for the ticks queued behind it to age
+        past the staleness gate.
+
+        The caller has already dropped the signal from active_signals so no
+        further tick evaluates it mid-write. A failed cancel puts it back, and
+        nm_monitor keeps its tracking state and clears its own dedup guard, so
+        the next tick re-confirms the same bounce and retries.
+        """
+        signal_id = signal.signal_id
+        if not await self.nm_monitor.trigger_near_miss(signal):
+            self.active_signals.setdefault(signal_id, signal)
+            return
+
+        self._react_async(signal, "❌")
+        self._apply_status_to_signal(signal, "cancelled")
+        self.nm_monitor.evict_signal(signal_id)
+        self.tp_monitor.evict_signal(signal_id)
+        await self.excursion_monitor.finalize(signal_id, current_price, "near_miss")
+        await self._maybe_unsubscribe_symbol(signal.instrument, signal_id)
+        self.stats["nm_cancels"] = self.stats.get("nm_cancels", 0) + 1
 
     async def _cancel_signal_during_guard(
         self, signal: dict, current_price: float, reason: str, news_event=None

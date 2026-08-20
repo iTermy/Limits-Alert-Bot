@@ -410,47 +410,53 @@ class AlertSystem:
         """Re-read channels.json and refresh all cached channel IDs. Call on !reload."""
         self._load_channels_config()
 
-    def is_pa_signal(self, signal: dict) -> bool:
+    def is_pa_signal(self, signal: SignalData) -> bool:
         return str(signal.channel_id or "") in self.pa_channel_ids
 
-    def is_toll_signal(self, signal: dict) -> bool:
+    def is_toll_signal(self, signal: SignalData) -> bool:
         return str(signal.channel_id or "") in self.toll_channel_ids
 
-    def is_general_toll_signal(self, signal: dict) -> bool:
+    def is_general_toll_signal(self, signal: SignalData) -> bool:
         return str(signal.channel_id or "") in self.general_toll_channel_ids
 
-    def is_oil_toll_signal(self, signal: dict) -> bool:
+    def is_oil_toll_signal(self, signal: SignalData) -> bool:
         return str(signal.channel_id or "") in self.oil_toll_channel_ids
 
-    def is_legends_signal(self, signal: dict) -> bool:
+    def is_legends_signal(self, signal: SignalData) -> bool:
         return str(signal.channel_id or "") in self.legends_channel_ids
 
-    def is_risky_signal(self, signal: dict) -> bool:
+    def is_risky_signal(self, signal: SignalData) -> bool:
         return str(signal.channel_id or "") in self.risky_channel_ids
 
     def is_auto_purge_channel(self, channel_id) -> bool:
         return str(channel_id) in self.auto_purge_channel_ids
 
-    def _get_alert_channel(self, signal: dict) -> Optional[discord.TextChannel]:
-        if self.is_general_toll_signal(signal) or self.is_oil_toll_signal(signal):
+    def _get_alert_channel(self, signal: SignalData) -> Optional[discord.TextChannel]:
+        return self._route_alert_channel(signal.channel_id)
+
+    def _route_alert_channel(self, channel_id) -> Optional[discord.TextChannel]:
+        """Resolve the alert channel a signal's embed belongs in from its source
+        channel id alone, for callers that hold a raw row rather than a model."""
+        key = str(channel_id or "")
+        if key in self.general_toll_channel_ids or key in self.oil_toll_channel_ids:
             if self.general_toll_alert_channel:
                 return self.general_toll_alert_channel
             logger.warning(
                 "General/oil-toll signal but no general-toll alert channel; falling back"
             )
-        if self.is_toll_signal(signal):
+        if key in self.toll_channel_ids:
             if self.toll_alert_channel:
                 return self.toll_alert_channel
             logger.warning("Toll signal but no toll alert channel; falling back")
-        if self.is_pa_signal(signal):
+        if key in self.pa_channel_ids:
             if self.pa_alert_channel:
                 return self.pa_alert_channel
             logger.warning("PA signal but no PA alert channel; falling back")
-        if self.is_legends_signal(signal):
+        if key in self.legends_channel_ids:
             if self.legends_alert_channel:
                 return self.legends_alert_channel
             logger.warning("Legends signal but no legends alert channel; falling back")
-        if self.is_risky_signal(signal):
+        if key in self.risky_channel_ids:
             if self.risky_alert_channel:
                 return self.risky_alert_channel
             logger.warning("Risky signal but no risky alert channel; falling back")
@@ -624,7 +630,7 @@ class AlertSystem:
                     channel = self.bot.get_channel(int(row["alert_channel_id"]))
                 if channel is None:
                     # Channel cache miss — fall back to status-based routing.
-                    channel = self._get_alert_channel({"channel_id": row["channel_id"]})
+                    channel = self._route_alert_channel(row["channel_id"])
                 if channel is None:
                     logger.warning(
                         f"Cannot resolve alert channel for orphaned signal {signal_id}; clearing IDs"

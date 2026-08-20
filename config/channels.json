@@ -106,7 +106,7 @@
     },
     "risky-gold": {
       "default_instrument": "XAUUSD",
-      "default_expiry": "week_end"
+      "default_expiry": "day_end"
     }
   }
 }

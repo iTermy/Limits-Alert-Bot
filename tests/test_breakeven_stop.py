@@ -90,8 +90,8 @@ def _build(direction, entries, armed=True, db_ok=True):
     return monitor, signal, signal_db, alert_system
 
 
-def _check(monitor, signal, bid):
-    return asyncio.run(monitor._check_breakeven_stop(signal, bid))
+def _check(monitor, signal, bid, is_spread_hour=False):
+    return asyncio.run(monitor._check_breakeven_stop(signal, bid, is_spread_hour))
 
 
 class TestBreakevenPrice:
@@ -180,3 +180,26 @@ class TestBreakevenStopGuards:
 
         assert _check(monitor, signal, 4000.0) is False
         assert signal_db.status_calls == []
+
+    def test_spread_hour_stands_the_floor_down(self):
+        # The bid blows out in the window and a long fires on `bid <= be_price`, so
+        # the widened spread alone would close the trade. Same rule as the stop loss.
+        monitor, signal, signal_db, alerts = _build("long", [5000.0])
+
+        assert _check(monitor, signal, 4990.0, is_spread_hour=True) is False
+        assert signal_db.status_calls == []
+        assert signal.status == "hit"
+
+        # The level is re-evaluated on the first tick after the window, on a bid
+        # that means something again.
+        assert _check(monitor, signal, 4990.0) is True
+        assert signal_db.status_calls[0]["status"] == "breakeven"
+
+    def test_crypto_keeps_its_floor_through_spread_hour(self):
+        # Crypto books stay tight through the window, so there is no artifact to dodge.
+        monitor, signal, signal_db, alerts = _build("long", [60000.0])
+        signal.instrument = "BTCUSDT"
+        signal.asset_class = "crypto"
+
+        assert _check(monitor, signal, 59900.0, is_spread_hour=True) is True
+        assert signal_db.status_calls[0]["status"] == "breakeven"

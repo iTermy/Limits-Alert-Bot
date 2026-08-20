@@ -24,6 +24,7 @@ import asyncio
 from dataclasses import dataclass
 from typing import Optional
 
+from database.signal_ops import STATUS_WRITE_TIMEOUT
 from utils.logger import get_logger
 
 logger = get_logger("nm_monitor")
@@ -217,6 +218,15 @@ class NearMissMonitor:
     # Trigger
     # ------------------------------------------------------------------
 
+    async def _did_cancel_land(self, signal_id: int) -> bool:
+        """Re-fetch a signal after a write timeout; True if it committed as cancelled."""
+        try:
+            current = await self.signal_db.get_signal_with_limits(signal_id)
+        except Exception as e:
+            logger.error(f"Signal {signal_id}: could not verify status after timeout: {e}")
+            return False
+        return bool(current and current.status == "cancelled")
+
     async def trigger_near_miss(self, signal: dict) -> bool:
         """
         Cancel a signal due to near-miss, update embed, send ping.
@@ -255,12 +265,25 @@ class NearMissMonitor:
                     reason=f"near_miss_auto_cancel:closest={closest_str}",
                     closed_reason="near_miss",
                 ),
-                timeout=5.0,
+                timeout=STATUS_WRITE_TIMEOUT,
             )
         except asyncio.TimeoutError:
-            logger.error(f"Signal {signal_id}: DB timeout during near-miss cancel")
-            self._processing.discard(signal_id)
-            return False
+            # A cancel issued through the session pooler does not reliably reach
+            # the backend, so the transaction can commit after wait_for has given
+            # up. Reporting failure here strands the signal: cancelled in the DB,
+            # dropped from tick tracking, but still showing a live embed that no
+            # event will ever edit again.
+            logger.warning(
+                f"Signal {signal_id}: DB timeout during near-miss cancel — verifying"
+            )
+            success = await self._did_cancel_land(signal_id)
+            if not success:
+                logger.error(
+                    f"Signal {signal_id}: near-miss cancel did not land after timeout"
+                )
+                self._processing.discard(signal_id)
+                return False
+            logger.info(f"Signal {signal_id}: near-miss cancel landed despite timeout")
         except Exception as e:
             logger.error(f"Signal {signal_id}: error during near-miss cancel: {e}", exc_info=True)
             self._processing.discard(signal_id)
