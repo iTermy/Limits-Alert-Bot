@@ -138,13 +138,13 @@ class AlertSystem:
         if self._live_update_task and not self._live_update_task.done():
             return
         self._live_update_task = asyncio.create_task(self._live_update_loop())
-        logger.info("Live embed update loop started")
+        logger.debug("Live embed update loop started")
 
     def stop_live_updates(self):
         """Cancel the live update loop and any pending archive-move tasks."""
         if self._live_update_task and not self._live_update_task.done():
             self._live_update_task.cancel()
-            logger.info("Live embed update loop stopped")
+            logger.debug("Live embed update loop stopped")
         self._archive_manager.cancel_all()
 
     async def _live_update_loop(self):
@@ -322,27 +322,27 @@ class AlertSystem:
 
     def set_channel(self, channel: discord.TextChannel):
         self.alert_channel = channel
-        logger.info(f"Alert channel set to #{channel.name} ({channel.id})")
+        logger.debug(f"Alert channel set to #{channel.name} ({channel.id})")
 
     def set_pa_channel(self, channel: discord.TextChannel):
         self.pa_alert_channel = channel
-        logger.info(f"PA alert channel set: #{channel.name} ({channel.id})")
+        logger.debug(f"PA alert channel set: #{channel.name} ({channel.id})")
 
     def set_toll_channel(self, channel: discord.TextChannel):
         self.toll_alert_channel = channel
-        logger.info(f"Toll alert channel set: #{channel.name} ({channel.id})")
+        logger.debug(f"Toll alert channel set: #{channel.name} ({channel.id})")
 
     def set_general_toll_channel(self, channel: discord.TextChannel):
         self.general_toll_alert_channel = channel
-        logger.info(f"General-toll alert channel set: #{channel.name} ({channel.id})")
+        logger.debug(f"General-toll alert channel set: #{channel.name} ({channel.id})")
 
     def set_legends_channel(self, channel: discord.TextChannel):
         self.legends_alert_channel = channel
-        logger.info(f"Legends alert channel set: #{channel.name} ({channel.id})")
+        logger.debug(f"Legends alert channel set: #{channel.name} ({channel.id})")
 
     def set_risky_channel(self, channel: discord.TextChannel):
         self.risky_alert_channel = channel
-        logger.info(f"Risky alert channel set: #{channel.name} ({channel.id})")
+        logger.debug(f"Risky alert channel set: #{channel.name} ({channel.id})")
 
     def _load_channels_config(self):
         """Load channels.json once and cache all derived channel ID sets and role mention."""
@@ -396,7 +396,7 @@ class AlertSystem:
         role_id = cfg.get("alert_role_id", "1334203997107650662")
         self.role_mention = f"<@&{role_id}>"
 
-        logger.info(
+        logger.debug(
             f"Channels loaded: {len(self.pa_channel_ids)} PA, "
             f"{len(self.toll_channel_ids)} toll "
             f"(incl. {len(self.oil_toll_channel_ids)} oil-toll), "
@@ -560,7 +560,7 @@ class AlertSystem:
             self.alert_messages.pop(str(embed_msg.id), None)
             try:
                 await embed_msg.delete()
-                logger.info(
+                logger.debug(
                     f"Retracted approaching embed for signal {signal_id} (msg {embed_msg.id})"
                 )
             except discord.NotFound:
@@ -747,13 +747,13 @@ class AlertSystem:
 
                     event = "hit" if status == "hit" else "approaching"
                     self._register_live_embed(signal, event, spread_buffer_enabled=True)
-                    logger.info(
+                    logger.debug(
                         f"Hydrated alert embed for signal {signal_id} "
                         f"(channel={channel.id}, msg={embed_msg.id}, event={event})"
                     )
                     return
                 except discord.NotFound:
-                    logger.info(
+                    logger.debug(
                         f"Persisted alert embed for signal {signal_id} no longer exists "
                         f"(msg={alert_message_id}) — falling back"
                     )
@@ -786,7 +786,7 @@ class AlertSystem:
         if status == "hit":
             rebuilt = await self.reactivate_embed(signal, ping_text=None)
             if rebuilt:
-                logger.info(f"Rebuilt missing embed for HIT signal {signal_id} on startup")
+                logger.debug(f"Rebuilt missing embed for HIT signal {signal_id} on startup")
             else:
                 logger.warning(f"Could not rebuild embed for HIT signal {signal_id} on startup")
             return
@@ -797,7 +797,7 @@ class AlertSystem:
             for limit in limits:
                 if limit.status == "pending":
                     limit.approaching_alert_sent = False
-            logger.info(
+            logger.debug(
                 f"Reset approaching_alert_sent for ACTIVE signal {signal_id} "
                 f"after losing embed reference"
             )
@@ -889,7 +889,7 @@ class AlertSystem:
                 if existing_msg:
                     try:
                         await existing_msg.edit(embed=embed)
-                        logger.info(
+                        logger.debug(
                             f"Edited persistent message for signal {signal_id} (event={event})"
                         )
                         embed_msg = existing_msg
@@ -915,7 +915,7 @@ class AlertSystem:
                         await self._persist_alert_message(
                             signal_id, embed_msg.id, target_channel.id
                         )
-                        logger.info(
+                        logger.debug(
                             f"Created persistent message for signal {signal_id} (event={event})"
                         )
                     except Exception as e:
@@ -1187,7 +1187,7 @@ class AlertSystem:
             self.alert_messages.pop(str(finished_msg.id), None)
             try:
                 await finished_msg.delete()
-                logger.info(
+                logger.debug(
                     f"Deleted finished-channel embed for signal {signal_id} on reactivation"
                 )
             except discord.NotFound:
@@ -1261,7 +1261,7 @@ class AlertSystem:
                 )
 
         if signal_id not in self.signal_messages:
-            logger.info(
+            logger.debug(
                 f"reactivate_embed: no existing embed for signal {signal_id} "
                 f"(likely auto-deleted) — will send fresh embed to channel"
             )
@@ -1279,7 +1279,7 @@ class AlertSystem:
             )
             if msg:
                 self._register_live_embed(signal, event, spread_buffer_enabled)
-                logger.info(f"Reactivated embed for signal {signal_id} as event='{event}'")
+                logger.debug(f"Reactivated embed for signal {signal_id} as event='{event}'")
                 return True
         except Exception as e:
             logger.error(f"reactivate_embed failed for signal {signal_id}: {e}", exc_info=True)
@@ -1312,7 +1312,7 @@ class AlertSystem:
         self.track_alert_message(embed_msg.id, signal_id)
         event = "hit" if signal.status == "hit" else "approaching"
         self._register_live_embed(signal, event, spread_buffer_enabled=True)
-        logger.info(f"Re-attached persistent embed for signal {signal_id} (msg={embed_msg.id})")
+        logger.debug(f"Re-attached persistent embed for signal {signal_id} (msg={embed_msg.id})")
         return True
 
     async def update_signal_message(
@@ -1607,7 +1607,7 @@ class AlertSystem:
                 )
                 self.stats["nm_cancelled"] += 1
                 self.stats["total_alerts"] += 1
-                logger.info(f"Near-miss cancel alert sent for signal {signal_id} ({instrument})")
+                logger.debug(f"Near-miss cancel alert sent for signal {signal_id} ({instrument})")
                 return True
         except Exception as e:
             logger.error(f"Failed to send near-miss cancel alert for signal {signal_id}: {e}")

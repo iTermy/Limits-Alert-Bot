@@ -32,7 +32,7 @@ class SymbolMapper:
         else:
             self.config_path = Path(config_path)
         self.mappings = self._load_mappings()
-        logger.info(f"SymbolMapper initialized with config from {config_path}")
+        logger.debug(f"SymbolMapper initialized with config from {config_path}")
 
     def _load_mappings(self) -> dict:
         """Load symbol mappings from JSON configuration"""

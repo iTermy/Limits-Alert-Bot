@@ -191,12 +191,12 @@ class FeedHealthMonitor:
         # Timezone for market hours
         self.est = pytz.timezone("America/New_York")
 
-        logger.info(f"FeedHealthMonitor initialized (admin: {admin_user_id})")
+        logger.debug(f"FeedHealthMonitor initialized (admin: {admin_user_id})")
 
     def set_admin_user(self, user_id: int):
         """Set admin user ID for alerts"""
         self.admin_user_id = user_id
-        logger.info(f"Admin user set to: {user_id}")
+        logger.debug(f"Admin user set to: {user_id}")
 
     async def start_monitoring(self):
         """Start the health monitoring loop"""
@@ -219,7 +219,7 @@ class FeedHealthMonitor:
         )
         self._loop_watchdog_thread.start()
 
-        logger.info("Feed health monitoring started")
+        logger.debug("Feed health monitoring started")
 
     async def _loop_heartbeat_beat(self):
         """Stamp a monotonic heartbeat while the event loop is servicing tasks."""
@@ -276,7 +276,7 @@ class FeedHealthMonitor:
                     await task
         self._reconnect_tasks.clear()
 
-        logger.info("Feed health monitoring stopped")
+        logger.debug("Feed health monitoring stopped")
 
     async def _monitoring_loop(self):
         """Main monitoring loop"""
@@ -495,7 +495,7 @@ class FeedHealthMonitor:
         Handle feed failure
         Attempt reconnection and send alerts if needed
         """
-        logger.error(f"{feed_name} feed failure detected: {len(stale_symbols)} stale symbols")
+        logger.error(f"{feed_name} feed stale: {len(stale_symbols)} symbol(s) not ticking")
 
         # Check alert cooldown
         if not self._should_send_alert(feed_name):
@@ -556,9 +556,8 @@ class FeedHealthMonitor:
         self.reconnect_attempts[feed_name] += 1
         self.stats["reconnections_attempted"] += 1
 
-        logger.info(
-            f"Attempting reconnection for {feed_name} (attempt {self.reconnect_attempts[feed_name]})"
-        )
+        attempt = self.reconnect_attempts[feed_name]
+        logger.debug(f"Attempting reconnection for {feed_name} (attempt {attempt})")
 
         try:
             await asyncio.sleep(RECONNECT_DELAY_SECONDS)
@@ -568,7 +567,7 @@ class FeedHealthMonitor:
 
             if success:
                 self.stats["reconnections_successful"] += 1
-                logger.info(f"{feed_name} reconnection successful")
+                logger.info(f"{feed_name} reconnected (attempt {attempt})")
                 return True
             logger.warning(f"{feed_name} reconnection failed")
             return False
@@ -622,7 +621,7 @@ class FeedHealthMonitor:
             self.last_alert_time[feed_name] = datetime.now()
             self.stats["alerts_sent"] += 1
 
-            logger.info(f"Sent failure alert to admin for {feed_name}")
+            logger.debug(f"Sent failure alert to admin for {feed_name}")
 
         except Exception as e:
             logger.error(f"Failed to send admin alert: {e}")
@@ -653,7 +652,7 @@ class FeedHealthMonitor:
 
             await admin_user.send(message)
 
-            logger.info(f"Sent recovery alert to admin for {feed_name}")
+            logger.debug(f"Sent recovery alert to admin for {feed_name}")
 
         except Exception as e:
             logger.error(f"Failed to send recovery alert: {e}")
@@ -672,7 +671,7 @@ class FeedHealthMonitor:
         try:
             admin_user = await self.bot.fetch_user(self.admin_user_id)
             await admin_user.send(message)
-            logger.info("Sent custom admin alert")
+            logger.debug("Sent custom admin alert")
         except Exception as e:
             logger.error(f"Failed to send custom alert: {e}")
 

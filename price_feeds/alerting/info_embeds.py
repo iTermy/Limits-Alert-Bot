@@ -329,10 +329,10 @@ class InfoEmbedManager:
                 try:
                     msg = await channel.fetch_message(int(stored_id))
                     await msg.edit(embed=embed)
-                    logger.info(f"Refreshed info embed in #{channel.name}")
+                    logger.debug(f"Refreshed info embed in #{channel.name}")
                     continue
                 except discord.NotFound:
-                    logger.info(f"Info embed in #{channel.name} was deleted — reposting")
+                    logger.debug(f"Info embed in #{channel.name} was deleted — reposting")
                 except Exception as e:
                     logger.warning(f"Could not refresh info embed in #{channel.name}: {e}")
                     continue
@@ -372,10 +372,10 @@ class InfoEmbedManager:
                 try:
                     msg = await channel.fetch_message(int(stored_id))
                     await msg.edit(content=None, embed=embed)
-                    logger.info(f"Refreshed notice in #{channel.name}")
+                    logger.debug(f"Refreshed notice in #{channel.name}")
                     continue
                 except discord.NotFound:
-                    logger.info(f"Notice in #{channel.name} was deleted — reposting")
+                    logger.debug(f"Notice in #{channel.name} was deleted — reposting")
                 except Exception as e:
                     logger.warning(f"Could not refresh notice in #{channel.name}: {e}")
                     continue
@@ -397,7 +397,7 @@ class InfoEmbedManager:
             await msg.pin()
         except Exception as e:
             logger.warning(f"Posted notice in #{channel.name} but could not pin it: {e}")
-        logger.info(f"Posted notice in #{channel.name}")
+        logger.debug(f"Posted notice in #{channel.name}")
         return msg.id
 
     async def _post(self, channel: discord.TextChannel, embed: discord.Embed) -> Optional[int]:
@@ -410,5 +410,5 @@ class InfoEmbedManager:
             await msg.pin()
         except Exception as e:
             logger.warning(f"Posted info embed in #{channel.name} but could not pin it: {e}")
-        logger.info(f"Posted info embed in #{channel.name}")
+        logger.debug(f"Posted info embed in #{channel.name}")
         return msg.id

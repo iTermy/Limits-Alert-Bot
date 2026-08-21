@@ -397,7 +397,7 @@ class ExcursionMonitor:
             ordering_bar=self._ordering_bar(row["instrument"], row["signal_type"], row["pip_size"]),
             ordering_decided=row["mae_before_mfe"] is not None,
         )
-        logger.info("Resumed excursion tracking for signal %s (%s)", signal_id, row["phase"])
+        logger.debug("Resumed excursion tracking for signal %s (%s)", signal_id, row["phase"])
 
     # === Volume sampler ===
 

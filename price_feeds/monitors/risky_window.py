@@ -151,10 +151,10 @@ class RiskyWindowAnnouncer:
 
     def start(self) -> None:
         if self.channel is None:
-            logger.info("Risky window announcer has no channel — not starting")
+            logger.warning("Risky window announcer has no channel — not starting")
             return
         self._task = asyncio.ensure_future(self._loop())
-        logger.info("Risky window announcer started (windows: %s UTC)", _windows_label())
+        logger.debug("Risky window announcer started (windows: %s UTC)", _windows_label())
 
     def stop(self) -> None:
         if self._task is not None and not self._task.done():

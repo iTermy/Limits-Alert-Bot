@@ -94,7 +94,7 @@ class NearMissMonitor:
         self._tracking.pop(signal_id, None)  # clear any stale tracking state
         self._processing.discard(signal_id)
         self._nm_immune.add(signal_id)
-        logger.info(f"Signal {signal_id} marked NM-immune (manually reactivated)")
+        logger.debug(f"Signal {signal_id} marked NM-immune (manually reactivated)")
 
     def get_tracking_state(self, signal_id: int) -> Optional[NMTrackingState]:
         return self._tracking.get(signal_id)
@@ -176,7 +176,7 @@ class NearMissMonitor:
                 closest_price=current_price,
             )
             self._tracking[signal_id] = state
-            logger.info(
+            logger.debug(
                 f"NM tracking started: signal {signal_id} ({instrument} {signal.direction.upper()}) "
                 f"limit @ {first_limit_price} | "
                 f"entered proximity at {self.nm_config.format_value(instrument, current_distance)} away"
@@ -202,7 +202,7 @@ class NearMissMonitor:
         )
 
         if bounce_so_far >= required_bounce:
-            logger.info(
+            logger.debug(
                 f"NEAR-MISS confirmed: signal {signal_id} ({instrument}) | "
                 f"closest={self.nm_config.format_value(instrument, state.closest_distance)} "
                 f"from limit | "
@@ -252,7 +252,7 @@ class NearMissMonitor:
             else "N/A"
         )
 
-        logger.info(
+        logger.debug(
             f"Signal {signal_id} ({instrument}): executing near-miss auto-cancel "
             f"[closest={closest_str}, required_bounce={required_str}]"
         )
@@ -297,7 +297,7 @@ class NearMissMonitor:
         # Clean up state before sending Discord alerts
         tracking_state = self._tracking.get(signal_id)
         self.evict_signal(signal_id)
-        logger.info(f"Signal {signal_id} cancelled via near-miss")
+        logger.info(f"Signal {signal_id} ({instrument}) cancelled — near-miss")
 
         if self.alert_system:
             try:

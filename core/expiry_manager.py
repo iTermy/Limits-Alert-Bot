@@ -111,7 +111,7 @@ class ExpiryManager:
                 try:
                     msg = await channel.fetch_message(int(message_id))
                     await msg.delete()
-                    self.logger.info(
+                    self.logger.debug(
                         f"Deleted gold-tolls original message {message_id} "
                         f"for expired signal {sig_id}"
                     )

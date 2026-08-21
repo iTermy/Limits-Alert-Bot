@@ -85,7 +85,7 @@ class ArchiveManager:
             if not task.done():
                 task.cancel()
         self._deletion_tasks.clear()
-        logger.info("Cancelled all pending end-state archive-move tasks")
+        logger.debug("Cancelled all pending end-state archive-move tasks")
 
     def _get_finished_channel(self) -> Optional[discord.TextChannel]:
         if not self._finished_channel_id or not self.bot:
@@ -117,7 +117,7 @@ class ArchiveManager:
             try:
                 src_msg = await src_channel.fetch_message(int(src_message_id))
                 await src_msg.delete()
-                logger.info(
+                logger.debug(
                     f"Deleted original signal message {src_message_id} for signal {signal_id}"
                 )
             except discord.NotFound:
@@ -245,7 +245,7 @@ class ArchiveManager:
                     finished_msg = await dest_channel.send(embed=new_embed)
                     self.signal_finished_messages[signal_id] = finished_msg
                     self._track_alert_message(finished_msg.id, signal_id)
-                    logger.info(
+                    logger.debug(
                         f"Moved signal {signal_id} embed to {dest_name} (msg {finished_msg.id})"
                     )
                 except Exception as e:
@@ -253,7 +253,7 @@ class ArchiveManager:
 
                 try:
                     await embed_msg.delete()
-                    logger.info(
+                    logger.debug(
                         f"Deleted alert-channel embed for signal {signal_id} after move to {dest_name}"
                     )
                 except discord.NotFound:
@@ -263,7 +263,7 @@ class ArchiveManager:
             else:
                 try:
                     await embed_msg.delete()
-                    logger.info(
+                    logger.debug(
                         f"Deleted end-state embed for signal {signal_id} "
                         f"(no {dest_name} configured)"
                     )
@@ -314,7 +314,7 @@ class ArchiveManager:
 
         task = asyncio.ensure_future(_move_after_delay())
         self._deletion_tasks[signal_id] = task
-        logger.info(
+        logger.debug(
             f"Scheduled archive move for signal {signal_id} (event='{event}') "
             f"in {END_STATE_DELETE_MINUTES} minutes -> "
             f"{'profit channel' if is_profit else 'finished-signals channel'}"
@@ -335,7 +335,7 @@ class ArchiveManager:
                 archived_embed = embed.copy()
                 _set_archive_footer(archived_embed)
                 await finished_channel.send(embed=archived_embed)
-                logger.info(
+                logger.debug(
                     f"Moved standalone news-cancel embed for signal {signal_id} to finished-signals"
                 )
             except Exception as _mv:
@@ -345,7 +345,7 @@ class ArchiveManager:
 
         try:
             await message.delete()
-            logger.info(f"Deleted standalone news-cancel message for signal {signal_id}")
+            logger.debug(f"Deleted standalone news-cancel message for signal {signal_id}")
         except Exception:
             pass
 

@@ -203,13 +203,13 @@ class SignalDatabase:
                     logger.error(f"Signal not found after conflict on message {message_id}")
                     return False, None
                 if existing_status == SignalStatus.CANCELLED:
-                    logger.info(f"Reactivating cancelled signal for message {message_id}")
+                    logger.debug(f"Reactivating cancelled signal for message {message_id}")
                     await self.reactivate_cancelled_signal(existing_id, parsed_signal)
                     return True, existing_id
                 logger.warning(f"Signal already exists for message {message_id} (status={existing_status})")
                 return False, existing_id
 
-            logger.info(
+            logger.debug(
                 f"Saved signal {signal_id}: {parsed_signal.instrument} "
                 f"{parsed_signal.direction} with {len(parsed_signal.limits)} limits"
             )
@@ -313,7 +313,7 @@ class SignalDatabase:
                     signal_id,
                 )
 
-            logger.info(f"Updated signal {signal_id} from edited message")
+            logger.debug(f"Updated signal {signal_id} from edited message")
             return True, diff["alert_invalidated"]
 
         except Exception as e:
@@ -359,7 +359,7 @@ class SignalDatabase:
                 new_expiry_time,
                 signal_id,
             )
-        logger.info(f"Updated instant signal {signal_id} SL/TP from edited message")
+        logger.debug(f"Updated instant signal {signal_id} SL/TP from edited message")
 
     async def add_instant_entry(
         self, signal_id: int, entry_price: float, disarm_breakeven: bool = False
@@ -506,7 +506,7 @@ class SignalDatabase:
             logger.debug(f"Found signal {row['id']} with status {row['status']}")
 
             if row["status"] == SignalStatus.CANCELLED:
-                logger.info(f"Signal {row['id']} is already cancelled")
+                logger.debug(f"Signal {row['id']} is already cancelled")
                 return True
 
             if (
@@ -557,7 +557,7 @@ class SignalDatabase:
                         "User cancelled",
                     )
                     await self._snapshot_close_prices(conn, row["id"], row["instrument"])
-                logger.info(f"Successfully cancelled signal {row['id']}")
+                logger.debug(f"Cancelled signal {row['id']}")
                 return True
 
             except Exception as e:
@@ -629,7 +629,7 @@ class SignalDatabase:
                     """,
                         signal_id,
                     )
-                logger.info(f"Successfully reactivated signal {signal_id} to status {new_status}")
+                logger.info(f"Signal {signal_id} reactivated -> {new_status}")
                 return True
 
             except Exception as e:
@@ -883,7 +883,7 @@ class SignalDatabase:
             old_status = row["status"]
 
             if old_status == new_status:
-                logger.info(f"Signal {signal_id} already has status {new_status}")
+                logger.debug(f"Signal {signal_id} already has status {new_status}")
                 return True
 
             effective_closed_reason = closed_reason if closed_reason is not None else "manual"
@@ -991,9 +991,9 @@ class SignalDatabase:
                 # reproducible off the VPS. Logged on the existing success line
                 # so a slow write leaves evidence without extra noise.
                 logger.info(
-                    f"Successfully set signal {signal_id} status: {old_status} -> {new_status}"
-                    + (f" (tp_price={tp_price:.5f})" if tp_price is not None else "")
-                    + f" in {monotonic() - started:.1f}s"
+                    f"Signal {signal_id} {old_status} -> {new_status}"
+                    + (f" @ {tp_price:.5f}" if tp_price is not None else "")
+                    + f" ({monotonic() - started:.1f}s)"
                 )
                 return True
 
@@ -1041,11 +1041,11 @@ class SignalDatabase:
             )
 
             if signal_row["status"] == SignalStatus.HIT:
-                logger.info(f"Signal {signal_id} is already HIT — no-op for manual hit")
+                logger.debug(f"Signal {signal_id} is already HIT — no-op for manual hit")
                 return False
 
             if signal_row["status"] == SignalStatus.CANCELLED:
-                logger.info(f"Signal {signal_id} is CANCELLED — reactivating before manual HIT")
+                logger.debug(f"Signal {signal_id} is CANCELLED — reactivating before manual HIT")
                 async with self.db.get_connection() as conn:
                     now = datetime.now(pytz.UTC)
                     await conn.execute(
@@ -1109,7 +1109,7 @@ class SignalDatabase:
             )
 
             if result and result.get("signal_id"):
-                logger.info(f"Signal {signal_id} manually marked as HIT via limit hit")
+                logger.debug(f"Signal {signal_id} manually marked as HIT via limit hit")
 
                 async with self.db.get_connection() as conn:
                     await conn.execute(
@@ -1145,7 +1145,7 @@ class SignalDatabase:
 
             if signal and len(signal.hit_limits) == signal.total_limits:
                 result["all_limits_hit"] = True
-                logger.info(f"All limits hit for signal {signal.signal_id}")
+                logger.debug(f"All limits hit for signal {signal.signal_id}")
             else:
                 result["all_limits_hit"] = False
 

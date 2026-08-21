@@ -54,7 +54,7 @@ class OANDAStream:
         self.streaming = False
         self.stream_response = None
 
-        logger.info("OANDAStream initialized")
+        logger.debug("OANDAStream initialized")
 
     async def connect(self) -> bool:
         """Initialize OANDA session"""
@@ -77,7 +77,7 @@ class OANDAStream:
             ) as response:
                 if response.status == 200:
                     self.connected = True
-                    logger.info("Connected to OANDA stream")
+                    logger.debug("Connected to OANDA stream")
                     return True
                 logger.error(f"OANDA connection failed: {response.status}")
                 return False
@@ -98,7 +98,7 @@ class OANDAStream:
             self.session = None
 
         self.connected = False
-        logger.info("Disconnected from OANDA")
+        logger.debug("Disconnected from OANDA")
 
     async def reconnect(self):
         """Reconnect to OANDA"""
@@ -118,11 +118,11 @@ class OANDAStream:
             raise Exception("Not connected to OANDA")
 
         self.subscribed_symbols.add(symbol)
-        logger.info(f"Subscribed to {symbol} on OANDA")
+        logger.debug(f"Subscribed to {symbol} on OANDA")
 
         # If already streaming, need to restart with updated symbols
         if self.streaming:
-            logger.info("Restarting stream with updated symbol list")
+            logger.debug("Restarting stream with updated symbol list")
             await self._restart_stream()
 
     async def unsubscribe(self, symbol: str):
@@ -138,7 +138,7 @@ class OANDAStream:
         for symbol in symbols:
             self.subscribed_symbols.add(symbol)
 
-        logger.info(f"Bulk subscribed to {len(symbols)} symbols on OANDA")
+        logger.debug(f"Bulk subscribed to {len(symbols)} symbols on OANDA")
 
         # Restart stream if needed
         if self.streaming:

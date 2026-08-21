@@ -230,7 +230,7 @@ async def initialize_database(db_manager):
         # Run migrations for any new columns added to existing tables
         await _run_migrations(conn)
 
-    logger.info("Database schema initialized successfully")
+    logger.debug("Database schema initialized")
 
 
 async def _create_indexes(conn):

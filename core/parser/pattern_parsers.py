@@ -834,7 +834,7 @@ def parse_instant_signal(
         logger.debug("Instant signal validation failed")
         return None
 
-    logger.info(
+    logger.debug(
         f"Instant parse success: {instrument} {direction} sl={stop_loss} tp={take_profit}"
     )
     return signal
@@ -854,7 +854,7 @@ class CorePatternParser:
 
     def __init__(self, channel_config: Optional[dict] = None):
         self.channel_config = channel_config or {}
-        logger.info("Initialized CorePatternParser")
+        logger.debug("Initialized CorePatternParser")
 
     def parse(self, message: str, channel_name: Optional[str] = None) -> Optional[ParsedSignal]:
         """Parse using pattern matching for core instruments"""
@@ -916,7 +916,7 @@ class CorePatternParser:
             )
 
             if validate_signal(signal):
-                logger.info(f"Core parse success: {signal.instrument} {signal.direction}")
+                logger.debug(f"Core parse success: {signal.instrument} {signal.direction}")
                 return signal
 
             logger.debug("Signal validation failed")
@@ -952,7 +952,7 @@ class StockPatternParser:
         self.available_symbols: set[str] = set()
         self._last_symbol_refresh: float = 0.0
         self._initialize_mt5()
-        logger.info("Initialized StockPatternParser")
+        logger.debug("Initialized StockPatternParser")
 
     def _initialize_mt5(self):
         """Initialize MT5 connection for symbol checking"""
@@ -971,7 +971,7 @@ class StockPatternParser:
                 self.available_symbols = {s.name for s in symbols}
                 self.mt5_initialized = True
                 self._last_symbol_refresh = time.monotonic()
-                logger.info(f"MT5 initialized with {len(self.available_symbols)} symbols")
+                logger.debug(f"MT5 initialized with {len(self.available_symbols)} symbols")
             else:
                 logger.warning("No symbols retrieved from MT5")
 
@@ -1064,7 +1064,7 @@ class StockPatternParser:
 
             # Validate before returning
             if validate_signal(signal):
-                logger.info(f"Stock parse success: {signal.instrument} {signal.direction}")
+                logger.debug(f"Stock parse success: {signal.instrument} {signal.direction}")
                 return signal
 
             return None
@@ -1110,7 +1110,7 @@ class StockPatternParser:
             alias = STOCK_TICKER_ALIASES.get(word)
             if alias and alias in tickers_to_symbol:
                 symbol = tickers_to_symbol[alias]
-                logger.info(f"Found ticker alias match: {word} -> {symbol}")
+                logger.debug(f"Found ticker alias match: {word} -> {symbol}")
                 return symbol
 
         # Step 1: Direct ticker match
@@ -1120,13 +1120,13 @@ class StockPatternParser:
 
             if word in tickers_to_symbol:
                 symbol = tickers_to_symbol[word]
-                logger.info(f"Found exact ticker match: {word} -> {symbol}")
+                logger.debug(f"Found exact ticker match: {word} -> {symbol}")
                 return symbol
 
         # Step 2: Check with exchange suffix
         for word in words_upper:
             if word in stock_symbols:
-                logger.info(f"Found symbol with exchange: {word}")
+                logger.debug(f"Found symbol with exchange: {word}")
                 return word
 
         # Step 3: Description matching
@@ -1134,13 +1134,13 @@ class StockPatternParser:
 
         if len(matches) == 1:
             match = matches[0]
-            logger.info(f"Single description match: {match['symbol']}")
+            logger.debug(f"Single description match: {match['symbol']}")
             return match["symbol"]
         if len(matches) > 1:
             # Try to find best match
             best = self._select_best_match(matches)
             if best:
-                logger.info(f"Selected best match: {best['symbol']}")
+                logger.debug(f"Selected best match: {best['symbol']}")
                 return best["symbol"]
 
         return None
@@ -1218,4 +1218,4 @@ class StockPatternParser:
         """Cleanup MT5 connection"""
         if self.mt5_initialized:
             mt5.shutdown()
-            logger.info("MT5 connection closed")
+            logger.debug("MT5 connection closed")

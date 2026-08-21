@@ -763,7 +763,13 @@ Numbers and strings that mean something — timeouts, thresholds, role IDs, chan
 `hasattr` guards, `if x is not None` checks, and try/excepts have a real cost — they obscure the happy path and tell future readers "this might fail" when it can't. Use them at genuine boundaries (external I/O, user input, optional config) and not for attributes the constructor always sets. When in doubt: would a sensible caller ever hit this case? If no, delete the guard.
 
 ### Logging
-Log at the level that matches the severity (debug for tracing, info for normal events, warning for recoverable problems, error for failures). Don't sprinkle emojis or status indicators into log messages — `logger.info("Signal saved")` not `logger.info("✅ Signal saved successfully!")`. Logging is for operators, not for users.
+INFO is a timeline of what the bot *did*, one line per real event — a signal saved, a status change, a feed reconnect, an admin command. Everything that only explains *how* it got there (parse stages, embed edits, subscribe/unsubscribe churn, per-tick guard suppressions, "X initialized" constructor lines) is DEBUG. The test is whether an operator scanning the log at 3 AM would want the line; if it repeats per tick, per limit, or per stage of one user-visible action, it's DEBUG.
+
+A single action must not produce a run of INFO lines. Saving a signal is one line naming the signal, not five across the handler, parser and DB. Per-item startup loops are summarised (`Monitoring 22 channels`, not 22 lines). When two layers both have something to say about one event, they must say different things — `signal_ops` logs the transition and its timing, the caller logs the reason (`Signal 3762 (XAUUSD) cancelled — spread hour`).
+
+Log at the level that matches severity (debug for tracing, info for normal events, warning for recoverable problems, error for failures). Don't sprinkle emojis or status indicators into log messages — `logger.info("Signal saved")` not `logger.info("✅ Signal saved successfully!")`. Skip filler adverbs: "Database connected", not "Database connection pool created successfully". Logging is for operators, not for users.
+
+`utils/logger.py` formats records; `file:line` is appended only for WARNING and above, so INFO stays scannable while failures stay debuggable. `LOG_LEVEL=DEBUG` brings the full trace back.
 
 ### Classes vs functions
 Prefer functions unless you actually need state. A class with only a constructor and one method is a function in disguise. A class that holds three sub-managers and forwards every method to them is plumbing — flatten it or delete it.

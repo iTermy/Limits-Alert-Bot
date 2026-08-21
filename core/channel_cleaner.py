@@ -190,7 +190,7 @@ class ChannelCleaner:
                     total_skipped_old += 1
 
             if not to_delete:
-                self.logger.info(
+                self.logger.debug(
                     f"#{channel_name}: no eligible messages "
                     f"({total_preserved} preserved, {total_skipped_old} too old)"
                 )

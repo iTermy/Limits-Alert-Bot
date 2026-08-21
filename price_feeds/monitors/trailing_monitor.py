@@ -229,7 +229,7 @@ class TrailingStopMonitor:
             stopped=stopped,
             distance_raw=distance_raw,
         )
-        logger.info(f"Restored shadow trailing tracking for signal {signal_id}")
+        logger.debug(f"Restored shadow trailing tracking for signal {signal_id}")
 
     @staticmethod
     def _pnl(state: TrailingState, exit_price: float) -> float:

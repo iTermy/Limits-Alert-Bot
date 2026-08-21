@@ -45,7 +45,7 @@ class TrailingStopConfig(BaseThresholdConfig):
     def __init__(self, tp_config: TPConfig, config_path: Optional[str] = None):
         self._tp_config = tp_config
         super().__init__(config_path)
-        logger.info("TrailingStopConfig initialised")
+        logger.debug("TrailingStopConfig initialised")
 
     # === Config defaults & validation ===
 

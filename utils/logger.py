@@ -22,6 +22,28 @@ _NOISY_LIBRARIES = (
     "websockets",
 )
 
+_CONSOLE_FORMAT = "%(asctime)s  %(levelname)-7s %(message)s"
+_FILE_FORMAT = "%(asctime)s  %(levelname)-7s %(source)-20s %(message)s"
+
+
+class _Formatter(logging.Formatter):
+    """Compact single-line records; source location only where it earns its space.
+
+    An INFO line is read, not debugged, so it carries the message alone. WARNING
+    and above get `file:line` appended — that's when you actually need to find
+    the code that emitted it.
+    """
+
+    def format(self, record: logging.LogRecord) -> str:
+        # Loggers are named inconsistently across the codebase
+        # (`trading_bot.bot`, `price_feeds.feeds.price_stream_manager`); the last
+        # segment is the part that identifies the subsystem.
+        record.source = record.name.rsplit(".", 1)[-1]
+        line = super().format(record)
+        if record.levelno >= logging.WARNING:
+            line = f"{line}  ({record.filename}:{record.lineno})"
+        return line
+
 
 def setup_logger(name: str = "trading_bot", log_dir: str = "data/logs") -> logging.Logger:
     """
@@ -56,20 +78,10 @@ def setup_logger(name: str = "trading_bot", log_dir: str = "data/logs") -> loggi
     for library in _NOISY_LIBRARIES:
         logging.getLogger(library).setLevel(logging.WARNING)
 
-    # Create formatters
-    detailed_formatter = logging.Formatter(
-        "%(asctime)s - %(name)s - %(levelname)s - [%(filename)s:%(lineno)d] - %(message)s",
-        datefmt="%Y-%m-%d %H:%M:%S",
-    )
-
-    simple_formatter = logging.Formatter(
-        "%(asctime)s - %(levelname)s - %(message)s", datefmt="%H:%M:%S"
-    )
-
     # Console handler with UTF-8 encoding support
     console_handler = logging.StreamHandler(sys.stdout)
     console_handler.setLevel(logging.INFO)
-    console_handler.setFormatter(simple_formatter)
+    console_handler.setFormatter(_Formatter(_CONSOLE_FORMAT, datefmt="%H:%M:%S"))
 
     # Force UTF-8 encoding for Windows console
     if sys.platform == "win32":
@@ -89,7 +101,7 @@ def setup_logger(name: str = "trading_bot", log_dir: str = "data/logs") -> loggi
         encoding="utf-8",  # Explicitly set UTF-8 encoding
     )
     file_handler.setLevel(logging.DEBUG)
-    file_handler.setFormatter(detailed_formatter)
+    file_handler.setFormatter(_Formatter(_FILE_FORMAT, datefmt="%Y-%m-%d %H:%M:%S"))
     root.addHandler(file_handler)
 
     # Error file handler (with UTF-8 encoding)
@@ -100,7 +112,7 @@ def setup_logger(name: str = "trading_bot", log_dir: str = "data/logs") -> loggi
         encoding="utf-8",  # Explicitly set UTF-8 encoding
     )
     error_handler.setLevel(logging.ERROR)
-    error_handler.setFormatter(detailed_formatter)
+    error_handler.setFormatter(_Formatter(_FILE_FORMAT, datefmt="%Y-%m-%d %H:%M:%S"))
     root.addHandler(error_handler)
 
     logger = logging.getLogger(name)

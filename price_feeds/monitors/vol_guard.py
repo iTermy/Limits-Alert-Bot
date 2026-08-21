@@ -126,7 +126,7 @@ def _load_config() -> dict:
     try:
         raw = json.loads(_CONFIG_PATH.read_text(encoding="utf-8"))
     except FileNotFoundError:
-        logger.info("vol_guard.json not found — using defaults")
+        logger.debug("vol_guard.json not found — using defaults")
         return defaults
     except (json.JSONDecodeError, OSError) as e:
         logger.error(f"Failed to read vol_guard.json ({e}) — using defaults")
@@ -186,7 +186,7 @@ class VolatilityGuard:
             return
         self.stream_manager.add_subscriber(self.on_price_update)
         self._eval_task = asyncio.ensure_future(self._eval_loop())
-        logger.info(
+        logger.debug(
             "Volatility guard started (lookback=%ss, window=%smin, thresholds=%s)",
             int(self.lookback_seconds),
             int(self.guard_seconds // 60),
@@ -295,7 +295,7 @@ class VolatilityGuard:
                     and msg.embeds[0].title == _EMBED_TITLE
                 ):
                     await msg.delete()
-                    logger.info("Purged stale volatility embed from a previous run")
+                    logger.debug("Purged stale volatility embed from a previous run")
         except Exception as e:
             logger.warning(f"Could not purge stale volatility embeds: {e}")
 
@@ -315,7 +315,7 @@ class VolatilityGuard:
             elif now >= guard_expiry:
                 if volatile:
                     self._symbol_guards[symbol] = now + self.guard_seconds
-                    logger.info("Volatility guard re-armed for %s (still volatile)", symbol)
+                    logger.debug("Volatility guard re-armed for %s (still volatile)", symbol)
                 else:
                     self._release(symbol)
 
