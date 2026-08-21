@@ -46,11 +46,11 @@ class AlertSystem:
 
     LIVE_UPDATE_INTERVAL = 15
 
-    # Max concurrent embed edits during a live-refresh pass. Editing different
-    # messages uses separate rate-limit buckets, so a bounded fan-out keeps a
-    # full pass to ~1-2s regardless of how many embeds are active, instead of
-    # the old 1s-per-embed serial stagger that pushed the effective refresh
-    # period past 60s once a dozen signals were live.
+    # Max channels refreshed in parallel during a live-refresh pass. Discord
+    # buckets PATCH /channels/{id}/messages/{id} on the CHANNEL, not the message,
+    # so embeds sharing a channel are refreshed one at a time; fanning them out
+    # only queues 429s behind each other. Different channels are different
+    # buckets, so a pass still completes in ~1-2s regardless of embed count.
     _LIVE_REFRESH_CONCURRENCY = 5
 
     def __init__(
@@ -159,12 +159,12 @@ class AlertSystem:
                 logger.error(f"Live update loop error: {e}", exc_info=True)
 
     async def _refresh_live_embeds(self):
-        """Refresh every live embed with the latest price, fanned out concurrently.
+        """Refresh every live embed with the latest price, fanned out per channel.
 
-        Edits run under a bounded semaphore (separate messages use separate
-        rate-limit buckets, so this is safe) and each edit is serialized against
-        event edits via the per-signal lock. A full pass completes in ~1-2s
-        regardless of embed count.
+        Embeds in the same channel share one Discord rate-limit bucket, so they
+        are refreshed sequentially; channels run in parallel under a bounded
+        semaphore. Each edit is serialized against event edits via the
+        per-signal lock. A full pass completes in ~1-2s regardless of embed count.
         """
         if not self._live_embeds:
             return
@@ -177,16 +177,29 @@ class AlertSystem:
             if sid not in self.signal_messages and not self._message_locks[sid].locked():
                 del self._message_locks[sid]
 
-        signal_ids = list(self._live_embeds.keys())
-        logger.debug("Refreshing %d live embed(s)", len(signal_ids))
+        by_channel: dict[int, list[int]] = collections.defaultdict(list)
+        for signal_id in list(self._live_embeds.keys()):
+            message = self.signal_messages.get(signal_id)
+            if message:
+                by_channel[message.channel.id].append(signal_id)
+
+        if not by_channel:
+            return
+
+        logger.debug(
+            "Refreshing %d live embed(s) across %d channel(s)",
+            sum(len(ids) for ids in by_channel.values()),
+            len(by_channel),
+        )
 
         semaphore = asyncio.Semaphore(self._LIVE_REFRESH_CONCURRENCY)
 
-        async def _guarded(signal_id: int):
+        async def _refresh_channel(signal_ids: list[int]):
             async with semaphore:
-                await self._refresh_one_embed(signal_id)
+                for signal_id in signal_ids:
+                    await self._refresh_one_embed(signal_id)
 
-        await asyncio.gather(*(_guarded(sid) for sid in signal_ids))
+        await asyncio.gather(*(_refresh_channel(ids) for ids in by_channel.values()))
 
     async def _refresh_one_embed(self, signal_id: int):
         """Re-render a single live embed with the current price and distance."""
