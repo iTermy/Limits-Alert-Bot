@@ -278,6 +278,13 @@ class SignalDatabase:
                 return True, False
 
             async with self.db.get_connection() as conn:
+                # Lock the signal row before reading its limits. Discord can
+                # deliver two edits for one message (a second event fires when it
+                # resolves link embeds), and two overlapping diffs each read the
+                # pre-edit rows: the loser deletes rows the winner already
+                # replaced, then re-inserts sequence_number 1 on top of it.
+                await conn.execute("SELECT id FROM signals WHERE id = $1 FOR UPDATE", signal_id)
+
                 existing_limits = await conn.fetch(
                     "SELECT id, price_level, sequence_number, status, "
                     "approaching_alert_sent, hit_alert_sent FROM limits "
@@ -500,7 +507,9 @@ class SignalDatabase:
 
             row = await self.get_signal_by_message_id(message_id)
             if not row:
-                logger.warning(f"No signal found for message {message_id}")
+                # Every ordinary chat message deleted in a monitored channel
+                # lands here — not a signal, nothing to cancel.
+                logger.debug(f"No signal found for message {message_id}")
                 return False
 
             logger.debug(f"Found signal {row['id']} with status {row['status']}")
