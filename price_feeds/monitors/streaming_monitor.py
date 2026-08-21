@@ -465,10 +465,17 @@ class StreamingPriceMonitor:
                     )
 
             except Exception as e:
-                logger.error(f"Error in periodic refresh: {e}")
+                logger.error(f"Error in periodic refresh: {e!r}")
 
     async def _on_price_update(self, symbol: str, price_data: dict):
         """Callback for price updates from stream manager."""
+        # Ticks already dispatched when stop() ran keep arriving for a few
+        # seconds while the feeds wind down. Evaluating them races the closing
+        # connection pool: a near-miss or auto-TP that fires here fails its
+        # status write ("pool is closing") and retries on every following tick.
+        if not self.running:
+            return
+
         self.stats["price_updates"] += 1
 
         # Spread-hour transition tracking
