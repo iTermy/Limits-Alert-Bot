@@ -9,6 +9,10 @@ from utils.logger import get_logger
 
 logger = get_logger("database.schema")
 
+# Advisory-lock key guarding schema DDL. Arbitrary but must stay stable — every
+# process that runs initialize_database has to pick the same number.
+_SCHEMA_LOCK_KEY = 7_314_552_901
+
 # Inline channel-name → signal-type map for the one-time backfill. Mirrors
 # core.parser.pattern_parsers.CHANNEL_TYPE_MAP — kept here to avoid importing
 # the parser (and its heavy deps) into the DB layer.
@@ -34,6 +38,13 @@ async def initialize_database(db_manager):
         db_manager: DatabaseManager instance
     """
     async with db_manager.get_connection() as conn:
+        # Serialize DDL across processes. A crash-restart can overlap the
+        # outgoing process, and two sessions running CREATE INDEX (ShareLock)
+        # and ALTER TABLE (AccessExclusiveLock) against the same tables deadlock
+        # — which kills the boot rather than just delaying it. Held for the
+        # transaction, so it is released when this block exits either way.
+        await conn.execute("SELECT pg_advisory_xact_lock($1)", _SCHEMA_LOCK_KEY)
+
         # Create signals table
         await conn.execute("""
             CREATE TABLE IF NOT EXISTS signals (
