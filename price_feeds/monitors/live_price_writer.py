@@ -179,4 +179,4 @@ class LivePriceWriter:
                 self._last_written_at[symbol] = now_mono
             logger.debug("LivePriceWriter flushed %d symbols", len(rows))
         except Exception as e:
-            logger.error("LivePriceWriter DB write failed: %s", e)
+            logger.error("LivePriceWriter DB write failed: %r", e)
