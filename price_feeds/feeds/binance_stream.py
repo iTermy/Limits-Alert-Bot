@@ -180,9 +180,15 @@ class BinanceStream:
         self.streaming = True
 
         while self.streaming:
+            # disconnect() closes and drops the session from under this loop, so
+            # re-check it each pass rather than reconnecting onto a dead one.
+            session = self.ws_session
+            if session is None or session.closed:
+                break
+
             try:
                 # Create WebSocket connection
-                async with self.ws_session.ws_connect(self.ws_url) as ws:
+                async with session.ws_connect(self.ws_url) as ws:
                     self.ws_connection = ws
 
                     # Subscribe to all symbols
@@ -235,10 +241,17 @@ class BinanceStream:
                             break
 
             except aiohttp.ClientError as e:
+                if not self.streaming:
+                    # disconnect() tore the socket down mid-read; not a failure.
+                    logger.debug(f"Binance stream closed during shutdown: {e}")
+                    break
                 logger.error(f"Binance WebSocket connection error: {e}")
                 await asyncio.sleep(5)
 
             except Exception as e:
+                if not self.streaming:
+                    logger.debug(f"Binance stream closed during shutdown: {e}")
+                    break
                 logger.error(f"Error in Binance stream: {e}")
                 await asyncio.sleep(5)
 

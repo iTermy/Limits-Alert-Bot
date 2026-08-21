@@ -114,4 +114,10 @@ def main():
 
 
 if __name__ == "__main__":
-    main()
+    try:
+        main()
+    except KeyboardInterrupt:
+        # Windows delivers the parent's console Ctrl+C to the whole process
+        # group, so a normal bot shutdown lands here. Exit quietly instead of
+        # dumping a traceback the parent then logs as a feed error.
+        mt5.shutdown()
