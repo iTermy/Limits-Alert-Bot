@@ -43,8 +43,9 @@ core/
                                   admin_ids + health_alert_admin_id read from settings.json; ServiceRegistry populated here
   services.py                   ServiceRegistry — typed container for subsystem references;
                                   replaces bot.monitor.X.Y reach-through coupling
-  expiry_manager.py             @tasks.loop(5min) — expires ACTIVE/HIT signals past expiry_time;
-                                  updates embeds; uses react_to_original_signal() from streaming_monitor
+  expiry_manager.py             @tasks.loop(5min) — cancels ACTIVE signals past expiry_time (HIT ones
+                                  roll over); updates embeds for the ids expire_old_signals cancelled;
+                                  uses react_to_original_signal() from streaming_monitor
   news_manager.py               Tracks active news windows; persists to data/news_events.json;
                                   cleanup polls every 30 s; parse_news_command() parses !news args
   channel_cleaner.py            @tasks.loop(1min) — every Friday 18:00 local time, bulk-deletes
@@ -82,7 +83,7 @@ database/
                                   get_overlapping_signals() — range-intersection query used on save;
                                   check_reactivation_guard() — compares cancelled limits vs live price;
                                   _get_live_price() — reads bid/ask from live_prices table
-  utils.py                      calculate_expiry() (day_end → 4:45 PM EST), _parse_dt()
+  utils.py                      calculate_expiry() (day_end → 4:45 PM EST, skipping the weekend), _parse_dt()
 
 price_feeds/
   feeds/                        Feed clients + stream coordination
@@ -628,8 +629,12 @@ Before reactivating a cancelled signal via reply command or `!setstatus active`,
 ### Tick staleness gate
 `streaming_monitor._on_price_update` drops ticks older than `_MAX_TICK_AGE_SECONDS` (5 s) before any signal evaluation. The timestamp comes from `price_data["updated_at"]`, which is stamped by `price_stream_manager._process_price_update`: UTC broker tick time for ICMarkets and Exness (from `tick.time`), current wall-clock for OANDA/Binance. Spread-hour transition tracking still runs on stale ticks — only per-signal checks are skipped.
 
-### HIT signals roll over at expiry
-`expire_old_signals` in `signal_ops.py` branches on status. **ACTIVE signals** are cancelled (existing behaviour). **HIT signals** are rolled over: `expiry_time` is advanced to the next occurrence of the same `expiry_type` (via `calculate_expiry`) and a `status_changes` row is inserted with `change_type='automatic', reason='rollover'`. The signal status and limits are untouched. This repeats each expiry window until the position closes naturally.
+### HIT signals roll over at expiry, weekend included
+`expire_old_signals` in `signal_ops.py` branches on status. **ACTIVE signals** are cancelled. **HIT signals** are rolled over: `expiry_time` is advanced to the next occurrence of the same `expiry_type` (via `calculate_expiry`) and a `status_changes` row is inserted with `change_type='automatic', reason='rollover'`. The signal status and limits are untouched. This repeats each expiry window until the position closes naturally.
+
+The weekend is not an exception. A position expiring into it used to be cancelled instead of rolled, which the EX bot's weekend force-close (`cancelled` + `closed_reason='expiry'` inside `is_weekend_window`) turned into a market exit at the Friday close — a trade flattened by the calendar rather than by its own SL or TP. It now rides the gap the way it rides any overnight one: `calculate_expiry` lands a `day_end` on **Monday** (`week_end` already lands on Friday, `month_end` already walks back to a weekday), and the EX bot's SL-strip window happens to span Fri 16:55 → Sun 18:00 continuously, so the broker-side stop is off across the gap and restored at the reopen. Nothing on the TM side needed a weekend carve-out: non-crypto feeds are silent from Friday's close until Sunday 18:00, and the spread-hour gate covers Friday 17:00–18:00 exactly as it covers a weekday's.
+
+`expire_old_signals` returns **the ids it cancelled**, not a count — `expiry_manager` runs its post-expiry cleanup (finalize the trailing/excursion trackers, mark the embed expired, schedule the archive move, react ❌) over that list. It used to re-query the due signals itself and clean up every one, so each rolled-over position had its analytics finalized mid-trade and its live embed archived every day at 4:45 PM.
 
 ### `save_signal` is TOCTOU-safe
 Uses `INSERT … ON CONFLICT (message_id) DO NOTHING RETURNING id`. If no id is returned (duplicate parse race), the existing row is inspected on the same connection: reactivate if cancelled, reject otherwise. The pre-check `SELECT` is gone.

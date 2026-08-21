@@ -21,44 +21,20 @@ class ExpiryManager:
             monitor = self.bot.services.monitor
             alert_system = self.bot.services.alert_system
 
-            # ── 1. Query which signals are about to be expired BEFORE expiring ──
-            # We need their IDs so we can do per-signal work afterward.
-            about_to_expire = []
-            if alert_system:
+            # Only the cancelled ids come back — a HIT signal rolls its expiry
+            # forward and stays open, so none of the cleanup below applies to it.
+            cancelled_ids = await self.bot.services.signal_db.expire_old_signals()
+
+            for sig_id in cancelled_ids:
                 try:
-                    from models.enums import SignalStatus
-
-                    pre_expire_rows = await self.bot.services.signal_db.db.fetch_all(
-                        """
-                        SELECT id, message_id, channel_id
-                        FROM signals
-                        WHERE status IN ($1, $2)
-                          AND expiry_time IS NOT NULL
-                          AND expiry_time < CURRENT_TIMESTAMP
-                        """,
-                        (SignalStatus.ACTIVE, SignalStatus.HIT),
-                    )
-                    about_to_expire = list(pre_expire_rows) if pre_expire_rows else []
-                except Exception as _pre:
-                    self.logger.warning(f"Could not pre-fetch expiring signals: {_pre}")
-
-            # ── 2. Run the DB expiry (sets status=cancelled, closed_reason='expiry') ──
-            count = await self.bot.services.signal_db.expire_old_signals()
-            if count > 0:
-                self.logger.info(f"Expired {count} signals")
-
-            # ── 3. Per-signal post-expiry cleanup ────────────────────────────
-            for row in about_to_expire:
-                sig_id = row["id"]
-                try:
-                    await self._handle_expired_signal(sig_id, row, alert_system, monitor)
+                    await self._handle_expired_signal(sig_id, alert_system, monitor)
                 except Exception as _e:
                     self.logger.warning(f"Post-expiry cleanup failed for signal {sig_id}: {_e}")
 
         except Exception as e:
             self.logger.error(f"Error in expiry loop: {e}", exc_info=True)
 
-    async def _handle_expired_signal(self, sig_id, row, alert_system, monitor):
+    async def _handle_expired_signal(self, sig_id, alert_system, monitor):
         """
         Perform all post-expiry actions for a single signal:
           • Finalize the trailing / excursion analytics trackers
@@ -73,7 +49,7 @@ class ExpiryManager:
             self.logger.warning(f"Could not fetch signal {sig_id} after expiry")
             return
 
-        # ── 3a. Close out the analytics trackers at the expiry price ─────────
+        # ── a. Close out the analytics trackers at the expiry price ─────────
         if monitor:
             try:
                 await monitor.finalize_trailing_on_manual_close(sig_id)
@@ -82,7 +58,7 @@ class ExpiryManager:
                     f"Could not finalize trackers for expired signal {sig_id}: {_fin}"
                 )
 
-        # ── 3b. Update the persistent embed (approaching alert or hit embed) ──
+        # ── b. Update the persistent embed (approaching alert or hit embed) ──
         if alert_system and sig_id in alert_system.signal_messages:
             try:
                 # Stop live price refresh for this signal
@@ -116,7 +92,7 @@ class ExpiryManager:
             ):
                 await self._delete_original_message(src_channel_id, src_message_id, sig_id)
 
-        # ── 3c. Add ❌ reaction to the original signal message ────────────────
+        # ── c. Add ❌ reaction to the original signal message ────────────────
         if monitor:
             try:
                 from price_feeds.monitors.streaming_monitor import react_to_original_signal

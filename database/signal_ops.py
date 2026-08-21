@@ -14,7 +14,7 @@ from models.enums import LimitStatus, SignalStatus
 from models.signal import LimitData, SignalData
 from utils.logger import get_logger
 
-from .utils import _parse_dt, calculate_expiry, is_weekend_window
+from .utils import _parse_dt, calculate_expiry
 
 logger = get_logger("signal_db")
 
@@ -44,16 +44,6 @@ MAX_INSTANT_ENTRIES = 2
 # believing a signal is open when the DB has already closed it. The budget is
 # there to stop a hang, not to pace a healthy write.
 STATUS_WRITE_TIMEOUT = 15.0
-
-
-def _is_crypto_symbol(symbol: str) -> bool:
-    """Lightweight crypto detector for DB-layer use (avoids importing the live mapper)."""
-    if not symbol:
-        return False
-    s = symbol.upper()
-    if any(c in s for c in ("BTC", "ETH", "BNB", "XRP", "ADA", "DOGE", "SOL", "DOT")):
-        return True
-    return s.endswith(("USDT", "USDC"))
 
 
 def _plan_limit_diff(existing_limits: list[dict[str, Any]], new_levels: list[float]) -> dict[str, Any]:
@@ -1243,8 +1233,12 @@ class SignalDatabase:
             logger.error(f"Error manually setting signal expiry: {e}", exc_info=True)
             return False
 
-    async def expire_old_signals(self) -> int:
-        """Check and expire signals past their expiry time."""
+    async def expire_old_signals(self) -> list[int]:
+        """Expire signals past their expiry time.
+
+        Returns the ids of the signals that were actually cancelled. HIT signals
+        roll over instead and are not in the list — they are still open.
+        """
         query = """
             SELECT id, status, expiry_type, instrument FROM signals
             WHERE status IN ($1, $2)
@@ -1255,9 +1249,9 @@ class SignalDatabase:
         expired = await self.db.fetch_all(query, (SignalStatus.ACTIVE, SignalStatus.HIT))
 
         if not expired:
-            return 0
+            return []
 
-        count = 0
+        cancelled_ids: list[int] = []
         rollover_count = 0
 
         # Each signal gets its own transaction so a single failure does not
@@ -1267,16 +1261,11 @@ class SignalDatabase:
             old_status = row["status"]
             instrument = row.get("instrument") or ""
 
-            # HIT signals normally roll over to the next expiry window. Non-crypto
-            # HIT signals heading into the weekend gap (Fri ≥ 4:45 PM or Sat/Sun)
-            # are cancelled instead — markets are closed and the next rollover
-            # would land on Saturday. Crypto runs 24/7 so weekend rollover is fine.
-            should_rollover = (
-                old_status == SignalStatus.HIT
-                and not (is_weekend_window() and not _is_crypto_symbol(instrument))
-            )
-
-            if should_rollover:
+            # An open position rolls over to the next expiry window rather than
+            # being closed, weekend included: calculate_expiry lands a day_end on
+            # Monday, and the position simply rides the gap the way it rides any
+            # overnight one. Only signals still waiting on a limit are cancelled.
+            if old_status == SignalStatus.HIT:
                 next_expiry = calculate_expiry(row["expiry_type"])
                 if next_expiry is None:
                     continue
@@ -1339,14 +1328,16 @@ class SignalDatabase:
                             "Expired",
                         )
                         await self._snapshot_close_prices(conn, signal_id, instrument)
-                    count += 1
+                    cancelled_ids.append(signal_id)
                 except Exception as e:
                     logger.error(f"Error expiring signal {signal_id}: {e}", exc_info=True)
 
-        if count > 0 or rollover_count > 0:
-            logger.info(f"Expired {count} signals, rolled over {rollover_count} HIT signals")
+        if cancelled_ids or rollover_count > 0:
+            logger.info(
+                f"Expired {len(cancelled_ids)} signals, rolled over {rollover_count} HIT signals"
+            )
 
-        return count
+        return cancelled_ids
 
     async def bulk_update_toll_sl(self, offset: float, channel_ids: list) -> tuple:
         """
