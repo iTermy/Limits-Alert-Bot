@@ -3,8 +3,9 @@ REM Force the VPS to match GitHub, then start the bot.
 REM Stop the running bot (Ctrl+C) before running this.
 REM
 REM Local changes to tracked files are DISCARDED - GitHub is the source of truth.
-REM Not affected: .env, the venv and logs (gitignored), and the live config files
-REM pinned with skip-worktree (see DEPLOY.md), which reset --hard leaves alone.
+REM That includes config/, so a threshold set live through Discord lasts only until
+REM the next deploy (see DEPLOY.md). Not affected: .env, the venv, the logs and
+REM data/ - all gitignored.
 
 REM Re-exec from a temp copy first: this script runs "git reset --hard", which can
 REM rewrite update.bat itself mid-run, and cmd.exe reads batch files by byte offset -

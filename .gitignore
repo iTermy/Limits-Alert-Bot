@@ -35,6 +35,10 @@ Thumbs.db
 # Project specific
 data/trading_bot.db
 config/local_settings.json
+
+# Runtime state, not config - the VPS's copy is the only correct one
+data/news_events.json
+data/info_embeds.json
 .claude/
 
 # Local production bundles (contain credentials)

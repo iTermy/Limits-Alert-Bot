@@ -24,8 +24,9 @@ it picked up, reinstalls dependencies if `requirements.txt` changed, and starts
 `main.py`. GitHub is the source of truth: local changes to tracked files are
 discarded, so the deploy can never be blocked by a dirty tree or a missing upstream.
 
-Not touched by the reset: `.env`, the venv and logs (gitignored), and the seven
-pinned config files below (`reset --hard` respects their `skip-worktree` flags).
+That includes the config files — see [Config is deployed, not tuned in
+place](#config-is-deployed-not-tuned-in-place). Not touched by the reset: `.env`,
+the venv, the logs, and `data/` (all gitignored).
 
 Two details that make it safe to run at any time:
 
@@ -57,14 +58,7 @@ git branch --set-upstream-to=origin/stage20_professionalize
 ```
 
 At this point git knows what the code *should* be but has not touched a single
-file. `.env`, the venv, and the logs are gitignored and stay put throughout.
-
-Now protect the config files the bot rewrites at runtime, so pulls never clobber
-your live tuning:
-
-```
-git update-index --skip-worktree config/settings.json config/tp_configuration.json config/alert_distances.json config/nm_configuration.json config/trailing_configuration.json data/news_events.json data/info_embeds.json
-```
+file. `.env`, the venv, the logs and `data/` are gitignored and stay put throughout.
 
 Review what is about to change:
 
@@ -84,37 +78,28 @@ The VPS now matches the repo. Start the bot with `update.bat` and you are done.
 
 ---
 
-## Why those seven files are pinned
+## Config is deployed, not tuned in place
 
-They are tracked in git but rewritten on the VPS at runtime:
+Every file in `config/` is overwritten from the repo on each deploy. The two
+copies are meant to be identical, so the repo simply wins.
 
-| File | Written by |
-|------|-----------|
-| `config/settings.json` | `!goldtollssl`, `!riskygoldsl`, news commands |
-| `config/tp_configuration.json` | `!tp set` / `!tp remove` |
-| `config/alert_distances.json` | `!alertdist set` / `remove` |
-| `config/nm_configuration.json` | `!nmconfig set` / `remove` |
-| `config/trailing_configuration.json` | trailing config writes |
-| `data/news_events.json` | `!news`, the 30 s cleanup loop |
-| `data/info_embeds.json` | info-embed message IDs |
+The consequence: **a threshold changed on the VPS through Discord survives only
+until the next deploy.** `!tp set`, `!alertdist set`, `!nmconfig set`,
+`!goldtollssl` and `!riskygoldsl` all write to `config/`, and `reset --hard`
+discards those edits along with any other local change. Use them to try a value
+live; commit the same change here to keep it.
 
-`BaseThresholdConfig` also rewrites its file on load when defaults are backfilled,
-so these go dirty just from starting the bot. Without `skip-worktree` every pull
-would abort on "local changes would be overwritten".
+`BaseThresholdConfig` also rewrites its file on load when defaults are
+backfilled, so `config/` goes dirty just from starting the bot. `reset --hard`
+does not care — it overwrites tracked files unconditionally and never aborts on a
+dirty tree. (`git pull` would abort, which is why the day-to-day flow resets.)
 
-`config/channels.json`, `config/symbol_mappings.json` and `config/vol_guard.json`
-are read-only at runtime and deploy normally.
+### `data/` is not config
 
-### Deploying a change to a pinned file
-
-Pulling a commit that touches a pinned file fails with "Entry ... would be
-overwritten by merge". Unpin it, take the repo's version, re-pin:
-
-```
-git update-index --no-skip-worktree config/tp_configuration.json
-git checkout -- config/tp_configuration.json
-git pull --ff-only
-git update-index --skip-worktree config/tp_configuration.json
-```
-
-To see what is currently pinned: `git ls-files -v | findstr /b S`
+`data/news_events.json` and `data/info_embeds.json` are runtime state and are
+gitignored — the VPS's copies are the only correct ones and no deploy touches
+them. `info_embeds.json` holds live Discord message IDs; overwrite it with a
+stale copy and the bot fails to find those messages and posts a second set of
+info embeds beside the ones already in the channels. `news_events.json` holds
+manual `!news` windows still running (auto-fetched ones are re-fetched at every
+startup, never persisted).
