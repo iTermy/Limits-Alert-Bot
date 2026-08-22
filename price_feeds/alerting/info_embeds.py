@@ -152,7 +152,7 @@ def _build_general_toll_embed() -> discord.Embed:
     embed.add_field(
         name="What's included",
         value=(
-            "Tolls on forex, indices and oil. Similar to gold tolls and behave similar to scalps. Valid **all week**."
+            "Tolls on forex, indices and oil. Similar to gold tolls and behave similar to scalps. Valid all week."
         ),
         inline=False,
     )
