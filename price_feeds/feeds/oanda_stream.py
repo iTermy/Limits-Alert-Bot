@@ -48,6 +48,7 @@ class OANDAStream:
         # Connection management
         self.session: aiohttp.ClientSession = None
         self.connected = False
+        self.last_connect_error: Optional[str] = None
         self.subscribed_symbols: set[str] = set()
 
         # Stream control
@@ -77,13 +78,19 @@ class OANDAStream:
             ) as response:
                 if response.status == 200:
                     self.connected = True
+                    self.last_connect_error = None
                     logger.debug("Connected to OANDA stream")
                     return True
-                logger.error(f"OANDA connection failed: {response.status}")
+                # The stream handler owns the noise policy for a feed that is
+                # down (weekend, maintenance) — it retries on a backoff and
+                # logs once per outage, so record the reason rather than log it.
+                self.last_connect_error = f"HTTP {response.status}"
+                logger.debug("OANDA connect rejected: %s", self.last_connect_error)
                 return False
 
         except Exception as e:
-            logger.error(f"Error connecting to OANDA: {e}")
+            self.last_connect_error = str(e)
+            logger.debug("OANDA connect failed: %s", e)
             return False
 
     async def disconnect(self):
@@ -166,7 +173,9 @@ class OANDAStream:
             Tuple of (symbol, price_data) on each update
         """
         if not self.connected:
-            raise Exception("Not connected to OANDA")
+            raise ConnectionError(
+                f"Not connected to OANDA ({self.last_connect_error or 'no session'})"
+            )
 
         if not self.subscribed_symbols:
             logger.debug("No symbols subscribed, waiting...")

@@ -16,6 +16,12 @@ logger = logging.getLogger(__name__)
 # Hard ceiling on a single feed reconnect (teardown + respawn + resubscribe).
 RECONNECT_TIMEOUT_SECONDS = 45
 
+# A feed can be legitimately unreachable for a long stretch (weekend, broker
+# maintenance). Retries back off to a ceiling low enough that the reopen is
+# picked up promptly.
+RECONNECT_BACKOFF_START_SECONDS = 5
+RECONNECT_BACKOFF_MAX_SECONDS = 60
+
 
 class PriceStreamManager:
     """
@@ -72,7 +78,7 @@ class PriceStreamManager:
             self.feed_status["icmarkets"] = True
 
             # Start MT5 stream handler
-            asyncio.create_task(self._handle_icmarkets_stream())
+            asyncio.create_task(self._run_feed_stream("icmarkets"))
             logger.debug("ICMarkets stream initialized")
         except Exception as e:
             logger.error(f"Failed to initialize ICMarkets stream: {e}")
@@ -94,7 +100,7 @@ class PriceStreamManager:
                 self.feed_status["oanda"] = True
 
                 # Start OANDA stream handler
-                asyncio.create_task(self._handle_oanda_stream())
+                asyncio.create_task(self._run_feed_stream("oanda"))
 
                 # Log which server we're connected to
                 server_type = "practice" if practice else "live"
@@ -112,7 +118,7 @@ class PriceStreamManager:
             self.feed_status["binance"] = True
 
             # Start Binance stream handler
-            asyncio.create_task(self._handle_binance_stream())
+            asyncio.create_task(self._run_feed_stream("binance"))
             logger.debug("Binance WebSocket initialized")
         except Exception as e:
             logger.error(f"Failed to initialize Binance stream: {e}")
@@ -129,7 +135,7 @@ class PriceStreamManager:
                 await self.feeds["exness"].connect()
                 self.feed_status["exness"] = True
 
-                asyncio.create_task(self._handle_exness_stream())
+                asyncio.create_task(self._run_feed_stream("exness"))
                 logger.debug("Exness MT5 stream initialized")
             else:
                 logger.debug("Exness MT5 path not configured, skipping")
@@ -286,103 +292,49 @@ class PriceStreamManager:
 
             ic_feed.on_poll = _mark_icmarkets_seen
 
-    async def _handle_icmarkets_stream(self):
-        """Handle MT5 price stream"""
-        feed = self.feeds["icmarkets"]
+    async def _run_feed_stream(self, feed_name: str):
+        """Consume a feed's price stream, reconnecting with backoff on failure.
+
+        Only the first failure of an outage is logged at WARNING: a feed that is
+        down for a whole weekend would otherwise repeat the same error every few
+        seconds for two days.
+        """
+        feed = self.feeds[feed_name]
+        failures = 0
 
         while True:
             try:
                 async for symbol, price_data in feed.stream_prices():
-                    # Convert feed symbol back to internal format
-                    internal_symbol = self.symbol_mapper.get_internal_symbol(symbol, "icmarkets")
+                    if failures:
+                        logger.info("%s feed recovered", feed_name)
+                        failures = 0
 
+                    internal_symbol = self.symbol_mapper.get_internal_symbol(symbol, feed_name)
                     if internal_symbol:
-                        await self._process_price_update(internal_symbol, price_data, "icmarkets")
+                        await self._process_price_update(internal_symbol, price_data, feed_name)
             except Exception as e:
-                logger.error(f"ICMarkets stream error: {e}")
                 self.stats["errors"] += 1
+                failures += 1
+                if failures == 1:
+                    logger.warning("%s stream error: %s", feed_name, e)
+                else:
+                    logger.debug("%s stream error (attempt %d): %s", feed_name, failures, e)
+            else:
+                # Stream ended without an error — nothing subscribed to it yet.
+                await asyncio.sleep(1)
+                continue
 
-                # Reconnect
-                await asyncio.sleep(5)
-                try:
-                    await feed.reconnect()
-                    self.stats["reconnections"] += 1
-                except Exception as e2:
-                    logger.error(f"ICMarkets reconnection failed: {e2}")
-                    await asyncio.sleep(30)
+            backoff = min(
+                RECONNECT_BACKOFF_START_SECONDS * 2 ** (failures - 1),
+                RECONNECT_BACKOFF_MAX_SECONDS,
+            )
+            await asyncio.sleep(backoff)
 
-    async def _handle_oanda_stream(self):
-        """Handle OANDA price stream"""
-        feed = self.feeds["oanda"]
-
-        while True:
             try:
-                async for symbol, price_data in feed.stream_prices():
-                    # Convert feed symbol back to internal format
-                    internal_symbol = self.symbol_mapper.get_internal_symbol(symbol, "oanda")
-
-                    if internal_symbol:
-                        await self._process_price_update(internal_symbol, price_data, "oanda")
+                await asyncio.wait_for(feed.reconnect(), timeout=RECONNECT_TIMEOUT_SECONDS)
+                self.stats["reconnections"] += 1
             except Exception as e:
-                logger.error(f"OANDA stream error: {e}")
-                self.stats["errors"] += 1
-
-                # Reconnect
-                await asyncio.sleep(5)
-                try:
-                    await feed.reconnect()
-                    self.stats["reconnections"] += 1
-                except Exception as e2:
-                    logger.error(f"OANDA reconnection failed: {e2}")
-                    await asyncio.sleep(30)
-
-    async def _handle_binance_stream(self):
-        """Handle Binance WebSocket stream"""
-        feed = self.feeds["binance"]
-
-        while True:
-            try:
-                async for symbol, price_data in feed.stream_prices():
-                    # Convert feed symbol back to internal format
-                    internal_symbol = self.symbol_mapper.get_internal_symbol(symbol, "binance")
-
-                    if internal_symbol:
-                        await self._process_price_update(internal_symbol, price_data, "binance")
-            except Exception as e:
-                logger.error(f"Binance stream error: {e}")
-                self.stats["errors"] += 1
-
-                # Reconnect
-                await asyncio.sleep(5)
-                try:
-                    await feed.reconnect()
-                    self.stats["reconnections"] += 1
-                except Exception as e2:
-                    logger.error(f"Binance reconnection failed: {e2}")
-                    await asyncio.sleep(30)
-
-    async def _handle_exness_stream(self):
-        """Handle Exness MT5 price stream (oil symbols)"""
-        feed = self.feeds["exness"]
-
-        while True:
-            try:
-                async for symbol, price_data in feed.stream_prices():
-                    internal_symbol = self.symbol_mapper.get_internal_symbol(symbol, "exness")
-
-                    if internal_symbol:
-                        await self._process_price_update(internal_symbol, price_data, "exness")
-            except Exception as e:
-                logger.error(f"Exness stream error: {e}")
-                self.stats["errors"] += 1
-
-                await asyncio.sleep(5)
-                try:
-                    await feed.reconnect()
-                    self.stats["reconnections"] += 1
-                except Exception as e2:
-                    logger.error(f"Exness reconnection failed: {e2}")
-                    await asyncio.sleep(30)
+                logger.debug("%s reconnect failed: %s", feed_name, e)
 
     async def _process_price_update(self, symbol: str, price_data: dict, feed: str):
         """Process a price update, compute spread if absent, and notify subscribers."""
