@@ -50,7 +50,7 @@ def _base_embed(title: str, description: str, color: int, footer: bool = True) -
 
 def _build_main_embed() -> discord.Embed:
     embed = _base_embed(
-        "Signal Alerts",
+        "🍾 Signal Alerts",
         "The main feed where most setups land, especially forex. You will see an embed in the channel "
         "when a signal is near, otherwise it will be empty.",
         0x5865F2,
@@ -92,7 +92,7 @@ def _build_main_embed() -> discord.Embed:
 
 def _build_pa_embed() -> discord.Embed:
     embed = _base_embed(
-        "Price Action Trades",
+        "🔮 Price Action Trades",
         "Higher-risk, higher-reward setups with wider stops.",
         0x9B59B6,
     )
@@ -121,7 +121,7 @@ def _build_pa_embed() -> discord.Embed:
 
 def _build_gold_toll_embed() -> discord.Embed:
     embed = _base_embed(
-        "Gold Tolls",
+        "🪙 Gold Tolls",
         "A collection of gold scalps mapped across a range of limits. A fan favorite.",
         0xF1C40F,
     )
@@ -134,7 +134,7 @@ def _build_gold_toll_embed() -> discord.Embed:
         inline=False,
     )
     embed.add_field(
-        name="🎯 How to take it",
+        name="How to take it",
         value=(
             "Treat it as a normal scalp setup with the suggested tps and stops."
         ),
@@ -157,7 +157,7 @@ def _build_general_toll_embed() -> discord.Embed:
         inline=False,
     )
     embed.add_field(
-        name="🎯 How to take it",
+        name="How to take it",
         value=(
             "• Reconcile your own broker's price with the reference chart — oil and "
             "indices usually need adjusting:\n"
@@ -172,7 +172,7 @@ def _build_general_toll_embed() -> discord.Embed:
 
 def _build_legends_embed() -> discord.Embed:
     embed = _base_embed(
-        "Legends Trades",
+        "🎲 Legends Trades",
         "Trades shared by TM-trained community members.",
         0x1ABC9C,
     )
@@ -197,7 +197,7 @@ def _build_legends_embed() -> discord.Embed:
 
 def _build_risky_embed() -> discord.Embed:
     embed = _base_embed(
-        "Risky Gold",
+        "❤️‍🔥 Risky Gold",
         "Higher-risk gold scalp maps. Riskier and quicker in-and-out setup than tolls.",
         0xE74C3C,
     )
