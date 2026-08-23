@@ -199,15 +199,20 @@ class StreamingPriceMonitor:
         Result cached for _SPREAD_HOUR_CACHE_SECONDS to avoid per-tick tz construction.
 
         Spread hour runs from 5:00 PM to 6:00 PM US/Eastern (America/New_York)
-        on weekdays (Monday-Friday).  During this window broker spreads widen
+        every day except Saturday. During this window broker spreads widen
         significantly, causing false limit/stop hits.
+
+        Sunday counts: the week reopens at 17:00 ET and the first hour is the
+        weekend gap plus a book that has barely any depth, so its prints are
+        the ones this gate exists to ignore. Saturday alone is excluded because
+        nothing quotes at all.
         """
         now_mono = monotonic()
         if now_mono < self._spread_hour_cache_expires:
             return self._spread_hour_cached
 
         now_est = datetime.now(_EST_TZ)
-        result = False if now_est.weekday() >= 5 else dtime(17, 0) <= now_est.time() < dtime(18, 0)
+        result = now_est.weekday() != 5 and dtime(17, 0) <= now_est.time() < dtime(18, 0)
 
         # Clamp the cache so it never serves a stale value across the 17:00 /
         # 18:00 ET boundaries. Spreads widen exactly at 17:00; a flat 5 s cache
@@ -540,6 +545,15 @@ class StreamingPriceMonitor:
             # Real position already closed via auto-TP; only the trailing-stop
             # shadow simulation is still watching this symbol. Skip every real
             # alert/status check entirely.
+            #
+            # The sim trails the bid (long) / ask (short), both of which blow out
+            # during spread hour, so a non-crypto shadow sits the window out too.
+            # Otherwise the Sunday reopen stops out every open level on spread
+            # alone and the trailing-vs-fixed-TP comparison measures the gap
+            # rather than the strategy.
+            if is_spread_hour and not self._is_crypto_signal(signal):
+                return
+
             all_done = await self.trailing_monitor.update(
                 signal, price_data["bid"], price_data["ask"]
             )
@@ -609,6 +623,15 @@ class StreamingPriceMonitor:
 
         # Check auto take-profit (runs for any HIT signal that has hit limits cached)
         if signal.status == "hit":
+            # A non-crypto position rides spread hour out untouched, like its stop
+            # loss and breakeven stop: TP is measured on the bid, which blows out
+            # in the window, so the spread alone can book a profit the trade never
+            # made. Sunday's 17:00 reopen is the sharp case — the first prints
+            # after the weekend gap are mostly spread. Excursion sampling stands
+            # down with it rather than ratcheting MFE/MAE off those same prints.
+            if is_spread_hour and not self._is_crypto_signal(signal):
+                return
+
             tp_triggered = await self.tp_monitor.check_signal(
                 signal, current_bid=price_data["bid"]
             )

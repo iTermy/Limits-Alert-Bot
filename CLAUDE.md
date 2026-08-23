@@ -269,7 +269,8 @@ Every incoming price update calls `streaming_monitor._on_price_update()` → `_c
    silently at DEBUG level. Spread-hour transition tracking still runs on stale ticks.
 
 1. Spread-hour gate
-   _is_spread_hour(): America/New_York, 17:00–18:00, weekdays only
+   _is_spread_hour(): America/New_York, 17:00–18:00, every day but Saturday
+   (Sunday's 17:00 reopen is spread hour too — see Spread hour covers Sunday)
    └─ Signal would trigger → send_spread_hour_cancel_alert()
       Edits embed if one exists; no standalone if embed already present.
 
@@ -309,6 +310,8 @@ Every incoming price update calls `streaming_monitor._on_price_update()` → `_c
 
 8. Auto-TP check (HIT-status signals only)
    tp_monitor.check_signal(signal, bid) — no spread buffer; evaluated on the bid
+   Skipped for non-crypto during spread hour, like the SL and the BE stop; the
+   excursion ratchet that rides in the same block stands down with it.
    last_hit_limit_pnl ≥ threshold AND sum(earlier_limits_pnl) ≥ 0 (ε=1e-9)
    → send_auto_tp_alert() → signal→profit
 ```
@@ -518,6 +521,21 @@ The `MetaTrader5` Python package is process-global — `mt5.initialize()` can on
 
 ### Exness oil symbol mapping
 Internal symbol `USOILSPOT` maps to `USOILm` on Exness MT5. The mapping is defined in both `symbol_mappings.json` (`symbol_mappings.exness.specific_mappings`) and the reverse direction (`reverse_mappings.exness`). Both sections are required — without the reverse mapping, prices arrive under `USOILM` instead of `USOILSPOT` and don't match signals.
+
+### Spread hour covers Sunday
+`_is_spread_hour` (and `vol_guard`'s copy of it) is 17:00–18:00 ET on **every day but
+Saturday**. It used to exclude the whole weekend, which left the week's 17:00 ET
+reopen — the widest, thinnest book there is — looking like ordinary trading: the
+first prints after the weekend gap are mostly spread, and auto-TP took them at face
+value. Saturday stays excluded because nothing quotes at all; Friday 17:00–18:00 was
+already covered and stays that way.
+
+Everything a non-crypto signal does in the window now stands down together: hits and
+SLs (existing behaviour), the breakeven stop, **auto-TP with the excursion ratchet
+that shares its block**, and the trailing shadow sim (which trails the bid/ask, so the
+reopen would stop out every open level on spread alone and make the
+trailing-vs-fixed-TP comparison measure the gap instead of the strategy). Crypto is
+exempt throughout — it never stops quoting. Tests: `tests/test_spread_hour.py`.
 
 ### Spread/news cancel behavior
 Spread-hour and news cancels **edit the persistent embed** when one already exists. They only fall back to standalone messages if no embed has been created yet for that signal.
