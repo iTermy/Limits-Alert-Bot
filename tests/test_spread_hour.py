@@ -146,6 +146,66 @@ class TestAutoTPDuringSpreadHour:
         assert monitor.excursion_monitor.updated == [5040.0]
 
 
+class _SLRecorder:
+    """Replaces everything _check_stop_loss reaches for once a gate lets it through."""
+
+    def __init__(self, monitor):
+        self.stopped = []
+        self.guarded = []
+        monitor.alert_system = self
+        monitor._react_async = lambda signal, emoji: None
+        monitor._process_stop_loss_hit = self._process
+        monitor._cancel_signal_during_guard = self._guard
+
+    async def send_stop_loss_alert(self, signal, current_price):
+        return True
+
+    async def _process(self, signal, current_price):
+        self.stopped.append(current_price)
+
+    async def _guard(self, signal, current_price, reason, event=None):
+        self.guarded.append(reason)
+
+
+def _drive_sl(monitor, signal, price, is_spread_hour):
+    asyncio.run(monitor._check_stop_loss(signal, price, "long", is_spread_hour, False))
+
+
+class TestStopLossDuringSpreadHour:
+    """The SL gate reads the same flag as everything else, so Sunday 17:00-18:00
+    now behaves exactly like a weekday's window."""
+
+    def test_open_position_rides_the_window_out(self):
+        monitor = _monitor()
+        recorder = _SLRecorder(monitor)
+        signal = _hit_signal()
+        _drive_sl(monitor, signal, 4890.0, is_spread_hour=True)
+        assert recorder.stopped == []
+        assert recorder.guarded == []
+        assert signal.sl_alert_sent is False
+
+    def test_signal_with_no_fills_is_cancelled(self):
+        monitor = _monitor()
+        recorder = _SLRecorder(monitor)
+        signal = _hit_signal()
+        signal.status = "active"
+        _drive_sl(monitor, signal, 4890.0, is_spread_hour=True)
+        assert recorder.guarded == ["spread_hour"]
+        assert recorder.stopped == []
+
+    def test_crypto_still_stops_out(self):
+        monitor = _monitor()
+        recorder = _SLRecorder(monitor)
+        _drive_sl(monitor, _hit_signal("crypto"), 4890.0, is_spread_hour=True)
+        assert recorder.stopped == [4890.0]
+
+    def test_outside_the_window_the_stop_books_normally(self):
+        monitor = _monitor()
+        recorder = _SLRecorder(monitor)
+        _drive_sl(monitor, _hit_signal(), 4890.0, is_spread_hour=False)
+        assert recorder.stopped == [4890.0]
+
+
 class TestShadowTrailingDuringSpreadHour:
     def test_non_crypto_shadow_sits_the_window_out(self):
         monitor = _monitor()
