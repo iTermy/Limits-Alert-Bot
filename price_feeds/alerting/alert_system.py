@@ -1194,6 +1194,7 @@ class AlertSystem:
             return False
 
         self._archive_manager.cancel_pending_move(signal_id)
+        await self._archive_manager.delete_profit_copy(signal_id)
 
         finished_msg = self.signal_finished_messages.pop(signal_id, None)
         if finished_msg:

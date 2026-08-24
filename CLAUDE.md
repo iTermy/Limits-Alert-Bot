@@ -112,7 +112,8 @@ price_feeds/
     embed_builders.py           Pure functions: _build_signal_embed(), _build_profit_archive_embed(),
                                   _set_archive_footer() + formatting helpers
     archive_manager.py          ArchiveManager — schedule_end_state_move(), cancel_pending_move(),
-                                  delayed move/delete for finished signals
+                                  delayed move/delete for finished signals; profit embeds go to
+                                  profit_channel AND a copy to finished_signals (with role ping)
     info_embeds.py              InfoEmbedManager — static per-channel info/risk embeds;
                                   message IDs persisted to data/info_embeds.json
   monitors/                     Per-tick evaluation, health, and market guards

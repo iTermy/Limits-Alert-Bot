@@ -71,6 +71,9 @@ class ArchiveManager:
         self._finished_channel_id = finished_channel_id
         self._profit_channel_id = profit_channel_id
         self._deletion_tasks: dict[int, asyncio.Task] = {}
+        # signal_id -> the finished-signals copy of a profit embed (the canonical
+        # copy lives in the profit channel and is the one persisted on the row)
+        self._profit_copies: dict[int, discord.Message] = {}
 
     def cancel_pending_move(self, signal_id: int):
         """Cancel any pending move-to-finished task for a signal (e.g. on reactivation)."""
@@ -96,6 +99,45 @@ class ArchiveManager:
         if not self._profit_channel_id or not self.bot:
             return None
         return self.bot.get_channel(int(self._profit_channel_id))
+
+    async def _mirror_profit_to_finished(self, signal_id: int, embed: discord.Embed) -> None:
+        """
+        Post a second copy of a profit archive embed to finished-signals, so wins
+        appear in the running archive as well as the profit channel.
+        """
+        finished_channel = self._get_finished_channel()
+        if not finished_channel:
+            return
+        try:
+            await finished_channel.send(self.role_mention)
+        except Exception as e:
+            logger.warning(
+                f"Could not send role ping to finished-signals for signal {signal_id}: {e}"
+            )
+        try:
+            copy_msg = await finished_channel.send(embed=embed)
+        except Exception as e:
+            logger.warning(
+                f"Could not copy profit embed for signal {signal_id} to finished-signals: {e}"
+            )
+            return
+        self._profit_copies[signal_id] = copy_msg
+        self._track_alert_message(copy_msg.id, signal_id)
+
+    async def delete_profit_copy(self, signal_id: int) -> None:
+        """Delete the finished-signals copy of a profit embed (on reactivation)."""
+        copy_msg = self._profit_copies.pop(signal_id, None)
+        if not copy_msg:
+            return
+        self.alert_messages.pop(str(copy_msg.id), None)
+        try:
+            await copy_msg.delete()
+        except discord.NotFound:
+            pass
+        except Exception as e:
+            logger.warning(
+                f"Could not delete finished-signals profit copy for signal {signal_id}: {e}"
+            )
 
     async def maybe_delete_original_message(self, signal: SignalData, signal_id: int) -> None:
         """
@@ -137,7 +179,7 @@ class ArchiveManager:
         END_STATE_DELETE_MINUTES minutes.
 
         Routing:
-          - profit / auto_tp  -> profit_channel
+          - profit / auto_tp  -> profit_channel, plus a copy in finished_signals
           - everything else   -> finished_signals channel
         """
         self.cancel_pending_move(signal_id)
@@ -248,6 +290,8 @@ class ArchiveManager:
                     logger.debug(
                         f"Moved signal {signal_id} embed to {dest_name} (msg {finished_msg.id})"
                     )
+                    if is_profit:
+                        await self._mirror_profit_to_finished(signal_id, new_embed)
                 except Exception as e:
                     logger.error(f"Failed to send embed to {dest_name} for signal {signal_id}: {e}")
 
