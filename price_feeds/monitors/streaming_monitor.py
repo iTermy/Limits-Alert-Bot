@@ -260,6 +260,10 @@ class StreamingPriceMonitor:
         """Crypto signals run 24/7 and are exempt from spread-hour cancellation."""
         return signal.asset_class == "crypto"
 
+    def _rides_out_news(self, signal: dict) -> bool:
+        """Swing signals hold through news — a window never cancels one."""
+        return signal.type == "swing"
+
     def _annotate_asset_class(self, signal: dict) -> None:
         """Cache asset_class on the signal so the hot path doesn't re-scan the symbol."""
         if signal.asset_class:
@@ -568,7 +572,7 @@ class StreamingPriceMonitor:
 
         # An already-HIT signal sitting open when a news window opens is
         # cancelled outright — swings are exempt (they ride news out).
-        if signal.status == "hit" and signal.type != "swing" and self.bot.news_manager:
+        if signal.status == "hit" and not self._rides_out_news(signal) and self.bot.news_manager:
             news_event = self.bot.news_manager.is_news_active_for(signal.instrument)
             if news_event is not None:
                 logger.debug(
@@ -758,9 +762,9 @@ class StreamingPriceMonitor:
         spread_buffer_enabled: bool,
     ) -> None:
         """Run the guard gates for a hit limit, then mark it and alert."""
-        # News mode guard
+        # News mode guard — a swing enters through the window like any other tick.
         news_event = None
-        if self.bot.news_manager:
+        if self.bot.news_manager and not self._rides_out_news(signal):
             news_event = self.bot.news_manager.is_news_active_for(signal.instrument)
 
         if news_event is not None:
@@ -858,8 +862,13 @@ class StreamingPriceMonitor:
         """Fire the approaching alert when the first pending limit enters range."""
         symbol = signal.instrument
 
-        # Suppress approaching alerts during active news windows
-        if self.bot.news_manager and self.bot.news_manager.is_news_active_for(signal.instrument):
+        # Suppress approaching alerts during active news windows — a hit in one is
+        # cancelled anyway. Swings are not, so they alert as usual.
+        if (
+            self.bot.news_manager
+            and not self._rides_out_news(signal)
+            and self.bot.news_manager.is_news_active_for(signal.instrument)
+        ):
             return
 
         # Suppress approaching alerts for non-crypto signals during the late

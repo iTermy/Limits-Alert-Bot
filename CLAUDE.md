@@ -279,9 +279,10 @@ Every incoming price update calls `streaming_monitor._on_price_update()` → `_c
    news_manager.is_news_active_for(instrument)
    └─ News active AND would trigger → send_news_cancel_alert()
       Edits embed if one exists; standalone message only if no embed yet.
-   └─ Also in _check_signal: an already-HIT signal (non-swing) is cancelled
-      outright the moment a news window covering its instrument opens, even
-      if no further limit/SL is touched. Swings ride news out.
+   └─ Also in _check_signal: an already-HIT signal is cancelled outright the
+      moment a news window covering its instrument opens, even if no further
+      limit/SL is touched.
+   └─ Swings are exempt from all of it — see "Swing signals hold through news".
 
 3. Approaching check
    First pending limit only (lowest sequence_number, approaching_alert_sent=False)
@@ -602,6 +603,16 @@ signal breakeven *immediately* — that one is a status command, this one is pro
 
 ### Swing is not near-missable
 `NearMissMonitor.update` short-circuits when `signal.type == "swing"`. Swing signals can only close via hit, profit, SL, or manual cancel.
+
+### Swing signals hold through news
+A news window never cancels a swing. `streaming_monitor._rides_out_news(signal)`
+(`signal.type == "swing"`) stands down all three news gates: the open-HIT cancel in
+`_check_signal`, the fill cancel in `_handle_limit_hit`, and the approaching-alert
+suppression in `_handle_approaching` — a swing that can still enter during the window
+should still say so on the way in. A swing is held for days and is sized for the event
+risk it is going to sit through, so flattening it around a release books a loss the
+trade was never meant to avoid. Every other guard (spread hour, late market, risky
+window) is unchanged, as is anything manual. Tests: `tests/test_news_swing.py`.
 
 ### Gold-tolls SL offset is configurable
 `get_gold_tolls_sl_offset()` reads `settings.json` via `load_settings()` → `BotSettings.gold_tolls_sl_offset` (default `5.0`) with a 30 s cache. Change it via `!goldtollssl <value>` or edit `settings.json` directly.
