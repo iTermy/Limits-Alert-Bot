@@ -29,6 +29,11 @@ _APPROACHING_RETRACTION_MULTIPLIER = 2.0
 # constructing a tz-aware datetime on every price tick.
 _SPREAD_HOUR_CACHE_SECONDS = 5
 
+# How long to wait before retrying a hit / stop-loss / breakeven write that
+# failed. These writes run inline in the feed dispatch loop and can block for
+# the pool timeout, so a database outage must not be retried on every tick.
+_WRITE_RETRY_BACKOFF_SECONDS = 5.0
+
 # Module-level pytz instance so we don't re-resolve the timezone string each call.
 _EST_TZ = pytz.timezone("America/New_York")
 
@@ -152,6 +157,10 @@ class StreamingPriceMonitor:
         # Late market hour (the hour before spread hour) is cached the same way.
         self._late_market_cached: bool = False
         self._late_market_cache_expires: float = 0.0
+
+        # Backoff deadlines for status writes that failed, keyed by
+        # "limit:<id>" / "sl:<signal_id>" / "be:<signal_id>".
+        self._write_retry_after: dict[str, float] = {}
 
         # Performance tracking
         self.stats = {
@@ -412,12 +421,21 @@ class StreamingPriceMonitor:
             self._refresh_spread_buffer_setting()
 
             try:
+                snapshot_at = datetime.now(timezone.utc)
                 signals = await self.db.get_active_signals_for_tracking()
                 new_by_id = {s.signal_id: s for s in signals}
                 new_ids = set(new_by_id.keys())
                 old_ids = set(self.active_signals.keys())
 
                 guild_id = self.bot.guilds[0].id if self.bot.guilds else None
+
+                # Signals present in both are diffed rather than rebuilt, so
+                # their limits are the one piece of in-memory state nothing else
+                # ever corrects. Reconcile them against the DB.
+                for signal_id in new_ids & old_ids:
+                    self._reconcile_limits(
+                        self.active_signals[signal_id], new_by_id[signal_id], snapshot_at
+                    )
 
                 ids_removed = old_ids - new_ids
                 ids_added = new_ids - old_ids
@@ -475,6 +493,38 @@ class StreamingPriceMonitor:
 
             except Exception as e:
                 logger.error(f"Error in periodic refresh: {e!r}")
+
+    def _reconcile_limits(
+        self, tracked: SignalData, fresh: SignalData, snapshot_at: datetime
+    ) -> None:
+        """Restore tracked limits that the database still reports as pending.
+
+        `fresh` carries only pending limits (the tracking query joins on them),
+        so a tracked limit appearing there must be pending in memory too.
+        Anything else is a fill or cancel that was applied in memory without a
+        matching write, which silently removes the level from pending_limits
+        and stops the tick path ever checking it again.
+
+        A limit filled after the snapshot was taken is left alone — memory is
+        legitimately ahead of the read.
+        """
+        db_pending = {limit.id for limit in fresh.limits}
+
+        for limit in tracked.limits:
+            if limit.id not in db_pending or limit.status == "pending":
+                continue
+            if limit.hit_time is not None and limit.hit_time >= snapshot_at:
+                continue
+
+            logger.warning(
+                f"Signal {tracked.signal_id} ({tracked.instrument}) limit "
+                f"#{limit.sequence_number} is {limit.status} in memory but pending "
+                f"in the database — restoring it to pending"
+            )
+            limit.status = "pending"
+            limit.hit_alert_sent = False
+            limit.hit_time = None
+            limit.hit_price = None
 
     async def _on_price_update(self, symbol: str, price_data: dict):
         """Callback for price updates from stream manager."""
@@ -670,6 +720,13 @@ class StreamingPriceMonitor:
                 else:
                     await self._maybe_unsubscribe_symbol(signal.instrument, signal_id)
 
+    def _write_retry_due(self, key: str) -> bool:
+        """True when a status write that previously failed may be retried."""
+        return monotonic() >= self._write_retry_after.get(key, 0.0)
+
+    def _write_retry_backoff(self, key: str) -> None:
+        self._write_retry_after[key] = monotonic() + _WRITE_RETRY_BACKOFF_SECONDS
+
     def _hit_state(
         self,
         symbol: str,
@@ -830,12 +887,23 @@ class StreamingPriceMonitor:
             await self._cancel_signal_during_guard(signal, current_price, "late_market")
             return
 
-        # Mark the limit hit in memory first so the embed edit and any
-        # concurrent live-refresh render identical state — the embed updates
-        # in the same beat as the ping instead of briefly reverting.
-        limit.status = "hit"
-        limit.hit_alert_sent = True
+        # The fill is recorded before anything is mutated in memory, and the
+        # limit is left pending when the write fails so the next tick retries.
+        # Flipping it to "hit" optimistically drops it out of pending_limits
+        # for good: the tick path stops checking a level the DB still reports
+        # as pending, and the execution bot goes on trading that level.
+        retry_key = f"limit:{limit.id}"
+        if not self._write_retry_due(retry_key):
+            return
 
+        if not await self._process_limit_hit(signal, limit, current_price):
+            self._write_retry_backoff(retry_key)
+            return
+
+        self._write_retry_after.pop(retry_key, None)
+
+        # _process_limit_hit has already marked the limit hit in memory, so the
+        # embed edit and any concurrent live-refresh render identical state.
         await self.alert_system.send_limit_hit_alert(
             signal,
             limit,
@@ -844,7 +912,6 @@ class StreamingPriceMonitor:
             spread_buffer_enabled=spread_buffer_enabled,
         )
         self._react_async(signal, "🎯")
-        await self._process_limit_hit(signal, limit, current_price)
 
         self.stats["limits_hit"] += 1
 
@@ -1024,11 +1091,22 @@ class StreamingPriceMonitor:
                     )
                     return
 
+            # As with a limit hit: the write lands before sl_alert_sent is set,
+            # so a failed write leaves the stop live instead of standing this
+            # check down for the rest of the signal's life.
+            retry_key = f"sl:{signal.signal_id}"
+            if not self._write_retry_due(retry_key):
+                return
+
+            if not await self._process_stop_loss_hit(signal, current_price):
+                self._write_retry_backoff(retry_key)
+                return
+
+            self._write_retry_after.pop(retry_key, None)
             signal.sl_alert_sent = True
 
             await self.alert_system.send_stop_loss_alert(signal, current_price)
             self._react_async(signal, "🛑")
-            await self._process_stop_loss_hit(signal, current_price)
             self.stats["stop_losses_hit"] += 1
 
     async def _check_breakeven_stop(
@@ -1062,6 +1140,15 @@ class StreamingPriceMonitor:
         if not reached:
             return False
 
+        retry_key = f"be:{signal.signal_id}"
+        if not self._write_retry_due(retry_key):
+            return False
+
+        if not await self._process_breakeven_stop(signal, bid):
+            self._write_retry_backoff(retry_key)
+            return False
+
+        self._write_retry_after.pop(retry_key, None)
         signal.be_stop_alert_sent = True
         logger.info(
             f"Signal {signal.signal_id} ({signal.instrument}) breakeven stop @ {bid} "
@@ -1070,12 +1157,15 @@ class StreamingPriceMonitor:
 
         await self.alert_system.send_breakeven_stop_alert(signal, bid, be_price)
         self._react_async(signal, "➖")
-        await self._process_breakeven_stop(signal, bid)
         self.stats["breakeven_stops_hit"] += 1
         return True
 
-    async def _process_breakeven_stop(self, signal: SignalData, current_price: float):
-        """Record a breakeven-stop close and tear down the per-signal trackers."""
+    async def _process_breakeven_stop(self, signal: SignalData, current_price: float) -> bool:
+        """Record a breakeven-stop close and tear down the per-signal trackers.
+
+        Returns whether the write landed, so a failure leaves the stop armed
+        rather than retiring it against a DB that still has the signal open.
+        """
         try:
             success = await self.signal_db.manually_set_signal_status(
                 signal.signal_id,
@@ -1085,11 +1175,11 @@ class StreamingPriceMonitor:
             )
         except Exception as e:
             logger.error(f"Failed to process breakeven stop: {e}")
-            return
+            return False
 
         if not success:
             logger.error(f"Signal {signal.signal_id}: breakeven stop write did not land")
-            return
+            return False
 
         self.sync_signal_status_in_memory(signal.signal_id, "breakeven")
         logger.debug(f"Signal {signal.signal_id} marked as breakeven")
@@ -1100,6 +1190,7 @@ class StreamingPriceMonitor:
         self.trailing_monitor.evict_signal(signal.signal_id)
         await self.excursion_monitor.finalize(signal.signal_id, current_price, "be_stop")
         await self._maybe_unsubscribe_symbol(signal.instrument, signal.signal_id)
+        return True
 
     async def _execute_near_miss_cancel(self, signal: SignalData, current_price: float):
         """Cancel a signal whose near-miss bounce was confirmed, then clean up.
@@ -1165,28 +1256,35 @@ class StreamingPriceMonitor:
         except Exception as e:
             logger.error(f"Failed to mark approaching sent: {e}")
 
-    async def _process_limit_hit(self, signal: dict, limit: dict, actual_price: float):
-        """Process limit hit in database"""
+    async def _process_limit_hit(
+        self, signal: SignalData, limit: LimitData, actual_price: float
+    ) -> bool:
+        """Record the fill in the database, then mirror it in memory.
+
+        Returns whether the write landed. Memory is only mutated afterwards: a
+        limit marked hit on a failed write disappears from pending_limits and
+        is never re-checked, leaving the signal inert while the DB still shows
+        it active with the limit pending.
+        """
         try:
             result = await self.signal_db.process_limit_hit(limit.id, actual_price)
-
-            now = datetime.now(timezone.utc)
-            limit.status = "hit"
-            limit.hit_time = now
-            limit.hit_price = actual_price
-
-            await self.tp_monitor.refresh_hit_limits(signal.signal_id)
-            signal.status = "hit"
-            self.nm_monitor.evict_signal(signal.signal_id)
-
-            if result.get("all_limits_hit"):
-                logger.debug(
-                    "All limits hit for signal %s — continuing to watch for auto-TP",
-                    signal.signal_id,
-                )
-
         except Exception as e:
-            logger.error(f"Failed to process limit hit: {e}")
+            logger.error(f"Failed to process limit hit for limit {limit.id}: {e}")
+            return False
+
+        if not result.get("signal_id"):
+            logger.error(f"Limit {limit.id} hit write did not land")
+            return False
+
+        limit.status = "hit"
+        limit.hit_alert_sent = True
+        limit.hit_time = datetime.now(timezone.utc)
+        limit.hit_price = actual_price
+
+        await self.tp_monitor.refresh_hit_limits(signal.signal_id)
+        signal.status = "hit"
+        self.nm_monitor.evict_signal(signal.signal_id)
+        return True
 
     def _mutate_limit_hit_in_memory(
         self, signal_id: int, limit_id: int, hit_price: Optional[float] = None
@@ -1386,32 +1484,39 @@ class StreamingPriceMonitor:
 
         return True
 
-    async def _process_stop_loss_hit(self, signal: dict, current_price: float):
-        """Process stop loss hit"""
+    async def _process_stop_loss_hit(self, signal: SignalData, current_price: float) -> bool:
+        """Record the stop loss and tear down the per-signal trackers.
+
+        Returns whether the write landed, so the caller can leave the stop live
+        for the next tick instead of marking it fired against a DB that still
+        has the signal open.
+        """
         try:
             success = await self.signal_db.manually_set_signal_status(
                 signal.signal_id,
                 "stop_loss",
                 closed_reason="automatic",
             )
-
-            if success:
-                self.sync_signal_status_in_memory(signal.signal_id, "stop_loss")
-                logger.info(
-                    f"Signal {signal.signal_id} ({signal.instrument}) stop loss @ {current_price}"
-                )
-                self.tp_monitor.evict_signal(signal.signal_id)
-                await self.trailing_monitor.finalize_with_price(
-                    signal.signal_id, current_price, reason="real_sl"
-                )
-                self.trailing_monitor.evict_signal(signal.signal_id)
-                await self.excursion_monitor.finalize(
-                    signal.signal_id, current_price, "real_sl"
-                )
-                await self._maybe_unsubscribe_symbol(signal.instrument, signal.signal_id)
-
         except Exception as e:
             logger.error(f"Failed to process stop loss: {e}")
+            return False
+
+        if not success:
+            logger.error(f"Signal {signal.signal_id}: stop loss write did not land")
+            return False
+
+        self.sync_signal_status_in_memory(signal.signal_id, "stop_loss")
+        logger.info(
+            f"Signal {signal.signal_id} ({signal.instrument}) stop loss @ {current_price}"
+        )
+        self.tp_monitor.evict_signal(signal.signal_id)
+        await self.trailing_monitor.finalize_with_price(
+            signal.signal_id, current_price, reason="real_sl"
+        )
+        self.trailing_monitor.evict_signal(signal.signal_id)
+        await self.excursion_monitor.finalize(signal.signal_id, current_price, "real_sl")
+        await self._maybe_unsubscribe_symbol(signal.instrument, signal.signal_id)
+        return True
 
     async def _process_spread_hour_cancel(self, signal: dict):
         """Cancel a signal that was falsely triggered during spread hour."""

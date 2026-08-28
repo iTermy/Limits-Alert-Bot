@@ -103,7 +103,8 @@ def _monitor(news_active=True):
         monitor.guarded.append(reason)
 
     async def _process_hit(signal, limit, current_price):
-        pass
+        limit.status = "hit"
+        return True
 
     async def _mark_approaching(limit_id):
         pass

@@ -672,6 +672,31 @@ Uses `INSERT … ON CONFLICT (message_id) DO NOTHING RETURNING id`. If no id is 
 ### `mark_limit_hit` is atomic
 All updates in `manager.mark_limit_hit` (limit row, signal counter, status→HIT, audit row) run inside `async with conn.transaction()`. A mid-flight disconnect cannot leave the row half-updated.
 
+### Tick-path status writes land before any in-memory mutation
+`_handle_limit_hit`, `_check_stop_loss` and `_check_breakeven_stop` all call their
+`_process_*` writer first and only touch memory — `limit.status`, `hit_alert_sent`,
+`sl_alert_sent`, `be_stop_alert_sent` — once it returns True. **Do not "mark it in
+memory first so the embed renders in the same beat".** That was the old order and it
+cost signals 3982 / 3983 / 4000 on 2026-08-28: three signals crossed every limit and
+their stop losses during the 14:00 UTC release, the writes failed, and the flags stuck
+anyway. A limit flipped to `hit` in memory drops out of `signal.pending_limits`, so the
+tick path never checks that level again; `sl_alert_sent` does the same to the stop.
+The signals went silently inert for an hour while the DB still showed them `active`
+with every limit `pending` — which is exactly what the EX bot keys placement on, so it
+entered a trade the TM had already invalidated. The embed still renders correctly
+because `_process_limit_hit` sets the limit state itself before returning; the visible
+cost is that a hit ping now waits on the pooler write (2–5 s) instead of racing it.
+
+Two supports back this up. Failed writes back off for `_WRITE_RETRY_BACKOFF_SECONDS`
+(5 s) per limit/signal before the next tick retries — these writes run inline in the
+feed dispatch loop and can block for the pool timeout, so an outage must not be retried
+per tick. And `_periodic_signal_refresh` calls `_reconcile_limits` for every signal
+present in both the DB and memory: the refresh diffs by signal id and preserves
+in-memory mutations, so limits were the one piece of state nothing ever corrected.
+A limit the DB still reports `pending` is restored to `pending` in memory unless its
+`hit_time` is newer than the snapshot taken before the query. Tests:
+`tests/test_write_failure_recovery.py`.
+
 ### Hit limits loaded on restart
 `streaming_monitor._load_and_subscribe_signals` fetches hit limits for every HIT-status signal (via `get_hit_limits_for_signal`) and appends them as `LimitData(status="hit")` to `signal.limits`. After restart, `signal.hit_limits` is non-empty so embed builders see the complete limit history without waiting for the next event.
 

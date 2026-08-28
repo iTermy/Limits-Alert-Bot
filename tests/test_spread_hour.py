@@ -162,6 +162,7 @@ class _SLRecorder:
 
     async def _process(self, signal, current_price):
         self.stopped.append(current_price)
+        return True
 
     async def _guard(self, signal, current_price, reason, event=None):
         self.guarded.append(reason)
