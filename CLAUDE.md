@@ -706,6 +706,63 @@ A limit the DB still reports `pending` is restored to `pending` in memory unless
 ### Price-flow watchdog
 `FeedHealthMonitor._check_price_flow_watchdog` force-restarts the bot (graceful `bot.close()` → `main.py` supervisor relaunch) only when ALL hold: past `WATCHDOG_GRACE_SECONDS`, at least one subscribed symbol whose market is open now (via `is_market_open`, which already excludes weekends/holidays/spread hour), and zero ticks across every feed for `WATCHDOG_SILENCE_SECONDS` (180 s). Fires at most once (`_watchdog_fired`). Runs the shutdown in a separate task so it doesn't await its own monitor task.
 
+### Dead-feed watchdog
+`_check_price_flow_watchdog` needs *every* feed silent, so it structurally cannot
+see one dead feed among four. `_check_dead_feed_watchdog` can: any feed sitting at
+status `down` for `FEED_DOWN_RESTART_SECONDS` (30 min, measured from
+`first_stale_time`) triggers the same supervised restart. It shares
+`_watchdog_fired` with the price-flow watchdog, so only one of them ever fires per
+process.
+
+The window is long on purpose. A feed only reaches `down` with its market open, so
+30 min of zero prices is unambiguous — but a genuine multi-hour broker outage will
+restart the bot roughly twice an hour, which is the accepted cost of never
+repeating 2026-08-27.
+
+### A feed must never be abandoned, and a session is not a feed
+Four independent safeguards each failed to notice OANDA dying at
+2026-08-27 14:33 and staying dead until a manual restart 28½ h later. OANDA
+carries every index, so signal 3935 (open since 08-25) and signal 4003 (saved
+*during* the blackout) got no approaching, hit, SL, TP or NM for the whole window
+while the bot looked healthy. All four are now closed:
+
+- **The reader task is referenced.** `PriceStreamManager.initialize` used bare
+  `asyncio.create_task(...)`; asyncio holds only a weak reference, so a reader
+  nobody else references can be garbage-collected mid-flight and take its feed
+  with it, silently. `_start_feed_task` stores the handle in `_feed_tasks` and
+  attaches a done-callback that logs any exit as an outage. **Never start a feed
+  reader with a bare `create_task` again.**
+- **A stream that ends without yielding is an outage.** `_run_feed_stream`'s `else`
+  branch used to `sleep(1); continue` forever with no log and no reconnect, and
+  `OANDAStream.stream_prices` returns exactly like that whenever `streaming` has
+  been cleared out from under it — which every `reconnect()` does, because it
+  disconnects first. It now counts as a failure and falls through to the
+  backoff/reconnect path. A feed with nothing routed to it (`symbol_to_feed`) is
+  still treated as idle, so pre-`bulk_subscribe` startup stays quiet.
+- **`reconnect_feed` revives the reader.** It returns `feed.connected` — a rebuilt
+  HTTP session, which says nothing about whether anything is consuming it. It now
+  also calls `_ensure_feed_task`, so a session and a reader are restored together.
+- **Reconnects slow down but never stop.** The old hard stop at
+  `MAX_RECONNECT_ATTEMPTS` (3) was spent inside a five-minute DNS outage and no
+  attempt was ever made again once the network came back — 1,625 identical ERROR
+  lines and nothing else for 28 h. `_may_attempt_reconnect` drops to
+  `RECONNECT_RETRY_INTERVAL_SECONDS` after the budget instead of giving up, and the
+  stale-feed ERROR is logged once per outage (DEBUG thereafter).
+
+`attempt_reconnection` also requires a **real tick** before declaring success:
+`_wait_for_first_tick` compares against a watermark taken *before* the reconnect
+and waits up to `RECONNECT_TICK_TIMEOUT_SECONDS`. OANDA logged three "reconnected"
+successes on 2026-08-27 while delivering nothing, which is why the outage read as
+handled.
+
+Relatedly, `_check_feed` holds a `down` feed down until a real tick arrives. A
+symbol whose market closes stops counting as stale, so a dead feed drains its own
+stale list overnight and reads as recovered — that is what cleared OANDA's down
+state at 01:00 on 2026-08-28, reopening the reconnect budget and DMing an
+all-clear for a feed that then stayed silent another 18 h.
+
+Tests: `tests/test_feed_recovery.py`.
+
 ### Per-feed reconnect (no cascade)
 `FeedHealthMonitor.attempt_reconnection` calls `PriceStreamManager.reconnect_feed(name)` to reconnect only the stale feed. It must never call `reconnect_all()` from the health path — that tore down healthy feeds (and the MT5 terminal) whenever one feed went stale. OANDA additionally self-heals via a read-timeout watchdog in `oanda_stream.stream_prices` (`_STREAM_READ_TIMEOUT` = 15 s; OANDA heartbeats every ~5 s), so a silently half-dead stream reconnects without health-monitor involvement.
 

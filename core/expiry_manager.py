@@ -38,8 +38,8 @@ class ExpiryManager:
         """
         Perform all post-expiry actions for a single signal:
           • Finalize the trailing / excursion analytics trackers
-          • Update / cancel the approaching alert embed
-          • Schedule the 15-minute move to finished-signals channel
+          • Update / cancel the approaching alert embed (which also schedules the
+            15-minute move to finished-signals, since "expired" is an end state)
           • Add ❌ reaction to the original signal message
           • Delete the original message for gold-toll signals with no embed
         """
@@ -71,10 +71,6 @@ class ExpiryManager:
                     ping_text="⏰ Signal expired.",
                 )
                 self.logger.debug(f"Updated embed to expired for signal {sig_id}")
-
-                # Schedule move to finished-signals channel after 15 minutes
-                alert_system._schedule_end_state_deletion(sig_id, event="expired")
-                self.logger.debug(f"Scheduled archive move for expired signal {sig_id}")
 
             except Exception as _embed_err:
                 self.logger.warning(

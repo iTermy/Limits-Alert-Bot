@@ -1199,7 +1199,9 @@ class MessageHandler:
                                     self._handle_overlap_prompt(message, signal_id, overlapping)
                                 )
                         except Exception as _oe:
-                            self.logger.warning(f"Overlap check failed for signal {signal_id}: {_oe}")
+                            self.logger.warning(
+                                "Overlap check failed for signal %s: %r", signal_id, _oe
+                            )
                 else:
                     existing = await self.signal_db.get_signal_by_message_id(str(message.id))
                     if existing and existing["status"] != "cancelled":

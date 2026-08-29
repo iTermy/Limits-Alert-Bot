@@ -302,7 +302,7 @@ class AlertSystem:
                     logger.warning(f"Live update HTTP error for signal {signal_id}: {e}")
 
         except Exception as e:
-            logger.error(f"Live update failed for signal {signal_id}: {e}", exc_info=True)
+            logger.error("Live update failed for signal %s: %r", signal_id, e, exc_info=True)
 
     def _register_live_embed(self, signal: dict, event: str, spread_buffer_enabled: bool = False):
         signal_id = signal.signal_id

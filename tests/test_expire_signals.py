@@ -145,3 +145,36 @@ def test_expiry_manager_cleans_up_only_the_cancelled_signals(monkeypatch):
     asyncio.run(ExpiryManager.check_expiry.coro(manager))
 
     assert cleaned == [5]
+
+
+def test_expired_embed_update_does_not_raise(monkeypatch, caplog):
+    """The cleanup used to call alert_system._schedule_end_state_deletion, which
+    does not exist — every expiry logged 'Could not update embed'. The archive
+    move is scheduled by update_signal_message itself, since "expired" is an end
+    state, so the call was dead as well as broken."""
+    updates = []
+
+    class _AlertSystem:
+        signal_messages = {7}
+
+        def _unregister_live_embed(self, sig_id):
+            pass
+
+        async def update_signal_message(self, signal, event, ping_text):
+            updates.append(event)
+
+    async def _get_signal_with_limits(sig_id):
+        return SimpleNamespace(signal_id=7, channel_id="1", message_id="2")
+
+    manager = ExpiryManager.__new__(ExpiryManager)
+    manager.logger = get_logger("test_expiry_manager")
+    manager.bot = SimpleNamespace(
+        services=SimpleNamespace(
+            signal_db=SimpleNamespace(get_signal_with_limits=_get_signal_with_limits),
+        )
+    )
+
+    asyncio.run(manager._handle_expired_signal(7, _AlertSystem(), None))
+
+    assert updates == ["expired"]
+    assert "Could not update embed" not in caplog.text
