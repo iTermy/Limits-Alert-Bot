@@ -103,7 +103,7 @@ price_feeds/
                                   reads subscribe/unsubscribe/shutdown commands from stdin
   alerting/                     Persistent embed orchestration + archiving
     alert_system.py             Persistent embed orchestrator; 4 data dicts + _live_embeds;
-                                  5-channel routing; coalesced 30 s live-refresh worker;
+                                  5-channel routing; bounded sequential live-refresh passes;
                                   hydrate_from_db / recover_pending_archives / recover_finished_embeds
                                   re-attach existing embeds on restart; retract_approaching_embed
                                   drops the embed when price drifts back past the alert window;
@@ -424,7 +424,7 @@ One persistent Discord embed per signal. Created on first approaching or hit eve
 | `signal_ping_messages` | signal_id → latest ping reply `discord.Message` |
 | `signal_finished_messages` | signal_id → archived copy in finished-signals/profit channel (`PartialMessage` after `recover_finished_embeds`) |
 | `alert_messages` | message_id_str → signal_id (bounded at 1000; for reply-handler lookup). Holds BOTH embed IDs AND ping IDs so users can reply to either. Tracked on send + hydration; untracked when a message is deleted (retraction, archive move, old-ping replacement). |
-| `_live_embeds` | signal_id → `{"signal": dict, "event": str, "spread_buffer_enabled": bool}`; drives the coalesced 30 s live-refresh worker. Caller must keep `signal["limits"]` in sync; otherwise the refresh re-renders stale data |
+| `_live_embeds` | signal_id → `{"signal": dict, "event": str, "spread_buffer_enabled": bool}`; drives the bounded sequential live-refresh pass. Caller must keep `signal["limits"]` in sync; otherwise the refresh re-renders stale data |
 | `auto_purge_channel_ids` | Set of channel_id strings whose original signal messages are deleted on end-state. Built from `monitored_channels` minus `AUTO_PURGE_EXEMPT_NAMES = {"price-action-trades"}`. |
 
 ### Embed edit vs standalone
@@ -443,7 +443,7 @@ Priority order:
 5. Default → `alert_channel`
 
 ### Live-update task
-`start_live_updates()` requests a refresh of all active embeds every **30 seconds** with current price and distance. Requests are deduplicated by signal in `_pending_live_updates` and drained sequentially, so repeated scheduler passes retain only the latest state and do not burst multiple edits into Discord's shared per-channel bucket. Status/event edits stand down the cosmetic worker and critical deliveries retry with bounded exponential backoff after transient failures. Stopped when a signal closes or is cancelled.
+`start_live_updates()` waits **30 seconds after a completed pass**, then takes one snapshot of the active embeds and drains it sequentially. A pass is never refilled while running; failed cosmetic edits are dropped until the next pass, and each edit has an 8 s total timeout. If a status/event edit begins, remaining cosmetic work is discarded so the critical event gets the next HTTP slot. Critical attempts have a 20 s timeout and continue through a deduplicated exponential-backoff retry task. An INFO summary is emitted after every refresh pass. Stopped when a signal closes or is cancelled.
 
 ### Key public methods
 - `send_approaching_alert(signal, limit, current_price, distance_formatted, spread, spread_buffer_enabled)` — creates embed; registers for live updates
@@ -647,7 +647,7 @@ All updates in `manager.mark_limit_hit` (limit row, signal counter, status→HIT
 `FeedHealthMonitor._check_price_flow_watchdog` force-restarts the bot (graceful `bot.close()` → `main.py` supervisor relaunch) only when ALL hold: past `WATCHDOG_GRACE_SECONDS`, at least one subscribed symbol whose market is open now (via `is_market_open`, which already excludes weekends/holidays/spread hour), and zero ticks across every feed for `WATCHDOG_SILENCE_SECONDS` (180 s). Fires at most once (`_watchdog_fired`). Runs the shutdown in a separate task so it doesn't await its own monitor task.
 
 ### Discord connection watchdog
-`TradingBot.heartbeat` checks gateway readiness every 30 s and runs an authenticated REST probe every 60 s. A gateway that remains unready for 120 s, or three consecutive REST failures/timeouts (30 s per probe), closes the bot from a separate task so `main.py` can relaunch it. The client caps pathological non-global rate-limit waits at 60 s; ordinary Discord Retry-After responses are still honoured. This watchdog is independent of price-feed health, so a network-device reset cannot leave Discord wedged while price ticks keep the process alive.
+`TradingBot.heartbeat` checks gateway readiness every 30 s and runs an authenticated REST probe every 60 s. A gateway that remains unready for 120 s, three consecutive REST probe failures/timeouts (30 s per probe), or two consecutive bounded message-operation timeouts closes the bot from a separate task so `main.py` can relaunch it. Cosmetic edits time out after 8 s and critical attempts after 20 s; this catches a wedged message route even when the separate user-fetch probe remains healthy. The client also caps any single non-global Retry-After at 60 s; ordinary short Discord Retry-After responses are still honoured.
 
 ### Per-feed reconnect (no cascade)
 `FeedHealthMonitor.attempt_reconnection` calls `PriceStreamManager.reconnect_feed(name)` to reconnect only the stale feed. It must never call `reconnect_all()` from the health path — that tore down healthy feeds (and the MT5 terminal) whenever one feed went stale. OANDA additionally self-heals via a read-timeout watchdog in `oanda_stream.stream_prices` (`_STREAM_READ_TIMEOUT` = 15 s; OANDA heartbeats every ~5 s), so a silently half-dead stream reconnects without health-monitor involvement.
@@ -656,7 +656,7 @@ All updates in `manager.mark_limit_hit` (limit row, signal counter, status→HIT
 The alert embed message reference is persisted on `signals` (`alert_message_id`, `alert_channel_id`, `ping_message_id`) every time `_upsert_signal_message` creates a new embed or sends a new ping. The archived embed location is persisted on `finished_message_id` / `finished_channel_id` when `archive_manager._move_after_delay` moves the embed, or when the signal-reply cancel path posts a direct cancellation embed to the finished channel.
 
 On startup, `AlertSystem.hydrate_from_db` runs from `streaming_monitor._load_and_subscribe_signals` AFTER hit-limits are loaded and BEFORE `bulk_subscribe` — this ordering matters: if the price stream started first, the next tick could fire `send_approaching_alert` / `send_limit_hit_alert` and post a duplicate embed alongside the orphaned one. Per-signal decision for active/hit signals:
-- **Persisted ID + Discord fetch succeeds** → re-populate `signal_messages` / `signal_ping_messages` / `alert_messages` (both embed and ping IDs) and register for live updates. Same embed continues live-refreshing on the coalesced 30 s worker.
+- **Persisted ID + Discord fetch succeeds** → re-populate `signal_messages` / `signal_ping_messages` / `alert_messages` (both embed and ping IDs) and register for live updates. Same embed continues through the bounded sequential refresh pass.
 - **Persisted ID + NotFound, status=ACTIVE** → clear persisted IDs, `UPDATE limits SET approaching_alert_sent = FALSE WHERE signal_id=$1 AND status='pending'`, mutate in-memory limit copies. The approaching alert re-fires on the next price tick with a fresh embed.
 - **Persisted ID + NotFound, status=HIT** → clear persisted IDs and call `reactivate_embed(signal, ping_text=None)` to rebuild the embed immediately so live updates and future events have a target.
 - **No persisted ID** (pre-feature signals, first deploy) → same fallback as above: ACTIVE resets `approaching_alert_sent`; HIT rebuilds. One-time cosmetic churn on first restart after deploy.

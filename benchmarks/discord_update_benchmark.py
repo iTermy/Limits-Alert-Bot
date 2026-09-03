@@ -12,7 +12,7 @@ import asyncio
 import contextlib
 import json
 import math
-from collections import OrderedDict, deque
+from collections import deque
 from dataclasses import asdict, dataclass
 
 
@@ -173,38 +173,22 @@ async def run_legacy(signal_count: int, clock: Clock, bucket: DiscordChannelBuck
 
 
 async def run_coalesced(signal_count: int, clock: Clock, bucket: DiscordChannelBucket) -> int:
-    """Current: schedule every 30 s, retain one key/signal, send sequentially."""
+    """Current: one sequential snapshot pass followed by a 30 s cooldown."""
     concurrency = AppConcurrency()
-    pending: OrderedDict[int, None] = OrderedDict()
-    wakeup = asyncio.Event()
     priority_active = False
-    scheduler_done = False
 
     async def scheduler() -> None:
-        nonlocal scheduler_done
         while True:
             await clock.sleep(30)
             if clock.now() >= 90:
-                scheduler_done = True
-                wakeup.set()
                 return
-            for signal_id in range(signal_count):
-                pending.setdefault(signal_id, None)
-            wakeup.set()
-
-    async def worker() -> None:
-        while True:
-            await wakeup.wait()
-            wakeup.clear()
-            while pending:
+            for _ in range(signal_count):
                 if priority_active:
-                    await clock.sleep(0.1)
-                    continue
-                pending.popitem(last=False)
+                    # The production worker drops the rest of a cosmetic pass
+                    # when a hit/SL/TP event needs the shared HTTP bucket.
+                    break
                 # Current payload is rendered only when its turn arrives.
                 await concurrency.send(bucket, clock.now())
-            if scheduler_done:
-                return
 
     async def critical_event() -> None:
         nonlocal priority_active
@@ -215,7 +199,7 @@ async def run_coalesced(signal_count: int, clock: Clock, bucket: DiscordChannelB
         finally:
             priority_active = False
 
-    await asyncio.gather(scheduler(), worker(), critical_event())
+    await asyncio.gather(scheduler(), critical_event())
     return concurrency.maximum
 
 

@@ -1,7 +1,6 @@
 # Discord live-update benchmark
 
-Run on 2026-09-03 after updating `master` to `a568c03` and applying the
-coalesced live-update changes.
+Run on 2026-09-03 from `master` at `93cd0a1` with the bounded-pass freeze fix.
 
 ## Workload
 
@@ -11,8 +10,8 @@ coalesced live-update changes.
 - Network outage: second 27 through second 55
 - Critical hit/SL-style event: second 40
 - Legacy policy: refresh every 15 seconds, up to 5 concurrent edits
-- New policy: refresh every 30 seconds, one sequential worker, one pending key
-  per signal
+- New policy: one sequential snapshot pass, drop remaining cosmetic work when
+  a critical event arrives, then wait 30 seconds after the pass completes
 
 Run with:
 
@@ -24,22 +23,22 @@ py benchmarks/discord_update_benchmark.py --scale 0.02
 
 | Signals | Policy | Cosmetic requests | Max app in flight | Max Discord queue | Mean payload age | Critical latency | Bucket wait time |
 |---:|---|---:|---:|---:|---:|---:|---:|
-| 5 | Legacy | 20 | 5 | 5 | 6.22 s | 21.05 s | 5.00 s |
-| 5 | Coalesced | 10 | 1 | 1 | 3.49 s | 14.72 s | 8.80 s |
-| 10 | Legacy | 30 | 5 | 5 | 6.02 s | 20.26 s | 19.97 s |
-| 10 | Coalesced | 15 | 1 | 1 | 2.70 s | 14.77 s | 13.25 s |
+| 5 | Legacy | 20 | 5 | 5 | 6.02 s | 20.13 s | 5.00 s |
+| 5 | Bounded pass | 6 | 1 | 1 | 4.26 s | 15.49 s | 0.00 s |
+| 10 | Legacy | 30 | 5 | 5 | 6.00 s | 20.32 s | 19.98 s |
+| 10 | Bounded pass | 11 | 1 | 1 | 2.82 s | 15.53 s | 5.00 s |
 
 ## Interpretation
 
-For both loads, the new policy cut cosmetic request volume by 50%, reduced the
-maximum Discord queue from five requests to one, and reduced critical-event
-latency by roughly 27–30% during the outage. At 10 signals, total bucket wait
-time fell by about 34% and mean payload age fell by about 55%.
+The bounded-pass policy cut cosmetic request volume by 70% at five signals and
+63% at ten signals. It reduced the maximum Discord queue from five requests to
+one and critical-event latency by roughly 23–24% during the outage. At ten
+signals, modeled bucket wait time fell by 75% and mean payload age by 53%.
 
-The worst individual cosmetic payload can still span the whole outage because
-an already in-flight HTTP request cannot be replaced. The improvement is that
-only that one request can be stale; later signals are rendered when their turn
-arrives, and repeated scheduler passes do not append stale batches.
+This workload intentionally leaves the simulated in-flight request waiting for
+the outage, so its payload-age number is conservative. Production additionally
+cancels an individual cosmetic edit after 8 seconds. A running pass is never
+refilled, and failed cosmetic snapshots wait until the next pass.
 
 `rate_limit_waits` and bucket wait time represent modeled client-side
 Retry-After waits, not real Discord 429 responses. This benchmark deliberately

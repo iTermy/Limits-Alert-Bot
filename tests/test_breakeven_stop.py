@@ -19,6 +19,9 @@ class _StubAlertSystem:
         self.calls.append({"price": current_price, "be_price": be_price})
         return True
 
+    async def deliver_critical(self, _key, operation, *args, **kwargs):
+        return await operation(*args, **kwargs)
+
 
 class _StubSignalDB:
     def __init__(self, ok=True):

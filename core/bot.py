@@ -578,6 +578,10 @@ class TradingBot(commands.Bot):
         self.logger.critical("Discord health watchdog forcing restart: %s", reason)
         self._discord_restart_task = asyncio.create_task(self._restart_for_discord_failure())
 
+    def request_discord_restart(self, reason: str) -> None:
+        """Allow bounded Discord operations to trip the central watchdog."""
+        self._schedule_discord_restart(reason)
+
     async def _restart_for_discord_failure(self) -> None:
         try:
             await self.close()
