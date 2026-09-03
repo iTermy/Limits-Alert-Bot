@@ -1,0 +1,58 @@
+[
+  {
+    "scheduler": "legacy",
+    "signals": 5,
+    "cosmetic_requests": 20,
+    "max_app_cosmetic_in_flight": 5,
+    "max_discord_queue_depth": 5,
+    "rate_limit_waits": 1,
+    "rate_limit_wait_seconds": 5.0,
+    "network_stalls": 1,
+    "mean_payload_age_seconds": 6.22,
+    "p95_payload_age_seconds": 24.88,
+    "max_payload_age_seconds": 24.88,
+    "critical_delivery_latency_seconds": 21.05
+  },
+  {
+    "scheduler": "coalesced",
+    "signals": 5,
+    "cosmetic_requests": 10,
+    "max_app_cosmetic_in_flight": 1,
+    "max_discord_queue_depth": 1,
+    "rate_limit_waits": 3,
+    "rate_limit_wait_seconds": 8.8,
+    "network_stalls": 1,
+    "mean_payload_age_seconds": 3.49,
+    "p95_payload_age_seconds": 24.82,
+    "max_payload_age_seconds": 24.82,
+    "critical_delivery_latency_seconds": 14.72
+  },
+  {
+    "scheduler": "legacy",
+    "signals": 10,
+    "cosmetic_requests": 30,
+    "max_app_cosmetic_in_flight": 5,
+    "max_discord_queue_depth": 5,
+    "rate_limit_waits": 4,
+    "rate_limit_wait_seconds": 19.97,
+    "network_stalls": 1,
+    "mean_payload_age_seconds": 6.02,
+    "p95_payload_age_seconds": 18.74,
+    "max_payload_age_seconds": 18.74,
+    "critical_delivery_latency_seconds": 20.26
+  },
+  {
+    "scheduler": "coalesced",
+    "signals": 10,
+    "cosmetic_requests": 15,
+    "max_app_cosmetic_in_flight": 1,
+    "max_discord_queue_depth": 1,
+    "rate_limit_waits": 5,
+    "rate_limit_wait_seconds": 13.25,
+    "network_stalls": 1,
+    "mean_payload_age_seconds": 2.7,
+    "p95_payload_age_seconds": 24.94,
+    "max_payload_age_seconds": 24.94,
+    "critical_delivery_latency_seconds": 14.77
+  }
+]

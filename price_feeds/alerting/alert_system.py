@@ -8,9 +8,10 @@ import asyncio
 import collections
 import contextlib
 import json
+from collections.abc import Awaitable, Callable
 from datetime import datetime, timezone
 from pathlib import Path
-from typing import Optional
+from typing import Any, Optional
 
 import discord
 
@@ -44,14 +45,13 @@ class AlertSystem:
     LIVE_UPDATE_INTERVAL seconds with the latest price and distance.
     """
 
-    LIVE_UPDATE_INTERVAL = 15
-
-    # Max concurrent embed edits during a live-refresh pass. Editing different
-    # messages uses separate rate-limit buckets, so a bounded fan-out keeps a
-    # full pass to ~1-2s regardless of how many embeds are active, instead of
-    # the old 1s-per-embed serial stagger that pushed the effective refresh
-    # period past 60s once a dozen signals were live.
-    _LIVE_REFRESH_CONCURRENCY = 5
+    # Cosmetic price snapshots do not need tick-level delivery. A 30-second
+    # cadence keeps ten active signals to at most ~20 edits/minute before
+    # Discord-side throttling, leaving headroom for hit/SL/TP messages.
+    LIVE_UPDATE_INTERVAL = 30
+    _LIVE_UPDATE_RETRY_DELAY = 5
+    _DELIVERY_RETRY_BASE_DELAY = 5
+    _DELIVERY_RETRY_MAX_DELAY = 60
 
     def __init__(
         self,
@@ -101,7 +101,19 @@ class AlertSystem:
         # loop can skip edits that would produce an identical embed.
         self._last_live_render: dict[int, str] = {}
 
+        # Ordered set of signals needing a cosmetic refresh. The scheduler may
+        # add a signal repeatedly while Discord is throttling, but one key is
+        # retained, so stale intermediate prices never build up in discord.py's
+        # HTTP rate-limit queue. A single worker also avoids same-channel bursts:
+        # Discord buckets message edits by route + channel, not by message ID.
+        self._pending_live_updates: collections.OrderedDict[int, None] = (
+            collections.OrderedDict()
+        )
+        self._live_update_wakeup = asyncio.Event()
+
         self._live_update_task: Optional[asyncio.Task] = None
+        self._live_update_worker_task: Optional[asyncio.Task] = None
+        self._delivery_retry_tasks: dict[str, asyncio.Task] = {}
         self._news_activation_messages: dict[int, list] = {}
 
         self._archive_manager = ArchiveManager(
@@ -138,13 +150,21 @@ class AlertSystem:
         if self._live_update_task and not self._live_update_task.done():
             return
         self._live_update_task = asyncio.create_task(self._live_update_loop())
+        self._live_update_worker_task = asyncio.create_task(self._live_update_worker())
         logger.info("Live embed update loop started")
 
     def stop_live_updates(self):
         """Cancel the live update loop and any pending archive-move tasks."""
         if self._live_update_task and not self._live_update_task.done():
             self._live_update_task.cancel()
-            logger.info("Live embed update loop stopped")
+        if self._live_update_worker_task and not self._live_update_worker_task.done():
+            self._live_update_worker_task.cancel()
+        for task in self._delivery_retry_tasks.values():
+            task.cancel()
+        self._delivery_retry_tasks.clear()
+        self._pending_live_updates.clear()
+        self._live_update_wakeup.clear()
+        logger.info("Live embed update loop stopped")
         self._archive_manager.cancel_all()
 
     async def _live_update_loop(self):
@@ -152,51 +172,76 @@ class AlertSystem:
         while True:
             try:
                 await asyncio.sleep(self.LIVE_UPDATE_INTERVAL)
-                await self._refresh_live_embeds()
+                self._queue_live_updates()
             except asyncio.CancelledError:
                 break
             except Exception as e:
                 logger.error(f"Live update loop error: {e}", exc_info=True)
 
-    async def _refresh_live_embeds(self):
-        """Refresh every live embed with the latest price, fanned out concurrently.
+    def _queue_live_updates(self) -> None:
+        """Request one latest-state refresh per live signal.
 
-        Edits run under a bounded semaphore (separate messages use separate
-        rate-limit buckets, so this is safe) and each edit is serialized against
-        event edits via the per-signal lock. A full pass completes in ~1-2s
-        regardless of embed count.
+        ``OrderedDict`` acts as an ordered set: repeated scheduler passes replace
+        no payload and add no duplicate work. The worker renders only when the
+        signal reaches the front, so signals waiting behind a Discord rate limit
+        use the newest price rather than a snapshot captured when they queued.
         """
         if not self._live_embeds:
             return
         if not self.stream_manager:
             return
 
-        # Prune locks for signals whose embed is gone so the dict stays bounded
-        # to roughly the number of live signals.
-        for sid in list(self._message_locks.keys()):
+        for signal_id in self._live_embeds:
+            self._pending_live_updates.setdefault(signal_id, None)
+        self._live_update_wakeup.set()
+        logger.debug(
+            "Queued latest-state refresh for %d live embed(s)",
+            len(self._pending_live_updates),
+        )
+
+    async def _live_update_worker(self) -> None:
+        """Drain cosmetic updates sequentially, coalescing repeated requests."""
+        while True:
+            try:
+                await self._live_update_wakeup.wait()
+                self._live_update_wakeup.clear()
+                await self._drain_live_update_queue()
+            except asyncio.CancelledError:
+                break
+            except Exception as e:
+                logger.error("Live update worker error: %s", e, exc_info=True)
+                await asyncio.sleep(self._LIVE_UPDATE_RETRY_DELAY)
+
+    async def _drain_live_update_queue(self) -> None:
+        """Send queued snapshots; transient failures leave one retry pending."""
+        while self._pending_live_updates:
+            # Let status/event writes take the next available HTTP slot. At most
+            # one cosmetic edit can already be in flight because this worker is
+            # deliberately sequential.
+            if self._priority_edits_active:
+                await asyncio.sleep(0.1)
+                continue
+
+            signal_id, _ = self._pending_live_updates.popitem(last=False)
+            delivered = await self._refresh_one_embed(signal_id)
+            if not delivered and signal_id in self._live_embeds:
+                self._pending_live_updates.setdefault(signal_id, None)
+                await asyncio.sleep(self._LIVE_UPDATE_RETRY_DELAY)
+
+        # Prune locks after a drain so the dict stays close to the live set.
+        for sid in list(self._message_locks):
             if sid not in self.signal_messages and not self._message_locks[sid].locked():
                 del self._message_locks[sid]
 
-        signal_ids = list(self._live_embeds.keys())
-        logger.debug("Refreshing %d live embed(s)", len(signal_ids))
-
-        semaphore = asyncio.Semaphore(self._LIVE_REFRESH_CONCURRENCY)
-
-        async def _guarded(signal_id: int):
-            async with semaphore:
-                await self._refresh_one_embed(signal_id)
-
-        await asyncio.gather(*(_guarded(sid) for sid in signal_ids))
-
-    async def _refresh_one_embed(self, signal_id: int):
-        """Re-render a single live embed with the current price and distance."""
+    async def _refresh_one_embed(self, signal_id: int) -> bool:
+        """Render and deliver the newest snapshot. False requests a retry."""
         entry = self._live_embeds.get(signal_id)
         if not entry:
-            return
+            return True
 
         # Stand down while a status/event edit is in flight so it lands first.
         if self._priority_edits_active:
-            return
+            return False
 
         signal = entry["signal"]
         event = entry["event"]
@@ -206,7 +251,7 @@ class AlertSystem:
             instrument = signal.instrument
             price_data = await self.stream_manager.get_latest_price(instrument)
             if not price_data:
-                return
+                return True
 
             direction = (signal.direction or "long").lower()
             current_price = price_data["ask"] if direction == "long" else price_data["bid"]
@@ -238,11 +283,11 @@ class AlertSystem:
                 logger.debug(
                     f"Live update: signal {signal_id} was unregistered mid-cycle, skipping"
                 )
-                return
+                return True
 
             existing_msg = self.signal_messages.get(signal_id)
             if not existing_msg:
-                return
+                return True
 
             guild_id = signal.guild_id
             if not guild_id and self.bot and self.bot.guilds:
@@ -264,22 +309,24 @@ class AlertSystem:
             # quiet for low-volatility signals and frees rate-limit budget.
             signature = self._embed_signature(embed)
             if self._last_live_render.get(signal_id) == signature:
-                return
+                return True
 
             # Re-check preemption: an event may have fired during the price fetch.
             if self._priority_edits_active:
-                return
+                return False
 
             try:
                 async with self._get_message_lock(signal_id):
                     await existing_msg.edit(embed=embed)
                 self._last_live_render[signal_id] = signature
                 logger.debug("Live-updated embed for signal %s @ %s", signal_id, current_price)
+                return True
             except discord.NotFound:
                 logger.warning(f"Live update: embed for signal {signal_id} not found, removing")
                 self._live_embeds.pop(signal_id, None)
                 self.signal_messages.pop(signal_id, None)
                 await self._clear_persisted_alert_ids(signal_id)
+                return True
             except discord.HTTPException as e:
                 if e.status == 429:
                     logger.warning(
@@ -287,9 +334,15 @@ class AlertSystem:
                     )
                 else:
                     logger.warning(f"Live update HTTP error for signal {signal_id}: {e}")
+                return False
+
+        except OSError as e:
+            logger.warning("Live update network error for signal %s: %s", signal_id, e)
+            return False
 
         except Exception as e:
             logger.error(f"Live update failed for signal {signal_id}: {e}", exc_info=True)
+            return False
 
     def _register_live_embed(self, signal: dict, event: str, spread_buffer_enabled: bool = False):
         signal_id = signal.signal_id
@@ -301,6 +354,7 @@ class AlertSystem:
 
     def _unregister_live_embed(self, signal_id: int):
         self._live_embeds.pop(signal_id, None)
+        self._pending_live_updates.pop(signal_id, None)
         self._last_live_render.pop(signal_id, None)
 
     @staticmethod
@@ -317,6 +371,49 @@ class AlertSystem:
             lock = asyncio.Lock()
             self._message_locks[signal_id] = lock
         return lock
+
+    def queue_delivery_retry(
+        self,
+        key: str,
+        operation: Callable[..., Awaitable[bool]],
+        *args: Any,
+        **kwargs: Any,
+    ) -> None:
+        """Retry one critical Discord event until delivered or shutdown.
+
+        Trading state is authoritative and still commits when Discord is down.
+        This retry task keeps the notification independently pending instead of
+        losing it after the monitor evicts a completed signal.
+        """
+        existing = self._delivery_retry_tasks.get(key)
+        if existing and not existing.done():
+            return
+        self._delivery_retry_tasks[key] = asyncio.create_task(
+            self._retry_delivery(key, operation, args, kwargs)
+        )
+
+    async def _retry_delivery(
+        self,
+        key: str,
+        operation: Callable[..., Awaitable[bool]],
+        args: tuple[Any, ...],
+        kwargs: dict[str, Any],
+    ) -> None:
+        delay = self._DELIVERY_RETRY_BASE_DELAY
+        try:
+            while True:
+                await asyncio.sleep(delay)
+                try:
+                    if await operation(*args, **kwargs):
+                        logger.info("Delivered queued Discord event %s", key)
+                        return
+                except Exception as e:
+                    logger.warning("Queued Discord event %s failed: %s", key, e)
+                delay = min(delay * 2, self._DELIVERY_RETRY_MAX_DELAY)
+        except asyncio.CancelledError:
+            raise
+        finally:
+            self._delivery_retry_tasks.pop(key, None)
 
     # ── Channel helpers ──────────────────────────────────────────────────────
 
@@ -1160,12 +1257,13 @@ class AlertSystem:
                 self._archive_manager.schedule_end_state_move(signal.signal_id, event="auto_tp")
                 self.stats["auto_tp_sent"] += 1
                 self.stats["total_alerts"] += 1
+                return True
         except Exception as e:
             logger.error(f"Failed to update embed for auto-TP signal {signal.signal_id}: {e}")
             self.stats["errors"] += 1
             return False
 
-        return True
+        return False
 
     async def reactivate_embed(
         self,

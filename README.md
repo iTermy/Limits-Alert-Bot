@@ -29,16 +29,18 @@ Key behaviours:
   per-channel defaults, typo detection via limit-ordering validation, and an
   optional AI fallback parser.
 - **Persistent alert embeds** — one embed per signal, edited in place on every
-  event and refreshed with live prices every 15 s. Embed references are stored in
-  the database so restarts re-attach to existing embeds instead of orphaning them.
+  event and refreshed with live prices every 30 s. Refreshes are coalesced per
+  signal and sent sequentially to protect Discord's shared channel rate-limit
+  bucket. Embed references are stored in the database so restarts re-attach to
+  existing embeds instead of orphaning them.
 - **Auto take-profit** — once a signal is hit, P&L is tracked on every tick and the
   signal closes automatically when the configured TP threshold is reached.
 - **News and spread-hour handling** — scheduled news windows and the daily
   spread-widening window suppress alerts and auto-cancel affected signals with a
   notification.
-- **Feed health monitoring** — stale-feed detection with targeted reconnects, a
-  price-flow watchdog that restarts the bot when open markets go silent, and admin
-  DM alerts on failure.
+- **Connection health monitoring** — stale-feed detection with targeted reconnects,
+  a price-flow watchdog, and a Discord gateway/REST watchdog that restarts the bot
+  after a prolonged network failure.
 - **Runtime configuration** — TP thresholds, alert distances, and near-miss rules
   are adjustable through commands without a restart; every change is appended to a
   `config_history` audit table.

@@ -805,13 +805,23 @@ class StreamingPriceMonitor:
         limit.status = "hit"
         limit.hit_alert_sent = True
 
-        await self.alert_system.send_limit_hit_alert(
+        sent = await self.alert_system.send_limit_hit_alert(
             signal,
             limit,
             current_price,
             spread=spread,
             spread_buffer_enabled=spread_buffer_enabled,
         )
+        if not sent:
+            self.alert_system.queue_delivery_retry(
+                f"limit_hit:{signal.signal_id}:{limit.id}",
+                self.alert_system.send_limit_hit_alert,
+                signal,
+                limit,
+                current_price,
+                spread=spread,
+                spread_buffer_enabled=spread_buffer_enabled,
+            )
         self._react_async(signal, "🎯")
         await self._process_limit_hit(signal, limit, current_price)
 
@@ -991,7 +1001,14 @@ class StreamingPriceMonitor:
 
             signal.sl_alert_sent = True
 
-            await self.alert_system.send_stop_loss_alert(signal, current_price)
+            sent = await self.alert_system.send_stop_loss_alert(signal, current_price)
+            if not sent:
+                self.alert_system.queue_delivery_retry(
+                    f"stop_loss:{signal.signal_id}",
+                    self.alert_system.send_stop_loss_alert,
+                    signal,
+                    current_price,
+                )
             self._react_async(signal, "🛑")
             await self._process_stop_loss_hit(signal, current_price)
             self.stats["stop_losses_hit"] += 1
@@ -1033,7 +1050,15 @@ class StreamingPriceMonitor:
             f"@ {bid} (BE {be_price})"
         )
 
-        await self.alert_system.send_breakeven_stop_alert(signal, bid, be_price)
+        sent = await self.alert_system.send_breakeven_stop_alert(signal, bid, be_price)
+        if not sent:
+            self.alert_system.queue_delivery_retry(
+                f"breakeven:{signal.signal_id}",
+                self.alert_system.send_breakeven_stop_alert,
+                signal,
+                bid,
+                be_price,
+            )
         self._react_async(signal, "➖")
         await self._process_breakeven_stop(signal, bid)
         self.stats["breakeven_stops_hit"] += 1
