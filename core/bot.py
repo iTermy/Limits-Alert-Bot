@@ -2,6 +2,7 @@
 Trading Bot Core - Main bot class
 """
 
+import asyncio
 import traceback
 from datetime import datetime
 from typing import Optional
@@ -19,6 +20,11 @@ logger = get_logger("bot")
 # Frames of the shutdown stack to log — enough to name the caller, not the
 # whole asyncio call chain.
 _SHUTDOWN_STACK_FRAMES = 4
+
+DISCORD_DISCONNECT_RESTART_SECONDS = 120
+DISCORD_REST_PROBE_INTERVAL_SECONDS = 60
+DISCORD_REST_PROBE_TIMEOUT_SECONDS = 30
+DISCORD_REST_FAILURES_BEFORE_RESTART = 3
 
 
 class TradingBot(commands.Bot):
@@ -39,6 +45,9 @@ class TradingBot(commands.Bot):
             command_prefix="!",
             intents=intents,
             help_command=None,  # We have a custom help command
+            # Do not let a pathological non-global Retry-After stall an alert
+            # forever. Normal short rate limits are still honoured by discord.py.
+            max_ratelimit_timeout=60.0,
         )
 
         # Initialize attributes
@@ -58,6 +67,10 @@ class TradingBot(commands.Bot):
         self.vol_guard = None
         self.risky_window_announcer = None
         self._info_embeds_synced = False
+        self._discord_disconnected_since: Optional[float] = None
+        self._discord_last_probe = 0.0
+        self._discord_rest_failures = 0
+        self._discord_restart_task: Optional[asyncio.Task] = None
 
         # Flat service registry — populated during setup_hook, injected into cogs/handlers
         self.services = ServiceRegistry()
@@ -194,6 +207,7 @@ class TradingBot(commands.Bot):
 
     async def on_ready(self):
         """Called when bot is fully ready"""
+        self._mark_discord_connected()
         self.logger.info(
             "Logged in as %s — %d guild(s)",
             self.user.name,
@@ -228,6 +242,21 @@ class TradingBot(commands.Bot):
                 type=discord.ActivityType.watching, name="for trading signals"
             )
         )
+
+    async def on_disconnect(self):
+        """Record gateway loss so a half-open reconnect cannot linger forever."""
+        if self._discord_disconnected_since is None:
+            self._discord_disconnected_since = asyncio.get_running_loop().time()
+            self.logger.warning("Discord gateway disconnected")
+
+    async def on_resumed(self):
+        """Reset disconnect tracking after discord.py resumes the session."""
+        self._mark_discord_connected()
+        self.logger.info("Discord gateway session resumed")
+
+    def _mark_discord_connected(self) -> None:
+        self._discord_disconnected_since = None
+        self._discord_rest_failures = 0
 
     async def on_message(self, message: discord.Message):
         """Handle new messages"""
@@ -316,19 +345,19 @@ class TradingBot(commands.Bot):
         try:
             from database.excursion_ops import ExcursionDatabase
             from database.trailing_ops import TrailingDatabase
-            from price_feeds.config.alert_config import AlertDistanceConfig
             from price_feeds.alerting.alert_system import AlertSystem
+            from price_feeds.config.alert_config import AlertDistanceConfig
+            from price_feeds.config.nm_config import NMConfig
+            from price_feeds.config.tp_config import TPConfig
+            from price_feeds.config.trailing_config import TrailingStopConfig
+            from price_feeds.feeds.price_stream_manager import PriceStreamManager
             from price_feeds.monitors.excursion_monitor import ExcursionMonitor
             from price_feeds.monitors.feed_health_monitor import FeedHealthMonitor
             from price_feeds.monitors.live_price_writer import LivePriceWriter
             from price_feeds.monitors.market_context import MarketContextProvider
-            from price_feeds.config.nm_config import NMConfig
             from price_feeds.monitors.nm_monitor import NearMissMonitor
-            from price_feeds.feeds.price_stream_manager import PriceStreamManager
             from price_feeds.monitors.streaming_monitor import StreamingPriceMonitor
-            from price_feeds.config.tp_config import TPConfig
             from price_feeds.monitors.tp_monitor import AutoTPMonitor
-            from price_feeds.config.trailing_config import TrailingStopConfig
             from price_feeds.monitors.trailing_monitor import TrailingStopMonitor
 
             # Create subsystems
@@ -489,8 +518,70 @@ class TradingBot(commands.Bot):
 
     @tasks.loop(seconds=30)
     async def heartbeat(self):
-        """Periodic heartbeat for monitoring"""
-        self.logger.debug("Heartbeat - Bot is running")
+        """Watch both gateway readiness and authenticated Discord REST I/O."""
+        await self._check_discord_health()
+
+    async def _check_discord_health(self) -> None:
+        """Restart when Discord stays disconnected or REST remains wedged."""
+        if self._discord_restart_task:
+            return
+
+        loop = asyncio.get_running_loop()
+        now = loop.time()
+        if not self.is_ready():
+            if self._discord_disconnected_since is None:
+                self._discord_disconnected_since = now
+            disconnected_for = now - self._discord_disconnected_since
+            self.logger.warning(
+                "Discord gateway not ready for %.0fs", disconnected_for
+            )
+            if disconnected_for >= DISCORD_DISCONNECT_RESTART_SECONDS:
+                self._schedule_discord_restart(
+                    f"gateway not ready for {int(disconnected_for)}s"
+                )
+            return
+
+        self._discord_disconnected_since = None
+        if now - self._discord_last_probe < DISCORD_REST_PROBE_INTERVAL_SECONDS:
+            return
+        self._discord_last_probe = now
+
+        try:
+            if self.user is None:
+                raise RuntimeError("Discord user unavailable while bot reports ready")
+            await asyncio.wait_for(
+                self.fetch_user(self.user.id),
+                timeout=DISCORD_REST_PROBE_TIMEOUT_SECONDS,
+            )
+            if self._discord_rest_failures:
+                self.logger.info("Discord REST probe recovered")
+            self._discord_rest_failures = 0
+            self.logger.debug("Heartbeat - Discord gateway and REST are healthy")
+        except Exception as e:
+            self._discord_rest_failures += 1
+            self.logger.warning(
+                "Discord REST probe failed (%d/%d): %s",
+                self._discord_rest_failures,
+                DISCORD_REST_FAILURES_BEFORE_RESTART,
+                e,
+            )
+            if self._discord_rest_failures >= DISCORD_REST_FAILURES_BEFORE_RESTART:
+                self._schedule_discord_restart(
+                    f"REST probe failed {self._discord_rest_failures} consecutive times"
+                )
+
+    def _schedule_discord_restart(self, reason: str) -> None:
+        """Close the client from a separate task so main.py can relaunch it."""
+        if self._discord_restart_task:
+            return
+        self.logger.critical("Discord health watchdog forcing restart: %s", reason)
+        self._discord_restart_task = asyncio.create_task(self._restart_for_discord_failure())
+
+    async def _restart_for_discord_failure(self) -> None:
+        try:
+            await self.close()
+        except Exception as e:
+            self.logger.error("Discord watchdog close failed: %s", e, exc_info=True)
 
     @heartbeat.before_loop
     async def before_heartbeat(self):

@@ -276,7 +276,7 @@ class AutoTPMonitor:
         # Send Discord alerts (alert channel + profit channel)
         if self.alert_system:
             try:
-                await self.alert_system.send_auto_tp_alert(
+                sent = await self.alert_system.send_auto_tp_alert(
                     signal,
                     hit_limits,
                     last_pnl,
@@ -284,6 +284,17 @@ class AutoTPMonitor:
                     cumulative_pnl=cumulative_pnl,
                     limit_pnl_map=limit_pnl_map,
                 )
+                if not sent:
+                    self.alert_system.queue_delivery_retry(
+                        f"auto_tp:{signal_id}",
+                        self.alert_system.send_auto_tp_alert,
+                        signal,
+                        hit_limits,
+                        last_pnl,
+                        self.tp_config,
+                        cumulative_pnl=cumulative_pnl,
+                        limit_pnl_map=limit_pnl_map,
+                    )
             except Exception as e:
                 logger.error(
                     f"Signal {signal_id}: failed to send auto-TP alert: {e}", exc_info=True
