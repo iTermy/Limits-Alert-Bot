@@ -119,8 +119,15 @@ EXNESS_MT5_PATH=...             # path to the Exness terminal64.exe
 EXNESS_MT5_LOGIN=...
 EXNESS_MT5_PASSWORD=...
 EXNESS_MT5_SERVER=...
-LOG_LEVEL=INFO
+LOG_LEVEL=INFO                    # DEBUG also enables discord.py diagnostics in console + bot.log
 ```
+
+`LOG_LEVEL=DEBUG` is intentionally verbose and should be used temporarily while
+diagnosing Gateway or REST/rate-limit behaviour. For every Discord 429 it records
+the available limit, remaining, reset, reset-after, scope, retry-after, global, and
+bucket values. Authentication headers and webhook/interaction tokens are never
+logged. Console and file writes run outside the asyncio thread so a paused console
+cannot freeze Discord heartbeats or commands. Restart the bot after changing it.
 
 4. Fill in `config/channels.json` with the monitored / alert channel IDs and
    `config/settings.json` with admin IDs.

@@ -191,7 +191,9 @@ commands/
                                   `!tp remove <symbol> [--type=X]`); !alertdist, !nmconfig
 
 utils/
-  logger.py                     Rotating logs: bot.log (10 MB×5) + errors.log (5 MB×3); UTF-8; LOG_LEVEL env
+  logger.py                     Non-blocking queued console/file logging; rotating bot.log
+                                (10 MB×5) + errors.log (5 MB×3); LOG_LEVEL env; UTF-8
+  discord_http_trace.py         Under DEBUG, safely logs Discord rate-limit headers for each 429
   config_loader.py              ConfigLoader class + load_settings() → BotSettings, save_settings(),
                                   load_channels_config()
   formatting.py                 Price/pip/distance formatting; get_channel_name(); get_status_emoji();
@@ -728,7 +730,7 @@ EXNESS_MT5_PATH=...             # path to Exness terminal64.exe; enables oil fee
 EXNESS_MT5_LOGIN=...            # Exness MT5 account login ID
 EXNESS_MT5_PASSWORD=...         # Exness MT5 account password
 EXNESS_MT5_SERVER=...           # Exness MT5 server (e.g. Exness-MT5Trial11)
-LOG_LEVEL=INFO                  # optional
+LOG_LEVEL=INFO                  # DEBUG enables app + discord.py debug in console and bot.log
 ```
 
 `database/__init__.py` calls `load_dotenv()` with an absolute path derived from `__file__` before instantiating `DatabaseManager`, so `.env` is found regardless of working directory. `main.py` does the same.
