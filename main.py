@@ -41,11 +41,11 @@ async def _run_once():
     returns; propagates any exception it raised."""
     bot = TradingBot()
     try:
-        logger.info("Starting TradeMaster Alert Bot...")
+        logger.info("Starting TradeMaster Alert Bot")
         await bot.start(DISCORD_TOKEN)
     finally:
         await bot.close()
-        logger.info("Bot shutdown complete")
+        logger.info("Bot stopped")
 
 
 async def main():

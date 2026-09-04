@@ -43,8 +43,9 @@ core/
                                   admin_ids + health_alert_admin_id read from settings.json; ServiceRegistry populated here
   services.py                   ServiceRegistry — typed container for subsystem references;
                                   replaces bot.monitor.X.Y reach-through coupling
-  expiry_manager.py             @tasks.loop(5min) — expires ACTIVE/HIT signals past expiry_time;
-                                  updates embeds; uses react_to_original_signal() from streaming_monitor
+  expiry_manager.py             @tasks.loop(5min) — cancels ACTIVE signals past expiry_time (HIT ones
+                                  roll over); updates embeds for the ids expire_old_signals cancelled;
+                                  uses react_to_original_signal() from streaming_monitor
   news_manager.py               Tracks active news windows; persists to data/news_events.json;
                                   cleanup polls every 30 s; parse_news_command() parses !news args
   channel_cleaner.py            @tasks.loop(1min) — every Friday 18:00 local time, bulk-deletes
@@ -82,7 +83,7 @@ database/
                                   get_overlapping_signals() — range-intersection query used on save;
                                   check_reactivation_guard() — compares cancelled limits vs live price;
                                   _get_live_price() — reads bid/ask from live_prices table
-  utils.py                      calculate_expiry() (day_end → 4:45 PM EST), _parse_dt()
+  utils.py                      calculate_expiry() (day_end → 4:45 PM EST, skipping the weekend), _parse_dt()
 
 price_feeds/
   feeds/                        Feed clients + stream coordination
@@ -103,7 +104,7 @@ price_feeds/
                                   reads subscribe/unsubscribe/shutdown commands from stdin
   alerting/                     Persistent embed orchestration + archiving
     alert_system.py             Persistent embed orchestrator; 4 data dicts + _live_embeds;
-                                  5-channel routing; bounded sequential live-refresh passes;
+                                  5-channel routing; bounded per-channel 30 s live-refresh pass;
                                   hydrate_from_db / recover_pending_archives / recover_finished_embeds
                                   re-attach existing embeds on restart; retract_approaching_embed
                                   drops the embed when price drifts back past the alert window;
@@ -111,7 +112,8 @@ price_feeds/
     embed_builders.py           Pure functions: _build_signal_embed(), _build_profit_archive_embed(),
                                   _set_archive_footer() + formatting helpers
     archive_manager.py          ArchiveManager — schedule_end_state_move(), cancel_pending_move(),
-                                  delayed move/delete for finished signals
+                                  delayed move/delete for finished signals; profit embeds go to
+                                  profit_channel AND a copy to finished_signals (with role ping)
     info_embeds.py              InfoEmbedManager — static per-channel info/risk embeds;
                                   message IDs persisted to data/info_embeds.json
   monitors/                     Per-tick evaluation, health, and market guards
@@ -270,14 +272,24 @@ Every incoming price update calls `streaming_monitor._on_price_update()` → `_c
    silently at DEBUG level. Spread-hour transition tracking still runs on stale ticks.
 
 1. Spread-hour gate
-   _is_spread_hour(): America/New_York, 17:00–18:00, weekdays only
+   _is_spread_hour(): America/New_York, 17:00–18:00, every day but Saturday
+   (Sunday's 17:00 reopen is spread hour too — see Spread hour covers Sunday)
    └─ Signal would trigger → send_spread_hour_cancel_alert()
       Edits embed if one exists; no standalone if embed already present.
 
 2. News-mode gate / client-only dry run
-   news_manager reconciles every active category into bot_mode_status.news_mode
-   for client bots. Normal events also guard alert-bot signals; events created
-   with the `dryrun` option pause clients while alert-bot processing continues.
+   news_manager.is_alert_bot_news_active_for(instrument)
+   └─ News active AND would trigger → send_news_cancel_alert()
+      Edits embed if one exists; standalone message only if no embed yet.
+   └─ Also in _check_signal: an already-HIT signal is cancelled outright the
+      moment a news window covering its instrument opens, even if no further
+      limit/SL is touched.
+   └─ Swings are exempt from all of it — see "Swing signals hold through news".
+   └─ news_manager reconciles every active category into bot_mode_status.news_mode
+      for client bots. Normal events also guard alert-bot signals; events created
+      with the `dryrun` option pause clients while alert-bot processing continues,
+      which is why every gate above calls is_alert_bot_news_active_for rather
+      than is_news_active_for.
 
 3. Approaching check
    First pending limit only (lowest sequence_number, approaching_alert_sent=False)
@@ -307,6 +319,8 @@ Every incoming price update calls `streaming_monitor._on_price_update()` → `_c
 
 8. Auto-TP check (HIT-status signals only)
    tp_monitor.check_signal(signal, bid) — no spread buffer; evaluated on the bid
+   Skipped for non-crypto during spread hour, like the SL and the BE stop; the
+   excursion ratchet that rides in the same block stands down with it.
    last_hit_limit_pnl ≥ threshold AND sum(earlier_limits_pnl) ≥ 0 (ε=1e-9)
    → send_auto_tp_alert() → signal→profit
 ```
@@ -423,7 +437,7 @@ One persistent Discord embed per signal. Created on first approaching or hit eve
 | `signal_ping_messages` | signal_id → latest ping reply `discord.Message` |
 | `signal_finished_messages` | signal_id → archived copy in finished-signals/profit channel (`PartialMessage` after `recover_finished_embeds`) |
 | `alert_messages` | message_id_str → signal_id (bounded at 1000; for reply-handler lookup). Holds BOTH embed IDs AND ping IDs so users can reply to either. Tracked on send + hydration; untracked when a message is deleted (retraction, archive move, old-ping replacement). |
-| `_live_embeds` | signal_id → `{"signal": dict, "event": str, "spread_buffer_enabled": bool}`; drives the bounded sequential live-refresh pass. Caller must keep `signal["limits"]` in sync; otherwise the refresh re-renders stale data |
+| `_live_embeds` | signal_id → `{"signal": dict, "event": str, "spread_buffer_enabled": bool}`; drives the bounded per-channel 30 s live-refresh pass. Caller must keep `signal["limits"]` in sync; otherwise the refresh re-renders stale data |
 | `auto_purge_channel_ids` | Set of channel_id strings whose original signal messages are deleted on end-state. Built from `monitored_channels` minus `AUTO_PURGE_EXEMPT_NAMES = {"price-action-trades"}`. |
 
 ### Embed edit vs standalone
@@ -442,7 +456,15 @@ Priority order:
 5. Default → `alert_channel`
 
 ### Live-update task
-`start_live_updates()` waits **30 seconds after a completed pass**, then takes one snapshot of the active embeds and drains it sequentially. A pass is never refilled while running; failed cosmetic edits are dropped until the next pass, and each edit has an 8 s total timeout. If a status/event edit begins, remaining cosmetic work is discarded so the critical event gets the next HTTP slot. Critical attempts have a 20 s timeout and continue through a deduplicated exponential-backoff retry task. An INFO summary is emitted after every refresh pass. Stopped when a signal closes or is cancelled.
+`start_live_updates()` runs two tasks: a scheduler that every **30 seconds** queues one refresh request per live signal, and a worker (woken by `_live_update_wakeup`) that drains them.
+
+Requests are deduplicated by signal id in `_pending_live_updates` (an `OrderedDict` used as an ordered set), so repeated scheduler passes never stack duplicate work — a signal delayed behind a rate limit is rendered when its turn arrives, using the price at send time rather than the one current when it queued.
+
+`_drain_live_update_queue` groups the pending set by channel (`_take_pending_by_channel`) and runs one `_drain_channel` per channel in parallel, bounded by `_LIVE_REFRESH_CONCURRENCY` (5). **Within a channel, edits are sequential** — Discord buckets `PATCH /channels/{id}/messages/{id}` on the CHANNEL, not the message, so fanning same-channel edits out only queues 429s behind each other. Different channels are different buckets, so a pass still completes in ~1-2 s regardless of embed count.
+
+**A pass is never refilled while it runs.** `_live_update_cycle_active` makes the scheduler skip its tick instead of topping up a pass that is already behind, and failed cosmetic edits are dropped rather than requeued immediately — the scheduler re-queues every live signal on the next interval anyway, so a 429 costs one skipped snapshot instead of becoming a permanent stream of PATCHes. Each edit carries an 8 s timeout (`_LIVE_UPDATE_ATTEMPT_TIMEOUT`); consecutive bounded hangs escalate to the process watchdog via `_record_discord_operation_timeout`.
+
+Status/event edits stand the cosmetic worker down via `_priority_edits_active`: a channel abandons the rest of its snapshots so the critical event gets the next HTTP slot. Critical events go through `deliver_critical`, which bounds the attempt at 20 s (`_DELIVERY_ATTEMPT_TIMEOUT`) and hands failures to a deduplicated exponential-backoff retry task. Stopped when a signal closes or is cancelled.
 
 ### Key public methods
 - `send_approaching_alert(signal, limit, current_price, distance_formatted, spread, spread_buffer_enabled)` — creates embed; registers for live updates
@@ -517,11 +539,25 @@ The `MetaTrader5` Python package is process-global — `mt5.initialize()` can on
 ### Exness oil symbol mapping
 Internal symbol `USOILSPOT` maps to `USOILm` on Exness MT5. The mapping is defined in both `symbol_mappings.json` (`symbol_mappings.exness.specific_mappings`) and the reverse direction (`reverse_mappings.exness`). Both sections are required — without the reverse mapping, prices arrive under `USOILM` instead of `USOILSPOT` and don't match signals.
 
-### Spread/news behavior
-Spread-hour and normal news cancels **edit the persistent embed** when one already
-exists. News events created with `dryrun` still update `bot_mode_status.news_mode`
-and post activation/ended notices for clients, but never suppress or cancel
-alert-bot signals.
+### Spread hour covers Sunday
+`_is_spread_hour` (and `vol_guard`'s copy of it) is 17:00–18:00 ET on **every day but
+Saturday**. It used to exclude the whole weekend, which left the week's 17:00 ET
+reopen — the widest, thinnest book there is — looking like ordinary trading: the
+first prints after the weekend gap are mostly spread, and auto-TP took them at face
+value. Saturday stays excluded because nothing quotes at all; Friday 17:00–18:00 was
+already covered and stays that way.
+
+Everything a non-crypto signal does in the window now stands down together: hits and
+SLs (existing behaviour), the breakeven stop, **auto-TP with the excursion ratchet
+that shares its block**, and the trailing shadow sim (which trails the bid/ask, so the
+reopen would stop out every open level on spread alone and make the
+trailing-vs-fixed-TP comparison measure the gap instead of the strategy). Crypto is
+exempt throughout — it never stops quoting. Tests: `tests/test_spread_hour.py`.
+
+### Spread/news cancel behavior
+Spread-hour and news cancels **edit the persistent embed** when one already exists. They only fall back to standalone messages if no embed has been created yet for that signal.
+
+News events created with `dryrun` still update `bot_mode_status.news_mode` and post activation/ended notices for clients, but never suppress or cancel alert-bot signals — that is the difference between `is_news_active_for` (client view) and `is_alert_bot_news_active_for` (what every gate in the tick path calls).
 
 ### News matching is per-currency; USD also covers US markets
 `NewsEvent.instrument_affected` matches per currency (CHF news never touches EURUSD). A `USD` category additionally pauses US equities (`.NAS`/`.NYSE`) and US indices (`US_INDEX_KEYWORDS`: NAS100/US30/US500/SPX500/SPX/USTEC/US2000/…), and pauses gold when `affects_gold` is set (auto-fetched high-impact USD events). Auto-fetched events carry a merged `title` ("EUR — ECB Rate / Press Conf"); `NewsEvent.display_label` is used in all news alerts (activation, cancel, ended), falling back to the bare category for manual events.
@@ -585,6 +621,16 @@ signal breakeven *immediately* — that one is a status command, this one is pro
 ### Swing is not near-missable
 `NearMissMonitor.update` short-circuits when `signal.type == "swing"`. Swing signals can only close via hit, profit, SL, or manual cancel.
 
+### Swing signals hold through news
+A news window never cancels a swing. `streaming_monitor._rides_out_news(signal)`
+(`signal.type == "swing"`) stands down all three news gates: the open-HIT cancel in
+`_check_signal`, the fill cancel in `_handle_limit_hit`, and the approaching-alert
+suppression in `_handle_approaching` — a swing that can still enter during the window
+should still say so on the way in. A swing is held for days and is sized for the event
+risk it is going to sit through, so flattening it around a release books a loss the
+trade was never meant to avoid. Every other guard (spread hour, late market, risky
+window) is unchanged, as is anything manual. Tests: `tests/test_news_swing.py`.
+
 ### Gold-tolls SL offset is configurable
 `get_gold_tolls_sl_offset()` reads `settings.json` via `load_settings()` → `BotSettings.gold_tolls_sl_offset` (default `5.0`) with a 30 s cache. Change it via `!goldtollssl <value>` or edit `settings.json` directly.
 
@@ -630,14 +676,43 @@ Before reactivating a cancelled signal via reply command or `!setstatus active`,
 ### Tick staleness gate
 `streaming_monitor._on_price_update` drops ticks older than `_MAX_TICK_AGE_SECONDS` (5 s) before any signal evaluation. The timestamp comes from `price_data["updated_at"]`, which is stamped by `price_stream_manager._process_price_update`: UTC broker tick time for ICMarkets and Exness (from `tick.time`), current wall-clock for OANDA/Binance. Spread-hour transition tracking still runs on stale ticks — only per-signal checks are skipped.
 
-### HIT signals roll over at expiry
-`expire_old_signals` in `signal_ops.py` branches on status. **ACTIVE signals** are cancelled (existing behaviour). **HIT signals** are rolled over: `expiry_time` is advanced to the next occurrence of the same `expiry_type` (via `calculate_expiry`) and a `status_changes` row is inserted with `change_type='automatic', reason='rollover'`. The signal status and limits are untouched. This repeats each expiry window until the position closes naturally.
+### HIT signals roll over at expiry, weekend included
+`expire_old_signals` in `signal_ops.py` branches on status. **ACTIVE signals** are cancelled. **HIT signals** are rolled over: `expiry_time` is advanced to the next occurrence of the same `expiry_type` (via `calculate_expiry`) and a `status_changes` row is inserted with `change_type='automatic', reason='rollover'`. The signal status and limits are untouched. This repeats each expiry window until the position closes naturally.
+
+The weekend is not an exception. A position expiring into it used to be cancelled instead of rolled, which the EX bot's weekend force-close (`cancelled` + `closed_reason='expiry'` inside `is_weekend_window`) turned into a market exit at the Friday close — a trade flattened by the calendar rather than by its own SL or TP. It now rides the gap the way it rides any overnight one: `calculate_expiry` lands a `day_end` on **Monday** (`week_end` already lands on Friday, `month_end` already walks back to a weekday), and the EX bot's SL-strip window happens to span Fri 16:55 → Sun 18:00 continuously, so the broker-side stop is off across the gap and restored at the reopen. Nothing on the TM side needed a weekend carve-out: non-crypto feeds are silent from Friday's close until Sunday 18:00, and the spread-hour gate covers Friday 17:00–18:00 exactly as it covers a weekday's.
+
+`expire_old_signals` returns **the ids it cancelled**, not a count — `expiry_manager` runs its post-expiry cleanup (finalize the trailing/excursion trackers, mark the embed expired, schedule the archive move, react ❌) over that list. It used to re-query the due signals itself and clean up every one, so each rolled-over position had its analytics finalized mid-trade and its live embed archived every day at 4:45 PM.
 
 ### `save_signal` is TOCTOU-safe
 Uses `INSERT … ON CONFLICT (message_id) DO NOTHING RETURNING id`. If no id is returned (duplicate parse race), the existing row is inspected on the same connection: reactivate if cancelled, reject otherwise. The pre-check `SELECT` is gone.
 
 ### `mark_limit_hit` is atomic
 All updates in `manager.mark_limit_hit` (limit row, signal counter, status→HIT, audit row) run inside `async with conn.transaction()`. A mid-flight disconnect cannot leave the row half-updated.
+
+### Tick-path status writes land before any in-memory mutation
+`_handle_limit_hit`, `_check_stop_loss` and `_check_breakeven_stop` all call their
+`_process_*` writer first and only touch memory — `limit.status`, `hit_alert_sent`,
+`sl_alert_sent`, `be_stop_alert_sent` — once it returns True. **Do not "mark it in
+memory first so the embed renders in the same beat".** That was the old order and it
+cost signals 3982 / 3983 / 4000 on 2026-08-28: three signals crossed every limit and
+their stop losses during the 14:00 UTC release, the writes failed, and the flags stuck
+anyway. A limit flipped to `hit` in memory drops out of `signal.pending_limits`, so the
+tick path never checks that level again; `sl_alert_sent` does the same to the stop.
+The signals went silently inert for an hour while the DB still showed them `active`
+with every limit `pending` — which is exactly what the EX bot keys placement on, so it
+entered a trade the TM had already invalidated. The embed still renders correctly
+because `_process_limit_hit` sets the limit state itself before returning; the visible
+cost is that a hit ping now waits on the pooler write (2–5 s) instead of racing it.
+
+Two supports back this up. Failed writes back off for `_WRITE_RETRY_BACKOFF_SECONDS`
+(5 s) per limit/signal before the next tick retries — these writes run inline in the
+feed dispatch loop and can block for the pool timeout, so an outage must not be retried
+per tick. And `_periodic_signal_refresh` calls `_reconcile_limits` for every signal
+present in both the DB and memory: the refresh diffs by signal id and preserves
+in-memory mutations, so limits were the one piece of state nothing ever corrected.
+A limit the DB still reports `pending` is restored to `pending` in memory unless its
+`hit_time` is newer than the snapshot taken before the query. Tests:
+`tests/test_write_failure_recovery.py`.
 
 ### Hit limits loaded on restart
 `streaming_monitor._load_and_subscribe_signals` fetches hit limits for every HIT-status signal (via `get_hit_limits_for_signal`) and appends them as `LimitData(status="hit")` to `signal.limits`. After restart, `signal.hit_limits` is non-empty so embed builders see the complete limit history without waiting for the next event.
@@ -648,8 +723,70 @@ All updates in `manager.mark_limit_hit` (limit row, signal counter, status→HIT
 ### Price-flow watchdog
 `FeedHealthMonitor._check_price_flow_watchdog` force-restarts the bot (graceful `bot.close()` → `main.py` supervisor relaunch) only when ALL hold: past `WATCHDOG_GRACE_SECONDS`, at least one subscribed symbol whose market is open now (via `is_market_open`, which already excludes weekends/holidays/spread hour), and zero ticks across every feed for `WATCHDOG_SILENCE_SECONDS` (180 s). Fires at most once (`_watchdog_fired`). Runs the shutdown in a separate task so it doesn't await its own monitor task.
 
+### Dead-feed watchdog
+`_check_price_flow_watchdog` needs *every* feed silent, so it structurally cannot
+see one dead feed among four. `_check_dead_feed_watchdog` can: any feed sitting at
+status `down` for `FEED_DOWN_RESTART_SECONDS` (30 min, measured from
+`first_stale_time`) triggers the same supervised restart. It shares
+`_watchdog_fired` with the price-flow watchdog, so only one of them ever fires per
+process.
+
+The window is long on purpose. A feed only reaches `down` with its market open, so
+30 min of zero prices is unambiguous — but a genuine multi-hour broker outage will
+restart the bot roughly twice an hour, which is the accepted cost of never
+repeating 2026-08-27.
+
+### A feed must never be abandoned, and a session is not a feed
+Four independent safeguards each failed to notice OANDA dying at
+2026-08-27 14:33 and staying dead until a manual restart 28½ h later. OANDA
+carries every index, so signal 3935 (open since 08-25) and signal 4003 (saved
+*during* the blackout) got no approaching, hit, SL, TP or NM for the whole window
+while the bot looked healthy. All four are now closed:
+
+- **The reader task is referenced.** `PriceStreamManager.initialize` used bare
+  `asyncio.create_task(...)`; asyncio holds only a weak reference, so a reader
+  nobody else references can be garbage-collected mid-flight and take its feed
+  with it, silently. `_start_feed_task` stores the handle in `_feed_tasks` and
+  attaches a done-callback that logs any exit as an outage. **Never start a feed
+  reader with a bare `create_task` again.**
+- **A stream that ends without yielding is an outage.** `_run_feed_stream`'s `else`
+  branch used to `sleep(1); continue` forever with no log and no reconnect, and
+  `OANDAStream.stream_prices` returns exactly like that whenever `streaming` has
+  been cleared out from under it — which every `reconnect()` does, because it
+  disconnects first. It now counts as a failure and falls through to the
+  backoff/reconnect path. A feed with nothing routed to it (`symbol_to_feed`) is
+  still treated as idle, so pre-`bulk_subscribe` startup stays quiet.
+- **`reconnect_feed` revives the reader.** It returns `feed.connected` — a rebuilt
+  HTTP session, which says nothing about whether anything is consuming it. It now
+  also calls `_ensure_feed_task`, so a session and a reader are restored together.
+- **Reconnects slow down but never stop.** The old hard stop at
+  `MAX_RECONNECT_ATTEMPTS` (3) was spent inside a five-minute DNS outage and no
+  attempt was ever made again once the network came back — 1,625 identical ERROR
+  lines and nothing else for 28 h. `_may_attempt_reconnect` drops to
+  `RECONNECT_RETRY_INTERVAL_SECONDS` after the budget instead of giving up, and the
+  stale-feed ERROR is logged once per outage (DEBUG thereafter).
+
+`attempt_reconnection` also requires a **real tick** before declaring success:
+`_wait_for_first_tick` compares against a watermark taken *before* the reconnect
+and waits up to `RECONNECT_TICK_TIMEOUT_SECONDS`. OANDA logged three "reconnected"
+successes on 2026-08-27 while delivering nothing, which is why the outage read as
+handled.
+
+Relatedly, `_check_feed` holds a `down` feed down until a real tick arrives. A
+symbol whose market closes stops counting as stale, so a dead feed drains its own
+stale list overnight and reads as recovered — that is what cleared OANDA's down
+state at 01:00 on 2026-08-28, reopening the reconnect budget and DMing an
+all-clear for a feed that then stayed silent another 18 h.
+
+Tests: `tests/test_feed_recovery.py`.
+
 ### Discord connection watchdog
-`TradingBot.heartbeat` checks gateway readiness every 30 s and runs an authenticated REST probe every 60 s. A gateway that remains unready for 120 s, three consecutive REST probe failures/timeouts (30 s per probe), or two consecutive bounded message-operation timeouts closes the bot from a separate task so `main.py` can relaunch it. Cosmetic edits time out after 8 s and critical attempts after 20 s; this catches a wedged message route even when the separate user-fetch probe remains healthy. The client also caps any single non-global Retry-After at 60 s; ordinary short Discord Retry-After responses are still honoured.
+`TradingBot.heartbeat` checks gateway readiness every 30 s and runs an authenticated REST probe every 60 s. A gateway that remains unready for 120 s, three consecutive REST probe failures/timeouts (30 s per probe), or two consecutive bounded message-operation timeouts closes the bot from a separate task so `main.py` can relaunch it. Cosmetic edits time out after 8 s and critical attempts after 20 s; this catches a wedged message route even when the separate user-fetch probe remains healthy. The client also caps any single non-global Retry-After at 60 s; ordinary short Discord Retry-After responses are still honoured. This watchdog is independent of price-feed health, so a network-device reset cannot leave Discord wedged while price ticks keep the process alive.
+
+### Critical alerts retry until delivered
+`alert_system.queue_delivery_retry(key, operation, *args, **kwargs)` re-sends one hit / SL / breakeven / auto-TP alert on a bounded exponential backoff (5 s → 60 s) until it lands. Trading state is authoritative and commits regardless, so this only keeps the *notification* pending instead of losing it when the monitor evicts the signal. Keyed per event (`limit_hit:<sid>:<lid>`, `stop_loss:<sid>`, …) so a duplicate request while one is in flight is dropped. Tasks are cancelled in `stop_live_updates`. Callers pass the same arguments they just used, and every `send_*_alert` returns `bool` for this to work — a new alert sender that returns `None` silently queues an infinite retry.
+
+`deliver_critical(key, operation, *args, **kwargs)` is the wrapper the tick path actually calls: it bounds the first attempt at `_DELIVERY_ATTEMPT_TIMEOUT` (20 s) and hands anything that fails or times out to `queue_delivery_retry`, so a wedged Discord route can never stall the monitor that is holding a trading decision open.
 
 ### Per-feed reconnect (no cascade)
 `FeedHealthMonitor.attempt_reconnection` calls `PriceStreamManager.reconnect_feed(name)` to reconnect only the stale feed. It must never call `reconnect_all()` from the health path — that tore down healthy feeds (and the MT5 terminal) whenever one feed went stale. OANDA additionally self-heals via a read-timeout watchdog in `oanda_stream.stream_prices` (`_STREAM_READ_TIMEOUT` = 15 s; OANDA heartbeats every ~5 s), so a silently half-dead stream reconnects without health-monitor involvement.
@@ -658,7 +795,7 @@ All updates in `manager.mark_limit_hit` (limit row, signal counter, status→HIT
 The alert embed message reference is persisted on `signals` (`alert_message_id`, `alert_channel_id`, `ping_message_id`) every time `_upsert_signal_message` creates a new embed or sends a new ping. The archived embed location is persisted on `finished_message_id` / `finished_channel_id` when `archive_manager._move_after_delay` moves the embed, or when the signal-reply cancel path posts a direct cancellation embed to the finished channel.
 
 On startup, `AlertSystem.hydrate_from_db` runs from `streaming_monitor._load_and_subscribe_signals` AFTER hit-limits are loaded and BEFORE `bulk_subscribe` — this ordering matters: if the price stream started first, the next tick could fire `send_approaching_alert` / `send_limit_hit_alert` and post a duplicate embed alongside the orphaned one. Per-signal decision for active/hit signals:
-- **Persisted ID + Discord fetch succeeds** → re-populate `signal_messages` / `signal_ping_messages` / `alert_messages` (both embed and ping IDs) and register for live updates. Same embed continues through the bounded sequential refresh pass.
+- **Persisted ID + Discord fetch succeeds** → re-populate `signal_messages` / `signal_ping_messages` / `alert_messages` (both embed and ping IDs) and register for live updates. Same embed continues live-refreshing on the bounded per-channel 30 s pass.
 - **Persisted ID + NotFound, status=ACTIVE** → clear persisted IDs, `UPDATE limits SET approaching_alert_sent = FALSE WHERE signal_id=$1 AND status='pending'`, mutate in-memory limit copies. The approaching alert re-fires on the next price tick with a fresh embed.
 - **Persisted ID + NotFound, status=HIT** → clear persisted IDs and call `reactivate_embed(signal, ping_text=None)` to rebuild the embed immediately so live updates and future events have a target.
 - **No persisted ID** (pre-feature signals, first deploy) → same fallback as above: ACTIVE resets `approaching_alert_sent`; HIT rebuilds. One-time cosmetic churn on first restart after deploy.
@@ -763,7 +900,13 @@ Numbers and strings that mean something — timeouts, thresholds, role IDs, chan
 `hasattr` guards, `if x is not None` checks, and try/excepts have a real cost — they obscure the happy path and tell future readers "this might fail" when it can't. Use them at genuine boundaries (external I/O, user input, optional config) and not for attributes the constructor always sets. When in doubt: would a sensible caller ever hit this case? If no, delete the guard.
 
 ### Logging
-Log at the level that matches the severity (debug for tracing, info for normal events, warning for recoverable problems, error for failures). Don't sprinkle emojis or status indicators into log messages — `logger.info("Signal saved")` not `logger.info("✅ Signal saved successfully!")`. Logging is for operators, not for users.
+INFO is a timeline of what the bot *did*, one line per real event — a signal saved, a status change, a feed reconnect, an admin command. Everything that only explains *how* it got there (parse stages, embed edits, subscribe/unsubscribe churn, per-tick guard suppressions, "X initialized" constructor lines) is DEBUG. The test is whether an operator scanning the log at 3 AM would want the line; if it repeats per tick, per limit, or per stage of one user-visible action, it's DEBUG.
+
+A single action must not produce a run of INFO lines. Saving a signal is one line naming the signal, not five across the handler, parser and DB. Per-item startup loops are summarised (`Monitoring 22 channels`, not 22 lines). When two layers both have something to say about one event, they must say different things — `signal_ops` logs the transition and its timing, the caller logs the reason (`Signal 3762 (XAUUSD) cancelled — spread hour`).
+
+Log at the level that matches severity (debug for tracing, info for normal events, warning for recoverable problems, error for failures). Don't sprinkle emojis or status indicators into log messages — `logger.info("Signal saved")` not `logger.info("✅ Signal saved successfully!")`. Skip filler adverbs: "Database connected", not "Database connection pool created successfully". Logging is for operators, not for users.
+
+`utils/logger.py` formats records; `file:line` is appended only for WARNING and above, so INFO stays scannable while failures stay debuggable. `LOG_LEVEL=DEBUG` brings the full trace back.
 
 ### Classes vs functions
 Prefer functions unless you actually need state. A class with only a constructor and one method is a function in disguise. A class that holds three sub-managers and forwards every method to them is plumbing — flatten it or delete it.

@@ -90,8 +90,6 @@ class MessageHandler:
         self.signal_db = bot.signal_db
         self.tp_config = TPConfig()
         self.alert_system = None  # Set by monitor when initialized
-        logger.info("MessageHandler initialized, alert_system is None initially")
-
     def is_allowed_channel(self, channel_id: int) -> bool:
         return channel_id in self.bot.allowed_channel_ids
 
@@ -108,7 +106,7 @@ class MessageHandler:
         try:
             await message.author.send(_NO_PERMISSION_DM)
         except discord.Forbidden:
-            self.logger.info(
+            self.logger.debug(
                 f"Could not DM {message.author} about denied signal management (DMs closed)"
             )
         except Exception as e:
@@ -119,7 +117,7 @@ class MessageHandler:
         if message.author.bot:
             return
         if message.channel.id in self.bot.monitored_channels:
-            self.logger.info(f"New message in monitored channel: {message.channel.name}")
+            self.logger.debug(f"New message in monitored channel: {message.channel.name}")
             await self.process_signal(message)
         await self.check_signal_management_reply(message)
         await self.check_alert_management_reply(message)
@@ -165,7 +163,7 @@ class MessageHandler:
             elif action_taken == "reactivated":
                 await self._safe_remove_reaction(original_message, "❌")
                 await self.safe_add_reaction(original_message, "♻️")
-            self.logger.info(
+            self.logger.debug(
                 f"Added reaction to original signal message {message_id} for action: {action_taken}"
             )
         except Exception as e:
@@ -179,9 +177,7 @@ class MessageHandler:
         if not self.alert_system:
             if self.bot.services.alert_system:
                 self.alert_system = self.bot.services.alert_system
-                logger.info(
-                    f"Got alert system from services, has {len(self.alert_system.alert_messages)} tracked messages"
-                )
+                logger.debug("Alert system resolved from services")
             else:
                 logger.warning("Alert system not available - monitor may not be initialized")
                 return
@@ -289,7 +285,7 @@ class MessageHandler:
     ) -> None:
         """Unified command processor shared by both alert-reply and signal-reply paths."""
         path = "signal" if from_signal_reply else "alert"
-        logger.info(
+        logger.debug(
             f"Processing {path} management command for signal {signal_id}: '{message.content}'"
         )
 
@@ -834,7 +830,7 @@ class MessageHandler:
                 channel_name = self.get_channel_name(int(signal.channel_id))
                 parsed = parse_signal(original_message.content, channel_name)
             except Exception as e:
-                logger.info(
+                logger.debug(
                     f"Could not fetch original message for signal {signal_id} "
                     f"— reactivating from DB state: {e}"
                 )
@@ -907,7 +903,7 @@ class MessageHandler:
 
         try:
             await referenced.delete()
-            logger.info(
+            logger.debug(
                 f"Deleted original signal message {referenced.id} "
                 f"(signal {sig_id} cancelled with no alert embed)"
             )
@@ -964,7 +960,7 @@ class MessageHandler:
                     )
             except Exception as e:
                 logger.warning(f"Could not persist finished embed IDs for signal {sig_id}: {e}")
-            logger.info(
+            logger.debug(
                 f"Sent direct cancellation embed to finished-signals "
                 f"for signal {sig_id} (no prior alert embed)"
             )
@@ -1182,7 +1178,8 @@ class MessageHandler:
                 if success:
                     await self.safe_add_reaction(message, "✅")
                     self.logger.info(
-                        f"Signal #{signal_id} processed: {parsed.instrument} {parsed.direction}"
+                        f"Signal {signal_id} saved: {parsed.instrument} {parsed.direction}, "
+                        f"{len(parsed.limits)} limit(s) ({channel_name})"
                     )
 
                     if parsed.instant_entry and signal_id:
@@ -1202,7 +1199,9 @@ class MessageHandler:
                                     self._handle_overlap_prompt(message, signal_id, overlapping)
                                 )
                         except Exception as _oe:
-                            self.logger.warning(f"Overlap check failed for signal {signal_id}: {_oe}")
+                            self.logger.warning(
+                                "Overlap check failed for signal %s: %r", signal_id, _oe
+                            )
                 else:
                     existing = await self.signal_db.get_signal_by_message_id(str(message.id))
                     if existing and existing["status"] != "cancelled":
@@ -1353,7 +1352,7 @@ class MessageHandler:
         if message.channel.id not in self.bot.monitored_channels:
             return
 
-        self.logger.info(f"Message edited in monitored channel: {message.channel.name}")
+        self.logger.debug(f"Message edited in monitored channel: {message.channel.name}")
 
         existing = await self.signal_db.get_signal_by_message_id(str(message.id))
         if not existing:
@@ -1368,7 +1367,7 @@ class MessageHandler:
             await message.clear_reactions()
             await message.add_reaction("❌")
             self.logger.info(
-                f"Signal edit rejected as malformed (likely typo): {message.id}: {parsed.reason}"
+                f"Signal {existing['id']} edit rejected as malformed: {parsed.reason}"
             )
             return
 
@@ -1390,7 +1389,7 @@ class MessageHandler:
                     await message.clear_reactions()
                     await message.add_reaction("✅")
                     await message.add_reaction("♻️")
-                    self.logger.info(f"Cancelled signal reactivated after edit: {message.id}")
+                    self.logger.info(f"Signal {existing['id']} reactivated after edit")
 
                     if self.alert_system:
                         try:
@@ -1426,7 +1425,10 @@ class MessageHandler:
                 await message.clear_reactions()
                 await message.add_reaction("✅")
                 await message.add_reaction("📝")
-                self.logger.info(f"Signal updated after edit: {message.id}")
+                self.logger.info(
+                    f"Signal {existing['id']} updated after edit: "
+                    f"{parsed.instrument} {parsed.direction}, {len(parsed.limits)} limit(s)"
+                )
 
                 monitor = self.bot.services.monitor
                 if monitor:
@@ -1439,7 +1441,7 @@ class MessageHandler:
                             # approaching/hit alert — retract the stale embed/ping so a
                             # corrected alert fires fresh when the real level is reached.
                             await self.alert_system.retract_approaching_embed(existing["id"])
-                            self.logger.info(
+                            self.logger.debug(
                                 f"Retracted stale alert embed after corrective edit: {message.id}"
                             )
                         else:
@@ -1460,7 +1462,9 @@ class MessageHandler:
                         self.logger.warning(f"Could not update embed after signal edit: {_ue}")
             elif existing["status"] in ["profit", "breakeven", "stop_loss"]:
                 await message.add_reaction("🔒")
-                self.logger.info(f"Cannot update signal in final status: {existing['status']}")
+                self.logger.info(
+                    f"Signal {existing['id']} not updated — already {existing['status']}"
+                )
             else:
                 # The DB update failed and rolled back (e.g. a constraint violation),
                 # leaving the old limits in place. Surface it instead of silently
@@ -1474,7 +1478,7 @@ class MessageHandler:
         else:
             await message.clear_reactions()
             await message.add_reaction("❌")
-            self.logger.info(f"Signal parse failed after edit: {message.id}")
+            self.logger.info(f"Signal {existing['id']} edit did not parse")
 
     async def handle_message_delete(self, payload: discord.RawMessageDeleteEvent):
         """Handle message deletions with signal cancellation"""
@@ -1484,11 +1488,11 @@ class MessageHandler:
         if payload.channel_id not in self.bot.monitored_channels:
             return
 
-        self.logger.info(f"Message deleted in monitored channel: {payload.message_id}")
+        self.logger.debug(f"Message deleted in monitored channel: {payload.message_id}")
         result = await self.signal_db.cancel_signal_by_message(str(payload.message_id))
 
         if result:
-            self.logger.info(f"Signal cancelled due to message deletion: {payload.message_id}")
+            self.logger.info(f"Signal cancelled — signal message {payload.message_id} deleted")
             monitor = self.bot.services.monitor
             if monitor:
                 try:

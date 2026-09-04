@@ -40,7 +40,7 @@ class DatabaseManager:
                 max_size=10,
                 command_timeout=30,
             )
-            logger.info("Database connection pool created")
+            logger.info("Database connected")
 
     @asynccontextmanager
     async def get_connection(self):
@@ -143,4 +143,4 @@ class DatabaseManager:
         if self._pool:
             await self._pool.close()
             self._pool = None
-            logger.info("Database connection pool closed")
+            logger.debug("Database connection pool closed")

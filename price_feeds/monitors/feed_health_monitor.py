@@ -33,6 +33,17 @@ RECONNECT_DELAY_SECONDS = 10
 ALERT_COOLDOWN_MINUTES = 15
 STARTUP_GRACE_PERIOD_SECONDS = 120
 
+# After MAX_RECONNECT_ATTEMPTS consecutive failures a feed is retried on this
+# slower interval rather than abandoned. Giving up for good is what left OANDA
+# dead for 28 h on 2026-08-27: the monitor burned its three attempts inside a
+# five-minute DNS outage and never tried again once the network came back.
+RECONNECT_RETRY_INTERVAL_SECONDS = 600
+
+# How long to wait for a feed to deliver a price after a reconnect reports
+# success. A rebuilt session is not a working feed — OANDA logged three
+# successful reconnects while delivering nothing at all.
+RECONNECT_TICK_TIMEOUT_SECONDS = 30
+
 # Loop-liveness watchdog: an async heartbeat stamps a monotonic timestamp while
 # the event loop is healthy; a daemon thread (which survives a frozen loop)
 # hard-exits the process if that stamp stops advancing. This is the only backstop
@@ -74,6 +85,15 @@ def _relaunch_process():
 # gate (is_market_open) means weekends, holidays, and spread hour never trip it.
 WATCHDOG_SILENCE_SECONDS = 180
 WATCHDOG_GRACE_SECONDS = 180
+
+# Dead-feed watchdog: the price-flow watchdog above only fires when EVERY feed
+# is silent, so one dead feed among four can never trip it — which is how the
+# OANDA reader stayed dead for 28 h on 2026-08-27 while ICMarkets, Binance and
+# Exness kept the bot looking alive, leaving every index signal unmonitored.
+# A feed with an open market and zero prices for this long is not going to
+# self-repair; a restart is what actually cured it. Long enough that a genuine
+# broker outage restarts the bot roughly twice an hour rather than constantly.
+FEED_DOWN_RESTART_SECONDS = 1800
 
 # `open_days` lists the weekdays a session STARTS on (Mon=0), not every weekday
 # the market is open. For the classes whose session wraps past midnight
@@ -172,6 +192,7 @@ class FeedHealthMonitor:
         self.feed_status: dict[str, str] = {}  # 'healthy', 'down', 'idle'
         self.last_alert_time: dict[str, datetime] = {}
         self.reconnect_attempts: dict[str, int] = defaultdict(int)
+        self.last_reconnect_time: dict[str, datetime] = {}
         # Earliest stale-symbol last_update timestamp captured when the feed first
         # crossed the down threshold. Used to report accurate downtime on recovery.
         self.first_stale_time: dict[str, datetime] = {}
@@ -191,12 +212,12 @@ class FeedHealthMonitor:
         # Timezone for market hours
         self.est = pytz.timezone("America/New_York")
 
-        logger.info(f"FeedHealthMonitor initialized (admin: {admin_user_id})")
+        logger.debug(f"FeedHealthMonitor initialized (admin: {admin_user_id})")
 
     def set_admin_user(self, user_id: int):
         """Set admin user ID for alerts"""
         self.admin_user_id = user_id
-        logger.info(f"Admin user set to: {user_id}")
+        logger.debug(f"Admin user set to: {user_id}")
 
     async def start_monitoring(self):
         """Start the health monitoring loop"""
@@ -219,7 +240,7 @@ class FeedHealthMonitor:
         )
         self._loop_watchdog_thread.start()
 
-        logger.info("Feed health monitoring started")
+        logger.debug("Feed health monitoring started")
 
     async def _loop_heartbeat_beat(self):
         """Stamp a monotonic heartbeat while the event loop is servicing tasks."""
@@ -274,7 +295,7 @@ class FeedHealthMonitor:
                     await task
         self._reconnect_tasks.clear()
 
-        logger.info("Feed health monitoring stopped")
+        logger.debug("Feed health monitoring stopped")
 
     async def _monitoring_loop(self):
         """Main monitoring loop"""
@@ -286,7 +307,9 @@ class FeedHealthMonitor:
                 logger.error(f"Error in health check: {e}", exc_info=True)
 
             try:
-                await self._check_price_flow_watchdog(datetime.now())
+                now = datetime.now()
+                await self._check_price_flow_watchdog(now)
+                await self._check_dead_feed_watchdog(now)
             except Exception as e:
                 logger.error(f"Error in price-flow watchdog: {e}", exc_info=True)
 
@@ -300,6 +323,11 @@ class FeedHealthMonitor:
                 if newest is None or ts > newest:
                     newest = ts
         return newest
+
+    def _feed_newest_tick(self, feed_name: str) -> Optional[datetime]:
+        """Most recent tick timestamp on one feed, or None."""
+        ticks = self.last_seen.get(feed_name, {}).values()
+        return max(ticks) if ticks else None
 
     def _any_open_market_subscribed(self) -> bool:
         """True if any currently-subscribed symbol's market should be open now."""
@@ -344,17 +372,62 @@ class FeedHealthMonitor:
         )
         # Run the shutdown in its own task: bot.close() cancels this monitor
         # task, so awaiting it here would make the task await itself.
-        asyncio.create_task(self._watchdog_restart(int(silence)))
+        asyncio.create_task(
+            self._watchdog_restart(
+                f"🚨 **Price-flow watchdog tripped**\n"
+                f"No ticks on any feed for {int(silence)}s while a market is open.\n"
+                f"Restarting the bot."
+            )
+        )
 
-    async def _watchdog_restart(self, silence: int):
+    async def _check_dead_feed_watchdog(self, now: datetime):
+        """Force a supervised restart when a single feed stays down for good.
+
+        The price-flow watchdog needs every feed silent, so it cannot see one
+        dead feed among four. This one can: a feed whose market is open (already
+        implied by "down") and which has produced nothing for
+        FEED_DOWN_RESTART_SECONDS is past self-repair, and the reconnect path has
+        already been retrying it the whole time.
+        """
+        if self._watchdog_fired:
+            return
+
+        if (now - self.startup_time).total_seconds() < WATCHDOG_GRACE_SECONDS:
+            return
+
+        for feed_name, status in self.feed_status.items():
+            if status != "down":
+                continue
+
+            stale_since = self.first_stale_time.get(feed_name)
+            if stale_since is None:
+                continue
+
+            down_for = (now - stale_since).total_seconds()
+            if down_for < FEED_DOWN_RESTART_SECONDS:
+                continue
+
+            self._watchdog_fired = True
+            logger.critical(
+                "Dead-feed watchdog: %s has delivered no prices for %.0fs — forcing restart",
+                feed_name,
+                down_for,
+            )
+            asyncio.create_task(
+                self._watchdog_restart(
+                    f"🚨 **Dead-feed watchdog tripped**\n"
+                    f"{feed_name.upper()} has delivered no prices for "
+                    f"{self._format_duration(timedelta(seconds=down_for))} while its "
+                    f"market is open.\nRestarting the bot."
+                )
+            )
+            return
+
+    async def _watchdog_restart(self, alert: str):
         """Alert the admin, then gracefully close the bot so the supervisor
         relaunches a fresh instance."""
         try:
-            await self.send_admin_alert(
-                f"🚨 **Price-flow watchdog tripped**\n"
-                f"No ticks on any feed for {silence}s while a market is open.\n"
-                f"Restarting the bot."
-            )
+            await self.send_admin_alert(alert)
         except Exception as e:
             logger.error(f"Watchdog admin alert failed: {e}")
 
@@ -461,11 +534,26 @@ class FeedHealthMonitor:
 
         # Determine feed health
         newest_seen = max(feed_symbols.values()) if feed_symbols else None
+        ticked_recently = any(now - ts <= stale_threshold for ts in feed_symbols.values())
 
         # The EX bot blocks placement on any feed marked "down", so we only mark a
         # feed down when every subscribed symbol has stalled. One unrelated quiet
         # symbol must not poison every other signal on the feed.
         if len(stale_symbols) < len(feed_symbols):
+            # A symbol whose market has closed stops counting as stale, so a feed
+            # that is genuinely dead drains its own stale list overnight and
+            # reads as recovered without ever delivering a price. That is what
+            # cleared OANDA's down state at 01:00 on 2026-08-28 — reopening the
+            # reconnect budget and DMing an all-clear for a feed that then stayed
+            # silent another 18 h. Hold the down state until a real tick arrives;
+            # the stale list refills on its own when the market reopens.
+            if self.feed_status.get(feed_name) == "down" and not ticked_recently:
+                oldest_seen = min(feed_symbols.values())
+                await self._write_feed_health(
+                    feed_name, "down", int((now - oldest_seen).total_seconds()), newest_seen
+                )
+                return
+
             if self.feed_status.get(feed_name) == "down":
                 await self._handle_feed_recovery(feed_name)
 
@@ -482,6 +570,17 @@ class FeedHealthMonitor:
                 self.first_stale_time[feed_name] = min(
                     s["last_update"] for s in stale_symbols
                 )
+                logger.error(
+                    "%s feed stale: %d symbol(s) not ticking", feed_name, len(stale_symbols)
+                )
+            else:
+                # One line per outage, not one per check — the OANDA stall wrote
+                # 1,625 identical ERROR lines over 28 h and buried everything else.
+                logger.debug(
+                    "%s feed still stale: %d symbol(s) not ticking",
+                    feed_name,
+                    len(stale_symbols),
+                )
 
             self.feed_status[feed_name] = "down"
             max_stale_secs = int(max(s["time_since"].total_seconds() for s in stale_symbols))
@@ -493,8 +592,6 @@ class FeedHealthMonitor:
         Handle feed failure
         Attempt reconnection and send alerts if needed
         """
-        logger.error(f"{feed_name} feed failure detected: {len(stale_symbols)} stale symbols")
-
         # Check alert cooldown
         if not self._should_send_alert(feed_name):
             logger.debug(f"Alert cooldown active for {feed_name}, skipping")
@@ -515,17 +612,32 @@ class FeedHealthMonitor:
     async def _reconnect_and_alert(self, feed_name: str, stale_symbols: list):
         """Attempt reconnection and, if it fails, DM the admin. Runs as a task."""
         try:
-            if self.reconnect_attempts[feed_name] < MAX_RECONNECT_ATTEMPTS:
-                if await self.attempt_reconnection(feed_name):
-                    return  # Don't alert if reconnection worked
-            else:
-                logger.error(
-                    f"{feed_name} max reconnection attempts reached ({MAX_RECONNECT_ATTEMPTS})"
-                )
+            if self._may_attempt_reconnect(feed_name) and await self.attempt_reconnection(
+                feed_name
+            ):
+                return  # Don't alert if reconnection worked
 
             await self._send_feed_failure_alert(feed_name, stale_symbols)
         finally:
             self._reconnect_tasks.pop(feed_name, None)
+
+    def _may_attempt_reconnect(self, feed_name: str) -> bool:
+        """Rate-limit reconnects for a feed that keeps failing, but never stop.
+
+        The first MAX_RECONNECT_ATTEMPTS failures are retried on every health
+        check; after that the feed drops to RECONNECT_RETRY_INTERVAL_SECONDS so a
+        long broker outage isn't hammered. It is never abandoned — the old
+        hard stop left OANDA unrecoverable for 28 h after a five-minute DNS
+        outage burned all three attempts.
+        """
+        if self.reconnect_attempts[feed_name] < MAX_RECONNECT_ATTEMPTS:
+            return True
+
+        last = self.last_reconnect_time.get(feed_name)
+        if last is None:
+            return True
+
+        return (datetime.now() - last).total_seconds() >= RECONNECT_RETRY_INTERVAL_SECONDS
 
     async def _handle_feed_recovery(self, feed_name: str):
         """Handle feed recovery"""
@@ -552,28 +664,51 @@ class FeedHealthMonitor:
             True if reconnection successful, False otherwise
         """
         self.reconnect_attempts[feed_name] += 1
+        self.last_reconnect_time[feed_name] = datetime.now()
         self.stats["reconnections_attempted"] += 1
 
-        logger.info(
-            f"Attempting reconnection for {feed_name} (attempt {self.reconnect_attempts[feed_name]})"
-        )
+        attempt = self.reconnect_attempts[feed_name]
+        logger.debug(f"Attempting reconnection for {feed_name} (attempt {attempt})")
 
         try:
             await asyncio.sleep(RECONNECT_DELAY_SECONDS)
 
-            # Reconnect only the stale feed — never tear down healthy feeds.
-            success = await self.stream_manager.reconnect_feed(feed_name)
+            # Read the tick watermark before the reconnect, so a price that
+            # arrives while the feed is coming back still counts as proof.
+            baseline = self._feed_newest_tick(feed_name)
 
-            if success:
-                self.stats["reconnections_successful"] += 1
-                logger.info(f"{feed_name} reconnection successful")
-                return True
-            logger.warning(f"{feed_name} reconnection failed")
-            return False
+            # Reconnect only the stale feed — never tear down healthy feeds.
+            if not await self.stream_manager.reconnect_feed(feed_name):
+                logger.warning(f"{feed_name} reconnection failed")
+                return False
+
+            # A rebuilt session is not a working feed. OANDA reported three
+            # successful reconnects on 2026-08-27 while its reader loop was gone
+            # and not one price arrived, which is why the outage read as handled.
+            # Only a fresh tick proves the feed is actually back.
+            if not await self._wait_for_first_tick(feed_name, baseline):
+                logger.warning(f"{feed_name} reconnected but delivered no prices")
+                return False
+
+            self.stats["reconnections_successful"] += 1
+            logger.info(f"{feed_name} reconnected (attempt {attempt})")
+            return True
 
         except Exception as e:
             logger.error(f"Error reconnecting {feed_name}: {e}")
             return False
+
+    async def _wait_for_first_tick(self, feed_name: str, baseline: Optional[datetime]) -> bool:
+        """Wait for a tick newer than `baseline` to arrive on the feed."""
+        deadline = time.monotonic() + RECONNECT_TICK_TIMEOUT_SECONDS
+
+        while True:
+            newest = self._feed_newest_tick(feed_name)
+            if newest is not None and (baseline is None or newest > baseline):
+                return True
+            if time.monotonic() >= deadline:
+                return False
+            await asyncio.sleep(1)
 
     def _should_send_alert(self, feed_name: str) -> bool:
         """Check if we should send an alert (respects cooldown)"""
@@ -620,7 +755,7 @@ class FeedHealthMonitor:
             self.last_alert_time[feed_name] = datetime.now()
             self.stats["alerts_sent"] += 1
 
-            logger.info(f"Sent failure alert to admin for {feed_name}")
+            logger.debug(f"Sent failure alert to admin for {feed_name}")
 
         except Exception as e:
             logger.error(f"Failed to send admin alert: {e}")
@@ -651,7 +786,7 @@ class FeedHealthMonitor:
 
             await admin_user.send(message)
 
-            logger.info(f"Sent recovery alert to admin for {feed_name}")
+            logger.debug(f"Sent recovery alert to admin for {feed_name}")
 
         except Exception as e:
             logger.error(f"Failed to send recovery alert: {e}")
@@ -670,7 +805,7 @@ class FeedHealthMonitor:
         try:
             admin_user = await self.bot.fetch_user(self.admin_user_id)
             await admin_user.send(message)
-            logger.info("Sent custom admin alert")
+            logger.debug("Sent custom admin alert")
         except Exception as e:
             logger.error(f"Failed to send custom alert: {e}")
 

@@ -226,7 +226,7 @@ class SignalParser:
         self._stock_parser = None
         self._ai_parser = None
 
-        logger.info("Initialized SignalParser")
+        logger.debug("Initialized SignalParser")
 
     def _load_channel_config(self, config_loader) -> dict:
         """Load channel configuration from JSON"""
@@ -241,7 +241,7 @@ class SignalParser:
         try:
             channels_data = config_loader.load("channels.json")
             channel_config = channels_data.get("channel_settings", {})
-            logger.info(f"Loaded channel config for {len(channel_config)} channels")
+            logger.debug(f"Loaded channel config for {len(channel_config)} channels")
             return channel_config
         except Exception as e:
             logger.warning(f"Could not load channel configuration: {e}")
@@ -299,7 +299,7 @@ class SignalParser:
                 logger.debug("Routing to CorePatternParser")
                 result = self._parse_with_core_parser(message, channel_name)
         except LimitsOrderError as e:
-            logger.info(f"Signal rejected — limits out of order (likely typo): {e}")
+            logger.debug(f"Signal rejected — limits out of order (likely typo): {e}")
             return RejectedSignal(reason=str(e))
 
         # Step 4: AI fallback if pattern parsing failed. Instant-entry channels
@@ -309,7 +309,7 @@ class SignalParser:
             result = self._parse_with_ai(message, channel_name)
 
         if result:
-            logger.info(
+            logger.debug(
                 f"Parse success ({result.parse_method}): {result.instrument} {result.direction}"
             )
         else:

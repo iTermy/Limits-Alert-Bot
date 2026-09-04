@@ -139,7 +139,9 @@ def test_limit_hit_is_processed_during_active_news():
         )
     )
 
-    assert limit.status == "hit"
+    # _process_limit_hit lands the write before anything is mutated in memory and
+    # sets limit.status itself, so with it mocked out the flag stays "pending" —
+    # what matters here is that the fill was processed rather than cancelled.
     assert alerts.hit_calls
     monitor._process_limit_hit.assert_awaited_once()
     monitor._cancel_signal_during_guard.assert_not_awaited()

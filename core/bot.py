@@ -18,6 +18,10 @@ from utils.logger import get_logger
 
 logger = get_logger("bot")
 
+# Frames of the shutdown stack to log — enough to name the caller, not the
+# whole asyncio call chain.
+_SHUTDOWN_STACK_FRAMES = 4
+
 DISCORD_DISCONNECT_RESTART_SECONDS = 120
 DISCORD_REST_PROBE_INTERVAL_SECONDS = 60
 DISCORD_REST_PROBE_TIMEOUT_SECONDS = 30
@@ -91,7 +95,7 @@ class TradingBot(commands.Bot):
 
     async def setup_hook(self):
         """Called when bot is getting ready"""
-        self.logger.info("Starting bot setup...")
+        self.logger.debug("Starting bot setup")
 
         # Initialize database FIRST
         await db.initialize()
@@ -113,7 +117,6 @@ class TradingBot(commands.Bot):
         from discord_handlers.message_handler import MessageHandler
 
         self.message_handler = MessageHandler(self)
-        self.logger.info("Message handler initialized")
 
         await self.initialize_price_monitor()
 
@@ -133,7 +136,6 @@ class TradingBot(commands.Bot):
         # Connect alert system to message handler
         if self.monitor and self.message_handler:
             self.message_handler.alert_system = self.monitor.alert_system
-            self.logger.info("Connected alert system to message handler")
         else:
             self.logger.error("Failed to connect alert system - monitor or message_handler is None")
 
@@ -151,7 +153,7 @@ class TradingBot(commands.Bot):
         # Start background tasks
         self.heartbeat.start()
 
-        self.logger.info("Bot setup completed with modular architecture")
+        self.logger.info("Bot setup complete")
 
     async def load_config(self):
         """Load configuration from files"""
@@ -162,19 +164,19 @@ class TradingBot(commands.Bot):
         for channel_name, channel_id in self.channels_config.get("monitored_channels", {}).items():
             if channel_id:
                 self.monitored_channels.add(int(channel_id))
-                self.logger.info(f"Monitoring channel: {channel_name} ({channel_id})")
+                self.logger.debug("Monitoring channel: %s (%s)", channel_name, channel_id)
+
+        self.logger.info("Monitoring %d channels", len(self.monitored_channels))
 
         # Set alert channel
         alert_id = self.channels_config.get("alert_channel")
         if alert_id:
             self.alert_channel_id = int(alert_id)
-            self.logger.info(f"Alert channel set: {alert_id}")
 
         # Set command channel
         command_id = self.channels_config.get("command_channel")
         if command_id:
             self.command_channel_id = int(command_id)
-            self.logger.info(f"Command channel set: {command_id}")
 
         # Build allowed_channel_ids once — read by on_message and MessageHandler
         self.allowed_channel_ids = set(self.monitored_channels)
@@ -204,26 +206,27 @@ class TradingBot(commands.Bot):
         for extension in extensions:
             try:
                 await self.load_extension(extension)
-                self.logger.info(f"Loaded extension: {extension}")
             except Exception as e:
                 self.logger.error(f"Failed to load extension {extension}: {e}")
 
     async def on_ready(self):
         """Called when bot is fully ready"""
         self._mark_discord_connected()
-        self.logger.info(f"Bot logged in as {self.user.name} ({self.user.id})")
-        self.logger.info(f"Connected to {len(self.guilds)} guild(s)")
+        self.logger.info(
+            "Logged in as %s — %d guild(s)",
+            self.user.name,
+            len(self.guilds),
+        )
 
         # Ensure alert system connection is valid (guard against race conditions)
         if self.monitor and self.message_handler and not self.message_handler.alert_system:
             self.message_handler.alert_system = self.monitor.alert_system
-            self.logger.info("Re-connected alert system in on_ready")
+            self.logger.warning("Alert system was not wired to the message handler; reconnected")
 
         # Start live embed price update loop
         if self.monitor and self.monitor.alert_system:
             self.monitor.alert_system.bot = self
             self.monitor.alert_system.start_live_updates()
-            self.logger.info("Live embed update loop started")
 
         # Post/refresh the pinned informational embeds in the alert channels and
         # the reference notices in the monitored channels.
@@ -343,7 +346,6 @@ class TradingBot(commands.Bot):
 
     async def initialize_price_monitor(self):
         """Initialize the price monitoring system — creates all subsystems and injects them."""
-        self.logger.info("Starting price monitor initialization...")
         try:
             from database.excursion_ops import ExcursionDatabase
             from database.trailing_ops import TrailingDatabase
@@ -443,7 +445,6 @@ class TradingBot(commands.Bot):
             self.services.news_fetcher = self.news_fetcher
             if bot_settings.news_autofetch.enabled:
                 self.news_fetcher.start()
-                self.logger.info("ForexFactory news fetcher started")
 
             # Volatility guard — informational only; subscribes to the same price
             # stream and announces sharp moves per pair (gold flags "ALL").
@@ -452,11 +453,6 @@ class TradingBot(commands.Bot):
             # Risky-window announcer — posts a "disabled/resumed" embed to the
             # risky-gold alert channel around each scheduled disabled window.
             self._start_risky_window_announcer(alert_system)
-
-            self.logger.info("Price monitoring system initialized and started")
-            self.logger.info(
-                f"Alert system created with {len(alert_system.alert_messages)} tracked messages"
-            )
 
         except Exception as e:
             self.logger.error(f"Failed to initialize price monitor: {e}", exc_info=True)
@@ -473,17 +469,20 @@ class TradingBot(commands.Bot):
             "legends-trade-alert": alert_system.set_legends_channel,
             "risky-gold-alert": alert_system.set_risky_channel,
         }
+        wired = 0
         for key, setter in channel_setters.items():
             channel_id = self.channels_config.get(key)
             if channel_id:
                 try:
                     channel = await self.fetch_channel(int(channel_id))
                     setter(channel)
-                    self.logger.info(f"{key} channel set: #{channel.name}")
+                    wired += 1
                 except Exception as e:
                     self.logger.error(f"Failed to set {key} channel: {e}")
             else:
                 self.logger.warning(f"No {key} configured in channels.json")
+
+        self.logger.info("Alert channels wired: %d/%d", wired, len(channel_setters))
 
     async def _start_vol_guard(self, stream_manager):
         """Create and start the volatility guard, posting to its own channel
@@ -505,7 +504,7 @@ class TradingBot(commands.Bot):
         self.vol_guard = VolatilityGuard(self, stream_manager, channel, db=db)
         self.services.vol_guard = self.vol_guard
         self.vol_guard.start()
-        self.logger.info(f"Volatility guard channel set: #{channel.name}")
+        self.logger.debug("Volatility guard channel set: #%s", channel.name)
 
     def _start_risky_window_announcer(self, alert_system):
         """Create and start the risky-window announcer, posting to the risky-gold
@@ -519,7 +518,7 @@ class TradingBot(commands.Bot):
         self.risky_window_announcer = RiskyWindowAnnouncer(self, channel)
         self.services.risky_window_announcer = self.risky_window_announcer
         self.risky_window_announcer.start()
-        self.logger.info(f"Risky window announcer channel set: #{channel.name}")
+        self.logger.debug("Risky window announcer channel set: #%s", channel.name)
 
     @tasks.loop(seconds=30)
     async def heartbeat(self):
@@ -599,13 +598,12 @@ class TradingBot(commands.Bot):
 
     async def close(self):
         """Cleanup when bot shuts down"""
-        # Log the call stack so we can see what triggered the shutdown — the
+        # Log the call site so we can see what triggered the shutdown — the
         # trigger (e.g. a fatal gateway close inside discord.py) is otherwise
-        # invisible, leaving only feed teardown errors in the log.
-        self.logger.warning(
-            "Shutting down bot... close() called from:\n%s",
-            "".join(traceback.format_stack()),
-        )
+        # invisible, leaving only feed teardown errors in the log. The last few
+        # frames name the caller; the rest of the stack is asyncio plumbing.
+        caller = "".join(traceback.format_stack()[-_SHUTDOWN_STACK_FRAMES:-1]).strip()
+        self.logger.warning("Shutting down — called from:\n%s", caller)
 
         # Cancel background tasks
         self.heartbeat.cancel()

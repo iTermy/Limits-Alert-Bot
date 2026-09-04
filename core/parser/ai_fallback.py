@@ -39,7 +39,7 @@ class AIFallbackParser:
         if not self.enabled:
             logger.warning("OpenAI API key not found, AI parsing disabled")
         else:
-            logger.info(f"Initialized AIFallbackParser with model {self.model}")
+            logger.debug(f"Initialized AIFallbackParser with model {self.model}")
 
     def parse(self, message: str, channel_name: Optional[str] = None) -> Optional[ParsedSignal]:
         """
@@ -263,7 +263,7 @@ If unable to confidently parse even after correction attempts, return null.
 
             # Validate before returning
             if validate_signal(signal):
-                logger.info(f"AI parse success: {signal.instrument} {signal.direction}")
+                logger.debug(f"AI parse success: {signal.instrument} {signal.direction}")
                 return signal
 
             logger.debug("AI signal failed validation")

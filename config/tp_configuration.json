@@ -3,12 +3,12 @@
     "standard": {
       "forex": {
         "type": "pips",
-        "value": 7.0,
+        "value": 10.0,
         "description": "Standard forex pairs"
       },
       "forex_jpy": {
         "type": "pips",
-        "value": 7.0,
+        "value": 10.0,
         "description": "JPY pairs (auto-detected)"
       },
       "metals": {
@@ -77,12 +77,12 @@
     "swing": {
       "forex": {
         "type": "pips",
-        "value": 21.0,
+        "value": 50.0,
         "description": "Swing - forex"
       },
       "forex_jpy": {
         "type": "pips",
-        "value": 21.0,
+        "value": 50.0,
         "description": "Swing - forex_jpy"
       },
       "metals": {

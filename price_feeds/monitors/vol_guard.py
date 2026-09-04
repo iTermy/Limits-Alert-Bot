@@ -126,7 +126,7 @@ def _load_config() -> dict:
     try:
         raw = json.loads(_CONFIG_PATH.read_text(encoding="utf-8"))
     except FileNotFoundError:
-        logger.info("vol_guard.json not found — using defaults")
+        logger.debug("vol_guard.json not found — using defaults")
         return defaults
     except (json.JSONDecodeError, OSError) as e:
         logger.error(f"Failed to read vol_guard.json ({e}) — using defaults")
@@ -186,7 +186,7 @@ class VolatilityGuard:
             return
         self.stream_manager.add_subscriber(self.on_price_update)
         self._eval_task = asyncio.ensure_future(self._eval_loop())
-        logger.info(
+        logger.debug(
             "Volatility guard started (lookback=%ss, window=%smin, thresholds=%s)",
             int(self.lookback_seconds),
             int(self.guard_seconds // 60),
@@ -242,7 +242,8 @@ class VolatilityGuard:
             samples.popleft()
 
     def _is_spread_hour(self) -> bool:
-        """True during the daily spread hour (17:00–18:00 America/New_York, weekdays).
+        """True during the daily spread hour (17:00–18:00 America/New_York, every
+        day but Saturday — Sunday's reopen hour is spread hour too).
 
         Cached for a few seconds and clamped at the hour boundaries so the cache
         never serves a stale value across the 17:00 / 18:00 transitions.
@@ -252,7 +253,7 @@ class VolatilityGuard:
             return self._spread_hour_cached
 
         now_est = datetime.now(_EST_TZ)
-        result = False if now_est.weekday() >= 5 else dtime(17, 0) <= now_est.time() < dtime(18, 0)
+        result = now_est.weekday() != 5 and dtime(17, 0) <= now_est.time() < dtime(18, 0)
 
         cache_seconds = 5.0
         for hh in (17, 18):
@@ -295,7 +296,7 @@ class VolatilityGuard:
                     and msg.embeds[0].title == _EMBED_TITLE
                 ):
                     await msg.delete()
-                    logger.info("Purged stale volatility embed from a previous run")
+                    logger.debug("Purged stale volatility embed from a previous run")
         except Exception as e:
             logger.warning(f"Could not purge stale volatility embeds: {e}")
 
@@ -315,7 +316,7 @@ class VolatilityGuard:
             elif now >= guard_expiry:
                 if volatile:
                     self._symbol_guards[symbol] = now + self.guard_seconds
-                    logger.info("Volatility guard re-armed for %s (still volatile)", symbol)
+                    logger.debug("Volatility guard re-armed for %s (still volatile)", symbol)
                 else:
                     self._release(symbol)
 

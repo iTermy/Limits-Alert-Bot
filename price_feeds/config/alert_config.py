@@ -34,7 +34,7 @@ class AlertDistanceConfig(BaseThresholdConfig):
 
     def __init__(self, config_path: Optional[str] = None):
         super().__init__(config_path)
-        logger.info("AlertDistanceConfig initialized")
+        logger.debug("AlertDistanceConfig initialized")
 
     # === Config defaults & validation ===
 

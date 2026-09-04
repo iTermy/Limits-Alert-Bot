@@ -24,7 +24,7 @@ class DatabaseManager(BaseConnectionManager):
     async def initialize(self):
         """Initialize database and create tables."""
         await initialize_database(self)
-        logger.info("Database manager initialized successfully")
+        logger.debug("Database manager initialized")
 
     # === Signal Status Operations ===
 
@@ -83,7 +83,7 @@ class DatabaseManager(BaseConnectionManager):
                 reason,
             )
 
-            logger.info(f"Updated signal {signal_id}: {old_status} -> {new_status} ({change_type})")
+            logger.info(f"Signal {signal_id} {old_status} -> {new_status} ({change_type})")
             return True
 
     async def mark_limit_hit(self, limit_id: int, hit_price: Optional[float] = None) -> dict[str, Any]:
@@ -156,7 +156,7 @@ class DatabaseManager(BaseConnectionManager):
                     )
 
                     status_changed = True
-                    logger.info(f"Signal {signal_id} status changed to HIT (first limit hit)")
+                    logger.debug(f"Signal {signal_id} status changed to HIT (first limit hit)")
 
                 return {
                     "signal_id": signal_id,
@@ -339,7 +339,7 @@ class DatabaseManager(BaseConnectionManager):
             )
 
             if rows > 0:
-                logger.info(f"Updated expiry for signal {signal_id} to {expiry_type}")
+                logger.debug(f"Updated expiry for signal {signal_id} to {expiry_type}")
                 return True
             return False
 

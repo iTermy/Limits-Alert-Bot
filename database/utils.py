@@ -2,22 +2,13 @@
 Utility functions for signal operations
 """
 
-from datetime import datetime, timedelta
+from datetime import date, datetime, timedelta
 from datetime import time as dtime
 from typing import Optional
 
 import pytz
 
-
-def is_weekend_window(now_est: Optional[datetime] = None) -> bool:
-    """True if EST now is Friday at/after 4:45 PM, Saturday, or Sunday — i.e. heading
-    into or sitting in the weekend gap when traditional markets are closed."""
-    if now_est is None:
-        now_est = datetime.now(pytz.timezone("America/New_York"))
-    wd = now_est.weekday()
-    if wd >= 5:
-        return True
-    return bool(wd == 4 and now_est.time() >= dtime(16, 45))
+MARKET_CLOSE = dtime(16, 45)
 
 
 def _parse_dt(value) -> Optional[datetime]:
@@ -33,6 +24,15 @@ def _parse_dt(value) -> Optional[datetime]:
     return dt
 
 
+def _market_close(est, day: date) -> datetime:
+    """The 4:45 PM close on a given EST date.
+
+    Built with est.localize() rather than timedelta arithmetic on an aware
+    datetime so a span crossing a DST change still lands on 4:45 PM local.
+    """
+    return est.localize(datetime.combine(day, MARKET_CLOSE))
+
+
 def calculate_expiry(expiry_type: str) -> Optional[str]:
     """
     Calculate expiry timestamp based on type.
@@ -46,19 +46,11 @@ def calculate_expiry(expiry_type: str) -> Optional[str]:
     est = pytz.timezone("America/New_York")
     now = datetime.now(est)
 
-    if expiry_type == "day_end":
-        expiry = now.replace(hour=16, minute=45, second=0, microsecond=0)
-        if now >= expiry:
-            expiry += timedelta(days=1)
-
-    elif expiry_type == "week_end":
+    if expiry_type == "week_end":
         days_until_friday = (4 - now.weekday()) % 7
-        if days_until_friday == 0 and now >= now.replace(
-            hour=16, minute=45, second=0, microsecond=0
-        ):
+        if days_until_friday == 0 and now >= _market_close(est, now.date()):
             days_until_friday = 7
-        expiry = now + timedelta(days=days_until_friday)
-        expiry = expiry.replace(hour=16, minute=45, second=0, microsecond=0)
+        expiry = _market_close(est, now.date() + timedelta(days=days_until_friday))
 
     elif expiry_type == "month_end":
         # Use est.localize() (not tzinfo=est) to get the correct modern UTC offset.
@@ -73,8 +65,14 @@ def calculate_expiry(expiry_type: str) -> Optional[str]:
         expiry = last_day
 
     else:
-        expiry = now.replace(hour=16, minute=45, second=0, microsecond=0)
-        if now >= expiry:
-            expiry += timedelta(days=1)
+        # day_end, and the fallback for anything unrecognised. A close that
+        # would land in the weekend gap moves to Monday: the market is shut,
+        # so Saturday 4:45 PM is not an end of day anyone traded through.
+        day = now.date()
+        if now >= _market_close(est, day):
+            day += timedelta(days=1)
+        while day.weekday() > 4:
+            day += timedelta(days=1)
+        expiry = _market_close(est, day)
 
     return expiry.isoformat()

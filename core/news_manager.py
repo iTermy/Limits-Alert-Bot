@@ -480,7 +480,7 @@ class NewsManager:
             except Exception as e:
                 logger.warning(f"Skipping malformed news event entry: {item} — {e}")
 
-        logger.info(f"Loaded {loaded} news event(s) from {self._CONFIG_PATH}")
+        logger.debug(f"Loaded {loaded} news event(s) from {self._CONFIG_PATH}")
         return loaded
 
     # ------------------------------------------------------------------
@@ -519,7 +519,7 @@ class NewsManager:
         self._next_id += 1
         self._events.append(event)
         self._save()
-        logger.info(f"News event added: {event}")
+        logger.debug(f"News event added: {event}")
         return event
 
     def remove_now_events(self) -> list[NewsEvent]:

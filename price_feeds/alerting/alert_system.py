@@ -49,9 +49,19 @@ class AlertSystem:
     # cadence keeps ten active signals to at most ~20 edits/minute before
     # Discord-side throttling, leaving headroom for hit/SL/TP messages.
     LIVE_UPDATE_INTERVAL = 30
+
+    # Max channels refreshed in parallel during a live-refresh pass. Discord
+    # buckets PATCH /channels/{id}/messages/{id} on the CHANNEL, not the message,
+    # so embeds sharing a channel are refreshed one at a time; fanning them out
+    # only queues 429s behind each other. Different channels are different
+    # buckets, so a pass still completes in ~1-2s regardless of embed count.
+    _LIVE_REFRESH_CONCURRENCY = 5
+
     _LIVE_UPDATE_ATTEMPT_TIMEOUT = 8
     _DELIVERY_ATTEMPT_TIMEOUT = 20
     _OPERATION_TIMEOUTS_BEFORE_RESTART = 2
+
+    _LIVE_UPDATE_RETRY_DELAY = 5
     _DELIVERY_RETRY_BASE_DELAY = 5
     _DELIVERY_RETRY_MAX_DELAY = 60
 
@@ -106,14 +116,21 @@ class AlertSystem:
         # Ordered set of signals needing a cosmetic refresh. The scheduler may
         # add a signal repeatedly while Discord is throttling, but one key is
         # retained, so stale intermediate prices never build up in discord.py's
-        # HTTP rate-limit queue. A single worker also avoids same-channel bursts:
-        # Discord buckets message edits by route + channel, not by message ID.
+        # HTTP rate-limit queue. The worker renders a signal only when its turn
+        # comes, so a snapshot delayed behind a rate limit uses the price at
+        # send time rather than the one that was current when it queued.
         self._pending_live_updates: collections.OrderedDict[int, None] = (
             collections.OrderedDict()
         )
+        self._live_update_wakeup = asyncio.Event()
+
+        # True while a refresh pass is in flight. The scheduler skips its tick
+        # rather than topping up a pass that is already running behind, so a slow
+        # pass can never refill itself into a permanent stream of PATCHes.
         self._live_update_cycle_active = False
 
         self._live_update_task: Optional[asyncio.Task] = None
+        self._live_update_worker_task: Optional[asyncio.Task] = None
         self._delivery_retry_tasks: dict[str, asyncio.Task] = {}
         self._discord_operation_timeouts = 0
         self._news_activation_messages: dict[int, list] = {}
@@ -152,18 +169,22 @@ class AlertSystem:
         if self._live_update_task and not self._live_update_task.done():
             return
         self._live_update_task = asyncio.create_task(self._live_update_loop())
-        logger.info("Live embed update loop started")
+        self._live_update_worker_task = asyncio.create_task(self._live_update_worker())
+        logger.debug("Live embed update loop started")
 
     def stop_live_updates(self):
         """Cancel the live update loop and any pending archive-move tasks."""
         if self._live_update_task and not self._live_update_task.done():
             self._live_update_task.cancel()
+        if self._live_update_worker_task and not self._live_update_worker_task.done():
+            self._live_update_worker_task.cancel()
         for task in self._delivery_retry_tasks.values():
             task.cancel()
         self._delivery_retry_tasks.clear()
         self._pending_live_updates.clear()
+        self._live_update_wakeup.clear()
         self._live_update_cycle_active = False
-        logger.info("Live embed update loop stopped")
+        logger.debug("Live embed update loop stopped")
         self._archive_manager.cancel_all()
 
     async def _live_update_loop(self):
@@ -172,7 +193,6 @@ class AlertSystem:
             try:
                 await asyncio.sleep(self.LIVE_UPDATE_INTERVAL)
                 self._queue_live_updates()
-                await self._drain_live_update_queue()
             except asyncio.CancelledError:
                 break
             except Exception as e:
@@ -196,56 +216,103 @@ class AlertSystem:
 
         for signal_id in self._live_embeds:
             self._pending_live_updates.setdefault(signal_id, None)
+        self._live_update_wakeup.set()
         logger.debug(
             "Queued latest-state refresh for %d live embed(s)",
             len(self._pending_live_updates),
         )
 
-    async def _drain_live_update_queue(self) -> None:
-        """Send one bounded snapshot pass, then yield for a full interval.
+    async def _live_update_worker(self) -> None:
+        """Drain cosmetic updates per channel, coalescing repeated requests."""
+        while True:
+            try:
+                await self._live_update_wakeup.wait()
+                self._live_update_wakeup.clear()
+                await self._drain_live_update_queue()
+            except asyncio.CancelledError:
+                break
+            except Exception as e:
+                logger.error("Live update worker error: %s", e, exc_info=True)
+                await asyncio.sleep(self._LIVE_UPDATE_RETRY_DELAY)
 
-        A slow pass is never refilled while it is running. Failed cosmetic edits
-        are dropped and reconsidered on the next pass instead of being retried
-        immediately, which prevents a Discord 429 from creating a permanent
-        stream of PATCH requests.
+    async def _drain_live_update_queue(self) -> None:
+        """Send one bounded snapshot pass, then yield until the next scheduler tick.
+
+        Embeds in the same channel share one Discord rate-limit bucket, so a
+        channel's signals are sent one at a time; channels run in parallel under
+        a bounded semaphore. Each edit is serialized against event edits via the
+        per-signal lock.
+
+        The pass is never refilled while it runs. Failed cosmetic edits are
+        dropped rather than requeued immediately — the scheduler re-queues every
+        live signal on the next interval anyway, so a Discord 429 costs one
+        skipped snapshot instead of becoming a permanent stream of PATCHes.
         """
         if self._live_update_cycle_active:
             return
 
         self._live_update_cycle_active = True
         started_at = asyncio.get_running_loop().time()
-        attempted = 0
-        delivered = 0
-        dropped_for_priority = 0
         try:
-            while self._pending_live_updates:
-                # Cosmetic work is disposable. If a hit/SL/TP write starts,
-                # discard the remainder so it gets the next HTTP slot.
-                if self._priority_edits_active:
-                    dropped_for_priority = len(self._pending_live_updates)
-                    self._pending_live_updates.clear()
-                    break
+            by_channel = self._take_pending_by_channel()
+            if not by_channel:
+                return
 
-                signal_id, _ = self._pending_live_updates.popitem(last=False)
-                attempted += 1
-                if await self._refresh_one_embed(signal_id):
-                    delivered += 1
-        finally:
-            self._live_update_cycle_active = False
-            logger.info(
-                "Live refresh pass complete: %d attempted, %d accepted, "
-                "%d failed, %d dropped for priority in %.1fs",
+            attempted = sum(len(ids) for ids in by_channel.values())
+            semaphore = asyncio.Semaphore(self._LIVE_REFRESH_CONCURRENCY)
+            results = await asyncio.gather(
+                *(self._drain_channel(ids, semaphore) for ids in by_channel.values())
+            )
+            delivered = sum(results)
+
+            logger.debug(
+                "Live refresh pass: %d attempted, %d accepted, %d failed "
+                "across %d channel(s) in %.1fs",
                 attempted,
                 delivered,
                 attempted - delivered,
-                dropped_for_priority,
+                len(by_channel),
                 asyncio.get_running_loop().time() - started_at,
             )
+        finally:
+            self._live_update_cycle_active = False
 
             # Prune locks after a drain so the dict stays close to the live set.
             for sid in list(self._message_locks):
                 if sid not in self.signal_messages and not self._message_locks[sid].locked():
                     del self._message_locks[sid]
+
+    def _take_pending_by_channel(self) -> dict[int, list[int]]:
+        """Drain the pending set into per-channel send order.
+
+        Signals whose embed has gone are dropped rather than grouped — there is
+        nothing left to edit.
+        """
+        by_channel: dict[int, list[int]] = collections.defaultdict(list)
+        while self._pending_live_updates:
+            signal_id, _ = self._pending_live_updates.popitem(last=False)
+            message = self.signal_messages.get(signal_id)
+            if message:
+                by_channel[message.channel.id].append(signal_id)
+        return by_channel
+
+    async def _drain_channel(
+        self, signal_ids: list[int], semaphore: asyncio.Semaphore
+    ) -> int:
+        """Refresh one channel's embeds in order; return how many were accepted.
+
+        Cosmetic work is disposable: once a status/event edit is in flight the
+        rest of this channel's snapshots are abandoned so the event edit gets the
+        next HTTP slot.
+        """
+        delivered = 0
+        async with semaphore:
+            for signal_id in signal_ids:
+                if self._priority_edits_active:
+                    break
+                if await self._refresh_one_embed(signal_id):
+                    delivered += 1
+        return delivered
 
     async def _refresh_one_embed(self, signal_id: int) -> bool:
         """Render and deliver the newest snapshot. False requests a retry."""
@@ -367,7 +434,7 @@ class AlertSystem:
             return False
 
         except Exception as e:
-            logger.error(f"Live update failed for signal {signal_id}: {e}", exc_info=True)
+            logger.error("Live update failed for signal %s: %r", signal_id, e, exc_info=True)
             return False
 
     def _register_live_embed(self, signal: dict, event: str, spread_buffer_enabled: bool = False):
@@ -512,27 +579,27 @@ class AlertSystem:
 
     def set_channel(self, channel: discord.TextChannel):
         self.alert_channel = channel
-        logger.info(f"Alert channel set to #{channel.name} ({channel.id})")
+        logger.debug(f"Alert channel set to #{channel.name} ({channel.id})")
 
     def set_pa_channel(self, channel: discord.TextChannel):
         self.pa_alert_channel = channel
-        logger.info(f"PA alert channel set: #{channel.name} ({channel.id})")
+        logger.debug(f"PA alert channel set: #{channel.name} ({channel.id})")
 
     def set_toll_channel(self, channel: discord.TextChannel):
         self.toll_alert_channel = channel
-        logger.info(f"Toll alert channel set: #{channel.name} ({channel.id})")
+        logger.debug(f"Toll alert channel set: #{channel.name} ({channel.id})")
 
     def set_general_toll_channel(self, channel: discord.TextChannel):
         self.general_toll_alert_channel = channel
-        logger.info(f"General-toll alert channel set: #{channel.name} ({channel.id})")
+        logger.debug(f"General-toll alert channel set: #{channel.name} ({channel.id})")
 
     def set_legends_channel(self, channel: discord.TextChannel):
         self.legends_alert_channel = channel
-        logger.info(f"Legends alert channel set: #{channel.name} ({channel.id})")
+        logger.debug(f"Legends alert channel set: #{channel.name} ({channel.id})")
 
     def set_risky_channel(self, channel: discord.TextChannel):
         self.risky_alert_channel = channel
-        logger.info(f"Risky alert channel set: #{channel.name} ({channel.id})")
+        logger.debug(f"Risky alert channel set: #{channel.name} ({channel.id})")
 
     def _load_channels_config(self):
         """Load channels.json once and cache all derived channel ID sets and role mention."""
@@ -586,7 +653,7 @@ class AlertSystem:
         role_id = cfg.get("alert_role_id", "1334203997107650662")
         self.role_mention = f"<@&{role_id}>"
 
-        logger.info(
+        logger.debug(
             f"Channels loaded: {len(self.pa_channel_ids)} PA, "
             f"{len(self.toll_channel_ids)} toll "
             f"(incl. {len(self.oil_toll_channel_ids)} oil-toll), "
@@ -750,7 +817,7 @@ class AlertSystem:
             self.alert_messages.pop(str(embed_msg.id), None)
             try:
                 await embed_msg.delete()
-                logger.info(
+                logger.debug(
                     f"Retracted approaching embed for signal {signal_id} (msg {embed_msg.id})"
                 )
             except discord.NotFound:
@@ -937,13 +1004,13 @@ class AlertSystem:
 
                     event = "hit" if status == "hit" else "approaching"
                     self._register_live_embed(signal, event, spread_buffer_enabled=True)
-                    logger.info(
+                    logger.debug(
                         f"Hydrated alert embed for signal {signal_id} "
                         f"(channel={channel.id}, msg={embed_msg.id}, event={event})"
                     )
                     return
                 except discord.NotFound:
-                    logger.info(
+                    logger.debug(
                         f"Persisted alert embed for signal {signal_id} no longer exists "
                         f"(msg={alert_message_id}) — falling back"
                     )
@@ -976,7 +1043,7 @@ class AlertSystem:
         if status == "hit":
             rebuilt = await self.reactivate_embed(signal, ping_text=None)
             if rebuilt:
-                logger.info(f"Rebuilt missing embed for HIT signal {signal_id} on startup")
+                logger.debug(f"Rebuilt missing embed for HIT signal {signal_id} on startup")
             else:
                 logger.warning(f"Could not rebuild embed for HIT signal {signal_id} on startup")
             return
@@ -987,7 +1054,7 @@ class AlertSystem:
             for limit in limits:
                 if limit.status == "pending":
                     limit.approaching_alert_sent = False
-            logger.info(
+            logger.debug(
                 f"Reset approaching_alert_sent for ACTIVE signal {signal_id} "
                 f"after losing embed reference"
             )
@@ -1079,7 +1146,7 @@ class AlertSystem:
                 if existing_msg:
                     try:
                         await existing_msg.edit(embed=embed)
-                        logger.info(
+                        logger.debug(
                             f"Edited persistent message for signal {signal_id} (event={event})"
                         )
                         embed_msg = existing_msg
@@ -1105,7 +1172,7 @@ class AlertSystem:
                         await self._persist_alert_message(
                             signal_id, embed_msg.id, target_channel.id
                         )
-                        logger.info(
+                        logger.debug(
                             f"Created persistent message for signal {signal_id} (event={event})"
                         )
                     except Exception as e:
@@ -1372,13 +1439,14 @@ class AlertSystem:
             return False
 
         self._archive_manager.cancel_pending_move(signal_id)
+        await self._archive_manager.delete_profit_copy(signal_id)
 
         finished_msg = self.signal_finished_messages.pop(signal_id, None)
         if finished_msg:
             self.alert_messages.pop(str(finished_msg.id), None)
             try:
                 await finished_msg.delete()
-                logger.info(
+                logger.debug(
                     f"Deleted finished-channel embed for signal {signal_id} on reactivation"
                 )
             except discord.NotFound:
@@ -1452,7 +1520,7 @@ class AlertSystem:
                 )
 
         if signal_id not in self.signal_messages:
-            logger.info(
+            logger.debug(
                 f"reactivate_embed: no existing embed for signal {signal_id} "
                 f"(likely auto-deleted) — will send fresh embed to channel"
             )
@@ -1470,7 +1538,7 @@ class AlertSystem:
             )
             if msg:
                 self._register_live_embed(signal, event, spread_buffer_enabled)
-                logger.info(f"Reactivated embed for signal {signal_id} as event='{event}'")
+                logger.debug(f"Reactivated embed for signal {signal_id} as event='{event}'")
                 return True
         except Exception as e:
             logger.error(f"reactivate_embed failed for signal {signal_id}: {e}", exc_info=True)
@@ -1503,7 +1571,7 @@ class AlertSystem:
         self.track_alert_message(embed_msg.id, signal_id)
         event = "hit" if signal.status == "hit" else "approaching"
         self._register_live_embed(signal, event, spread_buffer_enabled=True)
-        logger.info(f"Re-attached persistent embed for signal {signal_id} (msg={embed_msg.id})")
+        logger.debug(f"Re-attached persistent embed for signal {signal_id} (msg={embed_msg.id})")
         return True
 
     async def update_signal_message(
@@ -1798,7 +1866,7 @@ class AlertSystem:
                 )
                 self.stats["nm_cancelled"] += 1
                 self.stats["total_alerts"] += 1
-                logger.info(f"Near-miss cancel alert sent for signal {signal_id} ({instrument})")
+                logger.debug(f"Near-miss cancel alert sent for signal {signal_id} ({instrument})")
                 return True
         except Exception as e:
             logger.error(f"Failed to send near-miss cancel alert for signal {signal_id}: {e}")

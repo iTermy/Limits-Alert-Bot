@@ -53,7 +53,7 @@ class TPConfig(BaseThresholdConfig):
 
     def __init__(self, config_path: Optional[str] = None):
         super().__init__(config_path)
-        logger.info("TPConfig initialised")
+        logger.debug("TPConfig initialised")
 
     # === Config defaults & validation ===
 

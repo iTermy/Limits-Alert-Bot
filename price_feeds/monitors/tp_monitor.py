@@ -176,7 +176,7 @@ class AutoTPMonitor:
         if current is None or current.status in ("hit", "active"):
             return False
 
-        logger.info(
+        logger.debug(
             f"Signal {signal_id}: status is '{current.status}', "
             f"skipping auto-TP and evicting from cache"
         )
@@ -271,7 +271,7 @@ class AutoTPMonitor:
 
         self.evict_signal(signal_id)
         signal.tp_price = close_price
-        logger.info(f"Signal {signal_id}: marked as PROFIT via auto-TP")
+        logger.debug(f"Signal {signal_id}: marked as PROFIT via auto-TP")
 
         # Send Discord alerts (alert channel + profit channel)
         if self.alert_system:

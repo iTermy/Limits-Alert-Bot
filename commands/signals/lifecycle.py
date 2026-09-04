@@ -464,7 +464,7 @@ class LifecycleCog(BaseCog):
                         self.services.monitor._mutate_limit_hit_in_memory(
                             signal_id, first_limit.id, first_limit.price_level
                         )
-                    logger.info(
+                    logger.debug(
                         f"Auto-hit limit #{first_limit.sequence_number} "
                         f"for signal {signal_id} as part of manual profit (approaching→profit)"
                     )
@@ -881,7 +881,7 @@ class LifecycleCog(BaseCog):
                         )
                         summary_embed.set_footer(text="Mass cancellation complete")
                         await finished_channel.send(embed=summary_embed)
-                        logger.info(
+                        logger.debug(
                             f"Sent mass-cancel summary to finished-signals channel: "
                             f"Gold {dir_label} ({cat_label}), {cancelled} signals"
                         )
@@ -949,7 +949,7 @@ class LifecycleCog(BaseCog):
                         )
                         summary_embed.set_footer(text="Mass cancellation complete")
                         await finished_channel.send(embed=summary_embed)
-                        logger.info(
+                        logger.debug(
                             f"Sent mass-cancel summary to finished-signals channel: "
                             f"{target}, {cancelled} signals"
                         )

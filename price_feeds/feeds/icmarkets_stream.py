@@ -66,7 +66,7 @@ class ICMarketsStream:
         # don't get misread as a stale feed. Argument is the MT5-format symbol.
         self.on_poll: Optional[Callable[[str], None]] = None
 
-        logger.info("ICMarketsStream initialized")
+        logger.debug("ICMarketsStream initialized")
 
     async def _run_mt5(self, func, *args):
         """Run a blocking MT5 call on the dedicated pool, never on the loop thread."""
@@ -114,7 +114,7 @@ class ICMarketsStream:
 
                 terminal_info = await self._run_mt5(mt5.terminal_info)
                 if terminal_info:
-                    logger.info(f"Connected to MT5 - {terminal_info.name}")
+                    logger.debug(f"Connected to MT5 - {terminal_info.name}")
 
                 return True
             error = await self._run_mt5(mt5.last_error)
@@ -137,7 +137,7 @@ class ICMarketsStream:
         if self.connected:
             await self._run_mt5(mt5.shutdown)
             self.connected = False
-            logger.info("Disconnected from MT5")
+            logger.debug("Disconnected from MT5")
 
     async def reconnect(self):
         """Reconnect to MT5"""
@@ -174,7 +174,7 @@ class ICMarketsStream:
             await self._run_mt5(mt5.symbol_select, symbol, True)
 
         self.subscribed_symbols.add(symbol)
-        logger.info(f"Subscribed to {symbol} on MT5")
+        logger.debug(f"Subscribed to {symbol} on MT5")
 
     async def _resolve_stock_symbol(self, symbol: str) -> str:
         """
@@ -197,7 +197,7 @@ class ICMarketsStream:
 
         bare = symbol[:-3]
         if await self._run_mt5(mt5.symbol_info, bare) is not None:
-            logger.info("Stock %s has no 24-hour variant; using %s", symbol, bare)
+            logger.debug("Stock %s has no 24-hour variant; using %s", symbol, bare)
             self._stock_symbol_cache[symbol] = bare
             return bare
 

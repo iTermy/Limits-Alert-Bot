@@ -39,7 +39,7 @@ class BinanceStream:
 
         try:
             self.ssl_context = ssl.create_default_context(cafile=certifi.where())
-            logger.info("SSL context created with certifi certificates")
+            logger.debug("SSL context created with certifi certificates")
         except Exception as e:
             logger.warning(f"Could not create SSL context with certifi: {e}")
             # Fallback to default SSL context
@@ -57,7 +57,7 @@ class BinanceStream:
         self.streaming = False
         self.stream_id = 1
 
-        logger.info(
+        logger.debug(
             f"BinanceStream initialized ({'international' if self.use_international else 'US'} API)"
         )
 
@@ -70,7 +70,7 @@ class BinanceStream:
             self.ws_session = aiohttp.ClientSession(connector=connector)
 
             self.connected = True
-            logger.info("Binance WebSocket ready (with SSL support)")
+            logger.debug("Binance WebSocket ready (with SSL support)")
             return True
 
         except Exception as e:
@@ -90,7 +90,7 @@ class BinanceStream:
             self.ws_session = None
 
         self.connected = False
-        logger.info("Disconnected from Binance WebSocket")
+        logger.debug("Disconnected from Binance WebSocket")
 
     async def reconnect(self):
         """Reconnect to Binance WebSocket"""
@@ -109,7 +109,7 @@ class BinanceStream:
             raise Exception("Not connected to Binance WebSocket")
 
         self.subscribed_symbols.add(symbol)
-        logger.info(f"Subscribed to {symbol} on Binance")
+        logger.debug(f"Subscribed to {symbol} on Binance")
 
         # If already streaming, send subscribe message
         if self.streaming and self.ws_connection:
@@ -129,7 +129,7 @@ class BinanceStream:
         for symbol in symbols:
             self.subscribed_symbols.add(symbol)
 
-        logger.info(f"Bulk subscribed to {len(symbols)} symbols on Binance")
+        logger.debug(f"Bulk subscribed to {len(symbols)} symbols on Binance")
 
         # Send subscribe messages if streaming
         if self.streaming and self.ws_connection:
@@ -180,9 +180,15 @@ class BinanceStream:
         self.streaming = True
 
         while self.streaming:
+            # disconnect() closes and drops the session from under this loop, so
+            # re-check it each pass rather than reconnecting onto a dead one.
+            session = self.ws_session
+            if session is None or session.closed:
+                break
+
             try:
                 # Create WebSocket connection
-                async with self.ws_session.ws_connect(self.ws_url) as ws:
+                async with session.ws_connect(self.ws_url) as ws:
                     self.ws_connection = ws
 
                     # Subscribe to all symbols
@@ -235,10 +241,17 @@ class BinanceStream:
                             break
 
             except aiohttp.ClientError as e:
+                if not self.streaming:
+                    # disconnect() tore the socket down mid-read; not a failure.
+                    logger.debug(f"Binance stream closed during shutdown: {e}")
+                    break
                 logger.error(f"Binance WebSocket connection error: {e}")
                 await asyncio.sleep(5)
 
             except Exception as e:
+                if not self.streaming:
+                    logger.debug(f"Binance stream closed during shutdown: {e}")
+                    break
                 logger.error(f"Error in Binance stream: {e}")
                 await asyncio.sleep(5)
 

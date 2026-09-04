@@ -41,7 +41,7 @@ class BaseFeed(ABC):
         self.total_symbols_requested = 0
         self.total_symbols_fetched = 0
 
-        logger.info(f"{feed_name} feed initialized")
+        logger.debug(f"{feed_name} feed initialized")
 
     @abstractmethod
     async def connect(self) -> bool:

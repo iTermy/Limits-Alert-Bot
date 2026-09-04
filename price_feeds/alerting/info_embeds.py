@@ -35,7 +35,7 @@ def info_embed_message_ids() -> set[str]:
         logger.error(f"Failed to read info_embeds.json: {e}")
         return set()
 
-_FOOTER = "Discipline over everything — protect your account first. Small, consistent gains win long-term."
+_FOOTER = "Make sure to protect your account and prioritize compounding profits"
 
 
 def _base_embed(title: str, description: str, color: int, footer: bool = True) -> discord.Embed:
@@ -50,41 +50,38 @@ def _base_embed(title: str, description: str, color: int, footer: bool = True) -
 
 def _build_main_embed() -> discord.Embed:
     embed = _base_embed(
-        "👑 Signal Alerts",
-        "The main feed — **most signals land here**. Each one is a single live embed "
-        "that updates as price approaches, hits and closes. Quiet just means nothing's "
-        "active right now.",
+        "🍾 Signal Alerts",
+        "The main feed where most setups land, especially forex. You will see an embed in the channel "
+        "when a signal is near, otherwise it will be empty.",
         0x5865F2,
     )
     embed.add_field(
         name="What's included",
         value=(
-            "**Forex** (scalp / daily / swing) & exotics, **indices**, **oil**, "
-            "**stocks** and **crypto** — win rate **>90%**.\n"
-            "*Expiry:* scalps & daily setups expire **end of day**; forex, exotics & "
-            "indices valid **all week**; swings, stocks & crypto **all month**. Unfilled "
-            "limits expire at the end of their window."
+            "Forex (including exotics), indices, oil, "
+            "stocks, and crypto, with a win rate >90%.\n"
+            "Expiry: scalps & daily setups expire end of day; forex, exotics & "
+            "indices valid all week; swings, stocks & crypto all month."
         ),
         inline=False,
     )
     embed.add_field(
-        name="🎯 How to take it",
+        name="How to take it",
         value=(
-            "Treat each signal as **one trade** — average the basket, risk **max 5%** "
-            "across all limits, equal lots is simplest. Close lower entries first, hold "
-            "runners.\n"
+            "Each signal is **one trade** layered across several limits. Risk **max 5%** "
+            "across all limits, equal lots is simplest. Tp when the bot tps or at your own discretion.\n"
             "*Rough TPs:*\n"
             "• Scalp 5–10 pips · Daily 10–20 pips + runners · Swing 50–150 pips\n"
             "• Indices — SPX 5–15 pts · NASDAQ/US30/DAX 10–50 pts\n"
             "• Oil ~$0.5 · Crypto ~$500 (BTCUSDT; varies by symbol)\n"
-            "• Stocks — ranges vary per name, **use discretion**\n"
-            "*Prices:* indices & oil via **OANDA**, crypto via **Binance** — find the "
+            "• Stocks — ranges vary per name, use discretion\n"
+            "Prices: indices & oil use OANDA chart, crypto uses Binance. Find the "
             "exact symbol on TradingView."
         ),
         inline=False,
     )
     embed.add_field(
-        name="Reading the embeds",
+        name="Emojis meaning",
         value=(
             "🟡 Approaching · 🎯 Hit · 🛑 Stop · ❌ Cancelled · ♻️ Reactivated · 💰 Profit"
         ),
@@ -96,26 +93,25 @@ def _build_main_embed() -> discord.Embed:
 def _build_pa_embed() -> discord.Embed:
     embed = _base_embed(
         "🔮 Price Action Trades",
-        "Higher-risk, higher-reward gold setups with wider stops.",
+        "Higher-risk, higher-reward setups with wider stops.",
         0x9B59B6,
     )
     embed.add_field(
         name="What's included",
         value=(
-            "Gold price-action calls only — roughly **60–70% win rate** with wider stops "
+            "Price action trades, roughly 60–70% win rate with wider stops "
             "than the main feed. Fewer, more selective setups. Valid for the session "
-            "they're called in."
+            "they're called in unless otherwise specified."
         ),
         inline=False,
     )
     embed.add_field(
-        name="🎯 How to take it",
+        name="How to take it",
         value=(
-            "• Enter when called — expect spikes/dips around entry.\n"
-            "• Keep total risk **under 3%** of your account.\n"
-            "• You may add if it moves against you, but exit once risk hits 3%.\n"
+            "• Enter when called, layer on spikes/dips.\n"
+            "• Keep total risk under 3% of your account.\n"
             "• If price spikes hard right after entry, treat the move as done and step aside.\n"
-            "*TPs:* Gold PA **10 / 15 / 25 $** — tp is more discretionary; exit sooner if "
+            "TPs: Gold PA 10 / 15 / 25 $ — tp is more discretionary; exit sooner if "
             "the setup looks weak."
         ),
         inline=False,
@@ -126,26 +122,21 @@ def _build_pa_embed() -> discord.Embed:
 def _build_gold_toll_embed() -> discord.Embed:
     embed = _base_embed(
         "🪙 Gold Tolls",
-        "A collection of gold scalps mapped across a range of limits — one of our "
-        "**fan favorites**.",
+        "A collection of gold scalps mapped across a range of limits. A fan favorite.",
         0xF1C40F,
     )
     embed.add_field(
         name="What's included",
         value=(
-            "Gold scalp limits with a default **$5 stop** (widens to $10–15 in extreme "
-            "volatility — drop size to match). Valid **all week**. Win rate ~**90%**. "
-            "Monitor the channel for updates, as levels may change."
+            "Gold scalp limits with a $5 stop (widens to $10–15 in extreme "
+            "volatility). Valid all week. Win rate 90%+."
         ),
         inline=False,
     )
     embed.add_field(
-        name="🎯 How to take it",
+        name="How to take it",
         value=(
-            "Average the basket across whatever limits hit — close lower entries first "
-            "at breakeven/small profit, hold runners at your discretion. Equal lots is "
-            "simplest.\n"
-            "*TPs:* impulse limits **3–5 $** · runners **7–10 $**."
+            "Treat it as a normal scalp setup with the suggested tps and stops."
         ),
         inline=False,
     )
@@ -155,27 +146,24 @@ def _build_gold_toll_embed() -> discord.Embed:
 def _build_general_toll_embed() -> discord.Embed:
     embed = _base_embed(
         "Tolls",
-        "Non-gold toll maps — forex, indices and oil. One live embed per signal.",
+        "Non-gold tolls for forex, indices and oil.",
         0xE67E22,
     )
     embed.add_field(
         name="What's included",
         value=(
-            "Toll **maps** on forex, indices and oil. Only the limits price reaches get "
-            "worked. Valid **all week**."
+            "Tolls on forex, indices and oil. Similar to gold tolls and behave similar to scalps. Valid all week."
         ),
         inline=False,
     )
     embed.add_field(
-        name="🎯 How to take it",
+        name="How to take it",
         value=(
-            "• Always reconcile your broker's price with the reference chart — oil and "
+            "• Reconcile your own broker's price with the reference chart — oil and "
             "indices usually need adjusting:\n"
             "  ◦ Oil → TradingView USOILSPOT\n"
             "  ◦ Indices → OANDA spot\n"
-            "  ◦ Gold/forex → FXCM\n"
-            "• Average the basket across whatever limits hit — close lower entries first, "
-            "hold runners."
+            "  ◦ Gold/forex → FXCM"
         ),
         inline=False,
     )
@@ -184,8 +172,8 @@ def _build_general_toll_embed() -> discord.Embed:
 
 def _build_legends_embed() -> discord.Embed:
     embed = _base_embed(
-        "⭐ Legends Trades",
-        "Trades shared by TM-trained community members. One live embed per signal.",
+        "🎲 Legends Trades",
+        "Trades shared by TM-trained community members.",
         0x1ABC9C,
     )
     embed.add_field(
@@ -197,10 +185,10 @@ def _build_legends_embed() -> discord.Embed:
         inline=False,
     )
     embed.add_field(
-        name="🎯 How to take it",
+        name="How to take it",
         value=(
-            "• Follow the **SL and targets on the individual call** — they vary by caller.\n"
-            "• Size to your own risk tolerance and average the basket as usual."
+            "• Follow the SL and targets on the individual call, if given. They are usually the same as normal setups.\n"
+            "• Size to your own risk tolerance."
         ),
         inline=False,
     )
@@ -209,24 +197,22 @@ def _build_legends_embed() -> discord.Embed:
 
 def _build_risky_embed() -> discord.Embed:
     embed = _base_embed(
-        "🎲 Risky Gold",
-        "Higher-risk gold scalps mapped across a range of limits. One live embed per signal.",
+        "❤️‍🔥 Risky Gold",
+        "Higher-risk gold scalp maps. Riskier and quicker in-and-out setup than tolls.",
         0xE74C3C,
     )
     embed.add_field(
         name="What's included",
         value=(
-            "Gold scalp limits with a default **$5 stop** measured from the last limit. "
-            "Valid **all week**. Higher risk than the standard tolls — size down accordingly."
+            "Gold scalps with a default $5 stop measured from the last limit, unless specified. "
+            "Valid until day end."
         ),
         inline=False,
     )
     embed.add_field(
         name="🎯 How to take it",
         value=(
-            "Average the basket across whatever limits hit — close lower entries first "
-            "at breakeven/small profit, hold runners at your discretion. Equal lots is "
-            "simplest."
+            "Take like a normal gold scalp setup, but make sure to tp faster and expect SLs on higher volatility."
         ),
         inline=False,
     )
@@ -329,10 +315,10 @@ class InfoEmbedManager:
                 try:
                     msg = await channel.fetch_message(int(stored_id))
                     await msg.edit(embed=embed)
-                    logger.info(f"Refreshed info embed in #{channel.name}")
+                    logger.debug(f"Refreshed info embed in #{channel.name}")
                     continue
                 except discord.NotFound:
-                    logger.info(f"Info embed in #{channel.name} was deleted — reposting")
+                    logger.debug(f"Info embed in #{channel.name} was deleted — reposting")
                 except Exception as e:
                     logger.warning(f"Could not refresh info embed in #{channel.name}: {e}")
                     continue
@@ -372,10 +358,10 @@ class InfoEmbedManager:
                 try:
                     msg = await channel.fetch_message(int(stored_id))
                     await msg.edit(content=None, embed=embed)
-                    logger.info(f"Refreshed notice in #{channel.name}")
+                    logger.debug(f"Refreshed notice in #{channel.name}")
                     continue
                 except discord.NotFound:
-                    logger.info(f"Notice in #{channel.name} was deleted — reposting")
+                    logger.debug(f"Notice in #{channel.name} was deleted — reposting")
                 except Exception as e:
                     logger.warning(f"Could not refresh notice in #{channel.name}: {e}")
                     continue
@@ -397,7 +383,7 @@ class InfoEmbedManager:
             await msg.pin()
         except Exception as e:
             logger.warning(f"Posted notice in #{channel.name} but could not pin it: {e}")
-        logger.info(f"Posted notice in #{channel.name}")
+        logger.debug(f"Posted notice in #{channel.name}")
         return msg.id
 
     async def _post(self, channel: discord.TextChannel, embed: discord.Embed) -> Optional[int]:
@@ -410,5 +396,5 @@ class InfoEmbedManager:
             await msg.pin()
         except Exception as e:
             logger.warning(f"Posted info embed in #{channel.name} but could not pin it: {e}")
-        logger.info(f"Posted info embed in #{channel.name}")
+        logger.debug(f"Posted info embed in #{channel.name}")
         return msg.id

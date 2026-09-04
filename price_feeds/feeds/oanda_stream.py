@@ -48,13 +48,14 @@ class OANDAStream:
         # Connection management
         self.session: aiohttp.ClientSession = None
         self.connected = False
+        self.last_connect_error: Optional[str] = None
         self.subscribed_symbols: set[str] = set()
 
         # Stream control
         self.streaming = False
         self.stream_response = None
 
-        logger.info("OANDAStream initialized")
+        logger.debug("OANDAStream initialized")
 
     async def connect(self) -> bool:
         """Initialize OANDA session"""
@@ -77,13 +78,19 @@ class OANDAStream:
             ) as response:
                 if response.status == 200:
                     self.connected = True
-                    logger.info("Connected to OANDA stream")
+                    self.last_connect_error = None
+                    logger.debug("Connected to OANDA stream")
                     return True
-                logger.error(f"OANDA connection failed: {response.status}")
+                # The stream handler owns the noise policy for a feed that is
+                # down (weekend, maintenance) — it retries on a backoff and
+                # logs once per outage, so record the reason rather than log it.
+                self.last_connect_error = f"HTTP {response.status}"
+                logger.debug("OANDA connect rejected: %s", self.last_connect_error)
                 return False
 
         except Exception as e:
-            logger.error(f"Error connecting to OANDA: {e}")
+            self.last_connect_error = str(e)
+            logger.debug("OANDA connect failed: %s", e)
             return False
 
     async def disconnect(self):
@@ -98,7 +105,7 @@ class OANDAStream:
             self.session = None
 
         self.connected = False
-        logger.info("Disconnected from OANDA")
+        logger.debug("Disconnected from OANDA")
 
     async def reconnect(self):
         """Reconnect to OANDA"""
@@ -118,11 +125,11 @@ class OANDAStream:
             raise Exception("Not connected to OANDA")
 
         self.subscribed_symbols.add(symbol)
-        logger.info(f"Subscribed to {symbol} on OANDA")
+        logger.debug(f"Subscribed to {symbol} on OANDA")
 
         # If already streaming, need to restart with updated symbols
         if self.streaming:
-            logger.info("Restarting stream with updated symbol list")
+            logger.debug("Restarting stream with updated symbol list")
             await self._restart_stream()
 
     async def unsubscribe(self, symbol: str):
@@ -138,7 +145,7 @@ class OANDAStream:
         for symbol in symbols:
             self.subscribed_symbols.add(symbol)
 
-        logger.info(f"Bulk subscribed to {len(symbols)} symbols on OANDA")
+        logger.debug(f"Bulk subscribed to {len(symbols)} symbols on OANDA")
 
         # Restart stream if needed
         if self.streaming:
@@ -166,7 +173,9 @@ class OANDAStream:
             Tuple of (symbol, price_data) on each update
         """
         if not self.connected:
-            raise Exception("Not connected to OANDA")
+            raise ConnectionError(
+                f"Not connected to OANDA ({self.last_connect_error or 'no session'})"
+            )
 
         if not self.subscribed_symbols:
             logger.debug("No symbols subscribed, waiting...")

@@ -57,7 +57,7 @@ class LivePriceWriter:
         self._task: Optional[asyncio.Task] = None
         self._running = False
 
-        logger.info("LivePriceWriter initialised")
+        logger.debug("LivePriceWriter initialised")
 
     # ------------------------------------------------------------------
     # Public API
@@ -71,7 +71,7 @@ class LivePriceWriter:
         # Register as a subscriber to receive every price tick
         self._stream.add_subscriber(self._on_price_update)
         self._task = asyncio.create_task(self._flush_loop(), name="live_price_writer")
-        logger.info(
+        logger.debug(
             "LivePriceWriter started (flush every %ds, feeds: %s)", WRITE_INTERVAL, TRACKED_FEEDS
         )
 
@@ -85,7 +85,7 @@ class LivePriceWriter:
                 await self._task
         # Final flush so we don't lose the last few ticks
         await self._flush_to_db()
-        logger.info("LivePriceWriter stopped")
+        logger.debug("LivePriceWriter stopped")
 
     # ------------------------------------------------------------------
     # Internal
@@ -179,4 +179,4 @@ class LivePriceWriter:
                 self._last_written_at[symbol] = now_mono
             logger.debug("LivePriceWriter flushed %d symbols", len(rows))
         except Exception as e:
-            logger.error("LivePriceWriter DB write failed: %s", e)
+            logger.error("LivePriceWriter DB write failed: %r", e)

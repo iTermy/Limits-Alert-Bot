@@ -72,7 +72,7 @@ class NMConfig(BaseThresholdConfig):
 
     def __init__(self, config_path: Optional[str] = None):
         super().__init__(config_path)
-        logger.info("NMConfig initialised (linear bounce model)")
+        logger.debug("NMConfig initialised (linear bounce model)")
 
     # === Config defaults & migration ===
 

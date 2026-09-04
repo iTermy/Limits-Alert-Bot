@@ -54,7 +54,7 @@ class ExnessStream:
         self._loop: Optional[asyncio.AbstractEventLoop] = None
         self._reader_thread: Optional[threading.Thread] = None
 
-        logger.info("ExnessStream initialized")
+        logger.debug("ExnessStream initialized")
 
     def _spawn(self) -> subprocess.Popen:
         """Blocking child-process spawn — always called via asyncio.to_thread."""
@@ -70,7 +70,7 @@ class ExnessStream:
             logger.error("EXNESS_MT5_PATH not set")
             return False
 
-        logger.info(
+        logger.debug(
             "Starting Exness worker: path=%s login=%s server=%s",
             self.mt5_path, self.login, self.server,
         )
@@ -107,7 +107,7 @@ class ExnessStream:
             )
             self._reader_thread.start()
 
-            logger.info(f"Connected to Exness MT5 - {msg.get('terminal', 'unknown')}")
+            logger.debug(f"Connected to Exness MT5 - {msg.get('terminal', 'unknown')}")
             return True
 
         except asyncio.TimeoutError:
@@ -163,7 +163,7 @@ class ExnessStream:
                 await self._kill_process()
         self._process = None
         self.connected = False
-        logger.info("Disconnected from Exness MT5")
+        logger.debug("Disconnected from Exness MT5")
 
     async def reconnect(self):
         await self.disconnect()
@@ -180,7 +180,7 @@ class ExnessStream:
             raise Exception("Not connected to Exness MT5")
         self._send_command({"cmd": "subscribe", "symbol": symbol})
         self.subscribed_symbols.add(symbol)
-        logger.info(f"Subscribed to {symbol} on Exness MT5")
+        logger.debug(f"Subscribed to {symbol} on Exness MT5")
 
     async def unsubscribe(self, symbol: str):
         self.subscribed_symbols.discard(symbol)

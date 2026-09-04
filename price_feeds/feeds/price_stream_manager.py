@@ -16,6 +16,12 @@ logger = logging.getLogger(__name__)
 # Hard ceiling on a single feed reconnect (teardown + respawn + resubscribe).
 RECONNECT_TIMEOUT_SECONDS = 45
 
+# A feed can be legitimately unreachable for a long stretch (weekend, broker
+# maintenance). Retries back off to a ceiling low enough that the reopen is
+# picked up promptly.
+RECONNECT_BACKOFF_START_SECONDS = 5
+RECONNECT_BACKOFF_MAX_SECONDS = 60
+
 
 class PriceStreamManager:
     """
@@ -36,6 +42,11 @@ class PriceStreamManager:
         # Initialize streaming feeds
         self.feeds: dict[str, any] = {}
         self.feed_status: dict[str, bool] = {}
+
+        # feed -> reader task. asyncio holds only a weak reference to a running
+        # task, so a reader nobody else references can be garbage-collected
+        # mid-flight and take its feed with it, silently.
+        self._feed_tasks: dict[str, asyncio.Task] = {}
 
         # Symbol tracking
         self.subscribed_symbols: set[str] = set()
@@ -59,11 +70,11 @@ class PriceStreamManager:
             "errors": 0,
         }
 
-        logger.info("PriceStreamManager initialized")
+        logger.debug("PriceStreamManager initialized")
 
     async def initialize(self):
         """Initialize all streaming feeds"""
-        logger.info("Initializing streaming feeds...")
+        logger.debug("Initializing streaming feeds...")
 
         # Initialize MT5 stream
         try:
@@ -72,8 +83,8 @@ class PriceStreamManager:
             self.feed_status["icmarkets"] = True
 
             # Start MT5 stream handler
-            asyncio.create_task(self._handle_icmarkets_stream())
-            logger.info("ICMarkets stream initialized")
+            self._start_feed_task("icmarkets")
+            logger.debug("ICMarkets stream initialized")
         except Exception as e:
             logger.error(f"Failed to initialize ICMarkets stream: {e}")
             self.feed_status["icmarkets"] = False
@@ -94,13 +105,13 @@ class PriceStreamManager:
                 self.feed_status["oanda"] = True
 
                 # Start OANDA stream handler
-                asyncio.create_task(self._handle_oanda_stream())
+                self._start_feed_task("oanda")
 
                 # Log which server we're connected to
                 server_type = "practice" if practice else "live"
-                logger.info(f"OANDA stream initialized ({server_type} account)")
+                logger.debug(f"OANDA stream initialized ({server_type} account)")
             else:
-                logger.info("OANDA credentials not configured, skipping")
+                logger.debug("OANDA credentials not configured, skipping")
         except Exception as e:
             logger.error(f"Failed to initialize OANDA stream: {e}")
             self.feed_status["oanda"] = False
@@ -112,8 +123,8 @@ class PriceStreamManager:
             self.feed_status["binance"] = True
 
             # Start Binance stream handler
-            asyncio.create_task(self._handle_binance_stream())
-            logger.info("Binance WebSocket initialized")
+            self._start_feed_task("binance")
+            logger.debug("Binance WebSocket initialized")
         except Exception as e:
             logger.error(f"Failed to initialize Binance stream: {e}")
             self.feed_status["binance"] = False
@@ -129,17 +140,20 @@ class PriceStreamManager:
                 await self.feeds["exness"].connect()
                 self.feed_status["exness"] = True
 
-                asyncio.create_task(self._handle_exness_stream())
-                logger.info("Exness MT5 stream initialized")
+                self._start_feed_task("exness")
+                logger.debug("Exness MT5 stream initialized")
             else:
-                logger.info("Exness MT5 path not configured, skipping")
+                logger.debug("Exness MT5 path not configured, skipping")
         except Exception as e:
             logger.error(f"Failed to initialize Exness stream: {e}")
             self.feed_status["exness"] = False
 
-        connected = sum(1 for status in self.feed_status.values() if status)
+        connected = [name for name, status in self.feed_status.items() if status]
         logger.info(
-            f"Stream initialization complete: {connected}/{len(self.feed_status)} feeds connected"
+            "Feeds connected: %d/%d (%s)",
+            len(connected),
+            len(self.feed_status),
+            ", ".join(connected) or "none",
         )
 
     async def subscribe_symbol(self, symbol: str):
@@ -170,7 +184,7 @@ class PriceStreamManager:
             await self.feeds[feed_name].subscribe(feed_symbol)
             self.subscribed_symbols.add(symbol)
             self.symbol_to_feed[symbol] = feed_name
-            logger.info(f"Subscribed to {symbol} via {feed_name} (as {feed_symbol})")
+            logger.debug(f"Subscribed to {symbol} via {feed_name} (as {feed_symbol})")
         except Exception as e:
             logger.error(f"Failed to subscribe to {symbol}: {e}")
 
@@ -189,7 +203,7 @@ class PriceStreamManager:
             feed_symbol = self.symbol_mapper.get_feed_symbol(symbol, feed_name)
             try:
                 await self.feeds[feed_name].unsubscribe(feed_symbol)
-                logger.info(f"Unsubscribed from {symbol}")
+                logger.debug(f"Unsubscribed from {symbol}")
             except Exception as e:
                 logger.error(f"Failed to unsubscribe from {symbol}: {e}")
 
@@ -211,7 +225,7 @@ class PriceStreamManager:
         Args:
             symbols: List of internal format symbols
         """
-        logger.info(f"Bulk subscribing to {len(symbols)} symbols")
+        logger.debug(f"Bulk subscribing to {len(symbols)} symbols")
 
         # Group by feed
         feed_symbols: dict[str, list[tuple]] = defaultdict(list)
@@ -243,7 +257,7 @@ class PriceStreamManager:
                     self.subscribed_symbols.add(internal)
                     self.symbol_to_feed[internal] = feed_name
 
-                logger.info(f"Bulk subscribed {len(symbol_pairs)} symbols to {feed_name}")
+                logger.debug(f"Bulk subscribed {len(symbol_pairs)} symbols to {feed_name}")
             except Exception as e:
                 logger.error(f"Failed to bulk subscribe to {feed_name}: {e}")
 
@@ -255,7 +269,7 @@ class PriceStreamManager:
             callback: Async function(symbol, price_data) to call on updates
         """
         self.subscribers.append(callback)
-        logger.info(f"Added subscriber: {callback.__name__}")
+        logger.debug(f"Added subscriber: {callback.__name__}")
 
     def remove_subscriber(self, callback: Callable):
         """Remove a subscriber callback"""
@@ -270,7 +284,7 @@ class PriceStreamManager:
             health_monitor: FeedHealthMonitor instance
         """
         self.health_monitor = health_monitor
-        logger.info("Health monitor connected to stream manager")
+        logger.debug("Health monitor connected to stream manager")
 
         # Wire the MT5 stream's per-poll callback into the health monitor so
         # quiet ticks (no bid/ask change) still refresh last_seen.
@@ -283,103 +297,98 @@ class PriceStreamManager:
 
             ic_feed.on_poll = _mark_icmarkets_seen
 
-    async def _handle_icmarkets_stream(self):
-        """Handle MT5 price stream"""
-        feed = self.feeds["icmarkets"]
+    def _start_feed_task(self, feed_name: str):
+        """Start a feed's reader loop, keeping a strong reference to the task."""
+        task = asyncio.create_task(self._run_feed_stream(feed_name))
+        self._feed_tasks[feed_name] = task
+        task.add_done_callback(lambda t: self._on_feed_task_done(feed_name, t))
+
+    def _on_feed_task_done(self, feed_name: str, task: asyncio.Task):
+        """A reader loop only ends on shutdown; anything else is an outage."""
+        self._feed_tasks.pop(feed_name, None)
+
+        if task.cancelled():
+            return
+
+        error = task.exception()
+        if error is not None:
+            logger.error("%s reader loop died: %r", feed_name, error)
+        else:
+            logger.error("%s reader loop exited unexpectedly", feed_name)
+
+    def _ensure_feed_task(self, feed_name: str):
+        """Restart a feed's reader loop if it is no longer running."""
+        task = self._feed_tasks.get(feed_name)
+        if task is not None and not task.done():
+            return
+
+        logger.warning("%s reader loop was not running — restarting it", feed_name)
+        self._start_feed_task(feed_name)
+
+    def _feed_has_subscriptions(self, feed_name: str) -> bool:
+        """True if any symbol is currently routed to this feed."""
+        return feed_name in self.symbol_to_feed.values()
+
+    async def _run_feed_stream(self, feed_name: str):
+        """Consume a feed's price stream, reconnecting with backoff on failure.
+
+        Only the first failure of an outage is logged at WARNING: a feed that is
+        down for a whole weekend would otherwise repeat the same error every few
+        seconds for two days.
+        """
+        feed = self.feeds[feed_name]
+        failures = 0
 
         while True:
             try:
                 async for symbol, price_data in feed.stream_prices():
-                    # Convert feed symbol back to internal format
-                    internal_symbol = self.symbol_mapper.get_internal_symbol(symbol, "icmarkets")
+                    if failures:
+                        logger.info("%s feed recovered", feed_name)
+                        failures = 0
 
+                    internal_symbol = self.symbol_mapper.get_internal_symbol(symbol, feed_name)
                     if internal_symbol:
-                        await self._process_price_update(internal_symbol, price_data, "icmarkets")
+                        await self._process_price_update(internal_symbol, price_data, feed_name)
             except Exception as e:
-                logger.error(f"ICMarkets stream error: {e}")
                 self.stats["errors"] += 1
+                failures += 1
+                if failures == 1:
+                    logger.warning("%s stream error: %s", feed_name, e)
+                else:
+                    logger.debug("%s stream error (attempt %d): %s", feed_name, failures, e)
+            else:
+                if not self._feed_has_subscriptions(feed_name):
+                    # Nothing routed here yet — idle, not an outage.
+                    await asyncio.sleep(1)
+                    continue
 
-                # Reconnect
-                await asyncio.sleep(5)
-                try:
-                    await feed.reconnect()
-                    self.stats["reconnections"] += 1
-                except Exception as e2:
-                    logger.error(f"ICMarkets reconnection failed: {e2}")
-                    await asyncio.sleep(30)
+                # The stream ended without yielding a price and without raising.
+                # That is indistinguishable from a dead feed, and the old
+                # `sleep(1); continue` retried it forever without ever logging or
+                # reconnecting — which is how OANDA sat silent for 28 h on
+                # 2026-08-27 while its three index symbols went unmonitored.
+                self.stats["errors"] += 1
+                failures += 1
+                if failures == 1:
+                    logger.warning("%s stream ended without delivering prices", feed_name)
+                else:
+                    logger.debug(
+                        "%s stream ended without delivering prices (attempt %d)",
+                        feed_name,
+                        failures,
+                    )
 
-    async def _handle_oanda_stream(self):
-        """Handle OANDA price stream"""
-        feed = self.feeds["oanda"]
+            backoff = min(
+                RECONNECT_BACKOFF_START_SECONDS * 2 ** (failures - 1),
+                RECONNECT_BACKOFF_MAX_SECONDS,
+            )
+            await asyncio.sleep(backoff)
 
-        while True:
             try:
-                async for symbol, price_data in feed.stream_prices():
-                    # Convert feed symbol back to internal format
-                    internal_symbol = self.symbol_mapper.get_internal_symbol(symbol, "oanda")
-
-                    if internal_symbol:
-                        await self._process_price_update(internal_symbol, price_data, "oanda")
+                await asyncio.wait_for(feed.reconnect(), timeout=RECONNECT_TIMEOUT_SECONDS)
+                self.stats["reconnections"] += 1
             except Exception as e:
-                logger.error(f"OANDA stream error: {e}")
-                self.stats["errors"] += 1
-
-                # Reconnect
-                await asyncio.sleep(5)
-                try:
-                    await feed.reconnect()
-                    self.stats["reconnections"] += 1
-                except Exception as e2:
-                    logger.error(f"OANDA reconnection failed: {e2}")
-                    await asyncio.sleep(30)
-
-    async def _handle_binance_stream(self):
-        """Handle Binance WebSocket stream"""
-        feed = self.feeds["binance"]
-
-        while True:
-            try:
-                async for symbol, price_data in feed.stream_prices():
-                    # Convert feed symbol back to internal format
-                    internal_symbol = self.symbol_mapper.get_internal_symbol(symbol, "binance")
-
-                    if internal_symbol:
-                        await self._process_price_update(internal_symbol, price_data, "binance")
-            except Exception as e:
-                logger.error(f"Binance stream error: {e}")
-                self.stats["errors"] += 1
-
-                # Reconnect
-                await asyncio.sleep(5)
-                try:
-                    await feed.reconnect()
-                    self.stats["reconnections"] += 1
-                except Exception as e2:
-                    logger.error(f"Binance reconnection failed: {e2}")
-                    await asyncio.sleep(30)
-
-    async def _handle_exness_stream(self):
-        """Handle Exness MT5 price stream (oil symbols)"""
-        feed = self.feeds["exness"]
-
-        while True:
-            try:
-                async for symbol, price_data in feed.stream_prices():
-                    internal_symbol = self.symbol_mapper.get_internal_symbol(symbol, "exness")
-
-                    if internal_symbol:
-                        await self._process_price_update(internal_symbol, price_data, "exness")
-            except Exception as e:
-                logger.error(f"Exness stream error: {e}")
-                self.stats["errors"] += 1
-
-                await asyncio.sleep(5)
-                try:
-                    await feed.reconnect()
-                    self.stats["reconnections"] += 1
-                except Exception as e2:
-                    logger.error(f"Exness reconnection failed: {e2}")
-                    await asyncio.sleep(30)
+                logger.debug("%s reconnect failed: %s", feed_name, e)
 
     async def _process_price_update(self, symbol: str, price_data: dict, feed: str):
         """Process a price update, compute spread if absent, and notify subscribers."""
@@ -462,12 +471,21 @@ class PriceStreamManager:
 
     async def shutdown(self):
         """Shutdown all streaming feeds"""
-        logger.info("Shutting down streaming feeds...")
+        logger.debug("Shutting down streaming feeds...")
+
+        # Stop the readers before closing their sessions, so a reader does not
+        # log a teardown it caused as an outage.
+        tasks = list(self._feed_tasks.values())
+        for task in tasks:
+            task.cancel()
+        if tasks:
+            await asyncio.gather(*tasks, return_exceptions=True)
+        self._feed_tasks.clear()
 
         for feed_name, feed in self.feeds.items():
             try:
                 await feed.disconnect()
-                logger.info(f"Disconnected {feed_name}")
+                logger.debug(f"Disconnected {feed_name}")
             except Exception as e:
                 logger.error(f"Error disconnecting {feed_name}: {e}")
 
@@ -487,51 +505,50 @@ class PriceStreamManager:
             logger.warning(f"reconnect_feed: unknown feed {feed_name}")
             return False
         try:
-            logger.info(f"Reconnecting {feed_name}...")
+            logger.debug(f"Reconnecting {feed_name}...")
             # Bound the reconnect: a feed teardown/respawn that hangs (e.g. a
             # stuck MT5 child-process spawn) must fail, not wedge the caller.
             await asyncio.wait_for(feed.reconnect(), timeout=RECONNECT_TIMEOUT_SECONDS)
             self.feed_status[feed_name] = feed.connected
             self.stats["reconnections"] += 1
             if feed.connected:
-                logger.info(f"{feed_name} reconnected")
+                logger.debug(f"{feed_name} reconnected")
             else:
                 logger.warning(f"{feed_name} reconnect did not restore connection")
-            return feed.connected
         except asyncio.TimeoutError:
             logger.error(
                 f"{feed_name} reconnect timed out after {RECONNECT_TIMEOUT_SECONDS}s"
             )
             self.feed_status[feed_name] = False
-            return False
         except Exception as e:
             logger.error(f"Failed to reconnect {feed_name}: {e}")
             self.feed_status[feed_name] = False
-            return False
+
+        # A rebuilt session is worthless without a reader consuming it, and the
+        # reader can be gone for reasons the session knows nothing about — every
+        # feed's reconnect() disconnects first, which ends the stream generator.
+        self._ensure_feed_task(feed_name)
+        return self.feed_status[feed_name]
 
     async def reconnect_all(self):
         """Reconnect all streaming feeds"""
-        logger.info("Reconnecting all streaming feeds...")
+        logger.info("Reconnecting all feeds")
 
         reconnect_results = {}
 
         for feed_name, feed in self.feeds.items():
             try:
-                logger.info(f"Reconnecting {feed_name}...")
                 await feed.reconnect()
                 self.feed_status[feed_name] = feed.connected
                 reconnect_results[feed_name] = True
                 self.stats["reconnections"] += 1
-                logger.info(f"{feed_name} reconnected")
             except Exception as e:
                 logger.error(f"Failed to reconnect {feed_name}: {e}")
                 self.feed_status[feed_name] = False
                 reconnect_results[feed_name] = False
 
         connected_count = sum(1 for success in reconnect_results.values() if success)
-        logger.info(
-            f"Reconnection complete: {connected_count}/{len(reconnect_results)} feeds connected"
-        )
+        logger.info("Feeds reconnected: %d/%d", connected_count, len(reconnect_results))
 
         return reconnect_results
 
