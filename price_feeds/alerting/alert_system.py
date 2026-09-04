@@ -21,7 +21,6 @@ from price_feeds.alerting.archive_manager import (
     ArchiveManager,
     is_end_state,
 )
-from price_feeds.alerting.channel_rate_limiter import ChannelRateLimiter
 from price_feeds.alerting.embed_builders import _build_signal_embed, _fmt
 from price_feeds.config.nm_config import NMConfig
 from utils.logger import get_logger
@@ -51,9 +50,6 @@ class AlertSystem:
     # Discord-side throttling, leaving headroom for hit/SL/TP messages.
     LIVE_UPDATE_INTERVAL = 30
     _LIVE_UPDATE_ATTEMPT_TIMEOUT = 8
-    # Slots the cosmetic refresh leaves unspent in each window, so an event edit
-    # arriving mid-pass finds room instead of Retry-After.
-    _LIVE_UPDATE_RESERVED_SLOTS = 1
     _DELIVERY_ATTEMPT_TIMEOUT = 20
     _OPERATION_TIMEOUTS_BEFORE_RESTART = 2
     _DELIVERY_RETRY_BASE_DELAY = 5
@@ -116,10 +112,6 @@ class AlertSystem:
             collections.OrderedDict()
         )
         self._live_update_cycle_active = False
-
-        # What the bot has recently sent to each channel. Cosmetic refreshes
-        # wait for room in it; event edits and pings only record their spend.
-        self._channel_limiter = ChannelRateLimiter()
 
         self._live_update_task: Optional[asyncio.Task] = None
         self._delivery_retry_tasks: dict[str, asyncio.Task] = {}
@@ -333,12 +325,7 @@ class AlertSystem:
             if self._last_live_render.get(signal_id) == signature:
                 return True
 
-            await self._channel_limiter.acquire(
-                existing_msg.channel.id, reserve=self._LIVE_UPDATE_RESERVED_SLOTS
-            )
-
-            # Re-check preemption: an event may have fired during the price
-            # fetch or while this edit waited for its slot in the channel budget.
+            # Re-check preemption: an event may have fired during the price fetch.
             if self._priority_edits_active:
                 return False
 
@@ -1083,11 +1070,6 @@ class AlertSystem:
         # event lands without competing for the rate-limit budget. Serialize
         # against the live-refresh edit for this same signal too, so the two
         # never overlap or land out of order on the same message.
-        #
-        # Each call below records its spend against the channel budget without
-        # ever waiting on it. An event never queues behind the refresh loop, but
-        # the refresh loop -- which does wait -- sees the budget an event burst
-        # consumed and backs off instead of stacking on top of it.
         self._priority_edits_active += 1
         try:
             async with self._get_message_lock(signal_id):
@@ -1097,7 +1079,6 @@ class AlertSystem:
                 if existing_msg:
                     try:
                         await existing_msg.edit(embed=embed)
-                        self._channel_limiter.record(existing_msg.channel.id)
                         logger.info(
                             f"Edited persistent message for signal {signal_id} (event={event})"
                         )
@@ -1119,7 +1100,6 @@ class AlertSystem:
                         embed_msg = await target_channel.send(
                             content=self.role_mention, embed=embed
                         )
-                        self._channel_limiter.record(target_channel.id)
                         self.signal_messages[signal_id] = embed_msg
                         self.track_alert_message(embed_msg.id, signal_id)
                         await self._persist_alert_message(
@@ -1140,7 +1120,6 @@ class AlertSystem:
                         self.alert_messages.pop(str(old_ping.id), None)
                         try:
                             await old_ping.delete()
-                            self._channel_limiter.record(old_ping.channel.id)
                         except discord.NotFound:
                             pass
                         except Exception as e:
@@ -1150,7 +1129,6 @@ class AlertSystem:
 
                     try:
                         new_ping = await embed_msg.reply(f"{self.role_mention} {ping_text}")
-                        self._channel_limiter.record(new_ping.channel.id)
                         self.signal_ping_messages[signal_id] = new_ping
                         self.track_alert_message(new_ping.id, signal_id)
                         await self._persist_ping_message(signal_id, new_ping.id)
