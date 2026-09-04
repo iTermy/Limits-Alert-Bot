@@ -13,6 +13,7 @@ import pytest
 from models import LimitData, SignalData
 from price_feeds.alerting.alert_system import AlertSystem
 from price_feeds.alerting.channel_budget import ChannelBudget
+from utils.discord_http_trace import ChannelWrite
 
 
 class FakeStreamManager:
@@ -329,10 +330,10 @@ def test_budget_learns_the_real_limit_from_response_headers():
     budget = ChannelBudget(default_limit=5, default_window=5.0, event_reserve=1)
     assert budget.limit_for(42) == 5
 
-    budget.observe(42, limit=10, reset_after=2.0)
+    budget.observe(ChannelWrite(channel_id=42, limit=10, remaining=9, reset_after=8.0))
 
     assert budget.limit_for(42) == 10
-    assert budget.window_for(42) == 2.0
+    assert budget.window_for(42) == 8.0
     assert budget.cosmetic_allowance(42) == 9
     # Another channel is untouched — buckets are per channel.
     assert budget.limit_for(99) == 5

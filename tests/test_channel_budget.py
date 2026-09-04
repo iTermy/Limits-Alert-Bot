@@ -4,14 +4,35 @@ import asyncio
 import time
 from types import SimpleNamespace
 
-from price_feeds.alerting.channel_budget import MAX_WINDOW_SECONDS, ChannelBudget
-from utils.discord_http_trace import _channel_message_budget
+from price_feeds.alerting.channel_budget import (
+    MAX_WINDOW_SECONDS,
+    MIN_EFFECTIVE_LIMIT,
+    ChannelBudget,
+)
+from utils.discord_http_trace import ChannelWrite, _channel_message_write
 
 CHANNEL = 555
 
 
 def _url(path: str) -> SimpleNamespace:
     return SimpleNamespace(path=path)
+
+
+def _write(limit=5, remaining=2, reset_after=2.0, retry_after=0.0, channel_id=CHANNEL):
+    return ChannelWrite(
+        channel_id=channel_id,
+        limit=limit,
+        remaining=remaining,
+        reset_after=reset_after,
+        retry_after=retry_after,
+    )
+
+
+def _fresh(limit=5, reset_after=5.0, channel_id=CHANNEL):
+    """A response read at the start of a new window — Reset-After is the period."""
+    return _write(
+        limit=limit, remaining=limit - 1, reset_after=reset_after, channel_id=channel_id
+    )
 
 
 class TestAllowance:
@@ -96,7 +117,7 @@ class TestPacing:
             waiter = asyncio.create_task(budget.acquire(CHANNEL))
             # Let the waiter reach its sleep, then widen the bucket under it.
             await asyncio.sleep(0)
-            budget.observe(CHANNEL, limit=1, reset_after=0.15)
+            budget.observe(_fresh(limit=1, reset_after=0.15))
             return await waiter
 
         waited = asyncio.run(scenario())
@@ -112,37 +133,115 @@ class TestPacing:
 
         assert asyncio.run(scenario()) == 0.0
 
+    def test_a_rate_limited_channel_holds_cosmetic_work_off(self):
+        """Sending during a 429's Retry-After just queues behind discord.py."""
+        budget = ChannelBudget(default_limit=5, default_window=0.05, event_reserve=0)
+        budget.observe(_write(retry_after=0.1, reset_after=0.05))
+
+        async def scenario():
+            return await budget.acquire(CHANNEL)
+
+        assert asyncio.run(scenario()) > 0
+
 
 class TestLearning:
-    def test_observed_headers_replace_the_default(self):
+    def test_a_fresh_bucket_reading_replaces_the_default(self):
         budget = ChannelBudget(default_limit=5, default_window=5.0)
-        budget.observe(CHANNEL, limit=10, reset_after=3.0)
+        budget.observe(_fresh(limit=10, reset_after=8.0))
 
         assert budget.limit_for(CHANNEL) == 10
-        assert budget.window_for(CHANNEL) == 3.0
+        assert budget.window_for(CHANNEL) == 8.0
 
-    def test_the_window_converges_on_the_largest_reset_after(self):
-        """Mid-bucket responses report only the remainder, so keep the max."""
-        budget = ChannelBudget()
-        budget.observe(CHANNEL, limit=5, reset_after=1.2)
-        budget.observe(CHANNEL, limit=5, reset_after=4.8)
-        budget.observe(CHANNEL, limit=5, reset_after=0.4)
+    def test_mid_window_reset_after_is_not_mistaken_for_the_period(self):
+        """Reset-After is the remainder; only a fresh bucket states the period.
 
-        assert budget.window_for(CHANNEL) == 4.8
+        Every Reset-After the bot saw in production was a remainder (1.0–2.7 s
+        on a 5 s bucket). Taking the max over them shrank the window to 2.7 s
+        and put a 429 on every sweep.
+        """
+        budget = ChannelBudget(default_limit=5, default_window=5.0)
+        budget.observe(_write(remaining=3, reset_after=1.2))
+        budget.observe(_write(remaining=2, reset_after=2.7))
+        budget.observe(_write(remaining=1, reset_after=0.4))
+
+        assert budget.window_for(CHANNEL) == 5.0
+
+    def test_the_window_is_never_learned_below_the_default(self):
+        budget = ChannelBudget(default_limit=5, default_window=5.0)
+        budget.observe(_fresh(reset_after=1.0))
+
+        assert budget.window_for(CHANNEL) == 5.0
+
+    def test_the_tightest_reported_limit_wins(self):
+        """Sending and editing are separate buckets folded into one allowance.
+
+        Last-write-wins let the looser route set the pace, and the channel then
+        overran the tighter one on every sweep.
+        """
+        budget = ChannelBudget(default_limit=5, default_window=5.0, event_reserve=2)
+        budget.observe(_fresh(limit=10))
+        budget.observe(_fresh(limit=5))
+        budget.observe(_fresh(limit=10))
+
+        assert budget.limit_for(CHANNEL) == 5
 
     def test_an_absurd_window_is_clamped(self):
         budget = ChannelBudget()
-        budget.observe(CHANNEL, limit=5, reset_after=3600.0)
+        budget.observe(_fresh(reset_after=3600.0))
 
         assert budget.window_for(CHANNEL) == MAX_WINDOW_SECONDS
 
     def test_nonsense_observations_are_ignored(self):
         budget = ChannelBudget(default_limit=5, default_window=5.0)
-        budget.observe(CHANNEL, limit=0, reset_after=5.0)
-        budget.observe(CHANNEL, limit=5, reset_after=0.0)
+        budget.observe(_fresh(limit=0))
+        budget.observe(_write(reset_after=0.0))
 
         assert budget.limit_for(CHANNEL) == 5
         assert budget.window_for(CHANNEL) == 5.0
+
+
+class TestRateLimitPenalty:
+    def test_a_429_steps_the_channel_allowance_down(self):
+        """`scope: shared` 429s arrive with slots left, so only the 429 tells us."""
+        budget = ChannelBudget(default_limit=5, default_window=5.0, event_reserve=2)
+        budget.observe(_write(remaining=2, retry_after=3.0))
+
+        assert budget.limit_for(CHANNEL) == 4
+        assert budget.cosmetic_allowance(CHANNEL) == 2
+
+    def test_a_burst_of_429s_costs_one_step_not_five(self):
+        """One overrun produces a run of rejections describing the same overrun."""
+        budget = ChannelBudget(default_limit=5, default_window=5.0, event_reserve=2)
+        for _ in range(5):
+            budget.observe(_write(remaining=2, retry_after=3.0))
+
+        assert budget.limit_for(CHANNEL) == 4
+
+    def test_the_allowance_never_drops_below_the_floor(self):
+        budget = ChannelBudget(default_limit=5, default_window=0.01, event_reserve=2)
+        for _ in range(20):
+            budget.observe(_write(remaining=2, reset_after=0.01, retry_after=0.001))
+            time.sleep(0.02)
+
+        assert budget.limit_for(CHANNEL) == MIN_EFFECTIVE_LIMIT
+        assert budget.cosmetic_allowance(CHANNEL) == 1
+
+    def test_a_rejected_write_is_charged_to_the_window(self):
+        """discord.py retries it, so one logical write costs the channel two."""
+        budget = ChannelBudget(default_limit=9, default_window=5.0, event_reserve=0)
+        budget.observe(_write(limit=9, remaining=2, retry_after=3.0))
+
+        assert len(budget._writes[CHANNEL]) == 1
+
+    def test_a_quiet_spell_gives_a_slot_back(self):
+        budget = ChannelBudget(default_limit=5, default_window=5.0, event_reserve=2)
+        budget.observe(_write(remaining=2, retry_after=3.0))
+        assert budget.limit_for(CHANNEL) == 4
+
+        # Pretend the step-down happened long enough ago to be worth retesting.
+        budget._penalty_changed_at[CHANNEL] -= 600.0
+
+        assert budget.limit_for(CHANNEL) == 5
 
 
 class TestRefreshInterval:
@@ -163,40 +262,76 @@ class TestRefreshInterval:
 
 class TestHeaderParsing:
     def test_a_message_edit_route_is_parsed(self):
-        parsed = _channel_message_budget(
+        parsed = _channel_message_write(
             _url("/api/v10/channels/777/messages/888"),
-            {"X-RateLimit-Limit": "5", "X-RateLimit-Reset-After": "4.2"},
+            {
+                "X-RateLimit-Limit": "5",
+                "X-RateLimit-Remaining": "4",
+                "X-RateLimit-Reset-After": "4.2",
+            },
+            200,
         )
-        assert parsed == (777, 5, 4.2)
+        assert parsed == ChannelWrite(777, 5, 4, 4.2)
+        assert parsed.bucket_was_fresh
+        assert not parsed.rate_limited
 
     def test_a_message_send_route_is_parsed(self):
-        parsed = _channel_message_budget(
+        parsed = _channel_message_write(
             _url("/api/v10/channels/777/messages"),
-            {"X-RateLimit-Limit": "5", "X-RateLimit-Reset-After": "1.0"},
+            {
+                "X-RateLimit-Limit": "5",
+                "X-RateLimit-Remaining": "1",
+                "X-RateLimit-Reset-After": "1.0",
+            },
+            200,
         )
-        assert parsed == (777, 5, 1.0)
+        assert parsed == ChannelWrite(777, 5, 1, 1.0)
+        assert not parsed.bucket_was_fresh
+
+    def test_a_429_carries_its_retry_after(self):
+        parsed = _channel_message_write(
+            _url("/api/v10/channels/777/messages/888"),
+            {
+                "X-RateLimit-Limit": "5",
+                "X-RateLimit-Remaining": "2",
+                "X-RateLimit-Reset-After": "2.47",
+                "Retry-After": "3",
+            },
+            429,
+        )
+        assert parsed.rate_limited
+        assert parsed.retry_after == 3.0
 
     def test_unrelated_routes_are_ignored(self):
-        headers = {"X-RateLimit-Limit": "5", "X-RateLimit-Reset-After": "1.0"}
+        headers = {
+            "X-RateLimit-Limit": "5",
+            "X-RateLimit-Remaining": "4",
+            "X-RateLimit-Reset-After": "1.0",
+        }
         # Reactions and channel edits are different buckets; the channel route
         # itself carries no message allowance.
-        assert _channel_message_budget(_url("/api/v10/channels/777"), headers) is None
+        assert _channel_message_write(_url("/api/v10/channels/777"), headers, 200) is None
         assert (
-            _channel_message_budget(
-                _url("/api/v10/channels/777/messages/888/reactions/x/@me"), headers
+            _channel_message_write(
+                _url("/api/v10/channels/777/messages/888/reactions/x/@me"), headers, 200
             )
             is None
         )
 
     def test_missing_headers_yield_nothing(self):
         assert (
-            _channel_message_budget(_url("/api/v10/channels/777/messages/888"), {})
+            _channel_message_write(_url("/api/v10/channels/777/messages/888"), {}, 200)
             is None
         )
 
     def test_malformed_headers_yield_nothing(self):
-        parsed = _channel_message_budget(
+        parsed = _channel_message_write(
             _url("/api/v10/channels/777/messages/888"),
-            {"X-RateLimit-Limit": "lots", "X-RateLimit-Reset-After": "soon"},
+            {
+                "X-RateLimit-Limit": "lots",
+                "X-RateLimit-Remaining": "some",
+                "X-RateLimit-Reset-After": "soon",
+            },
+            200,
         )
         assert parsed is None

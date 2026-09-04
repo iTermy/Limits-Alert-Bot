@@ -6,7 +6,7 @@ from types import SimpleNamespace
 
 from yarl import URL
 
-from utils.discord_http_trace import _safe_route, build_discord_http_trace
+from utils.discord_http_trace import ChannelWrite, _safe_route, build_discord_http_trace
 
 _MESSAGE_HEADERS = {
     "X-RateLimit-Limit": "5",
@@ -76,26 +76,28 @@ def test_the_observer_learns_from_a_successful_message_write():
     seen = []
     params = _params("PATCH", "/api/v10/channels/123/messages/456", 200, _MESSAGE_HEADERS)
 
-    _run_trace(params, observer=lambda *args: seen.append(args))
+    _run_trace(params, observer=seen.append)
 
-    assert seen == [(123, 5, 5.28)]
+    assert seen == [ChannelWrite(123, 5, 0, 5.28)]
+    assert not seen[0].rate_limited
 
 
-def test_the_observer_also_learns_from_a_429():
-    """A 429's headers describe the same bucket and are worth recording."""
+def test_the_observer_learns_the_retry_from_a_429():
+    """A 429 is the only response that states the channel's real allowance."""
     seen = []
     params = _params("POST", "/api/v10/channels/123/messages", 429, _MESSAGE_HEADERS)
 
-    _run_trace(params, observer=lambda *args: seen.append(args))
+    _run_trace(params, observer=seen.append)
 
-    assert seen == [(123, 5, 5.28)]
+    assert seen == [ChannelWrite(123, 5, 0, 5.28, retry_after=5.28)]
+    assert seen[0].rate_limited
 
 
 def test_the_observer_ignores_non_message_routes():
     seen = []
     params = _params("PATCH", "/api/v10/channels/123", 200, _MESSAGE_HEADERS)
 
-    _run_trace(params, observer=lambda *args: seen.append(args))
+    _run_trace(params, observer=seen.append)
 
     assert seen == []
 

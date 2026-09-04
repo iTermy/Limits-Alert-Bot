@@ -804,13 +804,36 @@ generating that backlog:
 
 - **The numbers are observed.** Discord's docs are explicit that per-route limits
   are dynamic and must not be hard coded, and discord.py keeps its bucket state
-  private — so `build_discord_http_trace(observer=...)` reads
-  `X-RateLimit-Limit` / `X-RateLimit-Reset-After` off every channel message
-  response (200s and 429s alike) and feeds `observe()`. `DEFAULT_LIMIT = 5` /
-  `DEFAULT_WINDOW_SECONDS = 5.0` only cover the first few requests. The window is
-  the **largest** Reset-After seen, because a mid-bucket response reports only the
-  remainder; it is clamped to `MAX_WINDOW_SECONDS` so one odd header cannot stall
-  a channel.
+  private — so `build_discord_http_trace(observer=...)` turns every channel
+  message response (200s and 429s alike) into a `ChannelWrite` and feeds
+  `observe()`. `DEFAULT_LIMIT = 5` / `DEFAULT_WINDOW_SECONDS = 5.0` only cover
+  the first few requests.
+- **Every estimate is only ever revised in the conservative direction**, and the
+  2026-09-04 429 storm is why. Three separate readings were being taken
+  optimistically and each one alone was enough to overrun the channel:
+  - *The window came from a remainder.* `X-RateLimit-Reset-After` is the time
+    **left** in the window, not its period; it only states the period on the
+    first request of a fresh bucket (`ChannelWrite.bucket_was_fresh`, i.e.
+    `remaining == limit - 1`). The bot writes in bursts, so almost every reading
+    was mid-window: every Reset-After production ever logged was 1.0–2.7 s on a
+    5 s bucket, and taking the max over remainders settled the window at ~2.7 s.
+    Only fresh readings and a 429's Retry-After widen it now, never below
+    `DEFAULT_WINDOW_SECONDS`, still clamped to `MAX_WINDOW_SECONDS`.
+  - *The limit was last-write-wins.* Sending and editing are separate Discord
+    buckets that this budget deliberately folds into one channel allowance, so
+    they can advertise different numbers and the looser one was setting the
+    pace. The **smallest** limit a channel's message routes report wins.
+  - *A 429 taught it nothing.* Discord rejects channel message writes with
+    `X-RateLimit-Scope: shared` and slots still nominally remaining — no header
+    predicts those, so the 429 is the only unambiguous statement that the real
+    allowance is below the advertised bucket. `_penalize` now charges the
+    rejected request (discord.py retries it, so one logical write costs two),
+    holds cosmetic work off for the Retry-After, and steps the channel's limit
+    down one slot per window — at most one step per window, since a single
+    overrun produces a run of rejections all describing it. `_relax_penalty`
+    gives a slot back after `PENALTY_RECOVERY_SECONDS` (300 s) so one bad minute
+    does not throttle a channel until restart; `MIN_EFFECTIVE_LIMIT` (2) is the
+    floor.
 - **Cosmetic waits, events do not.** `acquire()` (live refreshes) sleeps until a
   slot frees. `record()` (event edits, pings, news notices, archive moves,
   retractions) never waits but still spends from the window, so a burst of hits
