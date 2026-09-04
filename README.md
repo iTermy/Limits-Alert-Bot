@@ -32,7 +32,10 @@ Key behaviours:
   event. Live-price refreshes run as one sequential, best-effort snapshot pass,
   followed by a 30 s cooldown. Slow passes are never refilled, and individual
   cosmetic edits time out after 8 s so they cannot monopolize Discord's shared
-  channel bucket. Embed references are stored in the database so restarts
+  channel bucket. Each refresh also takes a slot from a sliding-window budget of
+  what the bot has recently sent to that channel, so passes stay under Discord's
+  per-channel limit rather than being throttled by it; event alerts record their
+  spend against the same window but never wait on it. Embed references are stored in the database so restarts
   re-attach to existing embeds instead of orphaning them.
 - **Auto take-profit** — once a signal is hit, P&L is tracked on every tick and the
   signal closes automatically when the configured TP threshold is reached.

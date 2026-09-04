@@ -110,6 +110,8 @@ price_feeds/
                                   delegates embed building and archiving
     embed_builders.py           Pure functions: _build_signal_embed(), _build_profit_archive_embed(),
                                   _set_archive_footer() + formatting helpers
+    channel_rate_limiter.py     ChannelRateLimiter — sliding-window per-channel budget;
+                                  acquire() for cosmetic refreshes, record() for event traffic
     archive_manager.py          ArchiveManager — schedule_end_state_move(), cancel_pending_move(),
                                   delayed move/delete for finished signals
     info_embeds.py              InfoEmbedManager — static per-channel info/risk embeds;
@@ -443,6 +445,8 @@ Priority order:
 
 ### Live-update task
 `start_live_updates()` waits **30 seconds after a completed pass**, then takes one snapshot of the active embeds and drains it sequentially. A pass is never refilled while running; failed cosmetic edits are dropped until the next pass, and each edit has an 8 s total timeout. If a status/event edit begins, remaining cosmetic work is discarded so the critical event gets the next HTTP slot. Critical attempts have a 20 s timeout and continue through a deduplicated exponential-backoff retry task. An INFO summary is emitted after every refresh pass. Stopped when a signal closes or is cancelled.
+
+Every cosmetic edit first takes a slot from `ChannelRateLimiter` (`price_feeds/alerting/channel_rate_limiter.py`), a sliding window of the operations the bot has sent to that channel in the last 5 s. Discord budgets sends and edits per channel, so seven embeds refreshed back-to-back overran the budget and were throttled: passes took 25 s, most of it asleep on Retry-After, and edits that blew the 8 s timeout fed the restart counter. The window keeps the bot under that budget instead — an idle channel still grants the whole burst at once, which fixed inter-edit spacing could not. Event edits and pings (`_upsert_signal_message`) **record** their spend but never wait on it: a stop-loss alert must not queue behind a price refresh, while the refresh loop, which does wait, sees the budget an event burst consumed. `_LIVE_UPDATE_RESERVED_SLOTS` (1) keeps the cosmetic loop from spending the last slot in a window so an event arriving mid-pass finds room. Renders skipped by `_embed_signature` cost nothing, since the slot is taken only when an edit is actually issued.
 
 ### Key public methods
 - `send_approaching_alert(signal, limit, current_price, distance_formatted, spread, spread_buffer_enabled)` — creates embed; registers for live updates
