@@ -205,7 +205,12 @@ class ChannelBudget:
             self._writes[channel_id].append(now)
 
     async def acquire(self, channel_id: int) -> float:
-        """Wait until a cosmetic write fits, count it, and return the wait.
+        """Wait until a deferrable write fits, count it, and return the wait.
+
+        Price snapshots use this, and so does everything else nobody is waiting
+        on: startup embed rebuilds, archive moves, the static info embeds. All
+        of them arrive in batches, and a batch that does not wait empties the
+        channel's allowance before the first alert of the day.
 
         Sleeps in whole gaps rather than polling: the oldest write inside the
         window is the one whose expiry frees the next slot.

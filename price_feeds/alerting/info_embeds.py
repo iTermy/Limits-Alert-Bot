@@ -261,6 +261,10 @@ class InfoEmbedManager:
     def __init__(self, bot, alert_system):
         self.bot = bot
         self.alert_system = alert_system
+        # These embeds are static furniture written into the same alert channels
+        # the live signal embeds share, and sync() touches every one of them in a
+        # single startup pass — exactly when hydration is already writing.
+        self._channel_budget = alert_system._channel_budget
 
     def _channel_builders(self) -> dict[Optional[discord.TextChannel], Callable[[], discord.Embed]]:
         """Map each resolved alert channel to its embed builder, skipping any that
@@ -314,6 +318,7 @@ class InfoEmbedManager:
             if stored_id:
                 try:
                     msg = await channel.fetch_message(int(stored_id))
+                    await self._channel_budget.acquire(channel.id)
                     await msg.edit(embed=embed)
                     logger.debug(f"Refreshed info embed in #{channel.name}")
                     continue
@@ -357,6 +362,7 @@ class InfoEmbedManager:
             if stored_id:
                 try:
                     msg = await channel.fetch_message(int(stored_id))
+                    await self._channel_budget.acquire(channel.id)
                     await msg.edit(content=None, embed=embed)
                     logger.debug(f"Refreshed notice in #{channel.name}")
                     continue
@@ -375,6 +381,7 @@ class InfoEmbedManager:
 
     async def _post_notice(self, channel: discord.TextChannel, embed: discord.Embed) -> Optional[int]:
         try:
+            await self._channel_budget.acquire(channel.id)
             msg = await channel.send(embed=embed)
         except Exception as e:
             logger.error(f"Failed to post notice in #{channel.name}: {e}")
@@ -388,6 +395,7 @@ class InfoEmbedManager:
 
     async def _post(self, channel: discord.TextChannel, embed: discord.Embed) -> Optional[int]:
         try:
+            await self._channel_budget.acquire(channel.id)
             msg = await channel.send(embed=embed)
         except Exception as e:
             logger.error(f"Failed to post info embed in #{channel.name}: {e}")

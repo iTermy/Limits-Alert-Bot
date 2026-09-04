@@ -8,6 +8,7 @@ import asyncio
 import collections
 import contextlib
 import json
+import time
 from collections.abc import Awaitable, Callable
 from datetime import datetime, timezone
 from pathlib import Path
@@ -16,6 +17,7 @@ from typing import Any, Optional
 import discord
 
 from models import SignalData
+from models.signal import breakeven_price
 from price_feeds.alerting.archive_manager import (
     END_STATE_DELETE_MINUTES,
     ArchiveManager,
@@ -50,6 +52,16 @@ class AlertSystem:
     # cadence keeps ten active signals to at most ~20 edits/minute before
     # Discord-side throttling, leaving headroom for hit/SL/TP messages.
     LIVE_UPDATE_INTERVAL = 30
+
+    # How far an embed's price sits from the nearest level that would change it,
+    # in units of that instrument's alert distance, paired with the multiple of
+    # LIVE_UPDATE_INTERVAL it is refreshed on. Anything past the last bound uses
+    # _REFRESH_FAR_MULTIPLIER. One cadence for every embed does not scale: a
+    # channel takes roughly one message write per second, so ninety concurrent
+    # signals on a flat 30 s sweep ask for the channel's entire allowance and
+    # leave nothing for the hits and pings that share the bucket.
+    _REFRESH_TIERS = ((1.0, 1), (3.0, 2))
+    _REFRESH_FAR_MULTIPLIER = 4
 
     # Max channels refreshed in parallel during a live-refresh pass. Discord
     # buckets PATCH /channels/{id}/messages/{id} on the CHANNEL, not the message,
@@ -117,6 +129,11 @@ class AlertSystem:
         # signal_id -> signature of the last live-rendered embed, so the refresh
         # loop can skip edits that would produce an identical embed.
         self._last_live_render: dict[int, str] = {}
+
+        # signal_id -> monotonic deadline before which the scheduler leaves this
+        # embed alone. Set by the refresh worker from how close price sits to the
+        # levels that matter; absent means "due now".
+        self._next_refresh_at: dict[int, float] = {}
 
         # Ordered set of signals needing a cosmetic refresh. The scheduler may
         # add a signal repeatedly while Discord is throttling, but one key is
@@ -211,6 +228,9 @@ class AlertSystem:
         no payload and add no duplicate work. The worker renders only when the
         signal reaches the front, so signals waiting behind a Discord rate limit
         use the newest price rather than a snapshot captured when they queued.
+
+        Embeds still inside the interval the worker last set for them are left
+        out entirely — see ``_refresh_interval_for``.
         """
         if not self._live_embeds:
             return
@@ -220,12 +240,19 @@ class AlertSystem:
             logger.debug("Live refresh pass still active; skipping scheduler tick")
             return
 
+        now = time.monotonic()
         for signal_id in self._live_embeds:
-            self._pending_live_updates.setdefault(signal_id, None)
+            if self._next_refresh_at.get(signal_id, 0.0) <= now:
+                self._pending_live_updates.setdefault(signal_id, None)
+
+        if not self._pending_live_updates:
+            return
+
         self._live_update_wakeup.set()
         logger.debug(
-            "Queued latest-state refresh for %d live embed(s)",
+            "Queued latest-state refresh for %d of %d live embed(s)",
             len(self._pending_live_updates),
+            len(self._live_embeds),
         )
 
     async def _live_update_worker(self) -> None:
@@ -369,6 +396,10 @@ class AlertSystem:
             # command path, so this path no longer round-trips to Postgres.
             limits = signal.limits
 
+            self._next_refresh_at[signal_id] = time.monotonic() + self._refresh_interval_for(
+                signal, limits, current_price
+            )
+
             distance_formatted = None
             if event in ("approaching", "hit"):
                 pending_limits = [
@@ -470,11 +501,54 @@ class AlertSystem:
             "event": event,
             "spread_buffer_enabled": spread_buffer_enabled,
         }
+        # A signal that just changed state is due now, whatever backoff the last
+        # snapshot earned it — a fill moves the levels the backoff was measured
+        # against.
+        self._next_refresh_at.pop(signal_id, None)
 
     def _unregister_live_embed(self, signal_id: int):
         self._live_embeds.pop(signal_id, None)
         self._pending_live_updates.pop(signal_id, None)
         self._last_live_render.pop(signal_id, None)
+        self._next_refresh_at.pop(signal_id, None)
+
+    def _refresh_interval_for(self, signal, limits: list, current_price: float) -> float:
+        """Seconds this embed may go without a cosmetic snapshot.
+
+        Distance is measured to the nearest level that would actually change the
+        embed — the pending limits while a signal is still resting, the stop and
+        the take-profit once it is filled — and divided by the instrument's own
+        alert distance, so "close" means the same thing on gold as on EURUSD.
+        An embed parked far from all of them is pure decoration, and decoration
+        is what the channel should spend its writes on last.
+        """
+        base = self.LIVE_UPDATE_INTERVAL
+        if not self.alert_config:
+            return base
+
+        levels = [lim.price_level for lim in limits if lim.status == "pending"]
+        if signal.status == "hit":
+            levels.append(signal.stop_loss)
+            if signal.take_profit:
+                levels.append(signal.take_profit)
+            if signal.be_stop_armed_at:
+                levels.append(breakeven_price(signal.hit_limits))
+
+        levels = [level for level in levels if level]
+        if not levels:
+            return base
+
+        alert_distance = self.alert_config.get_approaching_distance(
+            signal.instrument, current_price
+        )
+        if alert_distance <= 0:
+            return base
+
+        proximity = min(abs(current_price - level) for level in levels) / alert_distance
+        for bound, multiplier in self._REFRESH_TIERS:
+            if proximity <= bound:
+                return base * multiplier
+        return base * self._REFRESH_FAR_MULTIPLIER
 
     @staticmethod
     def _embed_signature(embed: discord.Embed) -> str:
@@ -868,15 +942,26 @@ class AlertSystem:
         for live updates). Missing: ACTIVE signals reset approaching_alert_sent
         so the alert can re-fire on the next tick; HIT signals rebuild a fresh
         embed immediately so live updates and future events have a target.
+
+        The rebuilds are paced against the channel budget, so a batch of them
+        stretches startup rather than emptying the channel's allowance in one
+        burst. That delay is real — this runs before the price stream subscribes
+        — but the alternative is worse: an unpaced batch puts the channel into
+        Discord's penalty box and every alert for the next several minutes
+        queues behind the retries.
         """
+        rebuilt = 0
         for signal in signals:
             try:
-                await self._hydrate_signal(signal)
+                rebuilt += await self._hydrate_signal(signal)
             except Exception as e:
                 logger.error(
                     f"Hydration failed for signal {signal.signal_id}: {e}",
                     exc_info=True,
                 )
+
+        if rebuilt:
+            logger.info(f"Rebuilt {rebuilt} missing alert embed(s) during hydration")
 
     async def recover_pending_archives(self) -> None:
         """
@@ -1003,7 +1088,8 @@ class AlertSystem:
         if recovered:
             logger.info(f"Re-registered {recovered} finished-channel embed(s) for reply lookup")
 
-    async def _hydrate_signal(self, signal: dict) -> None:
+    async def _hydrate_signal(self, signal: dict) -> bool:
+        """Re-attach one signal's embed. Returns True if the embed was rebuilt."""
         signal_id = signal.signal_id
         status = signal.status
         alert_message_id = signal.alert_message_id
@@ -1036,7 +1122,7 @@ class AlertSystem:
                         f"Hydrated alert embed for signal {signal_id} "
                         f"(channel={channel.id}, msg={embed_msg.id}, event={event})"
                     )
-                    return
+                    return False
                 except discord.NotFound:
                     logger.debug(
                         f"Persisted alert embed for signal {signal_id} no longer exists "
@@ -1049,7 +1135,7 @@ class AlertSystem:
 
             await self._clear_persisted_alert_ids(signal_id)
 
-        await self._hydrate_fallback(signal)
+        return await self._hydrate_fallback(signal)
 
     def _resolve_channel(
         self, signal: dict, persisted_channel_id: Optional[int]
@@ -1060,21 +1146,23 @@ class AlertSystem:
                 return channel
         return self._get_alert_channel(signal)
 
-    async def _hydrate_fallback(self, signal: dict) -> None:
+    async def _hydrate_fallback(self, signal: dict) -> bool:
         """
         Embed reference is gone. For HIT signals rebuild immediately; for ACTIVE
         signals reset approaching_alert_sent so the alert re-fires naturally.
+
+        Returns True if an embed was rebuilt.
         """
         signal_id = signal.signal_id
         status = signal.status
 
         if status == "hit":
-            rebuilt = await self.reactivate_embed(signal, ping_text=None)
+            rebuilt = await self.reactivate_embed(signal, ping_text=None, paced=True)
             if rebuilt:
                 logger.debug(f"Rebuilt missing embed for HIT signal {signal_id} on startup")
             else:
                 logger.warning(f"Could not rebuild embed for HIT signal {signal_id} on startup")
-            return
+            return rebuilt
 
         limits = signal.limits
         if any(lim.approaching_alert_sent for lim in limits):
@@ -1086,6 +1174,7 @@ class AlertSystem:
                 f"Reset approaching_alert_sent for ACTIVE signal {signal_id} "
                 f"after losing embed reference"
             )
+        return False
 
     # ── Limit fetcher ────────────────────────────────────────────────────────
 
@@ -1116,6 +1205,19 @@ class AlertSystem:
 
     # ── Core: get/create/edit the persistent message ─────────────────────────
 
+    async def _spend_write(self, channel_id: int, *, paced: bool) -> None:
+        """Charge one Discord write to the channel's budget.
+
+        Trader-facing events are charged and sent immediately — someone is
+        watching for them. Deferrable work passes ``paced=True`` and waits for
+        room instead: startup rebuilds arrive in one batch and would otherwise
+        empty a channel's whole allowance before the first price tick.
+        """
+        if paced:
+            await self._channel_budget.acquire(channel_id)
+        else:
+            self._channel_budget.record(channel_id)
+
     async def _upsert_signal_message(
         self,
         signal: dict,
@@ -1130,6 +1232,7 @@ class AlertSystem:
         force_hit_up_to_seq: int = 0,
         limit_pnl_map: Optional[dict] = None,
         delete_after_minutes: Optional[int] = None,
+        paced: bool = False,
     ) -> Optional[discord.Message]:
         """
         Send a ping then create or edit the persistent embed for this signal.
@@ -1176,7 +1279,7 @@ class AlertSystem:
                         # Event writes never wait for the budget — a trader is
                         # watching for this — but they are charged to it so the
                         # next cosmetic sweep sees the smaller window.
-                        self._channel_budget.record(target_channel.id)
+                        await self._spend_write(target_channel.id, paced=paced)
                         await existing_msg.edit(embed=embed)
                         logger.debug(
                             f"Edited persistent message for signal {signal_id} (event={event})"
@@ -1196,7 +1299,7 @@ class AlertSystem:
 
                 if not existing_msg:
                     try:
-                        self._channel_budget.record(target_channel.id)
+                        await self._spend_write(target_channel.id, paced=paced)
                         embed_msg = await target_channel.send(
                             content=self.role_mention, embed=embed
                         )
@@ -1219,7 +1322,7 @@ class AlertSystem:
                     if old_ping:
                         self.alert_messages.pop(str(old_ping.id), None)
                         try:
-                            self._channel_budget.record(target_channel.id)
+                            await self._spend_write(target_channel.id, paced=paced)
                             await old_ping.delete()
                         except discord.NotFound:
                             pass
@@ -1229,7 +1332,7 @@ class AlertSystem:
                             )
 
                     try:
-                        self._channel_budget.record(target_channel.id)
+                        await self._spend_write(target_channel.id, paced=paced)
                         new_ping = await embed_msg.reply(f"{self.role_mention} {ping_text}")
                         self.signal_ping_messages[signal_id] = new_ping
                         self.track_alert_message(new_ping.id, signal_id)
@@ -1464,10 +1567,16 @@ class AlertSystem:
         self,
         signal: dict,
         ping_text: Optional[str] = None,
+        paced: bool = False,
     ) -> bool:
         """
         After a signal is reactivated from cancelled state, rebuild its embed.
         Re-registers the embed for live price updates.
+
+        ``paced`` makes the rebuild wait for room in the channel budget. Startup
+        hydration sets it: a user who typed `reactivate` is waiting on the reply,
+        but a batch of embeds being rebuilt after a restart is not urgent and
+        must not spend the channel's whole allowance at once.
         """
         signal_id = signal.signal_id
         if signal_id is None:
@@ -1480,6 +1589,7 @@ class AlertSystem:
         if finished_msg:
             self.alert_messages.pop(str(finished_msg.id), None)
             try:
+                await self._spend_write(finished_msg.channel.id, paced=paced)
                 await finished_msg.delete()
                 logger.debug(
                     f"Deleted finished-channel embed for signal {signal_id} on reactivation"
@@ -1570,6 +1680,7 @@ class AlertSystem:
                 spread=spread,
                 spread_buffer_enabled=spread_buffer_enabled,
                 ping_text=ping_text,
+                paced=paced,
             )
             if msg:
                 self._register_live_embed(signal, event, spread_buffer_enabled)

@@ -461,7 +461,9 @@ Priority order:
 5. Default → `alert_channel`
 
 ### Live-update task
-`start_live_updates()` runs two tasks: a scheduler that every **30 seconds** queues one refresh request per live signal, and a worker (woken by `_live_update_wakeup`) that drains them.
+`start_live_updates()` runs two tasks: a scheduler that every **30 seconds** queues a refresh request per *due* live signal, and a worker (woken by `_live_update_wakeup`) that drains them.
+
+**Not every embed is due every tick.** A channel takes roughly one message write per second, so a flat 30 s sweep over ~40 embeds asks for the channel's entire allowance on cosmetics alone and leaves nothing for the hits and pings sharing the bucket — measured at 1.33 writes/s for 40 embeds. `_refresh_interval_for` measures how far price sits from the nearest level that would actually change the embed (pending limits while a signal rests; the stop, the take-profit, and the armed breakeven once it is filled), divides by that instrument's alert distance so "close" means the same on gold as on EURUSD, and picks a multiple of `LIVE_UPDATE_INTERVAL` from `_REFRESH_TIERS` (`≤1×` → 30 s, `≤3×` → 60 s, beyond → `_REFRESH_FAR_MULTIPLIER` × 30 s). The worker stamps the resulting deadline in `_next_refresh_at`; `_queue_live_updates` skips anything not yet due. `_register_live_embed` clears the deadline, so a signal that just changed state is due immediately — a fill moves the levels the backoff was measured against.
 
 Requests are deduplicated by signal id in `_pending_live_updates` (an `OrderedDict` used as an ordered set), so repeated scheduler passes never stack duplicate work — a signal delayed behind a rate limit is rendered when its turn arrives, using the price at send time rather than the one current when it queued.
 
@@ -834,10 +836,23 @@ generating that backlog:
     gives a slot back after `PENALTY_RECOVERY_SECONDS` (300 s) so one bad minute
     does not throttle a channel until restart; `MIN_EFFECTIVE_LIMIT` (2) is the
     floor.
-- **Cosmetic waits, events do not.** `acquire()` (live refreshes) sleeps until a
-  slot frees. `record()` (event edits, pings, news notices, archive moves,
-  retractions) never waits but still spends from the window, so a burst of hits
-  pushes the next refresh back instead of stacking on top of it.
+- **Deferrable work waits, events do not.** `acquire()` sleeps until a slot
+  frees; everything nobody is waiting on goes through it — live refreshes,
+  startup embed rebuilds (`reactivate_embed(..., paced=True)` from
+  `_hydrate_fallback`), every archive-move write, and the static info embeds.
+  `record()` (event edits, pings, news notices, retractions) never waits but
+  still spends from the window, so a burst of hits pushes the next refresh back
+  instead of stacking on top of it. `AlertSystem._spend_write(channel_id,
+  paced=)` picks between them, which is how `_upsert_signal_message` serves both
+  a trader-facing hit and a startup rebuild.
+- **Batches must not burst.** Archive moves are four writes across two channels
+  and they cluster — one news release stops out five signals in a second, and
+  `recover_pending_archives` re-arms every interrupted countdown from the same
+  instant. `schedule_end_state_move` scatters each move over
+  `ARCHIVE_MOVE_JITTER_SECONDS` (120 s) past its nominal delay on top of the
+  `acquire()` pacing. Paced hydration is the same trade in the other direction:
+  it stretches startup (it runs before `bulk_subscribe`), which is cheaper than
+  putting the channel in Discord's penalty box for the following five minutes.
 - **`EVENT_RESERVE` (2) slots are withheld from cosmetic use**, so an event
   arriving mid-sweep finds room rather than queueing behind price snapshots.
 - **The interval stretches under load; nothing is starved.** Ten embeds in one
@@ -846,9 +861,13 @@ generating that backlog:
   channel, which is the practical way to see the real allowance.
 
 **When you add a Discord write, charge it.** A new `send`/`edit`/`delete` on an
-alert channel that skips `record()` makes the budget under-count, and the pacing
-is then computed against a false picture — the exact backlog this exists to
-prevent. `ChannelBudget` is built in `TradingBot.__init__` *before*
+alert channel that skips `record()`/`acquire()` makes the budget under-count, and
+the pacing is then computed against a false picture — the exact backlog this
+exists to prevent. This is not hypothetical: the archive move's delete of the
+alert-channel embed and the whole of `InfoEmbedManager.sync()` went uncharged
+until 2026-09-04, so the budget throttled itself to one cosmetic write per 5 s
+and the channel kept returning 429s anyway. `ChannelBudget` is built in
+`TradingBot.__init__` *before*
 `super().__init__()` because the HTTP trace that feeds it has to be handed to the
 client at construction; it is injected into `AlertSystem` and `ArchiveManager`.
 Tests that care about ordering rather than throughput opt out with a wide budget

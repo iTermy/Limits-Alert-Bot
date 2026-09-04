@@ -121,6 +121,40 @@ def _make_signal(sid: int) -> SignalData:
     )
 
 
+class FakeAlertConfig:
+    """Fixed approaching distance, so the proximity maths stays readable."""
+
+    def __init__(self, distance: float):
+        self.distance = distance
+
+    def get_approaching_distance(self, symbol: str, current_price: float = None) -> float:
+        return self.distance
+
+    def format_distance_for_display(self, symbol, distance, current_price) -> str:
+        return f"{distance:.2f}"
+
+
+def _hit_signal(sid: int, *, stop_loss: float, entry: float) -> SignalData:
+    return SignalData(
+        signal_id=sid,
+        instrument=f"TEST{sid}",
+        direction="long",
+        status="hit",
+        stop_loss=stop_loss,
+        total_limits=1,
+        limits_hit=1,
+        limits=[
+            LimitData(
+                id=sid,
+                signal_id=sid,
+                price_level=entry,
+                sequence_number=1,
+                status="hit",
+            )
+        ],
+    )
+
+
 def _unpaced_budget() -> ChannelBudget:
     """A budget wide enough not to pace anything.
 
@@ -352,6 +386,9 @@ def test_connection_reset_waits_until_next_refresh_pass():
         assert bucket.total_edits == 0
         assert not alerts._pending_live_updates
 
+        # The scheduler tick that retries this embed is one refresh interval
+        # later; nothing else in this test advances the clock.
+        alerts._next_refresh_at.clear()
         alerts._queue_live_updates()
         await asyncio.wait_for(alerts._drain_live_update_queue(), timeout=2)
 
@@ -432,3 +469,50 @@ def test_consecutive_discord_operation_timeouts_request_restart():
 
     alerts._record_discord_operation_timeout("second")
     assert bot.restart_reasons == ["2 consecutive Discord operation timeouts"]
+
+
+@pytest.mark.parametrize(
+    "stop_loss,expected_multiplier",
+    [
+        (100.5, 1),  # half an alert distance below the fill
+        (98.0, 2),  # three alert distances
+        (90.0, 4),  # eleven — nothing is going to happen here soon
+    ],
+)
+def test_refresh_interval_backs_off_with_distance_from_the_live_levels(
+    stop_loss, expected_multiplier
+):
+    alerts = AlertSystem(
+        bot=None,
+        stream_manager=None,
+        alert_config=FakeAlertConfig(1.0),
+        channel_budget=_unpaced_budget(),
+    )
+    signal = _hit_signal(1, stop_loss=stop_loss, entry=101.0)
+
+    interval = alerts._refresh_interval_for(signal, signal.limits, current_price=101.0)
+
+    assert interval == AlertSystem.LIVE_UPDATE_INTERVAL * expected_multiplier
+
+
+def test_scheduler_skips_embeds_still_inside_their_refresh_interval():
+    async def scenario():
+        alerts, _, bucket, _messages = _make_alert_system(2)
+        alerts.alert_config = FakeAlertConfig(1.0)
+
+        alerts._queue_live_updates()
+        await asyncio.wait_for(alerts._drain_live_update_queue(), timeout=2)
+        assert bucket.total_edits == 2
+
+        # Both embeds now carry a deadline, so the very next scheduler tick has
+        # nothing to do — this is the pressure the alert channel was under.
+        alerts._queue_live_updates()
+        assert not alerts._pending_live_updates
+
+        # An event re-registers its signal and clears the backoff with it: a
+        # fill moves the levels the backoff was measured against.
+        alerts._register_live_embed(_make_signal(1), "hit")
+        alerts._queue_live_updates()
+        assert list(alerts._pending_live_updates) == [1]
+
+    asyncio.run(scenario())

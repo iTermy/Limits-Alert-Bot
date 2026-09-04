@@ -9,6 +9,7 @@ and cleaning up original signal messages in auto-purge channels.
 import asyncio
 import contextlib
 import logging
+import random
 from typing import Optional
 
 import discord
@@ -38,6 +39,11 @@ _END_STATES = {
 _PROFIT_EVENTS = {"profit", "auto_tp"}
 
 END_STATE_DELETE_MINUTES = 15
+
+# Spread over which an archive move is scattered past its nominal delay. Closes
+# arrive in clusters and every move in a cluster would otherwise fire in the
+# same tick, four writes each, into channels the live embeds already keep busy.
+ARCHIVE_MOVE_JITTER_SECONDS = 120
 
 
 def is_end_state(event: str) -> bool:
@@ -114,14 +120,14 @@ class ArchiveManager:
         if not finished_channel:
             return
         try:
-            self._channel_budget.record(finished_channel.id)
+            await self._channel_budget.acquire(finished_channel.id)
             await finished_channel.send(self.role_mention)
         except Exception as e:
             logger.warning(
                 f"Could not send role ping to finished-signals for signal {signal_id}: {e}"
             )
         try:
-            self._channel_budget.record(finished_channel.id)
+            await self._channel_budget.acquire(finished_channel.id)
             copy_msg = await finished_channel.send(embed=embed)
         except Exception as e:
             logger.warning(
@@ -190,13 +196,22 @@ class ArchiveManager:
         Routing:
           - profit / auto_tp  -> profit_channel, plus a copy in finished_signals
           - everything else   -> finished_signals channel
+
+        Every write below waits for room in the channel budget rather than
+        spending event headroom: an archive move runs a quarter of an hour after
+        the close it describes, so it can always afford to queue. It also has to.
+        Closes cluster — one news release stops out five signals inside a second,
+        and `recover_pending_archives` re-arms every interrupted countdown from
+        the same instant — so a batch of moves lands together and each one is
+        four writes across two channels.
         """
         self.cancel_pending_move(signal_id)
         is_profit = event in _PROFIT_EVENTS
+        delay = END_STATE_DELETE_MINUTES * 60 + random.uniform(0, ARCHIVE_MOVE_JITTER_SECONDS)
 
         async def _move_after_delay():
             try:
-                await asyncio.sleep(END_STATE_DELETE_MINUTES * 60)
+                await asyncio.sleep(delay)
             except asyncio.CancelledError:
                 return
 
@@ -204,7 +219,7 @@ class ArchiveManager:
             if ping_msg:
                 self.alert_messages.pop(str(ping_msg.id), None)
                 with contextlib.suppress(Exception):
-                    self._channel_budget.record(ping_msg.channel.id)
+                    await self._channel_budget.acquire(ping_msg.channel.id)
                     await ping_msg.delete()
 
             embed_msg = self.signal_messages.get(signal_id)
@@ -288,14 +303,14 @@ class ArchiveManager:
 
                     if not is_profit:
                         try:
-                            self._channel_budget.record(dest_channel.id)
+                            await self._channel_budget.acquire(dest_channel.id)
                             await dest_channel.send(self.role_mention)
                         except Exception as _ping_err:
                             logger.warning(
                                 f"Could not send role ping to {dest_name} for signal {signal_id}: {_ping_err}"
                             )
 
-                    self._channel_budget.record(dest_channel.id)
+                    await self._channel_budget.acquire(dest_channel.id)
                     finished_msg = await dest_channel.send(embed=new_embed)
                     self.signal_finished_messages[signal_id] = finished_msg
                     self._track_alert_message(finished_msg.id, signal_id)
@@ -308,6 +323,7 @@ class ArchiveManager:
                     logger.error(f"Failed to send embed to {dest_name} for signal {signal_id}: {e}")
 
                 try:
+                    await self._channel_budget.acquire(embed_msg.channel.id)
                     await embed_msg.delete()
                     logger.debug(
                         f"Deleted alert-channel embed for signal {signal_id} after move to {dest_name}"
@@ -318,6 +334,7 @@ class ArchiveManager:
                     logger.warning(f"Failed to delete alert embed for signal {signal_id}: {e}")
             else:
                 try:
+                    await self._channel_budget.acquire(embed_msg.channel.id)
                     await embed_msg.delete()
                     logger.debug(
                         f"Deleted end-state embed for signal {signal_id} "
@@ -381,7 +398,9 @@ class ArchiveManager:
     ) -> None:
         """Move a standalone news-cancel message to finished-signals after the delay."""
         try:
-            await asyncio.sleep(END_STATE_DELETE_MINUTES * 60)
+            await asyncio.sleep(
+                END_STATE_DELETE_MINUTES * 60 + random.uniform(0, ARCHIVE_MOVE_JITTER_SECONDS)
+            )
         except asyncio.CancelledError:
             return
 
@@ -390,7 +409,7 @@ class ArchiveManager:
             try:
                 archived_embed = embed.copy()
                 _set_archive_footer(archived_embed)
-                self._channel_budget.record(finished_channel.id)
+                await self._channel_budget.acquire(finished_channel.id)
                 await finished_channel.send(embed=archived_embed)
                 logger.debug(
                     f"Moved standalone news-cancel embed for signal {signal_id} to finished-signals"
@@ -401,7 +420,7 @@ class ArchiveManager:
                 )
 
         try:
-            self._channel_budget.record(message.channel.id)
+            await self._channel_budget.acquire(message.channel.id)
             await message.delete()
             logger.debug(f"Deleted standalone news-cancel message for signal {signal_id}")
         except Exception:
