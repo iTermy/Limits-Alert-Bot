@@ -6,11 +6,15 @@ reset connections deterministically without risking a production rate limit.
 """
 
 import asyncio
+from types import SimpleNamespace
 
 import pytest
 
 from models import LimitData, SignalData
 from price_feeds.alerting.alert_system import AlertSystem
+from price_feeds.alerting.channel_rate_limiter import ChannelRateLimiter
+
+ALERT_CHANNEL_ID = 4242
 
 
 class FakeStreamManager:
@@ -32,8 +36,10 @@ class SharedBucket:
         self.in_flight = 0
         self.max_in_flight = 0
         self.total_edits = 0
+        self.started_at: list[float] = []
 
     async def edit(self) -> None:
+        self.started_at.append(asyncio.get_running_loop().time())
         self.in_flight += 1
         self.max_in_flight = max(self.max_in_flight, self.in_flight)
         self.total_edits += 1
@@ -48,6 +54,7 @@ class SharedBucket:
 class FakeMessage:
     def __init__(self, message_id: int, bucket: SharedBucket, *, reset_once: bool = False):
         self.id = message_id
+        self.channel = SimpleNamespace(id=ALERT_CHANNEL_ID)
         self.bucket = bucket
         self.reset_once = reset_once
         self.attempts = 0
@@ -77,6 +84,9 @@ def _make_alert_system(signal_count: int, *, block_first: bool = False):
     prices = {f"TEST{sid}": 100.0 + sid for sid in range(1, signal_count + 1)}
     stream = FakeStreamManager(prices)
     alerts = AlertSystem(bot=None, stream_manager=stream, alert_config=None)
+    # The channel budget is timing, not scheduling. Tests that measure the
+    # scheduler give it unlimited room; the budget tests set their own.
+    alerts._channel_limiter = ChannelRateLimiter(capacity=10_000)
     bucket = SharedBucket(block_first=block_first)
     messages = {}
 
@@ -232,3 +242,76 @@ def test_consecutive_discord_operation_timeouts_request_restart():
 
     alerts._record_discord_operation_timeout("second")
     assert bot.restart_reasons == ["2 consecutive Discord operation timeouts"]
+
+
+def test_cosmetic_edits_wait_for_room_in_the_channel_budget():
+    async def scenario():
+        alerts, _, bucket, _ = _make_alert_system(4)
+        alerts._channel_limiter = ChannelRateLimiter(capacity=3, window_seconds=0.3)
+
+        alerts._queue_live_updates()
+        await asyncio.wait_for(alerts._drain_live_update_queue(), timeout=2)
+
+        assert bucket.total_edits == 4
+        # Capacity 3 less one reserved slot: two edits burst, the third waits
+        # for the first to age out of the window.
+        first, _, third = bucket.started_at[0], bucket.started_at[1], bucket.started_at[2]
+        assert third - first >= alerts._channel_limiter.window_seconds * 0.9
+
+    asyncio.run(scenario())
+
+
+def test_idle_channel_takes_the_burst_without_waiting():
+    async def scenario():
+        alerts, _, bucket, _ = _make_alert_system(3)
+        alerts._channel_limiter = ChannelRateLimiter(capacity=8, window_seconds=5)
+
+        loop = asyncio.get_running_loop()
+        started = loop.time()
+        alerts._queue_live_updates()
+        await asyncio.wait_for(alerts._drain_live_update_queue(), timeout=2)
+
+        assert bucket.total_edits == 3
+        assert loop.time() - started < 0.5
+
+    asyncio.run(scenario())
+
+
+def test_event_traffic_spends_the_budget_the_refresh_loop_waits_on():
+    async def scenario():
+        alerts, _, bucket, _ = _make_alert_system(1)
+        alerts._channel_limiter = ChannelRateLimiter(capacity=2, window_seconds=0.3)
+        # An event edit and its ping just went out on this channel.
+        alerts._channel_limiter.record(ALERT_CHANNEL_ID)
+
+        loop = asyncio.get_running_loop()
+        started = loop.time()
+        alerts._queue_live_updates()
+        await asyncio.wait_for(alerts._drain_live_update_queue(), timeout=2)
+
+        assert bucket.total_edits == 1
+        assert loop.time() - started >= alerts._channel_limiter.window_seconds * 0.9
+
+    asyncio.run(scenario())
+
+
+def test_unchanged_embeds_do_not_wait_for_an_edit_slot():
+    async def scenario():
+        alerts, _, bucket, _ = _make_alert_system(3)
+        alerts._channel_limiter = ChannelRateLimiter(capacity=2, window_seconds=0.5)
+
+        alerts._queue_live_updates()
+        await asyncio.wait_for(alerts._drain_live_update_queue(), timeout=5)
+        assert bucket.total_edits == 3
+
+        # Prices are static in the fake stream, so every embed of the second
+        # pass renders identically. Skipped edits must not spend the budget.
+        loop = asyncio.get_running_loop()
+        started = loop.time()
+        alerts._queue_live_updates()
+        await asyncio.wait_for(alerts._drain_live_update_queue(), timeout=5)
+
+        assert bucket.total_edits == 3
+        assert loop.time() - started < alerts._channel_limiter.window_seconds
+
+    asyncio.run(scenario())
