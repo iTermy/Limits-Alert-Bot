@@ -242,6 +242,16 @@ def _help_news_embed() -> discord.Embed:
         inline=False,
     )
     embed.add_field(
+        name="Client-only dry run",
+        value=(
+            "Add `dryrun` anywhere to pause affected client trading without changing "
+            "the alert bot's signals.\n"
+            "Example: `!news USD 12:30pm 15 dryrun`\n"
+            "Example: `!news now gold dryrun`"
+        ),
+        inline=False,
+    )
+    embed.add_field(
         name="Immediate / open-ended window",
         value=(
             "`!news now` / `!news on` — activate news mode immediately for ALL pairs\n"

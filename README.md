@@ -37,8 +37,8 @@ Key behaviours:
 - **Auto take-profit** — once a signal is hit, P&L is tracked on every tick and the
   signal closes automatically when the configured TP threshold is reached.
 - **News and spread-hour handling** — scheduled news windows and the daily
-  spread-widening window suppress alerts and auto-cancel affected signals with a
-  notification.
+  spread-widening window suppress alerts and auto-cancel affected signals. Add
+  `dryrun` to a news command to pause clients while the alert bot continues normally.
 - **Connection health monitoring** — stale-feed detection with targeted reconnects,
   a price-flow watchdog, and a Discord gateway/REST watchdog that restarts the bot
   after a prolonged network failure.

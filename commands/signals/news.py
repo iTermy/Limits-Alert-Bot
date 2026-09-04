@@ -28,7 +28,7 @@ class NewsCog(BaseCog):
 
     @commands.command(
         name="news",
-        description="Schedule a news window that auto-cancels signals when hit",
+        description="Schedule a news window (add dryrun for client-only mode)",
     )
     async def news(self, ctx: commands.Context, *, args: Optional[str] = None):
         """
@@ -39,6 +39,7 @@ class NewsCog(BaseCog):
             !news now [category]   → open-ended window active immediately (default: all)
             !news on [category]    → alias for !news now
             !news off              → deactivate all 'now' windows
+            Add dryrun anywhere    → clients pause; alert-bot signals continue
 
         Tags (optional, add in any order):
             tz:<timezone>  — timezone for the time, e.g. tz:UTC  tz:EST  tz:London  (default: EST)
@@ -51,6 +52,7 @@ class NewsCog(BaseCog):
             !news JPY 9:30am date:tomorrow tz:CET
             !news now
             !news now USD
+            !news now USD dryrun
             !news off
         """
         if not await self.require_signal_manager(ctx):
@@ -59,6 +61,7 @@ class NewsCog(BaseCog):
             await ctx.send(
                 "❌ Usage: `!news <category> <time> [window] [tz:<tz>] [date:<date>]`\n"
                 "Or: `!news now [category]` / `!news on [category]` / `!news off`\n"
+                "Add `dryrun` anywhere for client-only mode (alert signals stay active).\n"
                 "Auto-fetch: `!news refresh` (pull ForexFactory now) / `!news auto on|off`\n"
                 "Categories: any currency code (USD, EUR, GBP…), `gold`, `oil`, `btc`, `crypto`, or `all`\n"
                 "Timezone tag example: `tz:UTC`  `tz:EST`  `tz:London`  `tz:CET`\n"
@@ -67,6 +70,13 @@ class NewsCog(BaseCog):
             return
 
         tokens = args.strip().split()
+        dry_run_tokens = {"dryrun", "dry-run", "clientonly", "client-only"}
+        client_only = any(token.lower() in dry_run_tokens for token in tokens)
+        tokens = [token for token in tokens if token.lower() not in dry_run_tokens]
+        if not tokens:
+            await ctx.send("❌ Add a category/time or `now` alongside `dryrun`.")
+            return
+        normalized_args = " ".join(tokens)
         subcommand = tokens[0].lower()
 
         # ── !news refresh ──────────────────────────────────────────────────
@@ -167,7 +177,9 @@ class NewsCog(BaseCog):
                 is_now_mode=True,
                 display_tz="EST",
                 end_time_override=end_time_override,
+                client_only=client_only,
             )
+            await news_manager.reconcile_news_mode()
 
             activated_ts = int(now_utc.timestamp())
 
@@ -175,13 +187,19 @@ class NewsCog(BaseCog):
                 end_ts = int(end_time_override.timestamp())
                 ends_val = f"<t:{end_ts}:t> (auto)"
                 desc = (
-                    f"Signals matching **{category}** will be automatically cancelled "
+                    f"Client trading matching **{category}** will be paused for the next "
+                    f"**{duration_minutes} minute(s)**; alert-bot signals stay active."
+                    if client_only
+                    else f"Signals matching **{category}** will be automatically cancelled "
                     f"for the next **{duration_minutes} minute(s)**."
                 )
             else:
                 ends_val = "Manual (`!news off`)"
                 desc = (
-                    f"Signals matching **{category}** will be automatically cancelled "
+                    f"Client trading matching **{category}** will be paused until `!news off`; "
+                    "alert-bot signals stay active."
+                    if client_only
+                    else f"Signals matching **{category}** will be automatically cancelled "
                     f"until you run `!news off`."
                 )
 
@@ -193,6 +211,8 @@ class NewsCog(BaseCog):
             embed.add_field(name="Category", value=category, inline=True)
             embed.add_field(name="Activated", value=f"<t:{activated_ts}:t>", inline=True)
             embed.add_field(name="Ends", value=ends_val, inline=True)
+            if client_only:
+                embed.add_field(name="Mode", value="Dry run (clients only)", inline=False)
             embed.set_footer(text=f"Event #{event.event_id} • Set by {ctx.author}")
             await ctx.send(embed=embed)
             logger.info(
@@ -204,7 +224,7 @@ class NewsCog(BaseCog):
         # ── Normal scheduled news ──────────────────────────────────────────
         try:
             category, news_time_utc, window_minutes, tz_label, auto_advanced = parse_news_command(
-                args
+                normalized_args
             )
         except ValueError as e:
             await ctx.send(f"❌ {e}")
@@ -217,7 +237,9 @@ class NewsCog(BaseCog):
             window_minutes=window_minutes,
             created_by=str(ctx.author),
             display_tz=tz_label,
+            client_only=client_only,
         )
+        await news_manager.reconcile_news_mode()
 
         # Use Discord timestamps so each viewer sees their local time. The :f
         # (short date + time) format always shows the date so a future-dated
@@ -232,7 +254,10 @@ class NewsCog(BaseCog):
         embed = discord.Embed(
             title="📰 News Mode Scheduled",
             description=(
-                f"Signals matching **{category.upper()}** will be automatically cancelled "
+                f"Client trading matching **{category.upper()}** will be paused during this "
+                "window; alert-bot signals stay active."
+                if client_only
+                else f"Signals matching **{category.upper()}** will be automatically cancelled "
                 f"if hit during this window."
             ),
             color=0x5865F2,
@@ -240,6 +265,8 @@ class NewsCog(BaseCog):
         embed.add_field(name="Category", value=category.upper(), inline=True)
         embed.add_field(name="News Time", value=tz_display, inline=True)
         embed.add_field(name="Window", value=f"±{window_minutes} min", inline=True)
+        if client_only:
+            embed.add_field(name="Mode", value="Dry run (clients only)", inline=False)
         embed.add_field(
             name="Active From → To",
             value=f"<t:{start_ts}:f> → <t:{end_ts}:f>",
@@ -276,6 +303,7 @@ class NewsCog(BaseCog):
 
         for event in events:
             src_tag = " `[auto]`" if event.source == "forexfactory" else ""
+            dry_run_tag = " `[dry run]`" if event.client_only else ""
             gold_tag = " +GOLD" if getattr(event, "affects_gold", False) else ""
             title_line = f"\n*{event.title}*" if event.title else ""
             if event.is_now_mode:
@@ -287,7 +315,10 @@ class NewsCog(BaseCog):
                 else:
                     window_str = f"From <t:{activated_ts}:t> — Until `!news off`"
                 embed.add_field(
-                    name=f"#{event.event_id}  {event.category.upper()}{gold_tag}{src_tag}",
+                    name=(
+                        f"#{event.event_id}  {event.category.upper()}"
+                        f"{gold_tag}{src_tag}{dry_run_tag}"
+                    ),
                     value=(
                         f"{status}{title_line}\nWindow: {window_str}\nSet by: {event.created_by}"
                     ),
@@ -301,7 +332,10 @@ class NewsCog(BaseCog):
                     f" ({event.display_tz})" if event.display_tz not in ("EST", "EDT", "ET") else ""
                 )
                 embed.add_field(
-                    name=f"#{event.event_id}  {event.category.upper()}{gold_tag}{tz_note}{src_tag}",
+                    name=(
+                        f"#{event.event_id}  {event.category.upper()}"
+                        f"{gold_tag}{tz_note}{src_tag}{dry_run_tag}"
+                    ),
                     value=(
                         f"{status}{title_line}\nWindow: <t:{s_ts}:f> → <t:{e_ts}:t>"
                         f"\nSet by: {event.created_by}"
