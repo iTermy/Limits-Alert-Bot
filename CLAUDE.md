@@ -274,10 +274,13 @@ Every incoming price update calls `streaming_monitor._on_price_update()` → `_c
    └─ Signal would trigger → send_spread_hour_cancel_alert()
       Edits embed if one exists; no standalone if embed already present.
 
-2. News-mode gate / client-only dry run
-   news_manager reconciles every active category into bot_mode_status.news_mode
-   for client bots. Normal events also guard alert-bot signals; events created
-   with the `dryrun` option pause clients while alert-bot processing continues.
+2. News-mode gate
+   news_manager.is_news_active_for(instrument)
+   └─ News active AND would trigger → send_news_cancel_alert()
+      Edits embed if one exists; standalone message only if no embed yet.
+   └─ Also in _check_signal: an already-HIT signal (non-swing) is cancelled
+      outright the moment a news window covering its instrument opens, even
+      if no further limit/SL is touched. Swings ride news out.
 
 3. Approaching check
    First pending limit only (lowest sequence_number, approaching_alert_sent=False)
@@ -517,11 +520,8 @@ The `MetaTrader5` Python package is process-global — `mt5.initialize()` can on
 ### Exness oil symbol mapping
 Internal symbol `USOILSPOT` maps to `USOILm` on Exness MT5. The mapping is defined in both `symbol_mappings.json` (`symbol_mappings.exness.specific_mappings`) and the reverse direction (`reverse_mappings.exness`). Both sections are required — without the reverse mapping, prices arrive under `USOILM` instead of `USOILSPOT` and don't match signals.
 
-### Spread/news behavior
-Spread-hour and normal news cancels **edit the persistent embed** when one already
-exists. News events created with `dryrun` still update `bot_mode_status.news_mode`
-and post activation/ended notices for clients, but never suppress or cancel
-alert-bot signals.
+### Spread/news cancel behavior
+Spread-hour and news cancels **edit the persistent embed** when one already exists. They only fall back to standalone messages if no embed has been created yet for that signal.
 
 ### News matching is per-currency; USD also covers US markets
 `NewsEvent.instrument_affected` matches per currency (CHF news never touches EURUSD). A `USD` category additionally pauses US equities (`.NAS`/`.NYSE`) and US indices (`US_INDEX_KEYWORDS`: NAS100/US30/US500/SPX500/SPX/USTEC/US2000/…), and pauses gold when `affects_gold` is set (auto-fetched high-impact USD events). Auto-fetched events carry a merged `title` ("EUR — ECB Rate / Press Conf"); `NewsEvent.display_label` is used in all news alerts (activation, cancel, ended), falling back to the bare category for manual events.
@@ -535,7 +535,7 @@ alert-bot signals.
 
 **An armed breakeven stop is disarmed by an add that moves the mean past the market**, and the ping says so. Averaging *down* is the main reason to add, so the new mean routinely lands on the far side of the bid — which is precisely the state `_can_arm_breakeven_stop` refuses to create at arm time, reached from the other direction; left armed, the next tick would close the trade flat. `_breakeven_disarm_note` runs the arm-time profitability test against the post-add mean (on the bid, like the stop itself) and disarms when it fails or when no live bid is available to check. The clear rides in the same locked write as the fill (`add_instant_entry(..., disarm_breakeven=True)`) — a signal that is briefly both averaged and still armed is one a tick can close on the spot. Re-arm with `set be` once the trade is back in profit against the new average.
 
-Downstream everything is shared machinery: `type='pa'` routes the embed to the PA alert channel and the signal into the PA report section; SL, manual reply commands, archiving, trailing and excursion analytics are unchanged. An already-HIT signal rides out spread hour and the late-market hour. Normal news events cancel it (except `swing`); `dryrun` news events leave it running while pausing affected clients. Edits to an instant signal update **SL/TP and expiry only** (`signal_ops._update_instant_from_edit`); the entry limit records a real fill and is never re-derived. The EX bot ignores these signals — it keys off pending limits, and there is never one.
+Downstream everything is shared machinery: `type='pa'` routes the embed to the PA alert channel and the signal into the PA report section; SL, manual reply commands, archiving, trailing and excursion analytics are unchanged. The guards land where they should without special-casing — an already-HIT signal rides out spread hour and the late-market hour, and is cancelled when a news window opens (only `swing` is exempt from that). Edits to an instant signal update **SL/TP and expiry only** (`signal_ops._update_instant_from_edit`); the entry limit records a real fill and is never re-derived. The EX bot ignores these signals — it keys off pending limits, and there is never one.
 
 ### Signal type taxonomy
 `signals.type` ∈ `{standard, scalp, swing, toll, pa, 1-1, risky}`. Determined by `pattern_parsers.get_signal_type(text, channel_name)`:

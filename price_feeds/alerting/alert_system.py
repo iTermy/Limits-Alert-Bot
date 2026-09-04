@@ -1808,7 +1808,6 @@ class AlertSystem:
 
     async def send_news_activated_alert(self, news_event) -> bool:
         """Send news-mode activated embed to ALL alert channels."""
-        client_only = getattr(news_event, "client_only", False)
         channels = []
         seen_ids = set()
         for ch in [
@@ -1838,25 +1837,15 @@ class AlertSystem:
             time_str = f"**<t:{start_ts}:t> -> <t:{end_ts}:t>**"
 
         embed = discord.Embed(
-            title=(
-                "📰 Client News Mode Active — DRY RUN"
-                if client_only
-                else "📰 News Mode Active"
-            ),
+            title="📰 News Mode Active",
             description=(
                 f"News window activated for **{news_event.display_label}**\n{time_str}"
-                + ("\nAlert-bot signals remain active." if client_only else "")
             ),
             color=0x5865F2,
             timestamp=datetime.now(timezone.utc),
         )
         embed.set_footer(
-            text=(
-                f"Event #{news_event.event_id} • Client trading paused; "
-                "alert signals remain active"
-                if client_only
-                else f"Event #{news_event.event_id} • Signals will be auto-cancelled if hit"
-            )
+            text=f"Event #{news_event.event_id} • Signals will be auto-cancelled if hit"
         )
 
         sent_messages = []
@@ -1876,16 +1865,11 @@ class AlertSystem:
 
     async def send_news_ended_alert(self, news_event) -> None:
         """Edit all activation embeds for this event to show 'News Mode Ended'."""
-        client_only = getattr(news_event, "client_only", False)
         messages = self._news_activation_messages.pop(news_event.event_id, [])
 
         end_ts = int(datetime.now(timezone.utc).timestamp())
         embed = discord.Embed(
-            title=(
-                "📰 Client News Mode Ended — DRY RUN"
-                if client_only
-                else "📰 News Mode Ended"
-            ),
+            title="📰 News Mode Ended",
             description=(
                 f"News window for **{news_event.display_label}** has ended.\n"
                 f"**Ended at <t:{end_ts}:t>**"
