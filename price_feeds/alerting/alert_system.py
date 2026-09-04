@@ -49,7 +49,9 @@ class AlertSystem:
     # cadence keeps ten active signals to at most ~20 edits/minute before
     # Discord-side throttling, leaving headroom for hit/SL/TP messages.
     LIVE_UPDATE_INTERVAL = 30
-    _LIVE_UPDATE_RETRY_DELAY = 5
+    _LIVE_UPDATE_ATTEMPT_TIMEOUT = 8
+    _DELIVERY_ATTEMPT_TIMEOUT = 20
+    _OPERATION_TIMEOUTS_BEFORE_RESTART = 2
     _DELIVERY_RETRY_BASE_DELAY = 5
     _DELIVERY_RETRY_MAX_DELAY = 60
 
@@ -109,11 +111,11 @@ class AlertSystem:
         self._pending_live_updates: collections.OrderedDict[int, None] = (
             collections.OrderedDict()
         )
-        self._live_update_wakeup = asyncio.Event()
+        self._live_update_cycle_active = False
 
         self._live_update_task: Optional[asyncio.Task] = None
-        self._live_update_worker_task: Optional[asyncio.Task] = None
         self._delivery_retry_tasks: dict[str, asyncio.Task] = {}
+        self._discord_operation_timeouts = 0
         self._news_activation_messages: dict[int, list] = {}
 
         self._archive_manager = ArchiveManager(
@@ -150,20 +152,17 @@ class AlertSystem:
         if self._live_update_task and not self._live_update_task.done():
             return
         self._live_update_task = asyncio.create_task(self._live_update_loop())
-        self._live_update_worker_task = asyncio.create_task(self._live_update_worker())
         logger.info("Live embed update loop started")
 
     def stop_live_updates(self):
         """Cancel the live update loop and any pending archive-move tasks."""
         if self._live_update_task and not self._live_update_task.done():
             self._live_update_task.cancel()
-        if self._live_update_worker_task and not self._live_update_worker_task.done():
-            self._live_update_worker_task.cancel()
         for task in self._delivery_retry_tasks.values():
             task.cancel()
         self._delivery_retry_tasks.clear()
         self._pending_live_updates.clear()
-        self._live_update_wakeup.clear()
+        self._live_update_cycle_active = False
         logger.info("Live embed update loop stopped")
         self._archive_manager.cancel_all()
 
@@ -173,6 +172,7 @@ class AlertSystem:
             try:
                 await asyncio.sleep(self.LIVE_UPDATE_INTERVAL)
                 self._queue_live_updates()
+                await self._drain_live_update_queue()
             except asyncio.CancelledError:
                 break
             except Exception as e:
@@ -190,48 +190,62 @@ class AlertSystem:
             return
         if not self.stream_manager:
             return
+        if self._live_update_cycle_active:
+            logger.debug("Live refresh pass still active; skipping scheduler tick")
+            return
 
         for signal_id in self._live_embeds:
             self._pending_live_updates.setdefault(signal_id, None)
-        self._live_update_wakeup.set()
         logger.debug(
             "Queued latest-state refresh for %d live embed(s)",
             len(self._pending_live_updates),
         )
 
-    async def _live_update_worker(self) -> None:
-        """Drain cosmetic updates sequentially, coalescing repeated requests."""
-        while True:
-            try:
-                await self._live_update_wakeup.wait()
-                self._live_update_wakeup.clear()
-                await self._drain_live_update_queue()
-            except asyncio.CancelledError:
-                break
-            except Exception as e:
-                logger.error("Live update worker error: %s", e, exc_info=True)
-                await asyncio.sleep(self._LIVE_UPDATE_RETRY_DELAY)
-
     async def _drain_live_update_queue(self) -> None:
-        """Send queued snapshots; transient failures leave one retry pending."""
-        while self._pending_live_updates:
-            # Let status/event writes take the next available HTTP slot. At most
-            # one cosmetic edit can already be in flight because this worker is
-            # deliberately sequential.
-            if self._priority_edits_active:
-                await asyncio.sleep(0.1)
-                continue
+        """Send one bounded snapshot pass, then yield for a full interval.
 
-            signal_id, _ = self._pending_live_updates.popitem(last=False)
-            delivered = await self._refresh_one_embed(signal_id)
-            if not delivered and signal_id in self._live_embeds:
-                self._pending_live_updates.setdefault(signal_id, None)
-                await asyncio.sleep(self._LIVE_UPDATE_RETRY_DELAY)
+        A slow pass is never refilled while it is running. Failed cosmetic edits
+        are dropped and reconsidered on the next pass instead of being retried
+        immediately, which prevents a Discord 429 from creating a permanent
+        stream of PATCH requests.
+        """
+        if self._live_update_cycle_active:
+            return
 
-        # Prune locks after a drain so the dict stays close to the live set.
-        for sid in list(self._message_locks):
-            if sid not in self.signal_messages and not self._message_locks[sid].locked():
-                del self._message_locks[sid]
+        self._live_update_cycle_active = True
+        started_at = asyncio.get_running_loop().time()
+        attempted = 0
+        delivered = 0
+        dropped_for_priority = 0
+        try:
+            while self._pending_live_updates:
+                # Cosmetic work is disposable. If a hit/SL/TP write starts,
+                # discard the remainder so it gets the next HTTP slot.
+                if self._priority_edits_active:
+                    dropped_for_priority = len(self._pending_live_updates)
+                    self._pending_live_updates.clear()
+                    break
+
+                signal_id, _ = self._pending_live_updates.popitem(last=False)
+                attempted += 1
+                if await self._refresh_one_embed(signal_id):
+                    delivered += 1
+        finally:
+            self._live_update_cycle_active = False
+            logger.info(
+                "Live refresh pass complete: %d attempted, %d accepted, "
+                "%d failed, %d dropped for priority in %.1fs",
+                attempted,
+                delivered,
+                attempted - delivered,
+                dropped_for_priority,
+                asyncio.get_running_loop().time() - started_at,
+            )
+
+            # Prune locks after a drain so the dict stays close to the live set.
+            for sid in list(self._message_locks):
+                if sid not in self.signal_messages and not self._message_locks[sid].locked():
+                    del self._message_locks[sid]
 
     async def _refresh_one_embed(self, signal_id: int) -> bool:
         """Render and deliver the newest snapshot. False requests a retry."""
@@ -317,10 +331,22 @@ class AlertSystem:
 
             try:
                 async with self._get_message_lock(signal_id):
-                    await existing_msg.edit(embed=embed)
+                    await asyncio.wait_for(
+                        existing_msg.edit(embed=embed),
+                        timeout=self._LIVE_UPDATE_ATTEMPT_TIMEOUT,
+                    )
                 self._last_live_render[signal_id] = signature
+                self._record_discord_operation_success()
                 logger.debug("Live-updated embed for signal %s @ %s", signal_id, current_price)
                 return True
+            except asyncio.TimeoutError:
+                logger.warning(
+                    "Live update timed out after %ss for signal %s; dropping this snapshot",
+                    self._LIVE_UPDATE_ATTEMPT_TIMEOUT,
+                    signal_id,
+                )
+                self._record_discord_operation_timeout(f"live update for signal {signal_id}")
+                return False
             except discord.NotFound:
                 logger.warning(f"Live update: embed for signal {signal_id} not found, removing")
                 self._live_embeds.pop(signal_id, None)
@@ -392,6 +418,61 @@ class AlertSystem:
             self._retry_delivery(key, operation, args, kwargs)
         )
 
+    def _record_discord_operation_success(self) -> None:
+        self._discord_operation_timeouts = 0
+
+    def _record_discord_operation_timeout(self, operation: str) -> None:
+        """Escalate consecutive bounded HTTP hangs to the process watchdog."""
+        self._discord_operation_timeouts += 1
+        logger.warning(
+            "Discord operation timeout (%d/%d): %s",
+            self._discord_operation_timeouts,
+            self._OPERATION_TIMEOUTS_BEFORE_RESTART,
+            operation,
+        )
+        if self._discord_operation_timeouts < self._OPERATION_TIMEOUTS_BEFORE_RESTART:
+            return
+        if self.bot is not None:
+            self.bot.request_discord_restart(
+                f"{self._discord_operation_timeouts} consecutive Discord operation timeouts"
+            )
+
+    async def deliver_critical(
+        self,
+        key: str,
+        operation: Callable[..., Awaitable[bool]],
+        *args: Any,
+        **kwargs: Any,
+    ) -> bool:
+        """Attempt one critical event without letting Discord stall its monitor.
+
+        The monitor remains free to commit trading state after the bounded
+        attempt. A failed or timed-out Discord delivery continues independently
+        through the deduplicated retry task.
+        """
+        try:
+            delivered = await asyncio.wait_for(
+                operation(*args, **kwargs),
+                timeout=self._DELIVERY_ATTEMPT_TIMEOUT,
+            )
+        except asyncio.TimeoutError:
+            logger.warning(
+                "Discord event %s timed out after %ss; queued for retry",
+                key,
+                self._DELIVERY_ATTEMPT_TIMEOUT,
+            )
+            self._record_discord_operation_timeout(key)
+            delivered = False
+        except Exception as e:
+            logger.warning("Discord event %s failed; queued for retry: %s", key, e)
+            delivered = False
+
+        if delivered:
+            self._record_discord_operation_success()
+        else:
+            self.queue_delivery_retry(key, operation, *args, **kwargs)
+        return delivered
+
     async def _retry_delivery(
         self,
         key: str,
@@ -404,9 +485,21 @@ class AlertSystem:
             while True:
                 await asyncio.sleep(delay)
                 try:
-                    if await operation(*args, **kwargs):
+                    delivered = await asyncio.wait_for(
+                        operation(*args, **kwargs),
+                        timeout=self._DELIVERY_ATTEMPT_TIMEOUT,
+                    )
+                    if delivered:
+                        self._record_discord_operation_success()
                         logger.info("Delivered queued Discord event %s", key)
                         return
+                except asyncio.TimeoutError:
+                    logger.warning(
+                        "Queued Discord event %s timed out after %ss",
+                        key,
+                        self._DELIVERY_ATTEMPT_TIMEOUT,
+                    )
+                    self._record_discord_operation_timeout(key)
                 except Exception as e:
                     logger.warning("Queued Discord event %s failed: %s", key, e)
                 delay = min(delay * 2, self._DELIVERY_RETRY_MAX_DELAY)

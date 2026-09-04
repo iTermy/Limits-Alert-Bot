@@ -65,11 +65,18 @@ class FakeMessage:
         self.rendered_prices.append(current)
 
 
+class FakeBot:
+    def __init__(self):
+        self.restart_reasons: list[str] = []
+
+    def request_discord_restart(self, reason: str) -> None:
+        self.restart_reasons.append(reason)
+
+
 def _make_alert_system(signal_count: int, *, block_first: bool = False):
     prices = {f"TEST{sid}": 100.0 + sid for sid in range(1, signal_count + 1)}
     stream = FakeStreamManager(prices)
     alerts = AlertSystem(bot=None, stream_manager=stream, alert_config=None)
-    alerts._LIVE_UPDATE_RETRY_DELAY = 0
     bucket = SharedBucket(block_first=block_first)
     messages = {}
 
@@ -98,7 +105,7 @@ def _make_alert_system(signal_count: int, *, block_first: bool = False):
 
 
 @pytest.mark.parametrize("signal_count", [5, 10])
-def test_refreshes_are_sequential_and_repeated_passes_are_coalesced(signal_count):
+def test_refreshes_are_sequential_and_busy_passes_are_skipped(signal_count):
     async def scenario():
         alerts, stream, bucket, messages = _make_alert_system(
             signal_count, block_first=True
@@ -109,30 +116,30 @@ def test_refreshes_are_sequential_and_repeated_passes_are_coalesced(signal_count
         await asyncio.wait_for(bucket.first_started.wait(), timeout=1)
         assert bucket.max_in_flight == 1
 
-        # Simulate four more scheduler passes while Discord is throttling the
-        # first edit. The queue must remain bounded to one entry per signal.
+        # Simulate four more scheduler ticks while Discord is throttling the
+        # first edit. A busy pass must not be refilled.
         for _ in range(4):
             for instrument in stream.prices:
                 stream.prices[instrument] += 1.0
             alerts._queue_live_updates()
-        assert len(alerts._pending_live_updates) <= signal_count
+        assert len(alerts._pending_live_updates) == signal_count - 1
 
         bucket.release_first.set()
         await asyncio.wait_for(drain, timeout=2)
 
         assert bucket.max_in_flight == 1
-        # The in-flight signal needs one follow-up; all signals that had not yet
-        # rendered consume only their newest state. Four full stale batches are
-        # not submitted to Discord.
-        assert bucket.total_edits == signal_count + 1
-        for sid, message in messages.items():
+        # Each signal is attempted once. The already in-flight signal keeps its
+        # original snapshot; signals not yet rendered consume the newest state.
+        assert bucket.total_edits == signal_count
+        assert messages[1].rendered_prices == ["101.00"]
+        for sid, message in list(messages.items())[1:]:
             expected = f"{stream.prices[f'TEST{sid}']:.2f}"
             assert message.rendered_prices[-1] == expected
 
     asyncio.run(scenario())
 
 
-def test_connection_reset_retries_one_latest_snapshot():
+def test_connection_reset_waits_until_next_refresh_pass():
     async def scenario():
         alerts, stream, bucket, messages = _make_alert_system(1)
         message = messages[1]
@@ -141,9 +148,33 @@ def test_connection_reset_retries_one_latest_snapshot():
         alerts._queue_live_updates()
         await asyncio.wait_for(alerts._drain_live_update_queue(), timeout=2)
 
+        assert message.attempts == 1
+        assert bucket.total_edits == 0
+        assert not alerts._pending_live_updates
+
+        alerts._queue_live_updates()
+        await asyncio.wait_for(alerts._drain_live_update_queue(), timeout=2)
+
         assert message.attempts == 2
         assert bucket.total_edits == 1
         assert message.rendered_prices == [f"{stream.prices['TEST1']:.2f}"]
+
+    asyncio.run(scenario())
+
+
+def test_hung_cosmetic_edit_is_bounded_and_does_not_block_following_signal():
+    async def scenario():
+        alerts, _, bucket, messages = _make_alert_system(2, block_first=True)
+        alerts._LIVE_UPDATE_ATTEMPT_TIMEOUT = 0.01
+
+        alerts._queue_live_updates()
+        await asyncio.wait_for(alerts._drain_live_update_queue(), timeout=1)
+
+        assert messages[1].attempts == 1
+        assert messages[1].rendered_prices == []
+        assert messages[2].attempts == 1
+        assert messages[2].rendered_prices == ["102.00"]
+        assert bucket.max_in_flight == 1
         assert not alerts._pending_live_updates
 
     asyncio.run(scenario())
@@ -168,3 +199,36 @@ def test_critical_delivery_retries_until_success():
         assert not alerts._delivery_retry_tasks
 
     asyncio.run(scenario())
+
+
+def test_critical_delivery_timeout_releases_monitor_and_queues_retry():
+    async def scenario():
+        alerts, _, _, _ = _make_alert_system(1)
+        alerts._DELIVERY_ATTEMPT_TIMEOUT = 0.01
+
+        async def hung_delivery() -> bool:
+            await asyncio.Event().wait()
+            return True
+
+        delivered = await asyncio.wait_for(
+            alerts.deliver_critical("stop_loss:1", hung_delivery),
+            timeout=0.2,
+        )
+
+        assert delivered is False
+        assert "stop_loss:1" in alerts._delivery_retry_tasks
+        alerts.stop_live_updates()
+
+    asyncio.run(scenario())
+
+
+def test_consecutive_discord_operation_timeouts_request_restart():
+    alerts, _, _, _ = _make_alert_system(1)
+    bot = FakeBot()
+    alerts.bot = bot
+
+    alerts._record_discord_operation_timeout("first")
+    assert bot.restart_reasons == []
+
+    alerts._record_discord_operation_timeout("second")
+    assert bot.restart_reasons == ["2 consecutive Discord operation timeouts"]

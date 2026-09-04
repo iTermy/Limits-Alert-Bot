@@ -8,24 +8,24 @@
     "rate_limit_waits": 1,
     "rate_limit_wait_seconds": 5.0,
     "network_stalls": 1,
-    "mean_payload_age_seconds": 6.22,
-    "p95_payload_age_seconds": 24.88,
-    "max_payload_age_seconds": 24.88,
-    "critical_delivery_latency_seconds": 21.05
+    "mean_payload_age_seconds": 6.02,
+    "p95_payload_age_seconds": 24.08,
+    "max_payload_age_seconds": 24.08,
+    "critical_delivery_latency_seconds": 20.13
   },
   {
     "scheduler": "coalesced",
     "signals": 5,
-    "cosmetic_requests": 10,
+    "cosmetic_requests": 6,
     "max_app_cosmetic_in_flight": 1,
     "max_discord_queue_depth": 1,
-    "rate_limit_waits": 3,
-    "rate_limit_wait_seconds": 8.8,
+    "rate_limit_waits": 0,
+    "rate_limit_wait_seconds": 0.0,
     "network_stalls": 1,
-    "mean_payload_age_seconds": 3.49,
-    "p95_payload_age_seconds": 24.82,
-    "max_payload_age_seconds": 24.82,
-    "critical_delivery_latency_seconds": 14.72
+    "mean_payload_age_seconds": 4.26,
+    "p95_payload_age_seconds": 25.54,
+    "max_payload_age_seconds": 25.54,
+    "critical_delivery_latency_seconds": 15.49
   },
   {
     "scheduler": "legacy",
@@ -34,25 +34,25 @@
     "max_app_cosmetic_in_flight": 5,
     "max_discord_queue_depth": 5,
     "rate_limit_waits": 4,
-    "rate_limit_wait_seconds": 19.97,
+    "rate_limit_wait_seconds": 19.98,
     "network_stalls": 1,
-    "mean_payload_age_seconds": 6.02,
-    "p95_payload_age_seconds": 18.74,
-    "max_payload_age_seconds": 18.74,
-    "critical_delivery_latency_seconds": 20.26
+    "mean_payload_age_seconds": 6.0,
+    "p95_payload_age_seconds": 18.76,
+    "max_payload_age_seconds": 18.76,
+    "critical_delivery_latency_seconds": 20.32
   },
   {
     "scheduler": "coalesced",
     "signals": 10,
-    "cosmetic_requests": 15,
+    "cosmetic_requests": 11,
     "max_app_cosmetic_in_flight": 1,
     "max_discord_queue_depth": 1,
-    "rate_limit_waits": 5,
-    "rate_limit_wait_seconds": 13.25,
+    "rate_limit_waits": 1,
+    "rate_limit_wait_seconds": 5.0,
     "network_stalls": 1,
-    "mean_payload_age_seconds": 2.7,
-    "p95_payload_age_seconds": 24.94,
-    "max_payload_age_seconds": 24.94,
-    "critical_delivery_latency_seconds": 14.77
+    "mean_payload_age_seconds": 2.82,
+    "p95_payload_age_seconds": 25.57,
+    "max_payload_age_seconds": 25.57,
+    "critical_delivery_latency_seconds": 15.53
   }
 ]
