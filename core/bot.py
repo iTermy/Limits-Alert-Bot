@@ -12,6 +12,7 @@ from discord.ext import commands, tasks
 
 from core.services import ServiceRegistry
 from database import db, initialize_signal_db
+from price_feeds.alerting.channel_budget import ChannelBudget
 from utils.config_loader import config, load_settings
 from utils.discord_http_trace import build_discord_http_trace
 from utils.logger import get_logger
@@ -42,6 +43,12 @@ class TradingBot(commands.Bot):
             True  # Required for on_member_update / on_member_remove (license auto-management)
         )
 
+        # Built before super().__init__ because the HTTP trace that feeds it has
+        # to be handed to the client at construction, and discord.py keeps its
+        # own bucket state private — the response headers are the only place the
+        # real per-channel write allowance is visible.
+        channel_budget = ChannelBudget()
+
         super().__init__(
             command_prefix="!",
             intents=intents,
@@ -49,12 +56,14 @@ class TradingBot(commands.Bot):
             # Do not let a pathological non-global Retry-After stall an alert
             # forever. Normal short rate limits are still honoured by discord.py.
             max_ratelimit_timeout=60.0,
-            # When LOG_LEVEL=DEBUG, record the safe rate-limit headers for every
-            # 429 before discord.py consumes the response and retries it.
-            http_trace=build_discord_http_trace(),
+            # Teaches channel_budget each channel's real message-route bucket,
+            # and when LOG_LEVEL=DEBUG records the safe rate-limit headers for
+            # every 429 before discord.py consumes the response and retries it.
+            http_trace=build_discord_http_trace(observer=channel_budget.observe),
         )
 
         # Initialize attributes
+        self.channel_budget = channel_budget
         self.logger = get_logger("bot")
         self.start_time = datetime.utcnow()
         self.channels_config = None
@@ -368,7 +377,10 @@ class TradingBot(commands.Bot):
             alert_config = AlertDistanceConfig()
             stream_manager = PriceStreamManager()
             alert_system = AlertSystem(
-                bot=self, stream_manager=stream_manager, alert_config=alert_config
+                bot=self,
+                stream_manager=stream_manager,
+                alert_config=alert_config,
+                channel_budget=self.channel_budget,
             )
             tp_config = TPConfig()
             tp_monitor = AutoTPMonitor(

@@ -1,4 +1,4 @@
-"""Discord REST rate-limit telemetry tests."""
+"""Discord REST rate-limit telemetry and budget-observation tests."""
 
 import asyncio
 import logging
@@ -6,7 +6,33 @@ from types import SimpleNamespace
 
 from yarl import URL
 
-from utils.discord_http_trace import _log_rate_limit_response, _safe_route
+from utils.discord_http_trace import _safe_route, build_discord_http_trace
+
+_MESSAGE_HEADERS = {
+    "X-RateLimit-Limit": "5",
+    "X-RateLimit-Remaining": "0",
+    "X-RateLimit-Reset": "1788512400.25",
+    "X-RateLimit-Reset-After": "5.28",
+    "X-RateLimit-Scope": "shared",
+    "Retry-After": "5.28",
+    "X-RateLimit-Global": "false",
+    "X-RateLimit-Bucket": "bucket-id",
+}
+
+
+def _run_trace(params, observer=None):
+    """Drive the real trace handler the client is built with."""
+    trace = build_discord_http_trace(observer=observer)
+    handler = trace.on_request_end[0]
+    asyncio.run(handler(None, None, params))
+
+
+def _params(method, path, status, headers):
+    return SimpleNamespace(
+        method=method,
+        url=URL(f"https://discord.com{path}"),
+        response=SimpleNamespace(status=status, headers=headers),
+    )
 
 
 def test_safe_route_redacts_discord_tokens():
@@ -18,26 +44,10 @@ def test_safe_route_redacts_discord_tokens():
 
 
 def test_debug_429_logs_rate_limit_headers(caplog):
-    params = SimpleNamespace(
-        method="PATCH",
-        url=URL("https://discord.com/api/v10/channels/123/messages/456"),
-        response=SimpleNamespace(
-            status=429,
-            headers={
-                "X-RateLimit-Limit": "5",
-                "X-RateLimit-Remaining": "0",
-                "X-RateLimit-Reset": "1788512400.25",
-                "X-RateLimit-Reset-After": "5.28",
-                "X-RateLimit-Scope": "shared",
-                "Retry-After": "5.28",
-                "X-RateLimit-Global": "false",
-                "X-RateLimit-Bucket": "bucket-id",
-            },
-        ),
-    )
+    params = _params("PATCH", "/api/v10/channels/123/messages/456", 429, _MESSAGE_HEADERS)
 
     with caplog.at_level(logging.DEBUG, logger="trading_bot.discord_rate_limits"):
-        asyncio.run(_log_rate_limit_response(None, None, params))
+        _run_trace(params)
 
     message = caplog.messages[-1]
     assert "method=PATCH" in message
@@ -53,13 +63,44 @@ def test_debug_429_logs_rate_limit_headers(caplog):
 
 
 def test_non_429_is_not_logged(caplog):
-    params = SimpleNamespace(
-        method="GET",
-        url=URL("https://discord.com/api/v10/channels/123"),
-        response=SimpleNamespace(status=200, headers={"X-RateLimit-Remaining": "4"}),
-    )
+    params = _params("GET", "/api/v10/channels/123", 200, {"X-RateLimit-Remaining": "4"})
 
     with caplog.at_level(logging.DEBUG, logger="trading_bot.discord_rate_limits"):
-        asyncio.run(_log_rate_limit_response(None, None, params))
+        _run_trace(params)
 
     assert caplog.messages == []
+
+
+def test_the_observer_learns_from_a_successful_message_write():
+    """Budget learning must not depend on hitting a rate limit first."""
+    seen = []
+    params = _params("PATCH", "/api/v10/channels/123/messages/456", 200, _MESSAGE_HEADERS)
+
+    _run_trace(params, observer=lambda *args: seen.append(args))
+
+    assert seen == [(123, 5, 5.28)]
+
+
+def test_the_observer_also_learns_from_a_429():
+    """A 429's headers describe the same bucket and are worth recording."""
+    seen = []
+    params = _params("POST", "/api/v10/channels/123/messages", 429, _MESSAGE_HEADERS)
+
+    _run_trace(params, observer=lambda *args: seen.append(args))
+
+    assert seen == [(123, 5, 5.28)]
+
+
+def test_the_observer_ignores_non_message_routes():
+    seen = []
+    params = _params("PATCH", "/api/v10/channels/123", 200, _MESSAGE_HEADERS)
+
+    _run_trace(params, observer=lambda *args: seen.append(args))
+
+    assert seen == []
+
+
+def test_a_trace_without_an_observer_still_works():
+    params = _params("PATCH", "/api/v10/channels/123/messages/456", 200, _MESSAGE_HEADERS)
+
+    _run_trace(params)  # must not raise

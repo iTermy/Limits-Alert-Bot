@@ -428,8 +428,50 @@ class BotManagementCog(BaseCog):
             inline=False,
         )
 
+        # Discord write budget — the learned per-channel allowance and what the
+        # current embed load costs. Answers "are we near the cap?" empirically,
+        # since Discord does not publish these numbers.
+        alert_system = self.services.alert_system
+        if alert_system:
+            embed.add_field(
+                name="Discord Budget",
+                value=self._budget_summary(alert_system),
+                inline=False,
+            )
+
         embed.set_footer(text=f"Generated at {now.strftime('%H:%M:%S')} UTC")
         await ctx.send(embed=embed)
+
+    @staticmethod
+    def _budget_summary(alert_system) -> str:
+        """Per-channel write allowance and the sweep interval it implies."""
+        budget = alert_system._channel_budget
+
+        live_per_channel: dict[int, int] = {}
+        for signal_id in alert_system._live_embeds:
+            message = alert_system.signal_messages.get(signal_id)
+            if message:
+                live_per_channel[message.channel.id] = (
+                    live_per_channel.get(message.channel.id, 0) + 1
+                )
+
+        if not live_per_channel:
+            return "No live embeds"
+
+        lines = []
+        for channel_id, count in sorted(
+            live_per_channel.items(), key=lambda item: item[1], reverse=True
+        ):
+            channel = alert_system.bot.get_channel(channel_id) if alert_system.bot else None
+            name = f"#{channel.name}" if channel else str(channel_id)
+            sweep = budget.refresh_interval_for(channel_id, count)
+            lines.append(
+                f"**{name}** — {count} embed(s) · "
+                f"{budget.cosmetic_allowance(channel_id)}/"
+                f"{budget.limit_for(channel_id)} slots per "
+                f"{budget.window_for(channel_id):.0f}s · sweep ~{sweep:.0f}s"
+            )
+        return "\n".join(lines)
 
     # ==================== ADMIN COMMANDS ====================
 

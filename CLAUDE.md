@@ -104,11 +104,16 @@ price_feeds/
                                   reads subscribe/unsubscribe/shutdown commands from stdin
   alerting/                     Persistent embed orchestration + archiving
     alert_system.py             Persistent embed orchestrator; 4 data dicts + _live_embeds;
-                                  5-channel routing; bounded per-channel 30 s live-refresh pass;
+                                  5-channel routing; bounded per-channel 30 s live-refresh pass
+                                  paced by ChannelBudget;
                                   hydrate_from_db / recover_pending_archives / recover_finished_embeds
                                   re-attach existing embeds on restart; retract_approaching_embed
                                   drops the embed when price drifts back past the alert window;
                                   delegates embed building and archiving
+    channel_budget.py           ChannelBudget — per-channel Discord write allowance learned from
+                                  response headers (observe); acquire() paces cosmetic refreshes,
+                                  record() charges event/news/archive writes without waiting;
+                                  refresh_interval_for() is what !health reports
     embed_builders.py           Pure functions: _build_signal_embed(), _build_profit_archive_embed(),
                                   _set_archive_footer() + formatting helpers
     archive_manager.py          ArchiveManager — schedule_end_state_move(), cancel_pending_move(),
@@ -462,6 +467,8 @@ Requests are deduplicated by signal id in `_pending_live_updates` (an `OrderedDi
 
 `_drain_live_update_queue` groups the pending set by channel (`_take_pending_by_channel`) and runs one `_drain_channel` per channel in parallel, bounded by `_LIVE_REFRESH_CONCURRENCY` (5). **Within a channel, edits are sequential** — Discord buckets `PATCH /channels/{id}/messages/{id}` on the CHANNEL, not the message, so fanning same-channel edits out only queues 429s behind each other. Different channels are different buckets, so a pass still completes in ~1-2 s regardless of embed count.
 
+**Every snapshot waits for room in the channel's write budget** (`ChannelBudget.acquire`), so the sweep slows down as embeds accumulate rather than generating a backlog. See "The Discord write budget is learned, not hard coded" below.
+
 **A pass is never refilled while it runs.** `_live_update_cycle_active` makes the scheduler skip its tick instead of topping up a pass that is already behind, and failed cosmetic edits are dropped rather than requeued immediately — the scheduler re-queues every live signal on the next interval anyway, so a 429 costs one skipped snapshot instead of becoming a permanent stream of PATCHes. Each edit carries an 8 s timeout (`_LIVE_UPDATE_ATTEMPT_TIMEOUT`); consecutive bounded hangs escalate to the process watchdog via `_record_discord_operation_timeout`.
 
 Status/event edits stand the cosmetic worker down via `_priority_edits_active`: a channel abandons the rest of its snapshots so the critical event gets the next HTTP slot. Critical events go through `deliver_critical`, which bounds the attempt at 20 s (`_DELIVERY_ATTEMPT_TIMEOUT`) and hands failures to a deduplicated exponential-backoff retry task. Stopped when a signal closes or is cancelled.
@@ -782,6 +789,48 @@ Tests: `tests/test_feed_recovery.py`.
 
 ### Discord connection watchdog
 `TradingBot.heartbeat` checks gateway readiness every 30 s and runs an authenticated REST probe every 60 s. A gateway that remains unready for 120 s, three consecutive REST probe failures/timeouts (30 s per probe), or two consecutive bounded message-operation timeouts closes the bot from a separate task so `main.py` can relaunch it. Cosmetic edits time out after 8 s and critical attempts after 20 s; this catches a wedged message route even when the separate user-fetch probe remains healthy. The client also caps any single non-global Retry-After at 60 s; ordinary short Discord Retry-After responses are still honoured. This watchdog is independent of price-feed health, so a network-device reset cannot leave Discord wedged while price ticks keep the process alive.
+
+### The Discord write budget is learned, not hard coded
+Discord buckets message writes on the **channel**, and one bucket covers `POST`,
+`PATCH` and `DELETE` on `/channels/{id}/messages`. A signal embed edit, its ping
+reply, the deletion of the previous ping, a news notice and an archive move all
+draw from the same allowance. discord.py already honours whatever the headers
+say, so the failure mode is **not** a 429 — it is latency: queue more edits than
+a channel drains and every one of them waits, including the stop-loss ping a
+trader is watching for.
+
+`ChannelBudget` (`price_feeds/alerting/channel_budget.py`) keeps the bot from
+generating that backlog:
+
+- **The numbers are observed.** Discord's docs are explicit that per-route limits
+  are dynamic and must not be hard coded, and discord.py keeps its bucket state
+  private — so `build_discord_http_trace(observer=...)` reads
+  `X-RateLimit-Limit` / `X-RateLimit-Reset-After` off every channel message
+  response (200s and 429s alike) and feeds `observe()`. `DEFAULT_LIMIT = 5` /
+  `DEFAULT_WINDOW_SECONDS = 5.0` only cover the first few requests. The window is
+  the **largest** Reset-After seen, because a mid-bucket response reports only the
+  remainder; it is clamped to `MAX_WINDOW_SECONDS` so one odd header cannot stall
+  a channel.
+- **Cosmetic waits, events do not.** `acquire()` (live refreshes) sleeps until a
+  slot frees. `record()` (event edits, pings, news notices, archive moves,
+  retractions) never waits but still spends from the window, so a burst of hits
+  pushes the next refresh back instead of stacking on top of it.
+- **`EVENT_RESERVE` (2) slots are withheld from cosmetic use**, so an event
+  arriving mid-sweep finds room rather than queueing behind price snapshots.
+- **The interval stretches under load; nothing is starved.** Ten embeds in one
+  channel with 3 cosmetic slots per 5 s window all still refresh — the sweep just
+  takes ~15 s. `refresh_interval_for()` computes this and `!health` reports it per
+  channel, which is the practical way to see the real allowance.
+
+**When you add a Discord write, charge it.** A new `send`/`edit`/`delete` on an
+alert channel that skips `record()` makes the budget under-count, and the pacing
+is then computed against a false picture — the exact backlog this exists to
+prevent. `ChannelBudget` is built in `TradingBot.__init__` *before*
+`super().__init__()` because the HTTP trace that feeds it has to be handed to the
+client at construction; it is injected into `AlertSystem` and `ArchiveManager`.
+Tests that care about ordering rather than throughput opt out with a wide budget
+(`tests/test_discord_live_updates.py::_unpaced_budget`). Tests:
+`tests/test_channel_budget.py`, `tests/test_discord_http_trace.py`.
 
 ### Critical alerts retry until delivered
 `alert_system.queue_delivery_retry(key, operation, *args, **kwargs)` re-sends one hit / SL / breakeven / auto-TP alert on a bounded exponential backoff (5 s → 60 s) until it lands. Trading state is authoritative and commits regardless, so this only keeps the *notification* pending instead of losing it when the monitor evicts the signal. Keyed per event (`limit_hit:<sid>:<lid>`, `stop_loss:<sid>`, …) so a duplicate request while one is in flight is dropped. Tasks are cancelled in `stop_live_updates`. Callers pass the same arguments they just used, and every `send_*_alert` returns `bool` for this to work — a new alert sender that returns `None` silently queues an infinite retry.

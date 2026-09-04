@@ -29,12 +29,14 @@ Key behaviours:
   per-channel defaults, typo detection via limit-ordering validation, and an
   optional AI fallback parser.
 - **Persistent alert embeds** — one embed per signal, edited in place on every
-  event and refreshed with live prices every 30 s. Refreshes are coalesced per
-  signal into one best-effort snapshot pass, grouped by channel to respect
-  Discord's shared per-channel rate-limit bucket. Slow passes are never refilled,
-  and individual cosmetic edits time out after 8 s so they cannot monopolize the
-  bucket. Embed references are stored in the database so restarts re-attach to
-  existing embeds instead of orphaning them.
+  event and refreshed with live prices every 30 s. Refreshes are paced against a
+  per-channel write budget the bot learns from Discord's own rate-limit headers,
+  so it never generates more edits than a channel can drain — every embed still
+  refreshes, the interval just stretches as embeds accumulate. Event alerts
+  (hit / stop-loss / TP) hold reserved slots and never queue behind a price
+  snapshot. Embed references are stored in the database so restarts re-attach to
+  existing embeds instead of orphaning them. `!health` reports the live
+  allowance and sweep interval per channel.
 - **Auto take-profit** — once a signal is hit, P&L is tracked on every tick and the
   signal closes automatically when the configured TP threshold is reached.
 - **News and spread-hour handling** — scheduled news windows and the daily

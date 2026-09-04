@@ -21,6 +21,7 @@ from price_feeds.alerting.archive_manager import (
     ArchiveManager,
     is_end_state,
 )
+from price_feeds.alerting.channel_budget import ChannelBudget
 from price_feeds.alerting.embed_builders import _build_signal_embed, _fmt
 from price_feeds.config.nm_config import NMConfig
 from utils.logger import get_logger
@@ -71,7 +72,11 @@ class AlertSystem:
         bot=None,
         stream_manager=None,
         alert_config=None,
+        channel_budget: Optional[ChannelBudget] = None,
     ):
+        # Owns its own budget when constructed standalone (tests, tooling); the
+        # bot passes the one wired to the HTTP trace so it learns real limits.
+        self._channel_budget = channel_budget or ChannelBudget()
         self.alert_channel = alert_channel
         self.pa_alert_channel = None
         self.toll_alert_channel = None
@@ -146,6 +151,7 @@ class AlertSystem:
             track_alert_message_fn=self.track_alert_message,
             finished_channel_id=self._finished_channel_id,
             profit_channel_id=self._profit_channel_id,
+            channel_budget=self._channel_budget,
         )
 
         self.stats = {
@@ -261,7 +267,10 @@ class AlertSystem:
             attempted = sum(len(ids) for ids in by_channel.values())
             semaphore = asyncio.Semaphore(self._LIVE_REFRESH_CONCURRENCY)
             results = await asyncio.gather(
-                *(self._drain_channel(ids, semaphore) for ids in by_channel.values())
+                *(
+                    self._drain_channel(channel_id, ids, semaphore)
+                    for channel_id, ids in by_channel.items()
+                )
             )
             delivered = sum(results)
 
@@ -297,9 +306,14 @@ class AlertSystem:
         return by_channel
 
     async def _drain_channel(
-        self, signal_ids: list[int], semaphore: asyncio.Semaphore
+        self, channel_id: int, signal_ids: list[int], semaphore: asyncio.Semaphore
     ) -> int:
         """Refresh one channel's embeds in order; return how many were accepted.
+
+        Every snapshot waits for room in the channel's learned write budget, so
+        the sweep slows down as embeds accumulate instead of generating a
+        backlog every event alert then has to queue behind. Ten embeds in one
+        channel each still refresh — just further apart.
 
         Cosmetic work is disposable: once a status/event edit is in flight the
         rest of this channel's snapshots are abandoned so the event edit gets the
@@ -310,6 +324,18 @@ class AlertSystem:
             for signal_id in signal_ids:
                 if self._priority_edits_active:
                     break
+                # A slot spent on a signal that closed while its snapshot queued
+                # is budget an open signal could have used. Under load the wait
+                # below is tens of seconds, so this is worth checking twice.
+                if signal_id not in self._live_embeds:
+                    continue
+
+                await self._channel_budget.acquire(channel_id)
+
+                if self._priority_edits_active:
+                    break
+                if signal_id not in self._live_embeds:
+                    continue
                 if await self._refresh_one_embed(signal_id):
                     delivered += 1
         return delivered
@@ -806,6 +832,7 @@ class AlertSystem:
         if ping_msg:
             self.alert_messages.pop(str(ping_msg.id), None)
             try:
+                self._channel_budget.record(ping_msg.channel.id)
                 await ping_msg.delete()
             except discord.NotFound:
                 pass
@@ -816,6 +843,7 @@ class AlertSystem:
         if embed_msg:
             self.alert_messages.pop(str(embed_msg.id), None)
             try:
+                self._channel_budget.record(embed_msg.channel.id)
                 await embed_msg.delete()
                 logger.debug(
                     f"Retracted approaching embed for signal {signal_id} (msg {embed_msg.id})"
@@ -1145,6 +1173,10 @@ class AlertSystem:
 
                 if existing_msg:
                     try:
+                        # Event writes never wait for the budget — a trader is
+                        # watching for this — but they are charged to it so the
+                        # next cosmetic sweep sees the smaller window.
+                        self._channel_budget.record(target_channel.id)
                         await existing_msg.edit(embed=embed)
                         logger.debug(
                             f"Edited persistent message for signal {signal_id} (event={event})"
@@ -1164,6 +1196,7 @@ class AlertSystem:
 
                 if not existing_msg:
                     try:
+                        self._channel_budget.record(target_channel.id)
                         embed_msg = await target_channel.send(
                             content=self.role_mention, embed=embed
                         )
@@ -1186,6 +1219,7 @@ class AlertSystem:
                     if old_ping:
                         self.alert_messages.pop(str(old_ping.id), None)
                         try:
+                            self._channel_budget.record(target_channel.id)
                             await old_ping.delete()
                         except discord.NotFound:
                             pass
@@ -1195,6 +1229,7 @@ class AlertSystem:
                             )
 
                     try:
+                        self._channel_budget.record(target_channel.id)
                         new_ping = await embed_msg.reply(f"{self.role_mention} {ping_text}")
                         self.signal_ping_messages[signal_id] = new_ping
                         self.track_alert_message(new_ping.id, signal_id)
@@ -1811,6 +1846,7 @@ class AlertSystem:
                     guild_id = self.bot.guilds[0].id
                 url = f"https://discord.com/channels/{guild_id}/{signal.channel_id}/{signal.message_id}"
                 embed.add_field(name="Source", value=url, inline=False)
+            self._channel_budget.record(target_channel.id, count=2)
             await target_channel.send(self.role_mention)
             message = await target_channel.send(embed=embed)
             self.track_alert_message(message.id, signal_id)
@@ -1930,6 +1966,10 @@ class AlertSystem:
         sent_messages = []
         try:
             for ch in channels:
+                # A news window fans out to every alert channel at once. Charging
+                # each send keeps that burst from starving the signal embeds that
+                # share these same channel buckets.
+                self._channel_budget.record(ch.id)
                 msg = await ch.send(embed=embed)
                 sent_messages.append(msg)
             self.stats["total_alerts"] += 1
@@ -1967,6 +2007,7 @@ class AlertSystem:
 
         for msg in messages:
             try:
+                self._channel_budget.record(msg.channel.id)
                 await msg.edit(embed=embed)
             except Exception as e:
                 logger.warning(f"Could not edit news activation message {msg.id}: {e}")
@@ -1977,6 +2018,7 @@ class AlertSystem:
                 await asyncio.sleep(300)
                 for msg in messages:
                     with contextlib.suppress(Exception):
+                        self._channel_budget.record(msg.channel.id)
                         await msg.delete()
 
             asyncio.ensure_future(_delete_later())

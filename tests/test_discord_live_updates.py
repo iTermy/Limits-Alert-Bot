@@ -6,11 +6,13 @@ reset connections deterministically without risking a production rate limit.
 """
 
 import asyncio
+import time
 
 import pytest
 
 from models import LimitData, SignalData
 from price_feeds.alerting.alert_system import AlertSystem
+from price_feeds.alerting.channel_budget import ChannelBudget
 
 
 class FakeStreamManager:
@@ -118,16 +120,32 @@ def _make_signal(sid: int) -> SignalData:
     )
 
 
+def _unpaced_budget() -> ChannelBudget:
+    """A budget wide enough not to pace anything.
+
+    Most tests here are about ordering and failure handling, not throughput, so
+    they opt out of the real allowance. Pacing has its own tests below and in
+    tests/test_channel_budget.py.
+    """
+    return ChannelBudget(default_limit=10_000, default_window=0.0, event_reserve=0)
+
+
 def _make_alert_system(
     signal_count: int,
     *,
     block_first: bool = False,
     channel_ids: dict[int, int] | None = None,
     message_factory=None,
+    channel_budget: ChannelBudget | None = None,
 ):
     prices = {f"TEST{sid}": 100.0 + sid for sid in range(1, signal_count + 1)}
     stream = FakeStreamManager(prices)
-    alerts = AlertSystem(bot=None, stream_manager=stream, alert_config=None)
+    alerts = AlertSystem(
+        bot=None,
+        stream_manager=stream,
+        alert_config=None,
+        channel_budget=channel_budget or _unpaced_budget(),
+    )
     alerts._LIVE_UPDATE_RETRY_DELAY = 0
     bucket = SharedBucket(block_first=block_first)
     messages = {}
@@ -217,6 +235,107 @@ def test_channels_run_in_parallel_but_serialize_within_a_channel():
         assert all(message.started.is_set() for message in messages.values())
 
     asyncio.run(scenario())
+
+
+def test_every_embed_still_refreshes_when_the_budget_stretches_the_pass():
+    """Ten embeds, three cosmetic slots per window: all ten still get an edit.
+
+    This is the "stretch the interval" contract — under load the sweep takes
+    longer, but nothing is starved and nothing is dropped.
+    """
+
+    async def scenario():
+        budget = ChannelBudget(default_limit=5, default_window=0.05, event_reserve=2)
+        alerts, _, bucket, messages = _make_alert_system(10, channel_budget=budget)
+
+        alerts._queue_live_updates()
+        await asyncio.wait_for(alerts._drain_live_update_queue(), timeout=5)
+
+        assert bucket.total_edits == 10
+        assert all(message.rendered_prices for message in messages.values())
+
+    asyncio.run(scenario())
+
+
+def test_no_window_ever_exceeds_the_channels_capacity():
+    """The contract: never generate more writes than the channel can drain.
+
+    Records when every edit actually hit the fake channel and asserts that no
+    sliding window of the bucket's length contains more than the bucket's limit
+    — including the event writes charged alongside the cosmetic ones.
+    """
+
+    async def scenario():
+        limit, window = 5, 0.2
+        budget = ChannelBudget(default_limit=limit, default_window=window, event_reserve=2)
+        alerts, _, _, messages = _make_alert_system(12, channel_budget=budget)
+
+        stamps: list[float] = []
+        for message in messages.values():
+            original = message.edit
+
+            async def timed(*, embed, _original=original):
+                stamps.append(time.monotonic())
+                await _original(embed=embed)
+
+            message.edit = timed
+
+        # An event burst lands on the same channel partway through the sweep.
+        async def event_burst():
+            await asyncio.sleep(window)
+            for _ in range(2):
+                budget.record(1)
+                stamps.append(time.monotonic())
+
+        alerts._queue_live_updates()
+        await asyncio.wait_for(
+            asyncio.gather(alerts._drain_live_update_queue(), event_burst()),
+            timeout=10,
+        )
+
+        assert len(stamps) == 14  # 12 cosmetic + 2 event
+
+        stamps.sort()
+        for i, start in enumerate(stamps):
+            in_window = [s for s in stamps[i:] if s - start < window]
+            assert len(in_window) <= limit, (
+                f"{len(in_window)} writes inside a {window}s window (limit {limit})"
+            )
+
+    asyncio.run(scenario())
+
+
+def test_cosmetic_edits_never_spend_the_slots_reserved_for_events():
+    """The allowance is capacity minus the event reserve, not capacity."""
+    budget = ChannelBudget(default_limit=5, default_window=5.0, event_reserve=2)
+
+    assert budget.cosmetic_allowance(123) == 3
+
+    # An event burst is charged to the same window, so it is visible to pacing.
+    budget.record(123, count=3)
+
+    async def scenario():
+        # Three event writes already fill the 3-slot cosmetic allowance, so the
+        # next snapshot has to wait rather than pile on top of the event.
+        budget._windows[123] = 0.05
+        waited = await asyncio.wait_for(budget.acquire(123), timeout=2)
+        assert waited > 0
+
+    asyncio.run(scenario())
+
+
+def test_budget_learns_the_real_limit_from_response_headers():
+    """Observed headers replace the conservative default."""
+    budget = ChannelBudget(default_limit=5, default_window=5.0, event_reserve=1)
+    assert budget.limit_for(42) == 5
+
+    budget.observe(42, limit=10, reset_after=2.0)
+
+    assert budget.limit_for(42) == 10
+    assert budget.window_for(42) == 2.0
+    assert budget.cosmetic_allowance(42) == 9
+    # Another channel is untouched — buckets are per channel.
+    assert budget.limit_for(99) == 5
 
 
 def test_connection_reset_waits_until_next_refresh_pass():

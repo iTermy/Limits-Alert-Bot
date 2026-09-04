@@ -59,8 +59,13 @@ class ArchiveManager:
         track_alert_message_fn,
         finished_channel_id,
         profit_channel_id,
+        channel_budget,
     ):
         self.bot = bot
+        # Archive moves are up to four writes across two channels, and closes
+        # cluster, so they are charged to the same per-channel budget that paces
+        # the live embeds sharing those channels.
+        self._channel_budget = channel_budget
         self.signal_messages = signal_messages
         self.signal_ping_messages = signal_ping_messages
         self.signal_finished_messages = signal_finished_messages
@@ -109,12 +114,14 @@ class ArchiveManager:
         if not finished_channel:
             return
         try:
+            self._channel_budget.record(finished_channel.id)
             await finished_channel.send(self.role_mention)
         except Exception as e:
             logger.warning(
                 f"Could not send role ping to finished-signals for signal {signal_id}: {e}"
             )
         try:
+            self._channel_budget.record(finished_channel.id)
             copy_msg = await finished_channel.send(embed=embed)
         except Exception as e:
             logger.warning(
@@ -131,6 +138,7 @@ class ArchiveManager:
             return
         self.alert_messages.pop(str(copy_msg.id), None)
         try:
+            self._channel_budget.record(copy_msg.channel.id)
             await copy_msg.delete()
         except discord.NotFound:
             pass
@@ -158,6 +166,7 @@ class ArchiveManager:
                 return
             try:
                 src_msg = await src_channel.fetch_message(int(src_message_id))
+                self._channel_budget.record(src_channel.id)
                 await src_msg.delete()
                 logger.debug(
                     f"Deleted original signal message {src_message_id} for signal {signal_id}"
@@ -195,6 +204,7 @@ class ArchiveManager:
             if ping_msg:
                 self.alert_messages.pop(str(ping_msg.id), None)
                 with contextlib.suppress(Exception):
+                    self._channel_budget.record(ping_msg.channel.id)
                     await ping_msg.delete()
 
             embed_msg = self.signal_messages.get(signal_id)
@@ -278,12 +288,14 @@ class ArchiveManager:
 
                     if not is_profit:
                         try:
+                            self._channel_budget.record(dest_channel.id)
                             await dest_channel.send(self.role_mention)
                         except Exception as _ping_err:
                             logger.warning(
                                 f"Could not send role ping to {dest_name} for signal {signal_id}: {_ping_err}"
                             )
 
+                    self._channel_budget.record(dest_channel.id)
                     finished_msg = await dest_channel.send(embed=new_embed)
                     self.signal_finished_messages[signal_id] = finished_msg
                     self._track_alert_message(finished_msg.id, signal_id)
@@ -378,6 +390,7 @@ class ArchiveManager:
             try:
                 archived_embed = embed.copy()
                 _set_archive_footer(archived_embed)
+                self._channel_budget.record(finished_channel.id)
                 await finished_channel.send(embed=archived_embed)
                 logger.debug(
                     f"Moved standalone news-cancel embed for signal {signal_id} to finished-signals"
@@ -388,6 +401,7 @@ class ArchiveManager:
                 )
 
         try:
+            self._channel_budget.record(message.channel.id)
             await message.delete()
             logger.debug(f"Deleted standalone news-cancel message for signal {signal_id}")
         except Exception:
