@@ -342,7 +342,8 @@ def test_no_window_ever_exceeds_the_channels_capacity():
 
 def test_cosmetic_edits_never_spend_the_slots_reserved_for_events():
     """The allowance is capacity minus the event reserve, not capacity."""
-    budget = ChannelBudget(default_limit=5, default_window=5.0, event_reserve=2)
+    budget = ChannelBudget(default_limit=9, default_window=5.0, event_reserve=2)
+    budget._proven[123] = 5
 
     assert budget.cosmetic_allowance(123) == 3
 
@@ -359,10 +360,14 @@ def test_cosmetic_edits_never_spend_the_slots_reserved_for_events():
     asyncio.run(scenario())
 
 
-def test_budget_learns_the_real_limit_from_response_headers():
-    """Observed headers replace the conservative default."""
+def test_budget_learns_the_real_window_from_response_headers():
+    """Observed headers set the window and cap the allowance.
+
+    They do not grant it: a channel that advertises ten slots is not thereby
+    known to take ten, which is why the allowance still has to be earned.
+    """
     budget = ChannelBudget(default_limit=5, default_window=5.0, event_reserve=1)
-    assert budget.limit_for(42) == 5
+    budget._proven[42] = 10
 
     budget.observe(ChannelWrite(channel_id=42, limit=10, remaining=9, reset_after=8.0))
 
@@ -370,7 +375,7 @@ def test_budget_learns_the_real_limit_from_response_headers():
     assert budget.window_for(42) == 8.0
     assert budget.cosmetic_allowance(42) == 9
     # Another channel is untouched — buckets are per channel.
-    assert budget.limit_for(99) == 5
+    assert budget.window_for(99) == 5.0
 
 
 def test_connection_reset_waits_until_next_refresh_pass():

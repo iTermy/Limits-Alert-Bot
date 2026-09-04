@@ -5,6 +5,7 @@ Trading Bot Core - Main bot class
 import asyncio
 import traceback
 from datetime import datetime
+from pathlib import Path
 from typing import Optional
 
 import discord
@@ -22,6 +23,10 @@ logger = get_logger("bot")
 # Frames of the shutdown stack to log — enough to name the caller, not the
 # whole asyncio call chain.
 _SHUTDOWN_STACK_FRAMES = 4
+
+# Learned per-channel Discord write allowances, kept beside the other
+# auto-generated runtime state.
+CHANNEL_BUDGET_STATE_PATH = Path(__file__).resolve().parent.parent / "data" / "channel_budget.json"
 
 DISCORD_DISCONNECT_RESTART_SECONDS = 120
 DISCORD_REST_PROBE_INTERVAL_SECONDS = 60
@@ -46,8 +51,10 @@ class TradingBot(commands.Bot):
         # Built before super().__init__ because the HTTP trace that feeds it has
         # to be handed to the client at construction, and discord.py keeps its
         # own bucket state private — the response headers are the only place the
-        # real per-channel write allowance is visible.
-        channel_budget = ChannelBudget()
+        # real per-channel write allowance is visible. The learned figures are
+        # persisted so a restart paces against what the channels already proved
+        # rather than rediscovering it through 429s.
+        channel_budget = ChannelBudget(state_path=CHANNEL_BUDGET_STATE_PATH)
 
         super().__init__(
             command_prefix="!",

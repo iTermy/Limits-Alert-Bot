@@ -828,14 +828,42 @@ generating that backlog:
   - *A 429 taught it nothing.* Discord rejects channel message writes with
     `X-RateLimit-Scope: shared` and slots still nominally remaining — no header
     predicts those, so the 429 is the only unambiguous statement that the real
-    allowance is below the advertised bucket. `_penalize` now charges the
-    rejected request (discord.py retries it, so one logical write costs two),
-    holds cosmetic work off for the Retry-After, and steps the channel's limit
-    down one slot per window — at most one step per window, since a single
-    overrun produces a run of rejections all describing it. `_relax_penalty`
-    gives a slot back after `PENALTY_RECOVERY_SECONDS` (300 s) so one bad minute
-    does not throttle a channel until restart; `MIN_EFFECTIVE_LIMIT` (2) is the
-    floor.
+    allowance is below the advertised bucket. `_penalize` charges the rejected
+    request (discord.py retries it, so one logical write costs two), holds
+    cosmetic work off for the Retry-After, and steps the channel's limit down
+    one slot per window — at most one step per window, since a single overrun
+    produces a run of rejections all describing it. `MIN_EFFECTIVE_LIMIT` (2)
+    is the floor.
+- **The header is a ceiling to earn, not an allowance to spend.** The budget
+  tracks two numbers per channel: `_advertised` (the tightest limit the headers
+  report) and `_proven` (what the channel has actually tolerated).
+  `limit_for` is `min(advertised, proven)` — a channel advertising five slots
+  is not thereby known to take five. `_proven` starts at
+  `INITIAL_PROVEN_LIMIT` (3, below `DEFAULT_LIMIT`), so a cold start paces
+  conservatively and earns headroom rather than discovering the ceiling by
+  overrunning it. This is why the 2026-09-04 restart stormed: hydration
+  registered 86 signals' embeds at once, the first sweep fired at the
+  advertised 5 into a channel that took 2, and six 429s in thirty seconds
+  delayed real alerts while discord.py sat on the retries.
+- **What a channel proved outlives the process.** The learned figures persist
+  to `data/channel_budget.json` (`state_path`, injected from `core/bot.py`;
+  omitted in tests so they stay hermetic). The budget used to be pure
+  in-memory, so *every restart* began at the optimistic default and rediscovered
+  the real allowance the only way it can — by generating 429s. Cleaning the
+  alert channel appeared to fix that only because fewer embeds kept the first
+  sweep under the wrong number.
+- **Recovery is a backed-off probe, not a decay.** `_probe_upward` returns one
+  slot after `_probe_interval_for` seconds of quiet, so a bad minute cannot
+  throttle a channel forever — but the interval **doubles per rejection**
+  (`PROBE_INTERVAL_SECONDS` 300 s → `PROBE_MAX_INTERVAL_SECONDS` 3600 s), and
+  the rejection count persists too. The old scheme decayed the whole penalty
+  away on a fixed timer and returned to the advertised figure, so a saturated
+  channel re-found the same wall every five minutes forever. Two clocks are
+  deliberately kept apart: `_proven_changed_at` (probe timing) and
+  `_stepped_down_at` (the one-step-per-window guard). Sharing one meant a probe
+  that raised the limit also looked like a recent step-down, so the 429 the
+  probe itself provoked was swallowed and the channel parked on a value it had
+  already been refused at.
 - **Deferrable work waits, events do not.** `acquire()` sleeps until a slot
   frees; everything nobody is waiting on goes through it — live refreshes,
   startup embed rebuilds (`reactivate_embed(..., paced=True)` from

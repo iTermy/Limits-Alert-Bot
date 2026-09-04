@@ -5,8 +5,11 @@ import time
 from types import SimpleNamespace
 
 from price_feeds.alerting.channel_budget import (
+    INITIAL_PROVEN_LIMIT,
     MAX_WINDOW_SECONDS,
     MIN_EFFECTIVE_LIMIT,
+    PROBE_INTERVAL_SECONDS,
+    PROBE_MAX_INTERVAL_SECONDS,
     ChannelBudget,
 )
 from utils.discord_http_trace import ChannelWrite, _channel_message_write
@@ -37,7 +40,10 @@ def _fresh(limit=5, reset_after=5.0, channel_id=CHANNEL):
 
 class TestAllowance:
     def test_allowance_is_capacity_minus_the_event_reserve(self):
-        budget = ChannelBudget(default_limit=5, default_window=5.0, event_reserve=2)
+        budget = ChannelBudget(default_limit=9, default_window=5.0, event_reserve=2)
+        budget.observe(_fresh(limit=9))
+        budget._proven[CHANNEL] = 5
+
         assert budget.cosmetic_allowance(CHANNEL) == 3
 
     def test_allowance_never_falls_below_one(self):
@@ -45,15 +51,24 @@ class TestAllowance:
         budget = ChannelBudget(default_limit=2, default_window=5.0, event_reserve=9)
         assert budget.cosmetic_allowance(CHANNEL) == 1
 
+    def test_an_unknown_channel_starts_below_what_the_bucket_usually_offers(self):
+        """Cold start is conservative — see INITIAL_PROVEN_LIMIT.
+
+        A restart with 86 signals hydrated their embeds and swept them all at
+        the advertised five, into a channel that took two.
+        """
+        budget = ChannelBudget(default_limit=5, default_window=5.0, event_reserve=2)
+        assert budget.limit_for(CHANNEL) == INITIAL_PROVEN_LIMIT
+
 
 class TestPacing:
     def test_writes_within_the_allowance_do_not_wait(self):
-        budget = ChannelBudget(default_limit=5, default_window=5.0, event_reserve=2)
+        budget = ChannelBudget(default_limit=5, default_window=5.0, event_reserve=0)
 
         async def scenario():
-            return [await budget.acquire(CHANNEL) for _ in range(3)]
+            return [await budget.acquire(CHANNEL) for _ in range(INITIAL_PROVEN_LIMIT)]
 
-        assert asyncio.run(scenario()) == [0.0, 0.0, 0.0]
+        assert asyncio.run(scenario()) == [0.0] * INITIAL_PROVEN_LIMIT
 
     def test_the_write_past_the_allowance_waits_for_the_window(self):
         budget = ChannelBudget(default_limit=3, default_window=0.1, event_reserve=0)
@@ -145,12 +160,30 @@ class TestPacing:
 
 
 class TestLearning:
-    def test_a_fresh_bucket_reading_replaces_the_default(self):
+    def test_a_fresh_bucket_reading_replaces_the_default_window(self):
         budget = ChannelBudget(default_limit=5, default_window=5.0)
         budget.observe(_fresh(limit=10, reset_after=8.0))
 
-        assert budget.limit_for(CHANNEL) == 10
         assert budget.window_for(CHANNEL) == 8.0
+
+    def test_an_advertised_limit_caps_the_allowance_but_does_not_grant_it(self):
+        """The header says what the channel offers, not what it tolerates.
+
+        `scope: shared` rejections arrive with slots still nominally remaining,
+        so trusting the advertised figure is what produced the 2026-09-04
+        restart storm.
+        """
+        budget = ChannelBudget(default_limit=5, default_window=5.0)
+        budget.observe(_fresh(limit=10))
+
+        assert budget.limit_for(CHANNEL) == INITIAL_PROVEN_LIMIT
+
+    def test_a_tight_advertised_limit_still_caps_a_higher_proven_one(self):
+        budget = ChannelBudget(default_limit=5, default_window=5.0)
+        budget._proven[CHANNEL] = 8
+        budget.observe(_fresh(limit=4))
+
+        assert budget.limit_for(CHANNEL) == 4
 
     def test_mid_window_reset_after_is_not_mistaken_for_the_period(self):
         """Reset-After is the remainder; only a fresh bucket states the period.
@@ -178,7 +211,8 @@ class TestLearning:
         Last-write-wins let the looser route set the pace, and the channel then
         overran the tighter one on every sweep.
         """
-        budget = ChannelBudget(default_limit=5, default_window=5.0, event_reserve=2)
+        budget = ChannelBudget(default_limit=9, default_window=5.0, event_reserve=2)
+        budget._proven[CHANNEL] = 9
         budget.observe(_fresh(limit=10))
         budget.observe(_fresh(limit=5))
         budget.observe(_fresh(limit=10))
@@ -196,24 +230,26 @@ class TestLearning:
         budget.observe(_fresh(limit=0))
         budget.observe(_write(reset_after=0.0))
 
-        assert budget.limit_for(CHANNEL) == 5
+        assert budget.limit_for(CHANNEL) == INITIAL_PROVEN_LIMIT
         assert budget.window_for(CHANNEL) == 5.0
 
 
 class TestRateLimitPenalty:
     def test_a_429_steps_the_channel_allowance_down(self):
         """`scope: shared` 429s arrive with slots left, so only the 429 tells us."""
-        budget = ChannelBudget(default_limit=5, default_window=5.0, event_reserve=2)
-        budget.observe(_write(remaining=2, retry_after=3.0))
+        budget = ChannelBudget(default_limit=9, default_window=5.0, event_reserve=2)
+        budget._proven[CHANNEL] = 5
+        budget.observe(_write(limit=9, remaining=2, retry_after=3.0))
 
         assert budget.limit_for(CHANNEL) == 4
         assert budget.cosmetic_allowance(CHANNEL) == 2
 
     def test_a_burst_of_429s_costs_one_step_not_five(self):
         """One overrun produces a run of rejections describing the same overrun."""
-        budget = ChannelBudget(default_limit=5, default_window=5.0, event_reserve=2)
+        budget = ChannelBudget(default_limit=9, default_window=5.0, event_reserve=2)
+        budget._proven[CHANNEL] = 5
         for _ in range(5):
-            budget.observe(_write(remaining=2, retry_after=3.0))
+            budget.observe(_write(limit=9, remaining=2, retry_after=3.0))
 
         assert budget.limit_for(CHANNEL) == 4
 
@@ -233,31 +269,167 @@ class TestRateLimitPenalty:
 
         assert len(budget._writes[CHANNEL]) == 1
 
-    def test_a_quiet_spell_gives_a_slot_back(self):
-        budget = ChannelBudget(default_limit=5, default_window=5.0, event_reserve=2)
-        budget.observe(_write(remaining=2, retry_after=3.0))
+    def test_a_quiet_spell_gives_one_slot_back(self):
+        budget = ChannelBudget(default_limit=9, default_window=5.0, event_reserve=2)
+        budget._proven[CHANNEL] = 5
+        budget.observe(_write(limit=9, remaining=2, retry_after=3.0))
         assert budget.limit_for(CHANNEL) == 4
 
         # Pretend the step-down happened long enough ago to be worth retesting.
-        budget._penalty_changed_at[CHANNEL] -= 600.0
+        budget._proven_changed_at[CHANNEL] -= budget._probe_interval_for(CHANNEL) + 1
 
         assert budget.limit_for(CHANNEL) == 5
 
+    def test_a_quiet_spell_does_not_restore_everything_at_once(self):
+        """The old scheme decayed the whole penalty away and re-stormed.
+
+        A 429 is evidence about the channel, not about the minute it arrived
+        in, so recovery is a one-slot probe that has to be re-earned each time.
+        """
+        budget = ChannelBudget(default_limit=9, default_window=0.01, event_reserve=2)
+        budget._proven[CHANNEL] = 6
+        for _ in range(3):
+            budget.observe(_write(limit=9, remaining=2, reset_after=0.01, retry_after=0.001))
+            time.sleep(0.02)
+        assert budget.limit_for(CHANNEL) == 3
+
+        budget._proven_changed_at[CHANNEL] -= budget._probe_interval_for(CHANNEL) + 1
+        assert budget.limit_for(CHANNEL) == 4
+
+    def test_the_probe_stops_at_what_the_channel_advertises(self):
+        budget = ChannelBudget(default_limit=9, default_window=5.0, event_reserve=0)
+        budget.observe(_fresh(limit=4))
+        budget._proven[CHANNEL] = 4
+        budget._proven_changed_at[CHANNEL] = budget._now() - (PROBE_MAX_INTERVAL_SECONDS + 1)
+
+        assert budget.limit_for(CHANNEL) == 4
+
+    def test_each_rejection_makes_the_next_probe_wait_longer(self):
+        """A channel at its true ceiling must not re-find the wall every 5 min.
+
+        Probing up on a fixed interval traded a 429 every interval for headroom
+        that was not there.
+        """
+        budget = ChannelBudget(default_limit=9, default_window=0.01, event_reserve=2)
+        budget._proven[CHANNEL] = 6
+        assert budget._probe_interval_for(CHANNEL) == PROBE_INTERVAL_SECONDS
+
+        intervals = []
+        for _ in range(3):
+            budget.observe(_write(limit=9, remaining=2, reset_after=0.01, retry_after=0.001))
+            intervals.append(budget._probe_interval_for(CHANNEL))
+            time.sleep(0.02)
+
+        assert intervals == [
+            PROBE_INTERVAL_SECONDS * 2,
+            PROBE_INTERVAL_SECONDS * 4,
+            PROBE_INTERVAL_SECONDS * 8,
+        ]
+
+    def test_a_429_the_probe_itself_provoked_is_not_swallowed(self):
+        """The probe clock and the one-step-per-window guard are separate.
+
+        Sharing one timestamp meant a probe raised the limit and thereby looked
+        like a recent step-down, so the rejection it directly caused was
+        ignored and the channel parked on a value it had already been refused
+        at.
+        """
+        budget = ChannelBudget(default_limit=5, default_window=5.0, event_reserve=2)
+        budget._advertised[CHANNEL] = 5
+        budget._proven[CHANNEL] = 3
+        budget._proven_changed_at[CHANNEL] = budget._now() - PROBE_MAX_INTERVAL_SECONDS * 2
+
+        assert budget.limit_for(CHANNEL) == 4  # the probe fires
+
+        budget.observe(_write(limit=5, remaining=1, retry_after=3.0))
+        assert budget.limit_for(CHANNEL) == 3
+
+    def test_the_probe_backoff_is_capped(self):
+        budget = ChannelBudget(default_limit=99, default_window=0.01, event_reserve=0)
+        budget._rejections[CHANNEL] = 50
+
+        assert budget._probe_interval_for(CHANNEL) == PROBE_MAX_INTERVAL_SECONDS
+
 
 class TestRefreshInterval:
+    def _budget_proving(self, limit: int) -> ChannelBudget:
+        budget = ChannelBudget(default_limit=9, default_window=5.0, event_reserve=2)
+        budget._proven[CHANNEL] = limit
+        return budget
+
     def test_one_sweep_of_a_full_allowance_costs_nothing(self):
-        budget = ChannelBudget(default_limit=5, default_window=5.0, event_reserve=2)
-        assert budget.refresh_interval_for(CHANNEL, 3) == 0.0
+        assert self._budget_proving(5).refresh_interval_for(CHANNEL, 3) == 0.0
 
     def test_the_interval_stretches_as_embeds_accumulate(self):
-        budget = ChannelBudget(default_limit=5, default_window=5.0, event_reserve=2)
-
         # 3 slots per 5 s window: 10 embeds need 3 extra windows after the first.
-        assert budget.refresh_interval_for(CHANNEL, 10) == 15.0
+        assert self._budget_proving(5).refresh_interval_for(CHANNEL, 10) == 15.0
 
     def test_no_embeds_is_no_wait(self):
         budget = ChannelBudget()
         assert budget.refresh_interval_for(CHANNEL, 0) == 0.0
+
+
+class TestPersistence:
+    """What a channel proved must outlive the process that learned it.
+
+    The budget used to be pure in-memory, so every restart began at the
+    optimistic default and rediscovered the real allowance the only way it
+    can — by generating 429s. That is what a restart with a full alert channel
+    did on 2026-09-04, and why cleaning the channel looked like a fix: fewer
+    embeds simply kept the first sweep under the wrong number.
+    """
+
+    def _budget(self, tmp_path, **kwargs):
+        return ChannelBudget(state_path=tmp_path / "channel_budget.json", **kwargs)
+
+    def test_a_stepped_down_limit_survives_a_restart(self, tmp_path):
+        budget = self._budget(tmp_path, default_limit=9, default_window=5.0)
+        budget._proven[CHANNEL] = 5
+        budget.observe(_write(limit=9, remaining=2, retry_after=3.0))
+        assert budget.limit_for(CHANNEL) == 4
+
+        restarted = self._budget(tmp_path, default_limit=9, default_window=5.0)
+        assert restarted.limit_for(CHANNEL) == 4
+
+    def test_a_learned_window_survives_a_restart(self, tmp_path):
+        budget = self._budget(tmp_path, default_limit=9, default_window=5.0)
+        budget.observe(_fresh(limit=9, reset_after=8.0))
+
+        restarted = self._budget(tmp_path, default_limit=9, default_window=5.0)
+        assert restarted.window_for(CHANNEL) == 8.0
+
+    def test_a_restart_still_re_earns_headroom_slowly(self, tmp_path):
+        """Restoring the figure must not also restore a right to probe at once."""
+        budget = self._budget(tmp_path, default_limit=9, default_window=5.0)
+        budget._proven[CHANNEL] = 5
+        budget.observe(_write(limit=9, remaining=2, retry_after=3.0))
+
+        restarted = self._budget(tmp_path, default_limit=9, default_window=5.0)
+        assert restarted.limit_for(CHANNEL) == 4
+        assert restarted.limit_for(CHANNEL) == 4
+
+    def test_the_probe_backoff_survives_a_restart(self, tmp_path):
+        """Otherwise a restart loop re-probes aggressively every time."""
+        budget = self._budget(tmp_path, default_limit=9, default_window=5.0)
+        budget._proven[CHANNEL] = 5
+        budget.observe(_write(limit=9, remaining=2, retry_after=3.0))
+
+        restarted = self._budget(tmp_path, default_limit=9, default_window=5.0)
+        assert restarted._probe_interval_for(CHANNEL) == PROBE_INTERVAL_SECONDS * 2
+
+    def test_an_unreadable_state_file_is_not_fatal(self, tmp_path):
+        path = tmp_path / "channel_budget.json"
+        path.write_text("{ this is not json", encoding="utf-8")
+
+        budget = ChannelBudget(state_path=path, default_limit=5)
+        assert budget.limit_for(CHANNEL) == INITIAL_PROVEN_LIMIT
+
+    def test_no_state_path_writes_nothing(self, tmp_path):
+        budget = ChannelBudget(default_limit=9, default_window=5.0)
+        budget._proven[CHANNEL] = 5
+        budget.observe(_write(limit=9, remaining=2, retry_after=3.0))
+
+        assert list(tmp_path.iterdir()) == []
 
 
 class TestHeaderParsing:
