@@ -13,6 +13,7 @@ from discord.ext import commands, tasks
 from core.services import ServiceRegistry
 from database import db, initialize_signal_db
 from utils.config_loader import config, load_settings
+from utils.discord_http_trace import build_discord_http_trace
 from utils.logger import get_logger
 
 logger = get_logger("bot")
@@ -44,6 +45,9 @@ class TradingBot(commands.Bot):
             # Do not let a pathological non-global Retry-After stall an alert
             # forever. Normal short rate limits are still honoured by discord.py.
             max_ratelimit_timeout=60.0,
+            # When LOG_LEVEL=DEBUG, record the safe rate-limit headers for every
+            # 429 before discord.py consumes the response and retries it.
+            http_trace=build_discord_http_trace(),
         )
 
         # Initialize attributes

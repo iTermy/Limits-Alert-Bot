@@ -1,10 +1,11 @@
 """
-News Mode Manager - Tracks active news windows during which signals are auto-cancelled.
+News Mode Manager - Tracks news windows for clients and alert-bot guards.
 
 Usage:
     !news USD 12:30pm 15                  → cancel all USD pairs hit within 15 min of 12:30pm (EST)
     !news gold 8:30am                     → cancel all GOLD signals hit within 15 min of 8:30am (default window)
     !news all 14:00 30                    → cancel ALL signals hit within 30 min of 14:00
+    !news USD 12:30pm 15 dryrun           → pause clients, but keep alert-bot signals running
     !news USD 14:30 tz:UTC                → specify timezone (EST is default)
     !news USD 9:30am date:2025-06-15      → schedule for a specific date
     !news USD 9:30am date:06/15           → date without year (uses current year)
@@ -161,6 +162,9 @@ class NewsEvent:
     # When True the event also pauses gold (XAUUSD) — used for USD news, which
     # ForexFactory files dollar releases (FOMC/NFP/CPI) that move gold hard.
     affects_gold: bool = field(default=False)
+    # Client-only ("dry run") events are published to bot_mode_status but do not
+    # suppress or cancel signals in this alert bot.
+    client_only: bool = field(default=False)
 
     @property
     def display_label(self) -> str:
@@ -238,7 +242,12 @@ class NewsEvent:
         return cat in instr
 
     def __str__(self) -> str:
-        tag = " [auto]" if self.source == "forexfactory" else ""
+        tags = []
+        if self.source == "forexfactory":
+            tags.append("auto")
+        if self.client_only:
+            tags.append("dry run")
+        tag = f" [{' / '.join(tags)}]" if tags else ""
         name = f" {self.title}" if self.title else ""
         if self.is_now_mode:
             return (
@@ -399,6 +408,7 @@ class NewsManager:
                     "end_time_override": e.end_time_override.isoformat()
                     if e.end_time_override
                     else None,
+                    "client_only": e.client_only,
                 }
                 for e in self._events
                 # Skip already-expired events and auto-fetched ones (re-fetched on boot)
@@ -458,6 +468,7 @@ class NewsManager:
                     source=item.get("source", "manual"),
                     external_id=item.get("external_id"),
                     title=item.get("title"),
+                    client_only=item.get("client_only", False),
                 )
 
                 if not event.is_expired(now):
@@ -488,6 +499,7 @@ class NewsManager:
         source: str = "manual",
         external_id: str | None = None,
         title: str | None = None,
+        client_only: bool = False,
     ) -> NewsEvent:
         """Register a new news event, persist to disk, and return it."""
         event = NewsEvent(
@@ -502,6 +514,7 @@ class NewsManager:
             source=source,
             external_id=external_id,
             title=title,
+            client_only=client_only,
         )
         self._next_id += 1
         self._events.append(event)
@@ -520,11 +533,29 @@ class NewsManager:
     def is_news_active_for(self, instrument: str) -> NewsEvent | None:
         """
         Return the first active NewsEvent that affects *instrument*, or None.
-        Called on every limit-hit check — must be fast.
+
+        Includes client-only dry-run events because clients and context reporting
+        should see every active news window.
         """
         now = datetime.now(pytz.utc)
         for event in self._events:
             if event.is_active(now) and event.instrument_affected(instrument):
+                return event
+        return None
+
+    def is_alert_bot_news_active_for(self, instrument: str) -> NewsEvent | None:
+        """Return an active event that should guard this alert bot's signals.
+
+        Client-only (dry-run) events still reach bot_mode_status through
+        reconcile_news_mode(), but are intentionally invisible to this lookup.
+        """
+        now = datetime.now(pytz.utc)
+        for event in self._events:
+            if (
+                not event.client_only
+                and event.is_active(now)
+                and event.instrument_affected(instrument)
+            ):
                 return event
         return None
 

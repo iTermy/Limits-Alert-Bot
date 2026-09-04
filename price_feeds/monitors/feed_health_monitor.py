@@ -6,7 +6,6 @@ Monitors all feeds (ICMarkets, OANDA, Binance) for stale data and connection iss
 import asyncio
 import contextlib
 import faulthandler
-import logging
 import os
 import subprocess
 import sys
@@ -14,7 +13,6 @@ import threading
 import time
 from collections import defaultdict
 from datetime import datetime, timedelta
-
 from typing import Optional
 
 import pytz
@@ -57,16 +55,18 @@ def _relaunch_process():
     tears down main.py's in-process restart supervisor too — so without this a
     wedged loop leaves nothing to relaunch the bot unless an external wrapper is
     running. Spawning a replacement here lets a plain `python main.py` self-heal
-    on its own. The replacement inherits the current console so its output keeps
-    flowing to the same terminal.
+    on its own. This function deliberately performs no logging: the event loop
+    may be frozen while holding a synchronous logging-handler lock.
     """
     try:
         script = os.path.abspath(sys.argv[0])
         cmd = [sys.executable, script, *sys.argv[1:]]
         subprocess.Popen(cmd, cwd=os.path.dirname(script) or None)
-        logger.critical("Spawned replacement process: %s", " ".join(cmd))
-    except Exception as e:
-        logger.error("Failed to spawn replacement process: %s", e)
+    except Exception:
+        # There is no guaranteed safe logging path while recovering a frozen
+        # event loop. An external service manager remains the final fallback if
+        # spawning the replacement fails.
+        pass
 
 # Price-flow watchdog: when at least one subscribed symbol's market should be
 # open but ZERO ticks have arrived across EVERY feed for this long, the bot is
@@ -239,13 +239,11 @@ class FeedHealthMonitor:
         while not self._loop_watchdog_stop.wait(LOOP_WATCHDOG_POLL_SECONDS):
             stalled = time.monotonic() - self._loop_heartbeat
             if stalled > LOOP_FREEZE_RESTART_SECONDS:
-                logger.critical(
-                    "Event loop frozen for %.0fs (heartbeat stalled) — forcing hard restart",
-                    stalled,
-                )
+                # Do not call logging here: the captured production freeze was
+                # inside StreamHandler.emit(), and logging again made this
+                # watchdog wait on the same handler lock forever.
                 self._dump_all_thread_stacks()
                 _relaunch_process()
-                logging.shutdown()
                 os._exit(1)
 
     def _dump_all_thread_stacks(self):

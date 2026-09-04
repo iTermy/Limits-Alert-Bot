@@ -548,10 +548,10 @@ class StreamingPriceMonitor:
         direction = signal.direction.lower()
         current_price = price_data["ask"] if direction == "long" else price_data["bid"]
 
-        # An already-HIT signal sitting open when a news window opens is
-        # cancelled outright — swings are exempt (they ride news out).
+        # An already-HIT signal sitting open when a normal news window opens is
+        # cancelled outright — swings and client-only dry-run events are exempt.
         if signal.status == "hit" and signal.type != "swing" and self.bot.news_manager:
-            news_event = self.bot.news_manager.is_news_active_for(signal.instrument)
+            news_event = self.bot.news_manager.is_alert_bot_news_active_for(signal.instrument)
             if news_event is not None:
                 logger.info(
                     f"News mode: cancelling open HIT signal {signal.signal_id} "
@@ -731,10 +731,11 @@ class StreamingPriceMonitor:
         spread_buffer_enabled: bool,
     ) -> None:
         """Run the guard gates for a hit limit, then mark it and alert."""
-        # News mode guard
+        # Normal news events guard the alert bot. Client-only dry-run events are
+        # still published for client bots but excluded by this lookup.
         news_event = None
         if self.bot.news_manager:
-            news_event = self.bot.news_manager.is_news_active_for(signal.instrument)
+            news_event = self.bot.news_manager.is_alert_bot_news_active_for(signal.instrument)
 
         if news_event is not None:
             logger.info(
@@ -833,8 +834,12 @@ class StreamingPriceMonitor:
         """Fire the approaching alert when the first pending limit enters range."""
         symbol = signal.instrument
 
-        # Suppress approaching alerts during active news windows
-        if self.bot.news_manager and self.bot.news_manager.is_news_active_for(signal.instrument):
+        # Normal news windows suppress alert-bot approaches; client-only dry-run
+        # windows do not.
+        if (
+            self.bot.news_manager
+            and self.bot.news_manager.is_alert_bot_news_active_for(signal.instrument)
+        ):
             return
 
         # Suppress approaching alerts for non-crypto signals during the late
