@@ -21,8 +21,8 @@
       "description": "Stock indices"
     },
     "stocks": {
-      "type": "dollars",
-      "value": 50.0,
+      "type": "percentage",
+      "value": 1.0,
       "description": "Individual stocks"
     },
     "crypto": {
@@ -61,41 +61,17 @@
       "set_by": "itermy",
       "set_at": "2026-02-03T15:10:44.394721+00:00"
     },
-    "PYPL.NAS": {
-      "type": "dollars",
-      "value": 1.0,
-      "set_by": "itermy",
-      "set_at": "2026-02-03T15:15:47.113663+00:00"
-    },
     "CTAS.NAS": {
       "type": "dollars",
       "value": 2.0,
       "set_by": "itermy",
       "set_at": "2025-12-03T14:54:09.460796+00:00"
     },
-    "CRWD.NAS": {
-      "type": "dollars",
-      "value": 8.0,
-      "set_by": "itermy",
-      "set_at": "2025-12-03T14:56:02.028995+00:00"
-    },
-    "SNPS.NAS": {
-      "type": "dollars",
-      "value": 10.0,
-      "set_by": "itermy",
-      "set_at": "2025-12-03T14:55:54.608481+00:00"
-    },
     "SPX500USD": {
       "type": "dollars",
       "value": 25.0,
       "set_by": "itermy",
       "set_at": "2025-12-17T18:33:00.371505+00:00"
-    },
-    "ANF.NAS": {
-      "type": "dollars",
-      "value": 1.0,
-      "set_by": "itermy",
-      "set_at": "2025-12-17T17:51:42.691731+00:00"
     },
     "ANF.NYSE": {
       "type": "dollars",
@@ -151,65 +127,11 @@
       "set_by": "itermy",
       "set_at": "2026-02-03T12:54:11.480272+00:00"
     },
-    "BIDU.NAS": {
-      "type": "dollars",
-      "value": 1.0,
-      "set_by": "itermy",
-      "set_at": "2026-02-03T13:01:29.629381+00:00"
-    },
-    "CLSK.NAS": {
-      "type": "dollars",
-      "value": 0.5,
-      "set_by": "itermy",
-      "set_at": "2026-02-03T13:14:58.096774+00:00"
-    },
-    "COIN.NAS": {
-      "type": "dollars",
-      "value": 3.0,
-      "set_by": "itermy",
-      "set_at": "2026-02-03T14:50:54.349961+00:00"
-    },
-    "GILD.NAS": {
-      "type": "dollars",
-      "value": 1.5,
-      "set_by": "itermy",
-      "set_at": "2026-02-03T14:51:17.195771+00:00"
-    },
     "GOOG.NAS": {
       "type": "dollars",
       "value": 5.0,
       "set_by": "itermy",
       "set_at": "2026-02-03T15:09:37.843346+00:00"
-    },
-    "MARA.NAS": {
-      "type": "dollars",
-      "value": 0.2,
-      "set_by": "itermy",
-      "set_at": "2026-02-03T15:11:10.333415+00:00"
-    },
-    "MRNA.NAS": {
-      "type": "dollars",
-      "value": 1.0,
-      "set_by": "itermy",
-      "set_at": "2026-02-03T15:11:29.966509+00:00"
-    },
-    "MSFT.NAS": {
-      "type": "dollars",
-      "value": 4.0,
-      "set_by": "itermy",
-      "set_at": "2026-02-03T15:12:04.680426+00:00"
-    },
-    "MSTR.NAS": {
-      "type": "dollars",
-      "value": 3.0,
-      "set_by": "itermy",
-      "set_at": "2026-02-03T15:12:22.846298+00:00"
-    },
-    "MU.NAS": {
-      "type": "dollars",
-      "value": 7.5,
-      "set_by": "itermy",
-      "set_at": "2026-02-03T15:13:01.637151+00:00"
     },
     "NFLX.NAS": {
       "type": "dollars",
@@ -223,59 +145,11 @@
       "set_by": "itermy",
       "set_at": "2026-02-03T15:13:58.390265+00:00"
     },
-    "PDD.NAS": {
-      "type": "dollars",
-      "value": 0.5,
-      "set_by": "itermy",
-      "set_at": "2026-02-03T15:14:25.118186+00:00"
-    },
-    "PLTR.NAS": {
-      "type": "dollars",
-      "value": 2.0,
-      "set_by": "itermy",
-      "set_at": "2026-02-03T15:14:56.343792+00:00"
-    },
-    "PTON.NAS": {
-      "type": "dollars",
-      "value": 0.1,
-      "set_by": "itermy",
-      "set_at": "2026-02-03T15:15:18.522519+00:00"
-    },
     "QCOM.NAS": {
       "type": "dollars",
       "value": 1.0,
       "set_by": "itermy",
       "set_at": "2026-02-03T15:16:11.031095+00:00"
-    },
-    "QQQ.NAS": {
-      "type": "dollars",
-      "value": 2.5,
-      "set_by": "itermy",
-      "set_at": "2026-02-03T15:16:37.695591+00:00"
-    },
-    "RIVN.NAS": {
-      "type": "dollars",
-      "value": 0.15,
-      "set_by": "itermy",
-      "set_at": "2026-02-03T15:17:00.651709+00:00"
-    },
-    "RKLB.NAS": {
-      "type": "dollars",
-      "value": 1.0,
-      "set_by": "itermy",
-      "set_at": "2026-02-03T15:17:30.437789+00:00"
-    },
-    "SBUX.NAS": {
-      "type": "dollars",
-      "value": 0.5,
-      "set_by": "itermy",
-      "set_at": "2026-02-03T15:17:56.562855+00:00"
-    },
-    "SOFI.NAS": {
-      "type": "dollars",
-      "value": 0.3,
-      "set_by": "itermy",
-      "set_at": "2026-02-03T15:18:14.607091+00:00"
     },
     "TSLA.NAS": {
       "type": "dollars",
@@ -283,29 +157,11 @@
       "set_by": "itermy",
       "set_at": "2026-02-03T15:18:41.093096+00:00"
     },
-    "UAL.NAS": {
-      "type": "dollars",
-      "value": 1.0,
-      "set_by": "itermy",
-      "set_at": "2026-02-03T15:19:36.579130+00:00"
-    },
     "GCZ26_CFD": {
       "type": "dollars",
       "value": 15.0,
       "set_by": "itermy",
       "set_at": "2026-06-09T23:31:39.104961+00:00"
-    },
-    "ACMR.NAS": {
-      "type": "dollars",
-      "value": 4.0,
-      "set_by": "itermy",
-      "set_at": "2026-07-01T15:53:12.366328+00:00"
-    },
-    "ACLS.NAS": {
-      "type": "dollars",
-      "value": 4.0,
-      "set_by": "itermy",
-      "set_at": "2026-07-01T15:53:19.996914+00:00"
     },
     "BAC.NYSE": {
       "type": "dollars",
@@ -313,27 +169,9 @@
       "set_by": "itermy",
       "set_at": "2026-07-01T15:59:57.604644+00:00"
     },
-    "NKE.NYSE": {
-      "type": "dollars",
-      "value": 2.0,
-      "set_by": "itermy",
-      "set_at": "2026-07-01T16:00:38.010221+00:00"
-    },
-    "XYZ.NYSE": {
-      "type": "dollars",
-      "value": 1.5,
-      "set_by": "itermy",
-      "set_at": "2026-07-01T22:48:45.311415+00:00"
-    },
     "AAXJ.NAS": {
       "type": "dollars",
       "value": 1.0,
-      "set_by": "itermy",
-      "set_at": "2026-07-13T00:00:00+00:00"
-    },
-    "SPY.NYSE": {
-      "type": "dollars",
-      "value": 2.0,
       "set_by": "itermy",
       "set_at": "2026-07-13T00:00:00+00:00"
     },
