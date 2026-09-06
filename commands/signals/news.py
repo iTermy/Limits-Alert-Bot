@@ -304,7 +304,6 @@ class NewsCog(BaseCog):
         for event in events:
             src_tag = " `[auto]`" if event.source == "forexfactory" else ""
             dry_run_tag = " `[dry run]`" if event.client_only else ""
-            gold_tag = " +GOLD" if getattr(event, "affects_gold", False) else ""
             title_line = f"\n*{event.title}*" if event.title else ""
             if event.is_now_mode:
                 activated_ts = int(event.news_time.timestamp())
@@ -317,7 +316,7 @@ class NewsCog(BaseCog):
                 embed.add_field(
                     name=(
                         f"#{event.event_id}  {event.category.upper()}"
-                        f"{gold_tag}{src_tag}{dry_run_tag}"
+                        f"{src_tag}{dry_run_tag}"
                     ),
                     value=(
                         f"{status}{title_line}\nWindow: {window_str}\nSet by: {event.created_by}"
@@ -334,7 +333,7 @@ class NewsCog(BaseCog):
                 embed.add_field(
                     name=(
                         f"#{event.event_id}  {event.category.upper()}"
-                        f"{gold_tag}{tz_note}{src_tag}{dry_run_tag}"
+                        f"{tz_note}{src_tag}{dry_run_tag}"
                     ),
                     value=(
                         f"{status}{title_line}\nWindow: <t:{s_ts}:f> → <t:{e_ts}:t>"

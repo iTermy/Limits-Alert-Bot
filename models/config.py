@@ -22,7 +22,6 @@ class NewsAutofetchConfig(BaseModel):
     currencies: list[str] = Field(
         default_factory=lambda: ["USD", "EUR", "GBP", "JPY", "AUD", "NZD", "CAD", "CHF"]
     )
-    usd_affects_gold: bool = True
 
 
 class BotSettings(BaseModel):

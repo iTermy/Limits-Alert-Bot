@@ -108,7 +108,6 @@ class NewsFetcher:
                     source="forexfactory",
                     external_id=f"{country}|{news_time.isoformat()}",
                     title=" / ".join(titles),
-                    affects_gold=self._config.usd_affects_gold and country == "USD",
                 )
             )
 

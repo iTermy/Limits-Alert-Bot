@@ -24,6 +24,7 @@ from __future__ import annotations
 import asyncio
 import json
 import re
+from collections.abc import Callable
 from dataclasses import dataclass, field
 from datetime import datetime, timedelta
 from pathlib import Path
@@ -126,14 +127,101 @@ FOREX_CURRENCIES: set[str] = {
     "TRY",
 }
 
-# Special named categories that map to specific instruments or patterns
-NAMED_CATEGORIES: dict[str, set[str]] = {
-    "GOLD": {"XAUUSD", "GOLD"},
-    "XAU": {"XAUUSD", "GOLD"},
-    "OIL": {"USOILSPOT", "USOIL", "WTIUSD", "OIL"},
-    "BTC": {"BTCUSDT", "BTCUSD"},
-    "ETH": {"ETHUSDT", "ETHUSD"},
-    "CRYPTO": None,  # None = special logic: crypto asset class
+# US index identifiers (internal/feed symbol fragments). USD news pauses these
+# alongside US equities — high-impact dollar releases move US indices hardest.
+US_INDEX_KEYWORDS: set[str] = {
+    "NAS100",
+    "US30",
+    "US500",
+    "SPX500",
+    "SPX",
+    "USTEC",
+    "US2000",
+    "NDX",
+    "DJI",
+    "DJ30",
+    "NASDAQ",
+}
+
+# Oil trades under several symbols across the feeds (USOILSPOT on Exness, XTIUSD
+# on ICMarkets). Matching the keyword rather than an explicit symbol list keeps a
+# newly-added contract from silently escaping every oil news window.
+_OIL_KEYWORDS: tuple[str, ...] = ("OIL", "WTI", "BRENT", "XTI", "BCO")
+
+# Gold trades as spot (XAUUSD) and as CFDs on the futures contracts (GCZ26_CFD,
+# MGC…), which share no substring with the spot symbol.
+_GOLD_FUTURES_PREFIXES: tuple[str, ...] = ("GC", "MGC")
+_OTHER_METAL_PREFIXES: tuple[str, ...] = ("XAG", "XPT", "XPD")
+
+# Every index we quote, US and otherwise. Indices settle in a currency and say so
+# in the symbol (NAS100USD, DE30EUR), so they have to be recognised before the
+# crypto test, which would otherwise claim every long USD-suffixed symbol.
+_INDEX_KEYWORDS: tuple[str, ...] = tuple(US_INDEX_KEYWORDS) + (
+    "NAS",
+    "DAX",
+    "DE30",
+    "DE40",
+    "F40",
+    "JP225",
+    "UK100",
+    "AUS200",
+    "AUS2000",
+    "HK50",
+    "CHINA",
+)
+
+
+def _is_us_stock(symbol: str) -> bool:
+    """US equities are stored with a .NAS / .NYSE suffix."""
+    return symbol.endswith((".NAS", ".NYSE"))
+
+
+def _is_us_index(symbol: str) -> bool:
+    """Match US index symbols while excluding non-US indices (DAX, JP225, …).
+
+    The keyword has to start the symbol rather than merely appear in it: AUS2000 is
+    the Australian small-cap index and contains 'US2000', which would otherwise put
+    an Australian index under every dollar release.
+    """
+    return symbol.startswith(tuple(US_INDEX_KEYWORDS))
+
+
+def _is_gold(symbol: str) -> bool:
+    return symbol in {"XAUUSD", "GOLD"} or symbol.startswith(_GOLD_FUTURES_PREFIXES)
+
+
+def _is_metal(symbol: str) -> bool:
+    return _is_gold(symbol) or symbol == "SILVER" or symbol.startswith(_OTHER_METAL_PREFIXES)
+
+
+def _is_oil(symbol: str) -> bool:
+    return any(keyword in symbol for keyword in _OIL_KEYWORDS)
+
+
+def _is_crypto(symbol: str) -> bool:
+    """Quotes against USDT/USDC, or a long-form USD pair (BTCUSD, SOLUSD).
+
+    Stocks, metals, oil and indices are dollar-denominated too and several carry a
+    USD suffix, so they are ruled out before the suffix test — otherwise a crypto
+    news window cancels every index signal.
+    """
+    if _is_us_stock(symbol) or _is_metal(symbol) or _is_oil(symbol):
+        return False
+    if any(keyword in symbol for keyword in _INDEX_KEYWORDS):
+        return False
+    return symbol.endswith(("USDT", "USDC", "BTC")) or (
+        symbol.endswith("USD") and len(symbol) > 6
+    )
+
+
+# Special named categories, each a predicate over the internal instrument symbol.
+NAMED_CATEGORIES: dict[str, Callable[[str], bool]] = {
+    "GOLD": _is_gold,
+    "XAU": _is_gold,
+    "OIL": _is_oil,
+    "BTC": lambda s: s.startswith("BTC"),
+    "ETH": lambda s: s.startswith("ETH"),
+    "CRYPTO": _is_crypto,
 }
 
 
@@ -159,9 +247,6 @@ class NewsEvent:
     external_id: str | None = field(default=None)
     # Human-readable event name for auto-fetched events (e.g. "Federal Funds Rate")
     title: str | None = field(default=None)
-    # When True the event also pauses gold (XAUUSD) — used for USD news, which
-    # ForexFactory files dollar releases (FOMC/NFP/CPI) that move gold hard.
-    affects_gold: bool = field(default=False)
     # Client-only ("dry run") events are published to bot_mode_status but do not
     # suppress or cancel signals in this alert bot.
     client_only: bool = field(default=False)
@@ -201,44 +286,39 @@ class NewsEvent:
         return now > self.end_time
 
     def instrument_affected(self, instrument: str) -> bool:
-        """Return True if *instrument* should be cancelled during this event."""
+        """Return True if *instrument* should be cancelled during this event.
+
+        Mirrors the execution bot's `instrument_under_news`: a currency code matches
+        any instrument quoted in it, plus the dollar-denominated markets whose
+        symbols carry no currency code at all. The two must agree — where they don't,
+        one bot keeps tracking a signal whose position the other has already
+        flattened at market.
+        """
         cat = self.category.upper()
         instr = instrument.upper()
 
-        # "all" catches everything
         if cat == "ALL":
             return True
 
-        # USD news optionally also pauses gold (FOMC/NFP/CPI move gold hard)
-        if self.affects_gold and instr in {"XAUUSD", "GOLD"}:
-            return True
-
-        # Named categories (gold, oil, btc, …)
         if cat in NAMED_CATEGORIES:
-            explicit = NAMED_CATEGORIES[cat]
-            if explicit is None:
-                # Crypto: any instrument that is NOT forex / metals / oil
-                return _is_crypto(instr)
-            return instr in explicit
+            return NAMED_CATEGORIES[cat](instr)
 
-        # Forex currency code (USD, EUR, …)
         if cat in FOREX_CURRENCIES:
-            # US dollar releases also pause US equities and US indices.
-            if cat == "USD" and (_is_us_stock(instr) or _is_us_index(instr)):
+            # A 24/7 book doesn't halt for a scheduled release, and every crypto
+            # symbol carries a currency code it would otherwise match on (BTCUSDT
+            # contains USD). Naming the asset directly (`!news btc`) still works —
+            # that goes through NAMED_CATEGORIES above.
+            if _is_crypto(instr):
+                return False
+            if cat in instr:
                 return True
+            # Metals, oil and US equities are dollar-denominated and move on US
+            # releases, but only some of them say so in the symbol: XAUUSD does,
+            # GCZ26_CFD, USOILSPOT and AMD.NAS do not.
+            return cat == "USD" and (
+                _is_metal(instr) or _is_oil(instr) or _is_us_stock(instr) or _is_us_index(instr)
+            )
 
-            # Match any 6-char forex pair that contains this currency on either side
-            # but exclude metal/commodity pairs (XAU, XAG, XPT, XPD prefix)
-            METAL_PREFIXES = {"XAU", "XAG", "XPT", "XPD", "BCO", "WTI"}
-            if len(instr) == 6:
-                prefix3 = instr[:3]
-                suffix3 = instr[3:]
-                if prefix3 in METAL_PREFIXES:
-                    return False  # e.g. XAUUSD — not a forex pair
-                return cat in (prefix3, suffix3)
-            return False
-
-        # Fallback: substring match
         return cat in instr
 
     def __str__(self) -> str:
@@ -260,40 +340,6 @@ class NewsEvent:
             f"{news_est.strftime('%I:%M %p')} EST "
             f"(±{self.window_minutes} min)"
         )
-
-
-# US index identifiers (internal/feed symbol fragments). USD news pauses these
-# alongside US equities — high-impact dollar releases move US indices hardest.
-US_INDEX_KEYWORDS: set[str] = {
-    "NAS100",
-    "US30",
-    "US500",
-    "SPX500",
-    "SPX",
-    "USTEC",
-    "US2000",
-    "NDX",
-    "DJI",
-    "DJ30",
-    "NASDAQ",
-}
-
-
-def _is_us_stock(symbol: str) -> bool:
-    """US equities are stored with a .NAS / .NYSE suffix."""
-    return symbol.endswith((".NAS", ".NYSE"))
-
-
-def _is_us_index(symbol: str) -> bool:
-    """Match US index symbols while excluding non-US indices (DAX, JP225, …)."""
-    return any(tok in symbol for tok in US_INDEX_KEYWORDS)
-
-
-def _is_crypto(symbol: str) -> bool:
-    """Rough check: symbol ends with USDT, USDC, or BTC."""
-    return (
-        symbol.endswith(("USDT", "USDC", "BTC")) or (symbol.endswith("USD") and len(symbol) > 6)
-    )
 
 
 def _load_optional_dt(value) -> datetime | None:
@@ -368,6 +414,10 @@ class NewsManager:
         writes, so a stale value left by a crash is corrected). Safe to call from
         any path (commands, the cleanup loop) — it is the single source of truth
         for the flag and does not rely on per-restart edge-detection state.
+
+        A failed write leaves the tracking state untouched so the 30 s cleanup pass
+        retries. Recording it as synced would skip every later write of the same
+        value, and the EX bot would trade the whole window unguarded.
         """
         if self._db is None:
             return
@@ -376,10 +426,11 @@ class NewsManager:
             return
         try:
             await self._db.set_news_mode(value)
-            self._last_news_mode = value
-            self._news_mode_synced = True
         except Exception as e:
-            logger.error(f"Failed to reconcile news_mode in DB: {e}")
+            logger.error(f"Failed to reconcile news_mode in DB, will retry: {e}")
+            return
+        self._last_news_mode = value
+        self._news_mode_synced = True
 
     # ------------------------------------------------------------------
     # Persistence

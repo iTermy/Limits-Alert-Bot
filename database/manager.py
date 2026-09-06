@@ -355,19 +355,20 @@ class DatabaseManager(BaseConnectionManager):
         A non-empty string marks news as active; NULL marks it inactive. Consumers
         (including the EX bot) read this column for truthiness, so callers must pass
         None — never the literal string 'FALSE' — when no news is active.
+
+        Raises on failure. The caller records what it believes landed in the DB and
+        skips redundant writes, so swallowing the error here marks a write that never
+        happened as synced and the flag never reaches the EX bot for that window.
         """
-        try:
-            await self.execute(
-                """
-                UPDATE bot_mode_status
-                SET news_mode = $1, updated_at = NOW()
-                WHERE id = 1
-                """,
-                (value,),
-            )
-            logger.debug(f"bot_mode_status.news_mode set to {value!r}")
-        except Exception as e:
-            logger.error(f"Failed to update news_mode status: {e}", exc_info=True)
+        await self.execute(
+            """
+            UPDATE bot_mode_status
+            SET news_mode = $1, updated_at = NOW()
+            WHERE id = 1
+            """,
+            (value,),
+        )
+        logger.debug(f"bot_mode_status.news_mode set to {value!r}")
 
     async def set_vol_guard_mode(self, value: Optional[str]) -> None:
         """Set bot_mode_status.vol_guard to a pair list (e.g. 'EURUSD, GBPUSD'), 'ALL',
@@ -376,19 +377,18 @@ class DatabaseManager(BaseConnectionManager):
         A non-empty string marks the market as volatile; NULL marks it calm. Like
         news_mode, consumers read this column for truthiness, so callers must pass
         None — never the literal string 'FALSE' — when no volatility is active.
+
+        Raises on failure, for the same reason as set_news_mode.
         """
-        try:
-            await self.execute(
-                """
-                UPDATE bot_mode_status
-                SET vol_guard = $1, updated_at = NOW()
-                WHERE id = 1
-                """,
-                (value,),
-            )
-            logger.debug(f"bot_mode_status.vol_guard set to {value!r}")
-        except Exception as e:
-            logger.error(f"Failed to update vol_guard status: {e}", exc_info=True)
+        await self.execute(
+            """
+            UPDATE bot_mode_status
+            SET vol_guard = $1, updated_at = NOW()
+            WHERE id = 1
+            """,
+            (value,),
+        )
+        logger.debug(f"bot_mode_status.vol_guard set to {value!r}")
 
     async def set_spread_hour(self, active: bool) -> None:
         """Update the spread_hour flag in bot_mode_status."""

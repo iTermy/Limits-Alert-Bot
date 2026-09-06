@@ -366,7 +366,9 @@ class VolatilityGuard:
         """Sync bot_mode_status.vol_guard to the active guard keys.
 
         Writes only when the value changes (the first call always writes, so a
-        stale value left by a crash is corrected).
+        stale value left by a crash is corrected). A failed write leaves the
+        tracking state untouched so the next eval cycle retries — recording it as
+        synced would skip every later write of the same value.
         """
         if self.db is None:
             return
@@ -375,10 +377,11 @@ class VolatilityGuard:
             return
         try:
             await self.db.set_vol_guard_mode(value)
-            self._last_vol_guard_mode = value
-            self._vol_guard_synced = True
         except Exception as e:
-            logger.error(f"Failed to reconcile vol_guard in DB: {e}")
+            logger.error(f"Failed to reconcile vol_guard in DB, will retry: {e}")
+            return
+        self._last_vol_guard_mode = value
+        self._vol_guard_synced = True
 
     # ------------------------------------------------------------------
     # Threshold + key mapping

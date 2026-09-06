@@ -2,7 +2,11 @@
   "admin_ids": [
     582358569542877184
   ],
-  "signal_manager_role_ids": [1274308820352499785, 1134083706341048370, 1098568532666630235],
+  "signal_manager_role_ids": [
+    1274308820352499785,
+    1134083706341048370,
+    1098568532666630235
+  ],
   "signal_manager_user_ids": [],
   "health_alert_admin_id": 582358569542877184,
   "spread_buffer_enabled": true,
@@ -31,8 +35,7 @@
       "NZD",
       "CAD",
       "CHF"
-    ],
-    "usd_affects_gold": true
+    ]
   },
   "us_market_holidays": [
     "2025-01-01",

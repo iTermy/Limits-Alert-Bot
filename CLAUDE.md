@@ -568,8 +568,44 @@ Spread-hour and news cancels **edit the persistent embed** when one already exis
 
 News events created with `dryrun` still update `bot_mode_status.news_mode` and post activation/ended notices for clients, but never suppress or cancel alert-bot signals — that is the difference between `is_news_active_for` (client view) and `is_alert_bot_news_active_for` (what every gate in the tick path calls).
 
-### News matching is per-currency; USD also covers US markets
-`NewsEvent.instrument_affected` matches per currency (CHF news never touches EURUSD). A `USD` category additionally pauses US equities (`.NAS`/`.NYSE`) and US indices (`US_INDEX_KEYWORDS`: NAS100/US30/US500/SPX500/SPX/USTEC/US2000/…), and pauses gold when `affects_gold` is set (auto-fetched high-impact USD events). Auto-fetched events carry a merged `title` ("EUR — ECB Rate / Press Conf"); `NewsEvent.display_label` is used in all news alerts (activation, cancel, ended), falling back to the bare category for manual events.
+### News matching mirrors the EX bot's, token for token
+`NewsEvent.instrument_affected` and the execution bot's `instrument_under_news` /
+`news_names_asset` decide the same question about the same tokens, and they must
+agree: where they don't, one bot keeps tracking a signal whose position the other
+has already flattened at market. A case added on one side belongs on the other.
+
+- **A currency category matches any instrument quoted in it** (CHF news never
+  touches EURUSD), *plus* the dollar-denominated markets whose symbols carry no
+  currency code at all. `USD` therefore pauses gold (spot **and** the `GC…`/`MGC…`
+  futures CFDs), silver, oil, US equities (`.NAS`/`.NYSE`) and US indices
+  (`US_INDEX_KEYWORDS`, matched as a **prefix** — `AUS2000` is the Australian
+  small-cap index and contains `US2000`). Gold used to be gated only when a
+  per-event `affects_gold` flag was set, which auto-fetched events carried and
+  manual `!news USD` did not — so a manual dollar window force-closed the user's
+  gold position on the EX side while the TM went on recording its hits and TP.
+- **Crypto sits out currency categories.** Every coin symbol carries a currency
+  code it would otherwise match on (BTCUSDT contains USD), and a 24/7 book has no
+  liquidity event to dodge. Naming the asset still works — `!news btc`,
+  `!news crypto` — and the EX bot draws the same line via `news_names_asset`.
+- **Asset categories match by asset, not by substring.** `gold`/`xau` covers spot
+  and futures; `oil` covers both feeds' symbols (`USOILSPOT`, `XTIUSD`); `crypto`
+  covers the asset class. `_is_crypto` rules out stocks, metals, oil and indices
+  *before* its USD-suffix test — otherwise a crypto window cancels every index
+  signal, since `NAS100USD` also ends in USD.
+
+Auto-fetched events carry a merged `title` ("EUR — ECB Rate / Press Conf");
+`NewsEvent.display_label` is used in all news alerts (activation, cancel, ended),
+falling back to the bare category for manual events.
+Tests: `tests/test_news_matching.py`.
+
+### bot_mode_status writes must not be marked synced until they land
+`reconcile_news_mode` and `vol_guard._reconcile_vol_guard_mode` skip redundant
+writes by remembering the last value they wrote, so a failed write that still
+updates that memory is never retried — the flag silently never reaches the EX bot
+and it trades the whole window unguarded. `set_news_mode` / `set_vol_guard_mode`
+therefore **raise** rather than logging and returning; the reconcilers advance
+their tracking state only after the await returns, and the 30 s cleanup pass
+retries. A new mode-status setter must follow the same rule.
 
 ### Instant-entry channels enter at market, not at a limit
 `semi-swing-pa-signals` (listed in `validators._INSTANT_ENTRY_CHANNELS`) posts signals of the form `short gold sl 5001 tp 4080`: an instrument, a direction, and labelled SL/TP with **no limits**. `parse_instant_signal()` produces a `ParsedSignal` with `instant_entry=True`, `take_profit` set, and `limits=[]`; the AI fallback is skipped for these channels.
