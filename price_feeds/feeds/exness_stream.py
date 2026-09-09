@@ -25,6 +25,8 @@ from datetime import datetime, timezone
 from pathlib import Path
 from typing import Optional
 
+from core.metrics import monitoring
+
 logger = logging.getLogger(__name__)
 
 _WORKER_PATH = str(Path(__file__).resolve().parent / "exness_worker.py")
@@ -136,6 +138,8 @@ class ExnessStream:
                 except json.JSONDecodeError:
                     continue
                 if "s" in msg:
+                    if "query_seconds" in msg:
+                        monitoring.mt5_query.labels("exness").observe(msg["query_seconds"])
                     data = (
                         msg["s"],
                         {

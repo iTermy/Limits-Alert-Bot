@@ -5,6 +5,8 @@ import math
 import os
 import time
 from contextlib import suppress
+from contextvars import ContextVar
+from functools import wraps
 
 from aiohttp import web
 from prometheus_client import (
@@ -12,6 +14,7 @@ from prometheus_client import (
     CollectorRegistry,
     Counter,
     Gauge,
+    Histogram,
     generate_latest,
 )
 
@@ -43,6 +46,14 @@ class Monitoring:
         self.restarts = Counter(
             "limits_bot_restarts", "Supervisor bot restarts", registry=self.registry
         )
+        buckets = (0.0001, 0.0005, 0.001, 0.005, 0.01, 0.025, 0.05, 0.1,
+                   0.25, 0.5, 1, 2, 5, 10, 30, 60, 120, 300)
+        self.mt5_query = Histogram("limits_mt5_query_seconds", "MT5 tick query wall time",
+                                   ["feed"], buckets=buckets, registry=self.registry)
+        self.mt5_call = Histogram("limits_mt5_call_seconds", "MT5 executor call including queue wait",
+                                  ["operation", "outcome"], buckets=buckets, registry=self.registry)
+        self.reaction = Histogram("limits_reaction_seconds", "Local tick dispatch to completed stage",
+                                  ["event", "stage"], buckets=buckets, registry=self.registry)
         self.started = time.monotonic()
         self.runner = None
         self.task = None
@@ -122,3 +133,24 @@ class Monitoring:
 
 
 monitoring = Monitoring()
+
+
+# Context follows async calls and retry tasks, without storing per-signal metrics.
+_tick_started = ContextVar("metrics_tick_started", default=None)
+
+
+def trace_tick(func):
+    @wraps(func)
+    async def wrapped(*args, **kwargs):
+        token = _tick_started.set(time.monotonic())
+        try:
+            return await func(*args, **kwargs)
+        finally:
+            _tick_started.reset(token)
+    return wrapped
+
+
+def record_reaction(event, stage):
+    started = _tick_started.get()
+    if started is not None and event in {"auto_tp", "breakeven", "stop_loss", "limit_hit"}:
+        monitoring.reaction.labels(event, stage).observe(max(0, time.monotonic() - started))

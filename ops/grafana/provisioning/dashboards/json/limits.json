@@ -2,7 +2,7 @@
   "uid": "limits-alert-bot",
   "title": "Limits Alert Bot",
   "schemaVersion": 39,
-  "version": 1,
+  "version": 2,
   "refresh": "15s",
   "time": {
     "from": "now-3h",
@@ -11,6 +11,19 @@
   "panels": [
     {
       "id": 1,
+      "title": "Overview",
+      "type": "row",
+      "collapsed": false,
+      "panels": [],
+      "gridPos": {
+        "x": 0,
+        "y": 0,
+        "w": 24,
+        "h": 1
+      }
+    },
+    {
+      "id": 2,
       "title": "Scrape available",
       "type": "timeseries",
       "datasource": {
@@ -19,7 +32,7 @@
       },
       "gridPos": {
         "x": 0,
-        "y": 0,
+        "y": 1,
         "w": 12,
         "h": 8
       },
@@ -38,7 +51,7 @@
       }
     },
     {
-      "id": 2,
+      "id": 3,
       "title": "Discord ready",
       "type": "timeseries",
       "datasource": {
@@ -47,7 +60,7 @@
       },
       "gridPos": {
         "x": 12,
-        "y": 0,
+        "y": 1,
         "w": 12,
         "h": 8
       },
@@ -66,7 +79,7 @@
       }
     },
     {
-      "id": 3,
+      "id": 4,
       "title": "Database available",
       "type": "timeseries",
       "datasource": {
@@ -75,7 +88,7 @@
       },
       "gridPos": {
         "x": 0,
-        "y": 8,
+        "y": 9,
         "w": 12,
         "h": 8
       },
@@ -94,7 +107,7 @@
       }
     },
     {
-      "id": 4,
+      "id": 5,
       "title": "Price monitor running",
       "type": "timeseries",
       "datasource": {
@@ -103,7 +116,7 @@
       },
       "gridPos": {
         "x": 12,
-        "y": 8,
+        "y": 9,
         "w": 12,
         "h": 8
       },
@@ -122,231 +135,7 @@
       }
     },
     {
-      "id": 5,
-      "title": "Discord latency",
-      "type": "timeseries",
-      "datasource": {
-        "type": "prometheus",
-        "uid": "limits-prometheus"
-      },
-      "gridPos": {
-        "x": 0,
-        "y": 16,
-        "w": 12,
-        "h": 8
-      },
-      "targets": [
-        {
-          "expr": "limits_discord_latency_seconds",
-          "refId": "A",
-          "legendFormat": "Discord latency"
-        }
-      ],
-      "fieldConfig": {
-        "defaults": {
-          "unit": "s"
-        },
-        "overrides": []
-      }
-    },
-    {
       "id": 6,
-      "title": "Event loop lag",
-      "type": "timeseries",
-      "datasource": {
-        "type": "prometheus",
-        "uid": "limits-prometheus"
-      },
-      "gridPos": {
-        "x": 12,
-        "y": 16,
-        "w": 12,
-        "h": 8
-      },
-      "targets": [
-        {
-          "expr": "limits_event_loop_lag_seconds",
-          "refId": "A",
-          "legendFormat": "Event loop lag"
-        }
-      ],
-      "fieldConfig": {
-        "defaults": {
-          "unit": "s"
-        },
-        "overrides": []
-      }
-    },
-    {
-      "id": 7,
-      "title": "Tracked signals",
-      "type": "timeseries",
-      "datasource": {
-        "type": "prometheus",
-        "uid": "limits-prometheus"
-      },
-      "gridPos": {
-        "x": 0,
-        "y": 24,
-        "w": 12,
-        "h": 8
-      },
-      "targets": [
-        {
-          "expr": "limits_tracked_signals",
-          "refId": "A",
-          "legendFormat": "Tracked signals"
-        }
-      ],
-      "fieldConfig": {
-        "defaults": {
-          "unit": "short"
-        },
-        "overrides": []
-      }
-    },
-    {
-      "id": 8,
-      "title": "Feed down (1 = down)",
-      "type": "timeseries",
-      "datasource": {
-        "type": "prometheus",
-        "uid": "limits-prometheus"
-      },
-      "gridPos": {
-        "x": 12,
-        "y": 24,
-        "w": 12,
-        "h": 8
-      },
-      "targets": [
-        {
-          "expr": "limits_feed_down",
-          "refId": "A",
-          "legendFormat": "{{feed}}"
-        }
-      ],
-      "fieldConfig": {
-        "defaults": {
-          "unit": "short"
-        },
-        "overrides": []
-      }
-    },
-    {
-      "id": 9,
-      "title": "Cosmetic alert queue",
-      "type": "timeseries",
-      "datasource": {
-        "type": "prometheus",
-        "uid": "limits-prometheus"
-      },
-      "gridPos": {
-        "x": 0,
-        "y": 32,
-        "w": 12,
-        "h": 8
-      },
-      "targets": [
-        {
-          "expr": "limits_alert_queue_depth",
-          "refId": "A",
-          "legendFormat": "Cosmetic alert queue"
-        }
-      ],
-      "fieldConfig": {
-        "defaults": {
-          "unit": "short"
-        },
-        "overrides": []
-      }
-    },
-    {
-      "id": 10,
-      "title": "Important alert retries",
-      "type": "timeseries",
-      "datasource": {
-        "type": "prometheus",
-        "uid": "limits-prometheus"
-      },
-      "gridPos": {
-        "x": 12,
-        "y": 32,
-        "w": 12,
-        "h": 8
-      },
-      "targets": [
-        {
-          "expr": "limits_alert_retries",
-          "refId": "A",
-          "legendFormat": "Important alert retries"
-        }
-      ],
-      "fieldConfig": {
-        "defaults": {
-          "unit": "short"
-        },
-        "overrides": []
-      }
-    },
-    {
-      "id": 11,
-      "title": "Bot restarts",
-      "type": "timeseries",
-      "datasource": {
-        "type": "prometheus",
-        "uid": "limits-prometheus"
-      },
-      "gridPos": {
-        "x": 0,
-        "y": 40,
-        "w": 12,
-        "h": 8
-      },
-      "targets": [
-        {
-          "expr": "limits_bot_restarts_total",
-          "refId": "A",
-          "legendFormat": "Bot restarts"
-        }
-      ],
-      "fieldConfig": {
-        "defaults": {
-          "unit": "short"
-        },
-        "overrides": []
-      }
-    },
-    {
-      "id": 12,
-      "title": "Database probe duration",
-      "type": "timeseries",
-      "datasource": {
-        "type": "prometheus",
-        "uid": "limits-prometheus"
-      },
-      "gridPos": {
-        "x": 12,
-        "y": 40,
-        "w": 12,
-        "h": 8
-      },
-      "targets": [
-        {
-          "expr": "limits_database_probe_seconds",
-          "refId": "A",
-          "legendFormat": "Database probe duration"
-        }
-      ],
-      "fieldConfig": {
-        "defaults": {
-          "unit": "s"
-        },
-        "overrides": []
-      }
-    },
-    {
-      "id": 13,
       "title": "Process uptime",
       "type": "timeseries",
       "datasource": {
@@ -355,7 +144,7 @@
       },
       "gridPos": {
         "x": 0,
-        "y": 48,
+        "y": 17,
         "w": 12,
         "h": 8
       },
@@ -374,7 +163,7 @@
       }
     },
     {
-      "id": 14,
+      "id": 7,
       "title": "Firing alerts",
       "type": "timeseries",
       "datasource": {
@@ -383,7 +172,7 @@
       },
       "gridPos": {
         "x": 12,
-        "y": 48,
+        "y": 17,
         "w": 12,
         "h": 8
       },
@@ -397,6 +186,451 @@
       "fieldConfig": {
         "defaults": {
           "unit": "short"
+        },
+        "overrides": []
+      }
+    },
+    {
+      "id": 8,
+      "title": "MT5 queries and polling",
+      "type": "row",
+      "collapsed": false,
+      "panels": [],
+      "gridPos": {
+        "x": 0,
+        "y": 25,
+        "w": 24,
+        "h": 1
+      }
+    },
+    {
+      "id": 9,
+      "title": "MT5 tick query duration",
+      "type": "timeseries",
+      "description": "ICMarkets: every completed symbol_info_tick call. Exness: changed-price samples only. Local terminal API time; not broker network round trip.",
+      "datasource": {
+        "type": "prometheus",
+        "uid": "limits-prometheus"
+      },
+      "targets": [
+        {
+          "refId": "0.5",
+          "expr": "histogram_quantile(0.5, sum by (le, feed) (rate(limits_mt5_query_seconds_bucket[$__rate_interval])))",
+          "legendFormat": "p50 {{feed}}"
+        },
+        {
+          "refId": "0.95",
+          "expr": "histogram_quantile(0.95, sum by (le, feed) (rate(limits_mt5_query_seconds_bucket[$__rate_interval])))",
+          "legendFormat": "p95 {{feed}}"
+        },
+        {
+          "refId": "0.99",
+          "expr": "histogram_quantile(0.99, sum by (le, feed) (rate(limits_mt5_query_seconds_bucket[$__rate_interval])))",
+          "legendFormat": "p99 {{feed}}"
+        }
+      ],
+      "fieldConfig": {
+        "defaults": {
+          "unit": "s"
+        },
+        "overrides": []
+      },
+      "gridPos": {
+        "x": 0,
+        "y": 26,
+        "w": 12,
+        "h": 8
+      }
+    },
+    {
+      "id": 10,
+      "title": "MT5 executor duration",
+      "type": "timeseries",
+      "description": "ICMarkets executor queue wait plus call duration. Poll sweep includes all subscribed symbols. Includes errors and cancellations.",
+      "datasource": {
+        "type": "prometheus",
+        "uid": "limits-prometheus"
+      },
+      "targets": [
+        {
+          "refId": "0.5",
+          "expr": "histogram_quantile(0.5, sum by (le, operation) (rate(limits_mt5_call_seconds_bucket[$__rate_interval])))",
+          "legendFormat": "p50 {{operation}}"
+        },
+        {
+          "refId": "0.95",
+          "expr": "histogram_quantile(0.95, sum by (le, operation) (rate(limits_mt5_call_seconds_bucket[$__rate_interval])))",
+          "legendFormat": "p95 {{operation}}"
+        },
+        {
+          "refId": "0.99",
+          "expr": "histogram_quantile(0.99, sum by (le, operation) (rate(limits_mt5_call_seconds_bucket[$__rate_interval])))",
+          "legendFormat": "p99 {{operation}}"
+        }
+      ],
+      "fieldConfig": {
+        "defaults": {
+          "unit": "s"
+        },
+        "overrides": []
+      },
+      "gridPos": {
+        "x": 12,
+        "y": 26,
+        "w": 12,
+        "h": 8
+      }
+    },
+    {
+      "id": 11,
+      "title": "TP / BE reaction time",
+      "type": "row",
+      "collapsed": false,
+      "panels": [],
+      "gridPos": {
+        "x": 0,
+        "y": 34,
+        "w": 24,
+        "h": 1
+      }
+    },
+    {
+      "id": 12,
+      "title": "Tick to confirmed state update",
+      "type": "timeseries",
+      "description": "From local stream manager dispatch to confirmed TP/BE database update. Includes earlier subscribers and signals on the same tick.",
+      "datasource": {
+        "type": "prometheus",
+        "uid": "limits-prometheus"
+      },
+      "targets": [
+        {
+          "refId": "0.5",
+          "expr": "histogram_quantile(0.5, sum by (le, event) (rate(limits_reaction_seconds_bucket{stage=\"state_committed\"}[$__rate_interval])))",
+          "legendFormat": "p50 {{event}}"
+        },
+        {
+          "refId": "0.95",
+          "expr": "histogram_quantile(0.95, sum by (le, event) (rate(limits_reaction_seconds_bucket{stage=\"state_committed\"}[$__rate_interval])))",
+          "legendFormat": "p95 {{event}}"
+        },
+        {
+          "refId": "0.99",
+          "expr": "histogram_quantile(0.99, sum by (le, event) (rate(limits_reaction_seconds_bucket{stage=\"state_committed\"}[$__rate_interval])))",
+          "legendFormat": "p99 {{event}}"
+        }
+      ],
+      "fieldConfig": {
+        "defaults": {
+          "unit": "s"
+        },
+        "overrides": []
+      },
+      "gridPos": {
+        "x": 0,
+        "y": 35,
+        "w": 12,
+        "h": 8
+      }
+    },
+    {
+      "id": 13,
+      "title": "Tick to Discord delivery",
+      "type": "timeseries",
+      "description": "From local tick dispatch to successful critical notification return, including asynchronous delivery retries. No broker execution timing.",
+      "datasource": {
+        "type": "prometheus",
+        "uid": "limits-prometheus"
+      },
+      "targets": [
+        {
+          "refId": "0.5",
+          "expr": "histogram_quantile(0.5, sum by (le, event) (rate(limits_reaction_seconds_bucket{stage=\"discord_delivered\"}[$__rate_interval])))",
+          "legendFormat": "p50 {{event}}"
+        },
+        {
+          "refId": "0.95",
+          "expr": "histogram_quantile(0.95, sum by (le, event) (rate(limits_reaction_seconds_bucket{stage=\"discord_delivered\"}[$__rate_interval])))",
+          "legendFormat": "p95 {{event}}"
+        },
+        {
+          "refId": "0.99",
+          "expr": "histogram_quantile(0.99, sum by (le, event) (rate(limits_reaction_seconds_bucket{stage=\"discord_delivered\"}[$__rate_interval])))",
+          "legendFormat": "p99 {{event}}"
+        }
+      ],
+      "fieldConfig": {
+        "defaults": {
+          "unit": "s"
+        },
+        "overrides": []
+      },
+      "gridPos": {
+        "x": 12,
+        "y": 35,
+        "w": 12,
+        "h": 8
+      }
+    },
+    {
+      "id": 14,
+      "title": "Discord delivery",
+      "type": "row",
+      "collapsed": false,
+      "panels": [],
+      "gridPos": {
+        "x": 0,
+        "y": 43,
+        "w": 24,
+        "h": 1
+      }
+    },
+    {
+      "id": 15,
+      "title": "Discord latency",
+      "type": "timeseries",
+      "datasource": {
+        "type": "prometheus",
+        "uid": "limits-prometheus"
+      },
+      "gridPos": {
+        "x": 0,
+        "y": 44,
+        "w": 12,
+        "h": 8
+      },
+      "targets": [
+        {
+          "expr": "limits_discord_latency_seconds",
+          "refId": "A",
+          "legendFormat": "Discord latency"
+        }
+      ],
+      "fieldConfig": {
+        "defaults": {
+          "unit": "s"
+        },
+        "overrides": []
+      }
+    },
+    {
+      "id": 16,
+      "title": "Cosmetic alert queue",
+      "type": "timeseries",
+      "datasource": {
+        "type": "prometheus",
+        "uid": "limits-prometheus"
+      },
+      "gridPos": {
+        "x": 12,
+        "y": 44,
+        "w": 12,
+        "h": 8
+      },
+      "targets": [
+        {
+          "expr": "limits_alert_queue_depth",
+          "refId": "A",
+          "legendFormat": "Cosmetic alert queue"
+        }
+      ],
+      "fieldConfig": {
+        "defaults": {
+          "unit": "short"
+        },
+        "overrides": []
+      }
+    },
+    {
+      "id": 17,
+      "title": "Important alert retries",
+      "type": "timeseries",
+      "datasource": {
+        "type": "prometheus",
+        "uid": "limits-prometheus"
+      },
+      "gridPos": {
+        "x": 0,
+        "y": 52,
+        "w": 12,
+        "h": 8
+      },
+      "targets": [
+        {
+          "expr": "limits_alert_retries",
+          "refId": "A",
+          "legendFormat": "Important alert retries"
+        }
+      ],
+      "fieldConfig": {
+        "defaults": {
+          "unit": "short"
+        },
+        "overrides": []
+      }
+    },
+    {
+      "id": 18,
+      "title": "Price feeds and signals",
+      "type": "row",
+      "collapsed": false,
+      "panels": [],
+      "gridPos": {
+        "x": 0,
+        "y": 60,
+        "w": 24,
+        "h": 1
+      }
+    },
+    {
+      "id": 19,
+      "title": "Tracked signals",
+      "type": "timeseries",
+      "datasource": {
+        "type": "prometheus",
+        "uid": "limits-prometheus"
+      },
+      "gridPos": {
+        "x": 0,
+        "y": 61,
+        "w": 12,
+        "h": 8
+      },
+      "targets": [
+        {
+          "expr": "limits_tracked_signals",
+          "refId": "A",
+          "legendFormat": "Tracked signals"
+        }
+      ],
+      "fieldConfig": {
+        "defaults": {
+          "unit": "short"
+        },
+        "overrides": []
+      }
+    },
+    {
+      "id": 20,
+      "title": "Feed down (1 = down)",
+      "type": "timeseries",
+      "datasource": {
+        "type": "prometheus",
+        "uid": "limits-prometheus"
+      },
+      "gridPos": {
+        "x": 12,
+        "y": 61,
+        "w": 12,
+        "h": 8
+      },
+      "targets": [
+        {
+          "expr": "limits_feed_down",
+          "refId": "A",
+          "legendFormat": "{{feed}}"
+        }
+      ],
+      "fieldConfig": {
+        "defaults": {
+          "unit": "short"
+        },
+        "overrides": []
+      }
+    },
+    {
+      "id": 21,
+      "title": "Runtime and database",
+      "type": "row",
+      "collapsed": false,
+      "panels": [],
+      "gridPos": {
+        "x": 0,
+        "y": 69,
+        "w": 24,
+        "h": 1
+      }
+    },
+    {
+      "id": 22,
+      "title": "Event loop lag",
+      "type": "timeseries",
+      "datasource": {
+        "type": "prometheus",
+        "uid": "limits-prometheus"
+      },
+      "gridPos": {
+        "x": 0,
+        "y": 70,
+        "w": 12,
+        "h": 8
+      },
+      "targets": [
+        {
+          "expr": "limits_event_loop_lag_seconds",
+          "refId": "A",
+          "legendFormat": "Event loop lag"
+        }
+      ],
+      "fieldConfig": {
+        "defaults": {
+          "unit": "s"
+        },
+        "overrides": []
+      }
+    },
+    {
+      "id": 23,
+      "title": "Bot restarts",
+      "type": "timeseries",
+      "datasource": {
+        "type": "prometheus",
+        "uid": "limits-prometheus"
+      },
+      "gridPos": {
+        "x": 12,
+        "y": 70,
+        "w": 12,
+        "h": 8
+      },
+      "targets": [
+        {
+          "expr": "limits_bot_restarts_total",
+          "refId": "A",
+          "legendFormat": "Bot restarts"
+        }
+      ],
+      "fieldConfig": {
+        "defaults": {
+          "unit": "short"
+        },
+        "overrides": []
+      }
+    },
+    {
+      "id": 24,
+      "title": "Database probe duration",
+      "type": "timeseries",
+      "datasource": {
+        "type": "prometheus",
+        "uid": "limits-prometheus"
+      },
+      "gridPos": {
+        "x": 0,
+        "y": 78,
+        "w": 12,
+        "h": 8
+      },
+      "targets": [
+        {
+          "expr": "limits_database_probe_seconds",
+          "refId": "A",
+          "legendFormat": "Database probe duration"
+        }
+      ],
+      "fieldConfig": {
+        "defaults": {
+          "unit": "s"
         },
         "overrides": []
       }

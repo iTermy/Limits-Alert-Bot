@@ -81,3 +81,47 @@ async def test_disabled_exporter(monkeypatch):
     assert metrics.runner is None
     assert metrics.task is None
     await metrics.close()
+
+
+@pytest.mark.asyncio
+async def test_reaction_context_survives_retry_and_resets(monkeypatch):
+    import core.metrics as module
+
+    metrics = Monitoring()
+    monkeypatch.setattr(module, "monitoring", metrics)
+    clock = [10.0]
+    monkeypatch.setattr(module.time, "monotonic", lambda: clock[0])
+    release = asyncio.Event()
+
+    async def retry():
+        await release.wait()
+        module.record_reaction("auto_tp", "discord_delivered")
+
+    @module.trace_tick
+    async def tick():
+        clock[0] = 10.25
+        module.record_reaction("auto_tp", "state_committed")
+        return asyncio.create_task(retry())
+
+    task = await tick()
+    clock[0] = 12.0
+    module.record_reaction("breakeven", "state_committed")  # outside tick: ignored
+    release.set()
+    await task
+    output = generate_latest(metrics.registry).decode()
+    assert 'limits_reaction_seconds_sum{event="auto_tp",stage="state_committed"} 0.25' in output
+    assert 'limits_reaction_seconds_sum{event="auto_tp",stage="discord_delivered"} 2.0' in output
+    assert 'event="breakeven"' not in output
+
+
+@pytest.mark.asyncio
+async def test_failed_tick_clears_context():
+    from core.metrics import _tick_started, trace_tick
+
+    @trace_tick
+    async def tick():
+        raise RuntimeError("subscriber failed")
+
+    with pytest.raises(RuntimeError):
+        await tick()
+    assert _tick_started.get() is None

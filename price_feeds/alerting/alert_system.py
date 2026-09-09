@@ -16,6 +16,7 @@ from typing import Any, Optional
 
 import discord
 
+from core.metrics import record_reaction
 from models import SignalData
 from models.signal import breakeven_price
 from price_feeds.alerting.archive_manager import (
@@ -635,6 +636,7 @@ class AlertSystem:
             delivered = False
 
         if delivered:
+            record_reaction(key.split(":", 1)[0], "discord_delivered")
             self._record_discord_operation_success()
         else:
             self.queue_delivery_retry(key, operation, *args, **kwargs)
@@ -657,6 +659,7 @@ class AlertSystem:
                         timeout=self._DELIVERY_ATTEMPT_TIMEOUT,
                     )
                     if delivered:
+                        record_reaction(key.split(":", 1)[0], "discord_delivered")
                         self._record_discord_operation_success()
                         logger.info("Delivered queued Discord event %s", key)
                         return

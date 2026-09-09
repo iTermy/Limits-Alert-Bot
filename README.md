@@ -215,3 +215,21 @@ and Grafana; external notification delivery needs an Alertmanager destination
 
 Verify: confirm the bot target is UP and dashboard values populate. Stop the bot;
 BotUnavailable should fire after one minute. Restart and verify recovery.
+
+### Latency panels
+
+Dashboard rows separate overview, MT5 queries, TP/BE reactions, Discord delivery,
+price feeds, and runtime/database health. Latency panels show p50/p95/p99.
+ICMarkets query latency measures each completed `symbol_info_tick` call; executor
+latency includes scheduling wait and full polling sweeps, including cancellation.
+Exness query latency is sampled on changed-price ticks sent by its worker.
+These are local terminal API times, not a broker network ping.
+
+Reaction timing starts when the stream manager receives a tick for dispatch.
+TP/BE state timing ends after the database update is confirmed; Discord timing ends
+only when critical delivery returns success, including background retry delays.
+This excludes time before dispatch (market movement, feed transport, polling interval,
+and Exness IPC queue). It is not order execution or fill latency. BE here means the
+breakeven stop firing, not a broker stop modification. Failed/untriggered events do
+not produce successful-reaction observations. Empty panels mean no qualifying events
+in the selected rate window; restart the updated bot to begin collecting metrics.

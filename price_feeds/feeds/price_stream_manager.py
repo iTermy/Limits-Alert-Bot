@@ -6,10 +6,11 @@ from collections import defaultdict
 from datetime import datetime, timezone
 from typing import Callable, Optional
 
+from core.metrics import trace_tick
+from price_feeds.config.symbol_mapper import SymbolMapper
 from price_feeds.feeds.binance_stream import BinanceStream
 from price_feeds.feeds.icmarkets_stream import ICMarketsStream
 from price_feeds.feeds.oanda_stream import OANDAStream
-from price_feeds.config.symbol_mapper import SymbolMapper
 
 logger = logging.getLogger(__name__)
 
@@ -390,6 +391,7 @@ class PriceStreamManager:
             except Exception as e:
                 logger.debug("%s reconnect failed: %s", feed_name, e)
 
+    @trace_tick
     async def _process_price_update(self, symbol: str, price_data: dict, feed: str):
         """Process a price update, compute spread if absent, and notify subscribers."""
         # Calculate spread if not already present
