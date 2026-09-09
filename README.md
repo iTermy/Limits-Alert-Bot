@@ -177,3 +177,41 @@ direct access to `licenses` or `users`.
   (heartbeat), and is allowed to age when a feed goes silent so staleness gates work.
 - `feed_health.status` changes are written immediately; unchanged rows are refreshed
   at most every 10 minutes.
+
+## Monitoring (Windows)
+
+Install updated `requirements.txt`, restart the bot with `run.bat`, then run
+`run_monitoring.bat`. The launcher installs Docker Desktop via winget if missing,
+starts its Linux engine, and launches Prometheus and Grafana. Complete any Docker
+administrator/WSL 2 prompts and reboot if requested, then rerun. Windows Server is
+not supported by Docker Desktop. See [Docker prerequisites](https://docs.docker.com/desktop/setup/install/windows-install/).
+The launcher does not start another bot or change its Python environment.
+
+- Grafana: http://localhost:3003 (user `admin`, generated password in `.monitoring.env`).
+  Open Dashboards / Limits Alert Bot. Password initialization only applies on first
+  start; editing the file does not reset an existing Grafana account.
+- Prometheus: http://localhost:9091 (Targets and Alerts pages).
+- Stop: `run_monitoring.bat -Stop`. Named volumes preserve data; retention is 30 days.
+
+The native bot exposes `/metrics` on TCP 9108 via `host.docker.internal`.
+`METRICS_ENABLED=false` disables it. `METRICS_HOST` defaults to `0.0.0.0` so Docker
+can reach it; restrict inbound TCP 9108 to Docker's network using Windows Firewall.
+Do not publish it through a public tunnel. `METRICS_PORT` defaults to 9108; update
+`ops/prometheus/prometheus.yml` too if changing it. Grafana/Prometheus bind only to
+localhost, using ports distinct from the neighboring discord-bot stack.
+
+Metrics cover Discord readiness/latency, event loop lag, database probes, tracked
+signals, price monitor health, market-aware feed failures, alert queue depth,
+important delivery retries, uptime, and supervisor restarts. Database probes use
+SELECT 1 on the existing pool with a 3-second timeout. No credentials, signal IDs,
+or prices are exported. Feed status reuses existing market-hours checks; feeds not
+yet initialized are absent. Restart counts cover in-process supervisor restarts,
+not watchdog process replacements. A frozen event loop causes scrapes to fail.
+
+Rules detect bot/database outages, disconnected Discord, stopped monitoring,
+feed failures, prolonged retries, and loop delays. Rules are visible in Prometheus
+and Grafana; external notification delivery needs an Alertmanager destination
+(not configured). Existing Discord health notifications continue independently.
+
+Verify: confirm the bot target is UP and dashboard values populate. Stop the bot;
+BotUnavailable should fire after one minute. Restart and verify recovery.

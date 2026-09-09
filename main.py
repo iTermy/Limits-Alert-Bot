@@ -11,6 +11,7 @@ _here = os.path.dirname(os.path.abspath(__file__))
 load_dotenv(dotenv_path=os.path.join(_here, ".env"))
 
 from core.bot import TradingBot
+from core.metrics import monitoring
 from utils.logger import logger
 
 DISCORD_TOKEN = os.getenv("DISCORD_BOT_TOKEN")
@@ -40,10 +41,12 @@ async def _run_once():
     """Start one bot instance and run until it stops. Returns when start()
     returns; propagates any exception it raised."""
     bot = TradingBot()
+    monitoring.bot = bot
     try:
         logger.info("Starting TradeMaster Alert Bot")
         await bot.start(DISCORD_TOKEN)
     finally:
+        monitoring.bot = None
         await bot.close()
         logger.info("Bot stopped")
 
@@ -53,6 +56,17 @@ async def main():
     loop = asyncio.get_running_loop()
     loop.set_exception_handler(_log_loop_exception)
 
+    try:
+        await monitoring.start()
+    except Exception:
+        logger.exception("Metrics endpoint failed to start; continuing without monitoring")
+    try:
+        await _supervise(loop)
+    finally:
+        await monitoring.close()
+
+
+async def _supervise(loop):
     delay = _RESTART_BASE_DELAY
     while True:
         started = loop.time()
@@ -68,6 +82,7 @@ async def main():
         if loop.time() - started >= _HEALTHY_RUN_SECONDS:
             delay = _RESTART_BASE_DELAY
 
+        monitoring.restarts.inc()
         await asyncio.sleep(delay)
         delay = min(delay * 2, _RESTART_MAX_DELAY)
 

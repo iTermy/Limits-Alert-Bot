@@ -45,3 +45,8 @@ data/channel_budget.json
 # Local production bundles (contain credentials)
 dist/
 .env.testing-backup
+
+.monitoring.env
+.worktrees/
+
+.venv-monitoring/

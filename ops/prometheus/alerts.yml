@@ -1,0 +1,52 @@
+groups:
+  - name: limits-alert-bot
+    rules:
+      - alert: BotUnavailable
+        expr: up{job="limits-alert-bot"} == 0
+        for: 1m
+        labels:
+          severity: warning
+        annotations:
+          summary: "Bot metrics endpoint is unreachable or event loop is blocked"
+      - alert: DiscordDisconnected
+        expr: limits_discord_ready == 0
+        for: 2m
+        labels:
+          severity: warning
+        annotations:
+          summary: "Discord is disconnected"
+      - alert: DatabaseUnavailable
+        expr: limits_database_up == 0
+        for: 1m
+        labels:
+          severity: warning
+        annotations:
+          summary: "Database probe is failing"
+      - alert: PriceMonitorStopped
+        expr: limits_monitor_running == 0
+        for: 2m
+        labels:
+          severity: warning
+        annotations:
+          summary: "Price monitor is stopped"
+      - alert: FeedDown
+        expr: limits_feed_down == 1
+        for: 2m
+        labels:
+          severity: warning
+        annotations:
+          summary: "Price feed is down during market hours"
+      - alert: AlertBacklog
+        expr: limits_alert_retries > 0
+        for: 5m
+        labels:
+          severity: warning
+        annotations:
+          summary: "Important Discord alerts are waiting for retry"
+      - alert: EventLoopSlow
+        expr: limits_event_loop_lag_seconds > 2
+        for: 1m
+        labels:
+          severity: warning
+        annotations:
+          summary: "Event loop is delayed"
