@@ -16,6 +16,7 @@ from core.parser.pattern_parsers import (
     invalidate_gold_tolls_sl_cache,
     invalidate_risky_gold_sl_cache,
 )
+from core.news_manager import LEAD_MINUTES
 from database import report_queries
 from database.config_history_ops import log_config_change
 from utils.config_loader import load_channels_config, load_settings, save_settings
@@ -235,7 +236,7 @@ def _help_news_embed() -> discord.Embed:
         name="Schedule a news window",
         value=(
             "`!news <category> <time> [window] [tz:<tz>] [date:<date>]`\n"
-            "Example: `!news USD 12:30pm 15` — USD news at 12:30 PM EST, ±15 min window\n"
+            "Example: `!news USD 12:30pm 15` — USD news at 12:30 PM EST, window closes 15 min after\n"
             "Example: `!news gold 8:30am tz:UTC` — Gold news at 8:30 AM UTC\n"
             "Example: `!news all 14:00 30 date:2025-06-20` — All pairs on a specific date"
         ),
@@ -289,7 +290,10 @@ def _help_news_embed() -> discord.Embed:
         inline=False,
     )
     embed.set_footer(
-        text="Window is ±N minutes around the news time. Default window is 10 minutes."
+        text=(
+            f"Windows open {LEAD_MINUTES} min before the news time; [window] sets how long "
+            "they stay open after it (default 10 minutes)."
+        )
     )
     return embed
 

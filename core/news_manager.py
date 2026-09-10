@@ -2,9 +2,9 @@
 News Mode Manager - Tracks news windows for clients and alert-bot guards.
 
 Usage:
-    !news USD 12:30pm 15                  → cancel all USD pairs hit within 15 min of 12:30pm (EST)
-    !news gold 8:30am                     → cancel all GOLD signals hit within 15 min of 8:30am (default window)
-    !news all 14:00 30                    → cancel ALL signals hit within 30 min of 14:00
+    !news USD 12:30pm 15                  → cancel USD pairs hit from 40 min before 12:30pm (EST) to 15 min after
+    !news gold 8:30am                     → same for GOLD, with the default 10 min tail
+    !news all 14:00 30                    → cancel ALL signals hit from 40 min before 14:00 to 30 min after
     !news USD 12:30pm 15 dryrun           → pause clients, but keep alert-bot signals running
     !news USD 14:30 tz:UTC                → specify timezone (EST is default)
     !news USD 9:30am date:2025-06-15      → schedule for a specific date
@@ -225,13 +225,19 @@ NAMED_CATEGORIES: dict[str, Callable[[str], bool]] = {
 }
 
 
+# How long before a scheduled release the window opens. Longer than the tail on
+# purpose: positioning and spread widening start well ahead of the print, while
+# the book is back to normal shortly after it.
+LEAD_MINUTES = 40
+
+
 @dataclass
 class NewsEvent:
     """A single news event window."""
 
     category: str  # raw category string (e.g. "USD", "gold", "all")
-    news_time: datetime  # centre of the window (timezone-aware, UTC internally)
-    window_minutes: int  # half the window on each side, so total = 2× this
+    news_time: datetime  # the release itself (timezone-aware, UTC internally)
+    window_minutes: int  # how long the window stays open after the release
     created_by: str  # Discord username who set the event
     created_at: datetime = field(default_factory=lambda: datetime.now(pytz.utc))
     event_id: int = field(default=0)
@@ -262,7 +268,9 @@ class NewsEvent:
 
     @property
     def start_time(self) -> datetime:
-        return self.news_time - timedelta(minutes=self.window_minutes)
+        if self.is_now_mode:
+            return self.news_time
+        return self.news_time - timedelta(minutes=LEAD_MINUTES)
 
     @property
     def end_time(self) -> datetime:
@@ -338,7 +346,7 @@ class NewsEvent:
         return (
             f"[#{self.event_id}]{tag} {self.category.upper()}{name} news @ "
             f"{news_est.strftime('%I:%M %p')} EST "
-            f"(±{self.window_minutes} min)"
+            f"(-{LEAD_MINUTES} / +{self.window_minutes} min)"
         )
 
 
@@ -750,6 +758,9 @@ def parse_news_command(args_str: str) -> tuple[str, datetime, int, str, bool]:
     """
     Parse the argument string from !news and return
     (category, news_time_utc, window_minutes, display_tz_label, auto_advanced).
+
+    window_minutes is the tail after the release; the window always opens
+    LEAD_MINUTES before it.
 
     auto_advanced is True only when no explicit date was given and the time had
     already passed today, so it was rolled to tomorrow.

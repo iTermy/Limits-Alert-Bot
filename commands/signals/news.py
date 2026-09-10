@@ -12,6 +12,7 @@ import pytz
 from discord.ext import commands
 
 from core.news_manager import (
+    LEAD_MINUTES,
     NewsManager,
     parse_news_command,
 )
@@ -264,7 +265,9 @@ class NewsCog(BaseCog):
         )
         embed.add_field(name="Category", value=category.upper(), inline=True)
         embed.add_field(name="News Time", value=tz_display, inline=True)
-        embed.add_field(name="Window", value=f"±{window_minutes} min", inline=True)
+        embed.add_field(
+            name="Window", value=f"-{LEAD_MINUTES} / +{window_minutes} min", inline=True
+        )
         if client_only:
             embed.add_field(name="Mode", value="Dry run (clients only)", inline=False)
         embed.add_field(

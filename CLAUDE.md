@@ -568,6 +568,13 @@ Spread-hour and news cancels **edit the persistent embed** when one already exis
 
 News events created with `dryrun` still update `bot_mode_status.news_mode` and post activation/ended notices for clients, but never suppress or cancel alert-bot signals — that is the difference between `is_news_active_for` (client view) and `is_alert_bot_news_active_for` (what every gate in the tick path calls).
 
+### The news window is asymmetric
+It opens `news_manager.LEAD_MINUTES` (40) before the release and closes the event's
+own `window_minutes` after it — positioning and spread widening start well ahead of
+the print, while the book is back to normal shortly after. The `[window]` argument to
+`!news` sets only the tail. `!news now` has no release to lead into, so its
+`start_time` is the moment it was set. Tests: `tests/test_news_window.py`.
+
 ### News matching mirrors the EX bot's, token for token
 `NewsEvent.instrument_affected` and the execution bot's `instrument_under_news` /
 `news_names_asset` decide the same question about the same tokens, and they must
