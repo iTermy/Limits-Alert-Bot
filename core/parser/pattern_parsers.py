@@ -13,6 +13,7 @@ from . import INSTRUMENT_MAPPINGS, ParsedSignal
 from .validators import (
     INDEX_SYMBOL_BLACKLIST,
     uses_gold_tolls_sl,
+    uses_one_to_one,
     validate_signal,
 )
 
@@ -167,6 +168,11 @@ HIGH_VALUE_INSTRUMENTS = {
 
 LONG_KEYWORDS = ["long", "buy"]
 SHORT_KEYWORDS = ["short", "sell"]
+
+# What a 1:1 RR signal risks, and therefore targets, when the sender names neither
+# a stop nor a target: the stop sits this far beyond the deepest limit and the take
+# profit the same distance the other way.
+ONE_TO_ONE_DEFAULT_RISK = 10.0
 
 # Channel-name → signal type mapping. Channels not listed default to "standard"
 # unless the message body itself contains a "swing" or "scalp" keyword.
@@ -655,10 +661,13 @@ def _general_tolls_limits_and_stop(
     return limits, stop_loss
 
 
-def _tolls_limits_and_stop(numbers: list[float], direction: str, raw_text: str, channel_name: str) -> tuple:
-    """Gold-tolls-style channels: an explicit SL keyword (with 2+ numbers) makes
-    the last number the stop; otherwise every number is a limit and the SL is the
-    configured offset beyond the outermost limit (risky-gold has its own offset)."""
+def _offset_sl_limits_and_stop(
+    numbers: list[float], direction: str, raw_text: str, sl_offset: float, label: str
+) -> tuple:
+    """Channels that auto-derive their stop: an explicit SL keyword (with 2+
+    numbers) makes the last number the stop; otherwise every number is a limit and
+    the stop sits `sl_offset` beyond the outermost one, so a lone number is a
+    complete signal."""
     if not numbers:
         return None, None
 
@@ -666,27 +675,33 @@ def _tolls_limits_and_stop(numbers: list[float], direction: str, raw_text: str, 
         limits, stop_loss = _split_explicit_stop(numbers, direction)
         if limits is None:
             logger.debug(
-                f"Tolls explicit stop loss validation failed for {direction} with numbers {numbers}"
+                f"{label} explicit stop loss validation failed for {direction} "
+                f"with numbers {numbers}"
             )
             return None, None
-        _reject_out_of_order(limits, direction, "tolls")
+        _reject_out_of_order(limits, direction, label)
         logger.debug(
-            f"Tolls channel (explicit SL): {len(limits)} limit(s), stop={stop_loss} ({direction})"
+            f"{label} (explicit SL): {len(limits)} limit(s), stop={stop_loss} ({direction})"
         )
         return limits, stop_loss
 
     limits = numbers
+    stop_loss = _auto_stop(limits, direction, sl_offset)
+    _reject_out_of_order(limits, direction, label)
+    logger.debug(
+        f"{label} (auto SL, offset={sl_offset}): {len(limits)} limit(s), "
+        f"stop={stop_loss} ({direction})"
+    )
+    return limits, stop_loss
+
+
+def _tolls_limits_and_stop(numbers: list[float], direction: str, raw_text: str, channel_name: str) -> tuple:
+    """Gold-tolls-style channels, each with its own configured SL offset."""
     if channel_name and channel_name.lower() == "risky-gold":
         sl_offset = get_risky_gold_sl_offset()
     else:
         sl_offset = get_gold_tolls_sl_offset()
-    stop_loss = _auto_stop(limits, direction, sl_offset)
-    _reject_out_of_order(limits, direction, "tolls")
-    logger.debug(
-        f"Tolls channel: Using all {len(limits)} number(s) as limits, "
-        f"auto-setting stop to {stop_loss} (offset={sl_offset}, {direction})"
-    )
-    return limits, stop_loss
+    return _offset_sl_limits_and_stop(numbers, direction, raw_text, sl_offset, "tolls")
 
 
 def _standard_limits_and_stop(numbers: list[float], direction: str) -> tuple:
@@ -721,6 +736,8 @@ def determine_limits_and_stop(
 
     Channel routing:
       - general-tolls: per-instrument auto-SL unless an SL keyword is present
+      - 1:1 channels: auto-SL at ONE_TO_ONE_DEFAULT_RISK unless an SL keyword
+        provides one explicitly
       - gold-tolls-style channels (incl. risky-gold): offset-derived auto-SL
         unless an SL keyword provides one explicitly
       - everything else: last (or first) number is the stop loss
@@ -728,10 +745,49 @@ def determine_limits_and_stop(
     if channel_name and channel_name.lower() == "general-tolls":
         return _general_tolls_limits_and_stop(numbers, direction, raw_text, instrument)
 
+    if uses_one_to_one(channel_name):
+        return _offset_sl_limits_and_stop(
+            numbers, direction, raw_text, ONE_TO_ONE_DEFAULT_RISK, "1-1"
+        )
+
     if uses_gold_tolls_sl(channel_name):
         return _tolls_limits_and_stop(numbers, direction, raw_text, channel_name)
 
     return _standard_limits_and_stop(numbers, direction)
+
+
+def deepest_limit(limits: list[float], direction: str) -> float:
+    """The limit furthest into the trade — the last level a falling (long) or
+    rising (short) price reaches, and the one `_auto_stop` measures the stop from."""
+    return min(limits) if direction == "long" else max(limits)
+
+
+def one_to_one_take_profit(
+    limits: list[float], stop_loss: float, direction: str, explicit_tp: Optional[float]
+) -> float:
+    """Fixed exit price for a 1:1 RR signal.
+
+    A target the sender labelled wins outright. Otherwise the trade targets exactly
+    what it risks, measured from the deepest limit — the same anchor the stop is
+    derived from, so a signal that fills all the way down makes 1R.
+
+    Raises LimitsOrderError when a labelled target sits on the losing side of the
+    stop, which is always a typo.
+    """
+    from . import LimitsOrderError
+
+    if explicit_tp is not None:
+        profitable = explicit_tp > stop_loss if direction == "long" else explicit_tp < stop_loss
+        if not profitable:
+            raise LimitsOrderError(
+                f"{direction} take profit {explicit_tp} is on the wrong side of "
+                f"stop loss {stop_loss}"
+            )
+        return explicit_tp
+
+    anchor = deepest_limit(limits, direction)
+    risk = abs(anchor - stop_loss)
+    return anchor + risk if direction == "long" else anchor - risk
 
 
 def get_signal_type(text: str, channel_name: Optional[str] = None) -> str:
@@ -772,6 +828,20 @@ def _instant_price(pattern: re.Pattern, text: str) -> Optional[float]:
         return float(match.group(1))
     except ValueError:
         return None
+
+
+def strip_take_profit(text: str) -> tuple[Optional[float], str]:
+    """Pull a labelled take profit out of a message, returning it alongside the
+    text with that phrase removed — otherwise the target reads as another limit
+    and breaks the direction's ordering check."""
+    match = _INSTANT_TP_RE.search(text)
+    if not match:
+        return None, text
+    try:
+        price = float(match.group(1))
+    except ValueError:
+        return None, text
+    return price, f"{text[: match.start()]} {text[match.end() :]}"
 
 
 def parse_instant_signal(
@@ -860,11 +930,23 @@ class CorePatternParser:
         """Parse using pattern matching for core instruments"""
         try:
             cleaned = clean_message(message)
+
+            # A 1:1 signal may name its own target. Take it out of the text before
+            # the numbers are read, so it is never counted as a limit.
+            one_to_one = uses_one_to_one(channel_name)
+            explicit_tp = None
+            if one_to_one:
+                explicit_tp, cleaned = strip_take_profit(cleaned)
+
             numbers = extract_numbers(cleaned)
 
             min_numbers = (
                 1
-                if (uses_gold_tolls_sl(channel_name) or _general_tolls_auto_sl(channel_name, cleaned))
+                if (
+                    uses_gold_tolls_sl(channel_name)
+                    or one_to_one
+                    or _general_tolls_auto_sl(channel_name, cleaned)
+                )
                 else 2
             )
 
@@ -877,7 +959,10 @@ class CorePatternParser:
                 logger.debug(f"No instrument found for channel {channel_name}")
                 return None
 
-            numbers = scale_forex_numbers(numbers, instrument)
+            if explicit_tp is None:
+                numbers = scale_forex_numbers(numbers, instrument)
+            else:
+                *numbers, explicit_tp = scale_forex_numbers([*numbers, explicit_tp], instrument)
             if not numbers:
                 logger.warning("No numbers after scaling")
                 return None
@@ -901,12 +986,18 @@ class CorePatternParser:
             expiry_type = extract_expiry(cleaned, channel_name, self.channel_config)
             keywords = extract_keywords(cleaned)
             signal_type = get_signal_type(message, channel_name)
+            take_profit = (
+                one_to_one_take_profit(limits, stop_loss, direction, explicit_tp)
+                if one_to_one
+                else None
+            )
 
             signal = ParsedSignal(
                 instrument=instrument,
                 direction=direction,
                 limits=limits,
                 stop_loss=stop_loss,
+                take_profit=take_profit,
                 expiry_type=expiry_type,
                 raw_text=message,
                 parse_method="core",

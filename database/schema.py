@@ -67,10 +67,13 @@ async def initialize_database(db_manager):
                 total_limits INTEGER DEFAULT 0,
                 limits_hit   INTEGER DEFAULT 0,
                 type         TEXT DEFAULT 'standard',
+                entry_type   TEXT NOT NULL DEFAULT 'limit',
 
                 created_at TIMESTAMPTZ DEFAULT NOW(),
                 updated_at TIMESTAMPTZ DEFAULT NOW(),
 
+                CONSTRAINT signals_entry_type_check
+                    CHECK (entry_type IN ('limit', 'market')),
                 CONSTRAINT signals_status_check
                     CHECK (status IN ('active', 'hit', 'profit', 'breakeven', 'stop_loss', 'cancelled')),
                 CONSTRAINT signals_direction_check
@@ -494,6 +497,31 @@ async def _run_migrations(conn):
                 UPDATE signals SET data_version = 1;
             END IF;
         END $$;
+        """,
+        # How the signal enters: 'limit' rests an order at a price the sender chose,
+        # 'market' is taken at the price the bot observed. Execution clients used to
+        # infer this from take_profit being non-NULL — the only marker an instant
+        # entry had — but a fixed exit price and a market entry are different facts,
+        # and 1:1 signals now carry the first without the second.
+        #
+        # The backfill has to run in the same branch as the ADD: re-running it later
+        # would relabel every 1:1 signal a market entry.
+        """
+        DO $$
+        BEGIN
+            IF NOT EXISTS (
+                SELECT 1 FROM information_schema.columns
+                WHERE table_name = 'signals' AND column_name = 'entry_type'
+            ) THEN
+                ALTER TABLE signals ADD COLUMN entry_type TEXT NOT NULL DEFAULT 'limit';
+                UPDATE signals SET entry_type = 'market' WHERE take_profit IS NOT NULL;
+            END IF;
+        END $$;
+        """,
+        """
+        ALTER TABLE signals DROP CONSTRAINT IF EXISTS signals_entry_type_check;
+        ALTER TABLE signals ADD CONSTRAINT signals_entry_type_check
+            CHECK (entry_type IN ('limit', 'market'));
         """,
         # Excursion additions: which extreme came first, and post-close follow-through.
         """

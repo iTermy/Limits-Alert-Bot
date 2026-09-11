@@ -26,6 +26,15 @@ _GOLD_TOLLS_SL_CHANNELS = {"risky-gold"}
 # entry is resolved from the live feed when the signal is saved.
 _INSTANT_ENTRY_CHANNELS = {"semi-swing-pa-signals"}
 
+# Channels whose signals target exactly what they risk. The sender may leave the
+# stop out entirely, so a lone limit price is a complete signal here.
+_ONE_TO_ONE_CHANNELS = {"gold-1-1-rr"}
+
+
+def uses_one_to_one(channel_name: Optional[str]) -> bool:
+    """True for channels whose take profit mirrors the stop-loss distance."""
+    return bool(channel_name) and channel_name.lower() in _ONE_TO_ONE_CHANNELS
+
 
 def uses_gold_tolls_sl(channel_name: Optional[str]) -> bool:
     """True for channels that auto-derive SL from the gold-tolls offset."""
@@ -104,10 +113,10 @@ def is_potential_signal(
 
     numbers = _extract_numbers(text)
 
-    # Tolls-style channels (including risky-gold) auto-derive the stop loss, so a
-    # single number is a valid signal — just a limit. Regular channels need at
-    # least 2 numbers (limits + stop).
-    min_numbers = 1 if uses_gold_tolls_sl(channel_name) else 2
+    # Tolls-style channels (including risky-gold) and the 1:1 channels auto-derive
+    # the stop loss, so a single number is a valid signal — just a limit. Regular
+    # channels need at least 2 numbers (limits + stop).
+    min_numbers = 1 if (uses_gold_tolls_sl(channel_name) or uses_one_to_one(channel_name)) else 2
 
     if len(numbers) < min_numbers:
         return False

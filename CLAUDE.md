@@ -352,7 +352,8 @@ All PKs: `BIGINT GENERATED ALWAYS AS IDENTITY`. Timestamps: `TIMESTAMPTZ`. RLS: 
 | first_limit_hit_time | TIMESTAMPTZ |
 | closed_at / closed_reason | TIMESTAMPTZ / TEXT (`automatic` / `manual` / `expiry`) |
 | be_stop_armed_at | TIMESTAMPTZ (nullable); when a breakeven stop was armed via the `set be` reply. NULL = not armed. A timestamp rather than a flag so analysis can see how far into a trade protection went on. |
-| take_profit | DOUBLE PRECISION (nullable); the sender's fixed TP price, set only by instant-entry channels. When present it *replaces* the TPConfig threshold as the exit condition (`tp_monitor._fixed_tp_reached`, evaluated on the bid like every other TP). |
+| take_profit | DOUBLE PRECISION (nullable); the signal's own fixed TP price. Set by the instant-entry channels and by the 1:1 channel. When present it *replaces* the TPConfig threshold as the exit condition (`tp_monitor._fixed_tp_reached`, evaluated on the bid like every other TP). Says nothing about how the signal *enters* — that is `entry_type`. |
+| entry_type | TEXT NOT NULL DEFAULT 'limit'; CHECK (limit, market). `market` is taken at the price the bot observed (instant-entry channels); `limit` rests an order at a price the sender chose. Written by the TM, read only by the EX bot, which routes market vs limit placement on it. It exists because execution clients used to infer this from `take_profit` being non-NULL — true while instant entries were the only signals with a fixed exit, wrong the moment 1:1 signals carried one on a resting limit. |
 | tp_price | DOUBLE PRECISION; market close price recorded on profit (for automatic, the bid at auto-TP trigger — see "Auto-TP is evaluated on the bid"; for manual profit, the live bid/ask at command time — bid if long, ask if short). NULL for SL / cancel / breakeven / other closures, and for manual profit when `live_prices` has no row for the instrument. |
 | manual_tp_price | DOUBLE PRECISION (nullable); retrospective manual TP price override set via `!profit <id> <tp_price>`. Kept separate from `tp_price` so the original recorded close is preserved. Both the `!report` P&L and the profit-archive embed (per-limit P&L + the "TP Price" field) use `manual_tp_price` when present, else `tp_price`. |
 | alert_message_id | BIGINT (nullable); Discord message ID of the active-channel alert embed. Persisted so restarts can reuse the existing embed instead of orphaning it. Cleared on archive move, live-update NotFound, and approaching-alert retraction. |
@@ -625,13 +626,48 @@ retries. A new mode-status setter must follow the same rule.
 
 Downstream everything is shared machinery: `type='pa'` routes the embed to the PA alert channel and the signal into the PA report section; SL, manual reply commands, archiving, trailing and excursion analytics are unchanged. An already-HIT signal rides out spread hour and the late-market hour. Normal news events cancel it (except `swing`); `dryrun` news events leave it running while pausing affected clients. Edits to an instant signal update **SL/TP and expiry only** (`signal_ops._update_instant_from_edit`); the entry limit records a real fill and is never re-derived. The EX bot ignores these signals — it keys off pending limits, and there is never one.
 
+### The 1:1 channel targets exactly what it risks
+`gold-1-1-rr` (listed in `validators._ONE_TO_ONE_CHANNELS`) is the only limit channel
+that resolves a **take-profit price** at parse time. Three shapes, all handled in
+`CorePatternParser.parse`:
+
+- `4062.7 / long / stops 4051` — the stop is the sender's; the target sits the same
+  distance the other side (4074.4).
+- `4062.7 / long` — no stop named, so both come from `ONE_TO_ONE_DEFAULT_RISK`
+  ($10): stop at 4052.7, target at 4072.7. The channel therefore accepts a **single
+  number** as a complete signal, which means `min_numbers` is relaxed to 1 in
+  `validators.is_potential_signal` *and* in `CorePatternParser.parse` — those two
+  checks are separate and a message that fails the first never reaches the second.
+- `4062.7 long tp 4075 stops 4051` — a labelled target wins outright.
+  `strip_take_profit` removes the phrase **before** `extract_numbers` runs; left in,
+  4075 reads as a second limit, and one that ascends on a long, so
+  `_reject_out_of_order` would throw the whole signal out as a typo.
+
+**Both the stop and the target are measured from the deepest limit** (`deepest_limit`
+— `min` for a long, `max` for a short, which the ordering validation makes the last
+one listed). A signal that fills all the way down therefore makes exactly 1R; a
+partial fill at the shallower limit makes slightly less. A labelled target on the
+losing side of the stop raises `LimitsOrderError`, mirroring `parse_instant_signal`.
+
+The resolved price lands in `signals.take_profit` and everything downstream is shared
+machinery: `tp_monitor`'s fixed-TP branch exits there instead of on the TPConfig
+threshold, and `_build_save_context` stamps `tp_threshold_used` with the distance
+actually targeted rather than a threshold this signal can never take. An edit
+re-derives it — `update_signal_from_edit` writes `take_profit` alongside the stop, so
+moving either moves the target. **The 1-1 entry in `tp_configuration.json` is now only
+a fallback** for rows saved before this existed.
+
+Entry is unchanged: an ordinary resting limit at the price the sender chose. That
+distinction is what `signals.entry_type` records, and why it had to exist — see the
+schema note.
+
 ### Signal type taxonomy
 `signals.type` ∈ `{standard, scalp, swing, toll, pa, 1-1, risky}`. Determined by `pattern_parsers.get_signal_type(text, channel_name)`:
 - `CHANNEL_TYPE_MAP` wins first: `scalps` → scalp; `swing-trades`/`gold-swings` → swing; `gold-tolls-map`/`general-tolls`/`oil-tolls` → toll; `gold-pa-signals`/`price-action-trades`/`semi-swing-pa-signals` → pa; `gold-1-1-rr` → 1-1.
 - Otherwise body keyword: `\bswing\b` → swing, `\bscalp\b` → scalp.
 - Default: standard.
 
-Each type has its own `tp_configuration.json` defaults under `type_defaults[<type>]` and per-symbol overrides under `type_overrides[<type>]`. Default initialization: scalp/standard kept as before; toll initialized from scalp; pa initialized from standard; swing = 3× standard; 1-1 metals = $10. The TP resolution order is: per-type symbol override → standard symbol override → per-type asset-class default → standard asset-class default → hard fallback ($5).
+Each type has its own `tp_configuration.json` defaults under `type_defaults[<type>]` and per-symbol overrides under `type_overrides[<type>]`. Default initialization: scalp/standard kept as before; toll initialized from scalp; pa initialized from standard; swing = 3× standard; 1-1 metals = $10. The TP resolution order is: per-type symbol override → standard symbol override → per-type asset-class default → standard asset-class default → hard fallback ($5). A signal carrying its own `take_profit` skips all of it.
 
 ### Breakeven stop (`set be`)
 Replying `set be` to an alert embed, its ping, or the original signal message arms a

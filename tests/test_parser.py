@@ -386,3 +386,85 @@ class TestInstantEntryParsing:
         assert signal.instant_entry is False
         assert signal.take_profit is None
         assert signal.limits == [4000.0, 3990.0]
+
+
+# ---------------------------------------------------------------------------
+# 1:1 RR channel: the target mirrors the risk
+# ---------------------------------------------------------------------------
+
+
+class TestOneToOneChannel:
+    """gold-1-1-rr signals target exactly what they risk.
+
+    Three shapes, in the order the sender is likeliest to post them: a limit and a
+    stop, a bare limit, and a limit with an explicit target. The stop and the target
+    are both measured from the *deepest* limit — the last level price reaches — so a
+    signal that fills all the way down makes 1R.
+    """
+
+    CHANNEL = "gold-1-1-rr"
+    CONFIG = {CHANNEL: {"default_instrument": "XAUUSD", "default_expiry": "week_end"}}
+
+    def _parse(self, text):
+        return SignalParser(config_loader=_StubConfigLoader(self.CONFIG)).parse(
+            text, self.CHANNEL
+        )
+
+    def test_explicit_stop_sets_the_target_at_the_same_distance(self):
+        signal = self._parse("4062.7\nlong\nStops 4051")
+        assert signal.limits == [4062.7]
+        assert signal.stop_loss == 4051.0
+        assert signal.take_profit == pytest.approx(4074.4)
+        assert signal.type == "1-1"
+
+    def test_bare_limit_risks_and_targets_the_default(self):
+        signal = self._parse("4062.7\nlong")
+        assert signal.limits == [4062.7]
+        assert signal.stop_loss == pytest.approx(4062.7 - pp.ONE_TO_ONE_DEFAULT_RISK)
+        assert signal.take_profit == pytest.approx(4062.7 + pp.ONE_TO_ONE_DEFAULT_RISK)
+
+    def test_labelled_target_wins_over_the_derived_one(self):
+        signal = self._parse("4062.7 long tp 4075 stops 4051")
+        assert signal.limits == [4062.7]
+        assert signal.stop_loss == 4051.0
+        assert signal.take_profit == 4075.0
+
+    def test_labelled_target_is_not_read_as_a_limit(self):
+        """Without stripping it, 'tp 4075' would be a second limit — and one that
+        ascends on a long, so the whole signal would be rejected as a typo."""
+        signal = self._parse("4062.7 long tp 4075 stops 4051")
+        assert len(signal.limits) == 1
+
+    def test_short_measures_from_the_deepest_limit(self):
+        signal = self._parse("short\n4526\n4528\nsl 4542.5")
+        assert signal.limits == [4526.0, 4528.0]
+        assert signal.stop_loss == 4542.5
+        # deepest is 4528, risk 14.5
+        assert signal.take_profit == pytest.approx(4513.5)
+
+    def test_multi_limit_without_a_stop_derives_both_from_the_deepest(self):
+        signal = self._parse("4228\n4227\nlong")
+        assert signal.limits == [4228.0, 4227.0]
+        assert signal.stop_loss == pytest.approx(4217.0)
+        assert signal.take_profit == pytest.approx(4237.0)
+
+    @pytest.mark.parametrize(
+        "text",
+        [
+            "4062.7 long tp 4040 stops 4051",  # target below the stop on a long
+            "short 4526 tp 4540 sl 4536",  # target above the stop on a short
+        ],
+    )
+    def test_target_on_the_losing_side_is_rejected(self, text):
+        assert isinstance(self._parse(text), RejectedSignal)
+
+    def test_enters_on_a_limit_not_at_market(self):
+        """A fixed take profit does not make it an instant entry — the sender named
+        a level to rest at, and execution clients route on that distinction."""
+        signal = self._parse("4062.7\nlong\nStops 4051")
+        assert signal.instant_entry is False
+
+    def test_other_channels_get_no_derived_target(self, pinned_offsets):
+        parser = SignalParser(config_loader=_StubConfigLoader({}))
+        signal = parser.parse("gold long 4062.7 sl 4051", "gold-swings")
+        assert signal.take_profit is None

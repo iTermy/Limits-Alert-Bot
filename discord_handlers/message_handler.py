@@ -12,6 +12,7 @@ import discord
 import pytz
 
 from core.parser import RejectedSignal, parse_signal
+from core.parser.pattern_parsers import deepest_limit
 from database import db
 from database.signal_ops import MAX_INSTANT_ENTRIES
 from models.signal import LimitData, SignalData, breakeven_price
@@ -1019,17 +1020,25 @@ class MessageHandler:
         """
         context = {}
         try:
-            signal_type = getattr(parsed, "type", "standard")
-            tp_config = self.tp_config
-            services = getattr(self.bot, "services", None)
-            if services is not None and getattr(services, "tp_config", None) is not None:
-                tp_config = services.tp_config
-            context["tp_threshold_used"] = tp_config.get_tp_value(
-                parsed.instrument, signal_type=signal_type
-            )
-            context["tp_threshold_unit"] = tp_config.get_tp_type(
-                parsed.instrument, signal_type=signal_type
-            )
+            if parsed.take_profit is not None:
+                # A signal carrying its own exit price never consults TPConfig, so
+                # stamping that threshold would describe an exit it cannot take.
+                # Record the distance it actually targets instead.
+                anchor = deepest_limit(parsed.limits, parsed.direction)
+                context["tp_threshold_used"] = abs(parsed.take_profit - anchor)
+                context["tp_threshold_unit"] = "dollars"
+            else:
+                signal_type = getattr(parsed, "type", "standard")
+                tp_config = self.tp_config
+                services = getattr(self.bot, "services", None)
+                if services is not None and getattr(services, "tp_config", None) is not None:
+                    tp_config = services.tp_config
+                context["tp_threshold_used"] = tp_config.get_tp_value(
+                    parsed.instrument, signal_type=signal_type
+                )
+                context["tp_threshold_unit"] = tp_config.get_tp_type(
+                    parsed.instrument, signal_type=signal_type
+                )
         except Exception as e:
             self.logger.warning(f"TP threshold stamp failed for {parsed.instrument}: {e}")
         try:

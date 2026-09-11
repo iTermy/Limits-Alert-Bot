@@ -139,9 +139,10 @@ class SignalDatabase:
                         message_id, channel_id, instrument, direction,
                         stop_loss, expiry_type, expiry_time, total_limits, status, type,
                         take_profit, tp_threshold_used, tp_threshold_unit, minutes_to_news,
-                        limits_hit, first_limit_hit_time
+                        limits_hit, first_limit_hit_time, entry_type
                     )
-                    VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13, $14, $15, $16)
+                    VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13, $14, $15,
+                            $16, $17)
                     ON CONFLICT (message_id) DO NOTHING
                     RETURNING id
                     """,
@@ -161,6 +162,7 @@ class SignalDatabase:
                     context.get("minutes_to_news"),
                     1 if instant else 0,
                     now if instant else None,
+                    "market" if instant else "limit",
                 )
 
                 if signal_id is None:
@@ -304,9 +306,9 @@ class SignalDatabase:
                     UPDATE signals
                     SET instrument = $1, direction = $2, stop_loss = $3,
                         expiry_type = $4, expiry_time = $5, total_limits = $6,
-                        type = $7, limits_hit = $8, status = $9,
+                        type = $7, limits_hit = $8, status = $9, take_profit = $10,
                         updated_at = CURRENT_TIMESTAMP
-                    WHERE id = $10
+                    WHERE id = $11
                     """,
                     parsed_signal.instrument,
                     parsed_signal.direction,
@@ -317,6 +319,9 @@ class SignalDatabase:
                     getattr(parsed_signal, "type", "standard"),
                     diff["hit_count"],
                     new_status,
+                    # Re-derived by the parser from the edited limits and stop, so an
+                    # edit that moves either moves the 1:1 target with it.
+                    parsed_signal.take_profit,
                     signal_id,
                 )
 
