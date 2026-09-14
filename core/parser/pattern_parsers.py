@@ -204,7 +204,10 @@ EXPIRY_PATTERNS = {
     "valid till week": "week_end",
     "valid till day": "day_end",
     "valid till month": "month_end",
-    "swing": "week_end",
+    # Checked before "swing" so a semi-swing keeps its shorter window.
+    "semi-swing": "week_end",
+    "semi swing": "week_end",
+    "swing": "month_end",
     "no expiry": "no_expiry",
 }
 

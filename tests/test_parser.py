@@ -8,7 +8,13 @@ the local config.
 
 import pytest
 
-from core.parser import INSTRUMENT_MAPPINGS, LimitsOrderError, RejectedSignal, SignalParser
+from core.parser import (
+    INSTRUMENT_MAPPINGS,
+    LimitsOrderError,
+    ParsedSignal,
+    RejectedSignal,
+    SignalParser,
+)
 from core.parser import pattern_parsers as pp
 from core.parser.pattern_parsers import (
     CorePatternParser,
@@ -238,6 +244,11 @@ class TestCoreParserEndToEnd:
         signal = core_parser.parse("eu long swing 1.1820 1.1750", "forex-signals")
         assert signal is not None
         assert signal.type == "swing"
+        assert signal.expiry_type == "month_end"
+
+    def test_semi_swing_keeps_the_shorter_window(self, core_parser):
+        signal = core_parser.parse("eu long semi-swing 1.1820 1.1750", "forex-signals")
+        assert signal is not None
         assert signal.expiry_type == "week_end"
 
     def test_tolls_auto_sl_end_to_end(self, pinned_offsets, core_parser):
@@ -273,6 +284,44 @@ class TestSignalParserRouting:
         signal = parser.parse("long 3310 3305 sl 3300", "my-gold-room")
         assert signal is not None
         assert signal.instrument == "XAUUSD"
+
+
+class TestOpenEndedExpiryIsBounded:
+    """Stocks and swings are held for weeks, never indefinitely: an open-ended
+    expiry — channel default or VTAI-style tag — becomes month_end."""
+
+    def _signal(self, instrument, signal_type):
+        return ParsedSignal(
+            instrument=instrument,
+            direction="long",
+            limits=[100.0],
+            stop_loss=95.0,
+            expiry_type="no_expiry",
+            raw_text="",
+            parse_method="stock",
+            type=signal_type,
+        )
+
+    @pytest.mark.parametrize(
+        "instrument,signal_type",
+        [
+            ("AAPL.NAS", "standard"),
+            ("BAC.NYSE", "standard"),
+            ("XAUUSD", "swing"),
+            ("AAPL.NAS", "swing"),
+        ],
+    )
+    def test_bounded_to_month_end(self, instrument, signal_type):
+        assert self._signal(instrument, signal_type).expiry_type == "month_end"
+
+    def test_other_signals_keep_no_expiry(self):
+        assert self._signal("XAUUSD", "standard").expiry_type == "no_expiry"
+
+    def test_open_ended_tag_on_a_swing_is_bounded(self, core_parser):
+        signal = core_parser.parse("eu long vtai 1.1820 1.1750", "swing-trades")
+        assert signal is not None
+        assert signal.type == "swing"
+        assert signal.expiry_type == "month_end"
 
 
 class TestIndexSymbolCanonicalization:

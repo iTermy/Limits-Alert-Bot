@@ -669,6 +669,22 @@ schema note.
 
 Each type has its own `tp_configuration.json` defaults under `type_defaults[<type>]` and per-symbol overrides under `type_overrides[<type>]`. Default initialization: scalp/standard kept as before; toll initialized from scalp; pa initialized from standard; swing = 3× standard; 1-1 metals = $10. The TP resolution order is: per-type symbol override → standard symbol override → per-type asset-class default → standard asset-class default → hard fallback ($5). A signal carrying its own `take_profit` skips all of it.
 
+### Stocks and swings expire at month end, never open-ended
+A stock or a swing is held for weeks, not indefinitely, so neither is allowed to rest
+on `no_expiry`. `ParsedSignal.__post_init__` bounds it: `no_expiry` becomes
+`month_end` when `type == "swing"` or the instrument carries a US-equity suffix
+(`STOCK_SUFFIXES` — `.NYSE` / `.NAS` / `.NASDAQ`). It sits on the dataclass rather
+than in `extract_expiry` because all four construction sites (core, stock, instant,
+AI fallback) must obey it, and an edit re-parses through the same constructor.
+
+Swing-ness comes from `get_signal_type`, so the bound covers both the swing channels
+(`swing-trades`, `gold-swings` — whose `channels.json` defaults now say `month_end`
+outright) and a bare `swing` tag in any other channel. `EXPIRY_PATTERNS` maps that
+tag to `month_end` too; `semi-swing` / `semi swing` are listed **before** it so a
+semi-swing keeps its week. Shorter explicit tags still win — `vtd` on a swing is a
+day, as the sender asked. Signals saved before this keep the `no_expiry` they were
+written with; `!setexpiry <id> month_end` moves one over.
+
 ### Breakeven stop (`set be`)
 Replying `set be` to an alert embed, its ping, or the original signal message arms a
 breakeven stop on an open (HIT) position: from then on the signal closes flat when

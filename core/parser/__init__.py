@@ -23,6 +23,10 @@ logger = get_logger("parser")
 # ============================================================================
 
 
+# US equities carry an exchange suffix (AAPL.NAS, BAC.NYSE).
+STOCK_SUFFIXES = (".NYSE", ".NAS", ".NASDAQ")
+
+
 @dataclass
 class ParsedSignal:
     """Represents a parsed trading signal"""
@@ -41,6 +45,15 @@ class ParsedSignal:
     # Enters at the market price instead of a limit. `limits` is empty until the
     # save path resolves the live entry price and fills it with that single level.
     instant_entry: bool = False
+
+    def __post_init__(self):
+        # Stocks and swings are held for weeks, not indefinitely. Whatever the
+        # channel default or an open-ended tag (VTAI / "valid till hit") says,
+        # they expire at month end rather than resting forever.
+        if self.expiry_type == "no_expiry" and (
+            self.type == "swing" or (self.instrument or "").upper().endswith(STOCK_SUFFIXES)
+        ):
+            self.expiry_type = "month_end"
 
 
 class RejectedSignal:
