@@ -1,0 +1,127 @@
+"""Exporter tests independent of Discord, MT5, and live database credentials."""
+
+import asyncio
+import sys
+from types import SimpleNamespace
+from unittest.mock import AsyncMock
+
+import pytest
+from aiohttp import web
+from aiohttp.test_utils import TestClient, TestServer
+from prometheus_client import generate_latest
+
+from core.metrics import Monitoring
+
+
+def test_snapshot_resets_after_bot_restart():
+    metrics = Monitoring()
+    health = SimpleNamespace(running=True, feed_status={"oanda": "down", "binance": "idle"})
+    alerts = SimpleNamespace(_pending_live_updates={1: None}, _delivery_retry_tasks={2: None})
+    metrics.bot = SimpleNamespace(
+        is_ready=lambda: True,
+        latency=0.1,
+        monitor=SimpleNamespace(
+            health_monitor=health, alert_system=alerts, active_signals={1: None}
+        ),
+    )
+    metrics.sample()
+    output = generate_latest(metrics.registry).decode()
+    assert 'limits_feed_down{feed="oanda"} 1.0' in output
+    assert 'limits_feed_down{feed="binance"} 0.0' in output
+    assert "limits_tracked_signals 1.0" in output
+    metrics.bot = None
+    metrics.sample()
+    output = generate_latest(metrics.registry).decode()
+    assert "limits_discord_ready 0.0" in output
+    assert "limits_alert_retries 0.0" in output
+    assert "limits_feed_down{feed=" not in output
+
+
+@pytest.mark.asyncio
+async def test_http_scrape():
+    metrics = Monitoring()
+    app = web.Application()
+    app.router.add_get("/metrics", metrics.scrape)
+    async with TestClient(TestServer(app)) as client:
+        response = await client.get("/metrics")
+        assert response.status == 200
+        assert response.headers["Content-Type"].startswith("text/plain")
+        assert "limits_discord_ready 0.0" in await response.text()
+        assert (await client.get("/missing")).status == 404
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("failed", [False, True])
+async def test_database_probe_and_cancellation(monkeypatch, failed):
+    fetch = AsyncMock(side_effect=ConnectionError() if failed else None, return_value=1)
+    monkeypatch.setitem(
+        sys.modules,
+        "database",
+        SimpleNamespace(db=SimpleNamespace(_pool=SimpleNamespace(fetchval=fetch))),
+    )
+    metrics = Monitoring()
+    metrics.task = asyncio.create_task(metrics.poll())
+    for _ in range(100):
+        if fetch.await_count:
+            break
+        await asyncio.sleep(0)
+    await asyncio.sleep(0)
+    await asyncio.sleep(0)
+    assert fetch.await_count == 1
+    assert metrics.gauges["database_up"]._value.get() == int(not failed)
+    await metrics.close()
+    assert metrics.task.cancelled()
+
+
+@pytest.mark.asyncio
+async def test_disabled_exporter(monkeypatch):
+    monkeypatch.setenv("METRICS_ENABLED", "false")
+    metrics = Monitoring()
+    await metrics.start()
+    assert metrics.runner is None
+    assert metrics.task is None
+    await metrics.close()
+
+
+@pytest.mark.asyncio
+async def test_reaction_context_survives_retry_and_resets(monkeypatch):
+    import core.metrics as module
+
+    metrics = Monitoring()
+    monkeypatch.setattr(module, "monitoring", metrics)
+    clock = [10.0]
+    monkeypatch.setattr(module.time, "monotonic", lambda: clock[0])
+    release = asyncio.Event()
+
+    async def retry():
+        await release.wait()
+        module.record_reaction("auto_tp", "discord_delivered")
+
+    @module.trace_tick
+    async def tick():
+        clock[0] = 10.25
+        module.record_reaction("auto_tp", "state_committed")
+        return asyncio.create_task(retry())
+
+    task = await tick()
+    clock[0] = 12.0
+    module.record_reaction("breakeven", "state_committed")  # outside tick: ignored
+    release.set()
+    await task
+    output = generate_latest(metrics.registry).decode()
+    assert 'limits_reaction_seconds_sum{event="auto_tp",stage="state_committed"} 0.25' in output
+    assert 'limits_reaction_seconds_sum{event="auto_tp",stage="discord_delivered"} 2.0' in output
+    assert 'event="breakeven"' not in output
+
+
+@pytest.mark.asyncio
+async def test_failed_tick_clears_context():
+    from core.metrics import _tick_started, trace_tick
+
+    @trace_tick
+    async def tick():
+        raise RuntimeError("subscriber failed")
+
+    with pytest.raises(RuntimeError):
+        await tick()
+    assert _tick_started.get() is None

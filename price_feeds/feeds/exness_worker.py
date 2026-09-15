@@ -98,14 +98,16 @@ def main():
             symbols = list(subscribed)
 
         for symbol in symbols:
+            started = time.monotonic()
             tick = mt5.symbol_info_tick(symbol)
+            query_seconds = time.monotonic() - started
             if tick is None:
                 continue
 
             key = (tick.bid, tick.ask)
             if last_prices.get(symbol) != key:
                 last_prices[symbol] = key
-                _send({"s": symbol, "b": tick.bid, "a": tick.ask, "t": tick.time})
+                _send({"s": symbol, "b": tick.bid, "a": tick.ask, "t": tick.time, "query_seconds": query_seconds})
 
         time.sleep(POLL_INTERVAL)
 

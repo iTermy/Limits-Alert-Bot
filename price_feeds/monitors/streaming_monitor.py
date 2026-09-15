@@ -10,6 +10,7 @@ from typing import Optional
 import discord
 import pytz
 
+from core.metrics import record_reaction
 from models.signal import LimitData, SignalData, breakeven_price
 from price_feeds.monitors.risky_window import is_risky_trading_disabled
 from utils.config_loader import load_settings
@@ -1160,6 +1161,7 @@ class StreamingPriceMonitor:
             return False
 
         self._write_retry_after.pop(retry_key, None)
+        record_reaction("breakeven", "state_committed")
         signal.be_stop_alert_sent = True
         logger.info(
             f"Signal {signal.signal_id} ({signal.instrument}) breakeven stop @ {bid} "

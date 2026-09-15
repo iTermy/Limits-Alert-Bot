@@ -18,6 +18,7 @@ threshold fires on $4 of visible movement rather than $4 plus the spread.
 import asyncio
 from typing import Optional
 
+from core.metrics import record_reaction
 from database.signal_ops import STATUS_WRITE_TIMEOUT
 from models.signal import LimitData, SignalData
 from utils.logger import get_logger
@@ -270,6 +271,7 @@ class AutoTPMonitor:
             return False
 
         self.evict_signal(signal_id)
+        record_reaction("auto_tp", "state_committed")
         signal.tp_price = close_price
         logger.debug(f"Signal {signal_id}: marked as PROFIT via auto-TP")
 

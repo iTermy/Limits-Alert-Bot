@@ -7,12 +7,15 @@ import asyncio
 import contextlib
 import logging
 import os
+import time
 from collections.abc import AsyncIterator
 from concurrent.futures import ThreadPoolExecutor
 from datetime import datetime, timezone
 from typing import Any, Callable, Optional
 
 import MetaTrader5 as mt5
+
+from core.metrics import monitoring
 
 logger = logging.getLogger(__name__)
 
@@ -71,7 +74,20 @@ class ICMarketsStream:
     async def _run_mt5(self, func, *args):
         """Run a blocking MT5 call on the dedicated pool, never on the loop thread."""
         loop = asyncio.get_running_loop()
-        return await loop.run_in_executor(self._mt5_executor, func, *args)
+        operation = getattr(func, "__name__", "other")
+        if operation not in {"_poll_symbols", "initialize", "shutdown", "symbol_select", "symbol_info", "symbols_get"}:
+            operation = "other"
+        started = time.monotonic()
+        outcome = "error"
+        try:
+            result = await loop.run_in_executor(self._mt5_executor, func, *args)
+            outcome = "returned"
+            return result
+        except asyncio.CancelledError:
+            outcome = "cancelled"
+            raise
+        finally:
+            monitoring.mt5_call.labels(operation, outcome).observe(time.monotonic() - started)
 
     def _poll_symbols(self, symbols: list[str]) -> list[tuple[str, Any]]:
         """Fetch the current tick for each symbol. Runs on the MT5 executor.
@@ -83,7 +99,11 @@ class ICMarketsStream:
         ticks = []
         for symbol in symbols:
             try:
-                tick = mt5.symbol_info_tick(symbol)
+                started = time.monotonic()
+                try:
+                    tick = mt5.symbol_info_tick(symbol)
+                finally:
+                    monitoring.mt5_query.labels("icmarkets").observe(time.monotonic() - started)
             except Exception as e:
                 logger.debug("MT5 tick fetch failed for %s: %s", symbol, e)
                 continue
