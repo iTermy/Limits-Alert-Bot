@@ -943,7 +943,7 @@ class StreamingPriceMonitor:
         """Check if stop loss is hit. Spread buffer is NOT applied."""
         stop_loss = signal.stop_loss
 
-        if signal.sl_alert_sent:
+        if signal.sl_alert_sent or signal.status not in ("active", "hit"):
             return
 
         is_hit = current_price <= stop_loss if direction == "long" else current_price >= stop_loss
@@ -996,6 +996,10 @@ class StreamingPriceMonitor:
                     )
                     return
 
+            # Persist first: a cancellation may have landed while this tick
+            # was in flight. Do not publish an SL for a rejected transition.
+            if not await self._process_stop_loss_hit(signal, current_price):
+                return
             signal.sl_alert_sent = True
 
             await self.alert_system.deliver_critical(
@@ -1005,7 +1009,6 @@ class StreamingPriceMonitor:
                 current_price,
             )
             self._react_async(signal, "🛑")
-            await self._process_stop_loss_hit(signal, current_price)
             self.stats["stop_losses_hit"] += 1
 
     async def _check_breakeven_stop(
@@ -1369,13 +1372,15 @@ class StreamingPriceMonitor:
 
         return True
 
-    async def _process_stop_loss_hit(self, signal: dict, current_price: float):
+    async def _process_stop_loss_hit(self, signal: dict, current_price: float) -> bool:
         """Process stop loss hit"""
+        success = False
         try:
             success = await self.signal_db.manually_set_signal_status(
                 signal.signal_id,
                 "stop_loss",
                 closed_reason="automatic",
+                expected_statuses=("active", "hit"),
             )
 
             if success:
@@ -1390,9 +1395,10 @@ class StreamingPriceMonitor:
                     signal.signal_id, current_price, "real_sl"
                 )
                 await self._maybe_unsubscribe_symbol(signal.instrument, signal.signal_id)
-
         except Exception as e:
             logger.error(f"Failed to process stop loss: {e}")
+        # A tracker failure after the write must not suppress the SL alert.
+        return success
 
     async def _process_spread_hour_cancel(self, signal: dict):
         """Cancel a signal that was falsely triggered during spread hour."""

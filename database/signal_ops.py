@@ -870,10 +870,13 @@ class SignalDatabase:
         reason: Optional[str] = None,
         tp_price: Optional[float] = None,
         closed_reason: Optional[str] = None,
+        expected_statuses: Optional[tuple[str, ...]] = None,
     ) -> bool:
         """
         Manually set a signal's status (for admin override).
         Bypasses validation for manual overrides.
+        expected_statuses restricts automatic closes at the database write, so
+        a stale monitor cannot overwrite a concurrent cancellation.
         """
         try:
             logger.debug(f"Manually setting signal {signal_id} to {new_status}")
@@ -891,6 +894,11 @@ class SignalDatabase:
                 return False
 
             old_status = row["status"]
+
+            if expected_statuses is not None and (
+                old_status not in expected_statuses or not SignalStatus.is_final(new_status)
+            ):
+                return False
 
             if old_status == new_status:
                 logger.info(f"Signal {signal_id} already has status {new_status}")
@@ -933,21 +941,26 @@ class SignalDatabase:
                 # its limits still read pending. A single statement satisfies that
                 # by construction — there is no intermediate state to observe.
                 if is_final:
-                    await self.db.execute(
+                    updated = await self.db.execute(
                         """
-                        WITH cancelled_limits AS (
-                            UPDATE limits SET status = 'cancelled'
-                            WHERE signal_id = $1 AND status = 'pending'
-                        ),
-                        updated_signal AS (
+                        WITH updated_signal AS (
                             UPDATE signals
                             SET status = $2, updated_at = $3, closed_at = $3,
                                 closed_reason = $4, tp_price = COALESCE($5, tp_price)
                             WHERE id = $1
+                              AND ($8::text[] IS NULL
+                                   OR (status = ANY($8::text[]) AND status = $6))
+                            RETURNING id
+                        ),
+                        cancelled_limits AS (
+                            UPDATE limits SET status = 'cancelled'
+                            WHERE signal_id IN (SELECT id FROM updated_signal)
+                              AND status = 'pending'
                         )
                         INSERT INTO status_changes
                             (signal_id, old_status, new_status, change_type, reason)
-                        VALUES ($1, $6, $2, $4, $7)
+                        SELECT id, $6, $2, $4, $7 FROM updated_signal
+                        RETURNING signal_id
                         """,
                         (
                             signal_id,
@@ -957,8 +970,11 @@ class SignalDatabase:
                             tp_price,
                             old_status,
                             reason or "Manual override",
+                            list(expected_statuses) if expected_statuses is not None else None,
                         ),
                     )
+                    if not updated:
+                        return False
                 else:
                     # Restore limits that were cancelled by a prior final-status
                     # transition (e.g. stop_loss or manual cancel) so reactivation

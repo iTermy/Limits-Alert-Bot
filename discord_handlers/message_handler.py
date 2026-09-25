@@ -240,7 +240,10 @@ class MessageHandler:
             return
 
         try:
-            referenced = await message.channel.fetch_message(message.reference.message_id)
+            try:
+                referenced = await message.channel.fetch_message(message.reference.message_id)
+            except discord.NotFound:
+                return  # The referenced message was deleted before this reply was handled.
             if not await self.has_bot_success_reaction(referenced):
                 return
 
