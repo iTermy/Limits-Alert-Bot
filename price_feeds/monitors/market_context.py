@@ -7,14 +7,16 @@ limit-hit time: ATR, RSI, EMA-distance (stretch), candle wick rejection, and
 higher-timeframe trend alignment. Also exposes a lightweight per-minute volume
 sample for time-series collection.
 
-Bar fetches run in an executor so they never block the price-tick loop, and
-nothing here touches alerts or signal status — it is pure data collection.
+Bar fetches go through PriceStreamManager.run_broker_call so they queue behind
+the ICMarkets poll sweep on that feed's executor: MT5 is not thread-safe, and a
+copy_rates landing mid-sweep made symbol_info() return None for a stock the
+broker does list, which left live stock signals unsubscribed. Nothing here
+touches alerts or signal status — it is pure data collection.
 
 Oil (Exness-only) has no bars on this terminal and returns None; the excursion
 MFE/MAE still works for it, only the bar-derived context is skipped.
 """
 
-import asyncio
 from datetime import datetime, timezone
 from typing import Optional
 
@@ -45,8 +47,9 @@ _M1_BARS = 20
 class MarketContextProvider:
     """Derives ATR/RSI/EMA/wick/HTF context and volume samples from MT5 bars."""
 
-    def __init__(self, symbol_mapper):
-        self._mapper = symbol_mapper
+    def __init__(self, stream_manager):
+        self._manager = stream_manager
+        self._mapper = stream_manager.symbol_mapper
 
     def _ic_symbol(self, internal_symbol: str) -> Optional[str]:
         """Resolve the MT5 (ICMarkets) symbol, or None if this terminal lacks it."""
@@ -59,10 +62,9 @@ class MarketContextProvider:
 
     async def _copy_rates(self, ic_symbol: str, timeframe, count: int) -> Optional[list[dict]]:
         """Fetch `count` recent bars as plain dicts, or None on failure."""
-        loop = asyncio.get_event_loop()
         try:
-            rates = await loop.run_in_executor(
-                None, mt5.copy_rates_from_pos, ic_symbol, timeframe, 0, count
+            rates = await self._manager.run_broker_call(
+                mt5.copy_rates_from_pos, ic_symbol, timeframe, 0, count
             )
         except Exception as e:
             logger.debug("copy_rates failed for %s: %s", ic_symbol, e)

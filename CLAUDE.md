@@ -600,9 +600,43 @@ A symbol the broker doesn't carry raises `UnlistedSymbolError`, which
 `bulk_subscribe` reports **once per symbol** — every reconnect re-subscribes the
 whole set, and the old `Exception` catch logged it every time.
 
-`MarketContextProvider` also calls MT5 (`copy_rates_from_pos`, on the default
-executor) and is the remaining unserialized caller. It only runs at limit-hit and
-never calls `initialize()`, so it rides the feed's connection.
+`MarketContextProvider` also calls MT5 (`copy_rates_from_pos`) and used to be the
+remaining unserialized caller, on the default executor. "Only runs at limit-hit"
+was wrong: `ExcursionMonitor`'s sampler calls `sample_volume` **every 60 s for
+every tracked instrument**, so it raced the sweep constantly. It now goes through
+`PriceStreamManager.run_broker_call` → `ICMarketsStream.run_mt5`, which is why
+that method is public. **Nothing outside the feed may call the `mt5` package
+directly.** A new MT5 caller goes through `run_broker_call`.
+
+### A refused subscribe is retried, never abandoned
+"Some tickers were not hitting and only show hit when I restarted the bot" —
+reported 2026-09-27 about stocks, and true of every feed. `symbol_info()` returns
+`None` for a listing the broker does carry when it lands mid-sweep, so on a busy
+stocks day `AVGO.NAS-24`, `AMD.NAS-24`, `ADBE.NAS-24`, `CSCO.NAS-24`,
+`ISRG.NAS-24`, `ADP.NAS-24` and a dozen more all logged "not found in MT5" within
+seconds of their signal being saved. Three things then made that one bad moment
+permanent, and each is now closed:
+
+- **`_resolve_stock_symbol` cached the double miss**, so the symbol was never
+  re-probed for the life of the process. A resolved answer (`-24`, or the bare
+  fallback) is still cached — that one is stable, and re-probing it would put
+  pointless calls in front of the poll sweep.
+- **`PriceStreamManager.bulk_subscribe` marked the whole batch subscribed**, so a
+  refused symbol was indistinguishable from a live one: the monitor kept the
+  signal, the manager reported it watched, and even `_report_never_ticked` only
+  named it 5 min later without anything acting. Every feed's `bulk_subscribe` now
+  **returns the symbols it accepted**, and only those are recorded.
+- **A symbol is subscribed exactly once**, when its first signal appears
+  (`_periodic_signal_refresh` only subscribes `added_symbols`). Refusals now land
+  in `_pending_subscriptions` and `retry_pending_subscriptions()` re-attempts them
+  on every 30 s refresh — one INFO line naming the symbol when it recovers, DEBUG
+  while it keeps failing, and skipped entirely while the feed is down so an outage
+  can't become one log line per symbol per pass. `unsubscribe_symbol` drops the
+  pending entry so a closed signal stops the retries.
+
+The signals went silent because nothing priced them; the restart "fixed" it
+because `bulk_subscribe` ran again and succeeded, then fired every level price had
+crossed in the meantime. Tests: `tests/test_subscribe_retry.py`.
 
 ### Exness oil symbol mapping
 Internal symbol `USOILSPOT` maps to `USOILm` on Exness MT5. The mapping is defined in both `symbol_mappings.json` (`symbol_mappings.exness.specific_mappings`) and the reverse direction (`reverse_mappings.exness`). Both sections are required — without the reverse mapping, prices arrive under `USOILM` instead of `USOILSPOT` and don't match signals.

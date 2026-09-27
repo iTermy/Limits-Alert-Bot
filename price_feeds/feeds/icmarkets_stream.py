@@ -91,8 +91,13 @@ class ICMarketsStream:
 
         logger.debug("ICMarketsStream initialized")
 
-    async def _run_mt5(self, func, *args):
-        """Run a blocking MT5 call on the dedicated pool, never on the loop thread."""
+    async def run_mt5(self, func, *args):
+        """Run a blocking MT5 call on the dedicated pool, never on the loop thread.
+
+        Public because this feed owns the process-global terminal connection:
+        anything else that needs MT5 (see MarketContextProvider) must queue
+        behind the poll sweep here rather than call the package directly.
+        """
         loop = asyncio.get_running_loop()
         async with self._mt5_lock:
             return await loop.run_in_executor(self._mt5_executor, func, *args)
@@ -129,20 +134,20 @@ class ICMarketsStream:
             self._reset_mt5_executor()
             mt5_path = os.getenv("MT5_PATH")
             if mt5_path:
-                result = await self._run_mt5(mt5.initialize, mt5_path)
+                result = await self.run_mt5(mt5.initialize, mt5_path)
             else:
-                result = await self._run_mt5(mt5.initialize)
+                result = await self.run_mt5(mt5.initialize)
 
             if result:
                 self.connected = True
 
-                terminal_info = await self._run_mt5(mt5.terminal_info)
+                terminal_info = await self.run_mt5(mt5.terminal_info)
                 if terminal_info:
                     logger.debug(f"Connected to MT5 - {terminal_info.name}")
 
                 await self._load_stock_catalogue()
                 return True
-            error = await self._run_mt5(mt5.last_error)
+            error = await self.run_mt5(mt5.last_error)
             logger.error(f"MT5 initialization failed: {error}")
             return False
 
@@ -160,7 +165,7 @@ class ICMarketsStream:
                 await self.stream_task
 
         if self.connected:
-            await self._run_mt5(mt5.shutdown)
+            await self.run_mt5(mt5.shutdown)
             self.connected = False
             logger.debug("Disconnected from MT5")
 
@@ -184,7 +189,7 @@ class ICMarketsStream:
         empty symbol list back. See core/parser/stock_catalogue.py.
         """
         try:
-            symbols = await self._run_mt5(mt5.symbols_get)
+            symbols = await self.run_mt5(mt5.symbols_get)
         except Exception as e:
             logger.warning("MT5 stock catalogue load failed: %s", e)
             return
@@ -216,19 +221,24 @@ class ICMarketsStream:
         if not self.connected:
             raise Exception("Not connected to MT5")
 
+        requested = symbol
+
         # Resolve the 24-hour stock fallback before validating, so a stock
         # without a "-24" variant subscribes to its bare symbol instead.
         symbol = await self._resolve_stock_symbol(symbol)
 
-        symbol_info = await self._run_mt5(mt5.symbol_info, symbol)
+        symbol_info = await self.run_mt5(mt5.symbol_info, symbol)
 
         if symbol_info is None:
             raise UnlistedSymbolError(f"Symbol {symbol} not found in MT5")
 
         if not symbol_info.visible:
-            await self._run_mt5(mt5.symbol_select, symbol, True)
+            await self.run_mt5(mt5.symbol_select, symbol, True)
 
         self.subscribed_symbols.add(symbol)
+        # Keyed on the requested name, which is what an earlier refusal recorded
+        # — so a symbol that stops resolving again is reported, not swallowed.
+        self._unlisted_symbols.discard(requested)
         logger.debug(f"Subscribed to {symbol} on MT5")
 
     async def _resolve_stock_symbol(self, symbol: str) -> str:
@@ -246,18 +256,21 @@ class ICMarketsStream:
         if symbol in self._stock_symbol_cache:
             return self._stock_symbol_cache[symbol]
 
-        if await self._run_mt5(mt5.symbol_info, symbol) is not None:
+        if await self.run_mt5(mt5.symbol_info, symbol) is not None:
             self._stock_symbol_cache[symbol] = symbol
             return symbol
 
         bare = symbol[:-3]
-        if await self._run_mt5(mt5.symbol_info, bare) is not None:
+        if await self.run_mt5(mt5.symbol_info, bare) is not None:
             logger.debug("Stock %s has no 24-hour variant; using %s", symbol, bare)
             self._stock_symbol_cache[symbol] = bare
             return bare
 
-        # Neither exists — keep the original so the normal not-found error fires.
-        self._stock_symbol_cache[symbol] = symbol
+        # Neither name resolved. Return the original so the normal not-found
+        # error fires, but do NOT cache that: MT5 hands back None for a listing
+        # it does carry when a call lands mid-sweep, and a cached miss turned
+        # that one bad moment into a symbol the bot never polled again — the
+        # signals on it stayed silent until the next restart re-probed it.
         return symbol
 
     async def unsubscribe(self, symbol: str):
@@ -268,8 +281,9 @@ class ICMarketsStream:
         self.subscribed_symbols.discard(symbol)
         self.last_prices.pop(symbol, None)
 
-    async def bulk_subscribe(self, symbols: list):
-        """Subscribe to multiple symbols"""
+    async def bulk_subscribe(self, symbols: list) -> list[str]:
+        """Subscribe to multiple symbols; return the ones that were accepted."""
+        accepted = []
         for symbol in symbols:
             try:
                 await self.subscribe(symbol)
@@ -284,6 +298,9 @@ class ICMarketsStream:
                     logger.debug("Skipping unlisted symbol %s", symbol)
             except Exception as e:
                 logger.error(f"Failed to subscribe to {symbol}: {e}")
+            else:
+                accepted.append(symbol)
+        return accepted
 
     async def stream_prices(self) -> AsyncIterator[tuple[str, dict]]:
         """
@@ -309,7 +326,7 @@ class ICMarketsStream:
                     # polling indefinitely.
                     try:
                         ticks = await asyncio.wait_for(
-                            self._run_mt5(self._poll_symbols, symbols),
+                            self.run_mt5(self._poll_symbols, symbols),
                             timeout=_MT5_SWEEP_TIMEOUT_SECONDS,
                         )
                     except asyncio.TimeoutError:

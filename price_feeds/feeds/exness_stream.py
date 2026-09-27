@@ -210,12 +210,17 @@ class ExnessStream:
         if self.connected:
             self._send_command({"cmd": "unsubscribe", "symbol": symbol})
 
-    async def bulk_subscribe(self, symbols: list):
+    async def bulk_subscribe(self, symbols: list) -> list[str]:
+        """Subscribe to multiple symbols; return the ones that were accepted."""
+        accepted = []
         for symbol in symbols:
             try:
                 await self.subscribe(symbol)
             except Exception as e:
                 logger.error(f"Failed to subscribe to {symbol}: {e}")
+            else:
+                accepted.append(symbol)
+        return accepted
 
     async def stream_prices(self) -> AsyncIterator[tuple[str, dict]]:
         if not self.connected or self._queue is None:

@@ -485,6 +485,11 @@ class StreamingPriceMonitor:
                 if added_symbols:
                     await self.stream_manager.bulk_subscribe(list(added_symbols))
 
+                # A symbol is subscribed once, when its first signal appears, so
+                # a feed that refused it then would never be asked again — the
+                # signals on it went silent until the next restart.
+                await self.stream_manager.retry_pending_subscriptions()
+
                 if added_symbols or symbols_to_unsub:
                     logger.debug(
                         f"Signal refresh: +{len(added_symbols)} -{len(symbols_to_unsub)} symbols "

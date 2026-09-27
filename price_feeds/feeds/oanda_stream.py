@@ -140,8 +140,8 @@ class OANDAStream:
         if self.streaming:
             await self._restart_stream()
 
-    async def bulk_subscribe(self, symbols: list):
-        """Subscribe to multiple symbols at once"""
+    async def bulk_subscribe(self, symbols: list) -> list[str]:
+        """Subscribe to multiple symbols; return the ones that were accepted."""
         for symbol in symbols:
             self.subscribed_symbols.add(symbol)
 
@@ -150,6 +150,8 @@ class OANDAStream:
         # Restart stream if needed
         if self.streaming:
             await self._restart_stream()
+
+        return list(symbols)
 
     async def _restart_stream(self):
         """Restart the stream with current symbol list"""

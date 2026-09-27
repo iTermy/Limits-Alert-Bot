@@ -52,6 +52,10 @@ class PriceStreamManager:
         self.subscribed_symbols: set[str] = set()
         self.symbol_to_feed: dict[str, str] = {}  # Maps symbol to feed name
 
+        # Symbols a feed refused, awaiting another attempt. See
+        # retry_pending_subscriptions.
+        self._pending_subscriptions: dict[str, str] = {}
+
         # Price storage (latest prices only)
         self.latest_prices: dict[str, dict] = {}
         self.price_lock = asyncio.Lock()
@@ -182,12 +186,13 @@ class PriceStreamManager:
         # Subscribe to the feed
         try:
             await self.feeds[feed_name].subscribe(feed_symbol)
-            self.subscribed_symbols.add(symbol)
-            self.symbol_to_feed[symbol] = feed_name
-            self._mark_subscribed(symbol, feed_name)
-            logger.debug(f"Subscribed to {symbol} via {feed_name} (as {feed_symbol})")
         except Exception as e:
             logger.error(f"Failed to subscribe to {symbol}: {e}")
+            self._pending_subscriptions[symbol] = feed_name
+            return
+
+        self._record_subscribed(symbol, feed_name)
+        logger.debug(f"Subscribed to {symbol} via {feed_name} (as {feed_symbol})")
 
     async def unsubscribe_symbol(self, symbol: str):
         """
@@ -196,6 +201,10 @@ class PriceStreamManager:
         Args:
             symbol: Internal format symbol
         """
+        # Stop retrying a symbol nothing needs any more, whether or not a feed
+        # ever accepted it.
+        self._pending_subscriptions.pop(symbol, None)
+
         if symbol not in self.subscribed_symbols:
             return
 
@@ -250,26 +259,75 @@ class PriceStreamManager:
         # Subscribe to each feed
         for feed_name, symbol_pairs in feed_symbols.items():
             try:
-                feed_syms = [fs for _, fs in symbol_pairs]
-                await self.feeds[feed_name].bulk_subscribe(feed_syms)
-
-                # Track subscriptions
-                for internal, _feed_sym in symbol_pairs:
-                    self.subscribed_symbols.add(internal)
-                    self.symbol_to_feed[internal] = feed_name
-                    self._mark_subscribed(internal, feed_name)
-
-                logger.debug(f"Bulk subscribed {len(symbol_pairs)} symbols to {feed_name}")
+                accepted = await self.feeds[feed_name].bulk_subscribe(
+                    [fs for _, fs in symbol_pairs]
+                )
             except Exception as e:
                 logger.error(f"Failed to bulk subscribe to {feed_name}: {e}")
+                accepted = []
 
-    def _mark_subscribed(self, symbol: str, feed_name: str):
-        """Tell the health monitor prices are now expected for a symbol.
+            # Only what the feed actually took counts as subscribed. Marking the
+            # whole batch made a refused symbol indistinguishable from a live
+            # one: the monitor kept the signal, the manager reported it watched,
+            # and nothing ever polled it or retried.
+            accepted_set = set(accepted)
+            for internal, feed_sym in symbol_pairs:
+                if feed_sym in accepted_set:
+                    self._record_subscribed(internal, feed_name)
+                else:
+                    self._pending_subscriptions[internal] = feed_name
+
+            logger.debug(f"Bulk subscribed {len(accepted_set)} symbols to {feed_name}")
+
+    async def retry_pending_subscriptions(self):
+        """Re-attempt the subscribes a feed refused.
+
+        A refusal used to be permanent: the symbol never entered the feed's poll
+        set, nothing retried it, and every signal on it sat silent until a
+        restart re-ran the subscribe — which usually succeeded, because MT5
+        returns "symbol not found" for a listing it does carry whenever a call
+        lands mid-sweep.
+        """
+        for symbol, feed_name in list(self._pending_subscriptions.items()):
+            if not self.feed_status.get(feed_name):
+                continue
+
+            feed_symbol = self.symbol_mapper.get_feed_symbol(symbol, feed_name)
+            try:
+                await self.feeds[feed_name].subscribe(feed_symbol)
+            except Exception as e:
+                # The first refusal was already logged; this is a quiet retry.
+                logger.debug("Retrying %s on %s failed: %s", symbol, feed_name, e)
+                continue
+
+            self._record_subscribed(symbol, feed_name)
+            logger.info("Subscribed to %s on %s after an earlier refusal", symbol, feed_name)
+
+    async def run_broker_call(self, func, *args):
+        """Run an MT5 call on the ICMarkets feed's serialized runner.
+
+        MetaTrader5 is process-global and talks to the terminal over one pipe:
+        a call landing mid-sweep comes back None for a symbol the broker does
+        list. Anything outside the feed that needs the terminal queues here.
+
+        Raises RuntimeError when the ICMarkets feed is unavailable (non-Windows,
+        or MT5 failed to initialize).
+        """
+        feed = self.feeds.get("icmarkets")
+        if feed is None:
+            raise RuntimeError("ICMarkets feed unavailable")
+        return await feed.run_mt5(func, *args)
+
+    def _record_subscribed(self, symbol: str, feed_name: str):
+        """Mark a symbol as watched and tell the health monitor to expect prices.
 
         Subscribing is the only moment that fact is known. Without it a symbol
         that never delivers a first tick has no timestamp to age from and its
         feed reads "idle" no matter how long it stays silent.
         """
+        self.subscribed_symbols.add(symbol)
+        self.symbol_to_feed[symbol] = feed_name
+        self._pending_subscriptions.pop(symbol, None)
         if self.health_monitor:
             self.health_monitor.mark_subscribed(symbol, feed_name)
 

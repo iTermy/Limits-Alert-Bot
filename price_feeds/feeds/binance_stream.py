@@ -124,8 +124,8 @@ class BinanceStream:
             if self.streaming and self.ws_connection:
                 await self._send_unsubscribe_message([symbol])
 
-    async def bulk_subscribe(self, symbols: list):
-        """Subscribe to multiple symbols at once"""
+    async def bulk_subscribe(self, symbols: list) -> list[str]:
+        """Subscribe to multiple symbols; return the ones that were accepted."""
         for symbol in symbols:
             self.subscribed_symbols.add(symbol)
 
@@ -134,6 +134,8 @@ class BinanceStream:
         # Send subscribe messages if streaming
         if self.streaming and self.ws_connection:
             await self._send_subscribe_message(symbols)
+
+        return list(symbols)
 
     async def _send_subscribe_message(self, symbols: list):
         """Send WebSocket subscribe message"""
