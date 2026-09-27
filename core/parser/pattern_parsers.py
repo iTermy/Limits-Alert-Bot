@@ -10,6 +10,7 @@ from typing import Optional
 from utils.logger import get_logger
 
 from . import INSTRUMENT_MAPPINGS, ParsedSignal
+from .stock_catalogue import stock_catalogue
 from .validators import (
     INDEX_SYMBOL_BLACKLIST,
     uses_gold_tolls_sl,
@@ -96,15 +97,6 @@ def invalidate_risky_gold_sl_cache() -> None:
     global _risky_gold_sl_cache_ts
     _risky_gold_sl_cache_ts = 0.0
 
-
-# Optional import for stock parsing
-try:
-    import MetaTrader5 as mt5
-
-    MT5_AVAILABLE = True
-except ImportError:
-    MT5_AVAILABLE = False
-    logger.warning("MetaTrader5 not available - stock parsing will be disabled")
 
 # ============================================================================
 # CONSTANTS
@@ -1032,60 +1024,26 @@ class CorePatternParser:
 
 class StockPatternParser:
     """
-    Stock-specific parser with MT5 integration for symbol lookup
-    """
+    Stock-specific parser; resolves tickers against the broker's listings.
 
-    # Minimum seconds between symbol-cache refreshes when stock symbols are missing.
-    # Prevents every miss from paying the ~24 ms symbols_get() cost if the broker
-    # genuinely has no stocks.
-    _SYMBOL_REFRESH_MIN_INTERVAL = 60.0
+    Reads the shared ``stock_catalogue``, which the ICMarkets feed fills — this
+    parser must not touch MT5 itself. See core/parser/stock_catalogue.py.
+    """
 
     def __init__(self, channel_config: Optional[dict] = None):
         self.channel_config = channel_config or {}
-        self.mt5_initialized = False
-        self.available_symbols: set[str] = set()
-        self._last_symbol_refresh: float = 0.0
-        self._initialize_mt5()
+        self._warned_unloaded = False
         logger.debug("Initialized StockPatternParser")
 
-    def _initialize_mt5(self):
-        """Initialize MT5 connection for symbol checking"""
-        if not MT5_AVAILABLE:
-            logger.warning("MT5 module not available, stock parsing disabled")
-            return
-
-        try:
-            if not mt5.initialize():
-                logger.warning("MT5 initialization failed, stock parsing disabled")
-                return
-
-            # Get all available symbols
-            symbols = mt5.symbols_get()
-            if symbols:
-                self.available_symbols = {s.name for s in symbols}
-                self.mt5_initialized = True
-                self._last_symbol_refresh = time.monotonic()
-                logger.debug(f"MT5 initialized with {len(self.available_symbols)} symbols")
-            else:
-                logger.warning("No symbols retrieved from MT5")
-
-        except Exception as e:
-            logger.error(f"MT5 initialization error: {e}")
-            self.mt5_initialized = False
-
-    def _refresh_symbols(self) -> None:
-        """Re-fetch MT5's symbol set. Rate-limited so misses on a stock-less broker don't stall the event loop."""
-        now = time.monotonic()
-        if now - self._last_symbol_refresh < self._SYMBOL_REFRESH_MIN_INTERVAL:
-            return
-        self._last_symbol_refresh = now
-        try:
-            symbols = mt5.symbols_get()
-            if symbols:
-                self.available_symbols = {s.name for s in symbols}
-                logger.debug(f"Refreshed MT5 symbol set: {len(self.available_symbols)} symbols")
-        except Exception as e:
-            logger.debug(f"Symbol refresh failed: {e}")
+    def _catalogue_ready(self) -> bool:
+        """True once the feed has published listings. Warns once while it hasn't."""
+        if stock_catalogue.loaded:
+            self._warned_unloaded = False
+            return True
+        if not self._warned_unloaded:
+            self._warned_unloaded = True
+            logger.warning("Broker stock listings not loaded yet; cannot parse stocks")
+        return False
 
     def parse(self, message: str, channel_name: Optional[str] = None) -> Optional[ParsedSignal]:
         """
@@ -1098,8 +1056,7 @@ class StockPatternParser:
         Returns:
             ParsedSignal or None
         """
-        if not self.mt5_initialized:
-            logger.warning("MT5 not initialized, cannot parse stocks")
+        if not self._catalogue_ready():
             return None
 
         try:
@@ -1172,32 +1129,9 @@ class StockPatternParser:
             return None
 
     def _extract_stock_symbol(self, text: str) -> Optional[str]:
-        """Extract stock symbol using MT5 integration"""
-        if not self.mt5_initialized:
-            return None
-
-        # Get words from text
-        words_original = text.split()
-        words_upper = [w.upper() for w in words_original]
-
-        # Get only stock symbols from available symbols
-        stock_symbols = [
-            s for s in self.available_symbols if s.endswith((".NYSE", ".NAS", ".NASDAQ"))
-        ]
-
-        # Cache was empty of stock symbols — MT5 may have loaded them after init.
-        # Refresh once and retry (rate-limited inside _refresh_symbols).
-        if not stock_symbols:
-            self._refresh_symbols()
-            stock_symbols = [
-                s for s in self.available_symbols if s.endswith((".NYSE", ".NAS", ".NASDAQ"))
-            ]
-
-        if not stock_symbols:
-            logger.warning("No stock symbols found in MT5")
-            return None
-
-        tickers_to_symbol = {symbol.split(".")[0]: symbol for symbol in stock_symbols}
+        """Resolve the message's stock to a symbol the broker lists."""
+        words_upper = [w.upper() for w in text.split()]
+        tickers_to_symbol = stock_catalogue.tickers
 
         # Step 0: Alias match — resolve ambiguous names to a canonical ticker
         for word in words_upper:
@@ -1217,14 +1151,15 @@ class StockPatternParser:
                 logger.debug(f"Found exact ticker match: {word} -> {symbol}")
                 return symbol
 
-        # Step 2: Check with exchange suffix
+        # Step 2: The message named the full symbol, with or without exchange
         for word in words_upper:
-            if word in stock_symbols:
-                logger.debug(f"Found symbol with exchange: {word}")
-                return word
+            symbol = stock_catalogue.canonical(word)
+            if symbol:
+                logger.debug(f"Found symbol with exchange: {symbol}")
+                return symbol
 
         # Step 3: Description matching
-        matches = self._find_by_description(text, stock_symbols)
+        matches = self._find_by_description(text)
 
         if len(matches) == 1:
             match = matches[0]
@@ -1239,7 +1174,7 @@ class StockPatternParser:
 
         return None
 
-    def _find_by_description(self, text: str, stock_symbols: list[str]) -> list[dict]:
+    def _find_by_description(self, text: str) -> list[dict]:
         """Find stocks by description matching"""
         # Get meaningful words for search
         words_lower = [
@@ -1255,29 +1190,23 @@ class StockPatternParser:
 
         matches = []
 
-        for symbol in stock_symbols:
-            try:
-                symbol_info = mt5.symbol_info(symbol)
-                if not symbol_info or not symbol_info.description:
-                    continue
-
-                description_lower = symbol_info.description.lower()
-
-                # Check if any search word is in description
-                for word in words_lower:
-                    if word in description_lower:
-                        matches.append(
-                            {
-                                "symbol": symbol,
-                                "description": symbol_info.description,
-                                "matched_word": word,
-                            }
-                        )
-                        break
-
-            except Exception as e:
-                logger.debug(f"Error getting info for {symbol}: {e}")
+        for symbol, description in stock_catalogue.descriptions.items():
+            if not description:
                 continue
+
+            description_lower = description.lower()
+
+            # Check if any search word is in description
+            for word in words_lower:
+                if word in description_lower:
+                    matches.append(
+                        {
+                            "symbol": symbol,
+                            "description": description,
+                            "matched_word": word,
+                        }
+                    )
+                    break
 
         return matches
 
@@ -1307,9 +1236,3 @@ class StockPatternParser:
             return best_match
 
         return None
-
-    def cleanup(self):
-        """Cleanup MT5 connection"""
-        if self.mt5_initialized:
-            mt5.shutdown()
-            logger.debug("MT5 connection closed")

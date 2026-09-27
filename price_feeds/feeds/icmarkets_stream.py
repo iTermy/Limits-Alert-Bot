@@ -7,12 +7,15 @@ import asyncio
 import contextlib
 import logging
 import os
+import time
 from collections.abc import AsyncIterator
 from concurrent.futures import ThreadPoolExecutor
 from datetime import datetime, timezone
 from typing import Any, Callable, Optional
 
 import MetaTrader5 as mt5
+
+from core.parser.stock_catalogue import stock_catalogue
 
 logger = logging.getLogger(__name__)
 
@@ -27,6 +30,14 @@ logger = logging.getLogger(__name__)
 # standing source of event-loop latency for everything else on the loop.
 _MT5_EXECUTOR_WORKERS = 4
 _MT5_SWEEP_TIMEOUT_SECONDS = 10
+
+# How often to re-read the broker's stock listings. They change when a ticker is
+# added, delisted or moves exchange — days apart, not minutes.
+_CATALOGUE_REFRESH_SECONDS = 6 * 3600
+
+
+class UnlistedSymbolError(Exception):
+    """Raised when the broker does not carry a symbol. Permanent, not transient."""
 
 
 class ICMarketsStream:
@@ -47,6 +58,13 @@ class ICMarketsStream:
         # and cache the result to avoid re-probing on every subscribe.
         self._stock_symbol_cache: dict[str, str] = {}
 
+        # Symbols this broker does not list, so the failure is reported once
+        # rather than on every subscribe attempt and every restart.
+        self._unlisted_symbols: set[str] = set()
+
+        self._catalogue_loaded_at: float = 0.0
+        self._catalogue_size: int = 0
+
         # Price cache to detect changes
         self.last_prices: dict[str, dict] = {}
 
@@ -60,6 +78,11 @@ class ICMarketsStream:
             max_workers=_MT5_EXECUTOR_WORKERS, thread_name_prefix="mt5"
         )
 
+        # MetaTrader5 talks to the terminal over one pipe and is not thread-safe:
+        # a symbol_info() landing mid-sweep comes back None for a symbol the
+        # broker does list, which is how live stock signals ended up unsubscribed.
+        self._mt5_lock = asyncio.Lock()
+
         # Optional callback invoked on every successful MT5 poll, regardless of
         # whether the price changed. Used by the health monitor to refresh its
         # last_seen timer so quiet periods (spread widening, illiquid windows)
@@ -71,7 +94,8 @@ class ICMarketsStream:
     async def _run_mt5(self, func, *args):
         """Run a blocking MT5 call on the dedicated pool, never on the loop thread."""
         loop = asyncio.get_running_loop()
-        return await loop.run_in_executor(self._mt5_executor, func, *args)
+        async with self._mt5_lock:
+            return await loop.run_in_executor(self._mt5_executor, func, *args)
 
     def _poll_symbols(self, symbols: list[str]) -> list[tuple[str, Any]]:
         """Fetch the current tick for each symbol. Runs on the MT5 executor.
@@ -116,6 +140,7 @@ class ICMarketsStream:
                 if terminal_info:
                     logger.debug(f"Connected to MT5 - {terminal_info.name}")
 
+                await self._load_stock_catalogue()
                 return True
             error = await self._run_mt5(mt5.last_error)
             logger.error(f"MT5 initialization failed: {error}")
@@ -151,6 +176,36 @@ class ICMarketsStream:
 
         return success
 
+    async def _load_stock_catalogue(self) -> None:
+        """Snapshot the broker's stock listings for the parser.
+
+        The parser cannot ask MT5 itself: the package is process-global and not
+        thread-safe, so a second caller racing this feed's poll sweep gets an
+        empty symbol list back. See core/parser/stock_catalogue.py.
+        """
+        try:
+            symbols = await self._run_mt5(mt5.symbols_get)
+        except Exception as e:
+            logger.warning("MT5 stock catalogue load failed: %s", e)
+            return
+
+        if not symbols:
+            logger.warning("MT5 returned no symbols; stock catalogue left unchanged")
+            return
+
+        self._catalogue_loaded_at = time.monotonic()
+        count = stock_catalogue.replace((s.name, s.description) for s in symbols)
+        if count == self._catalogue_size:
+            logger.debug("Broker stock listings unchanged (%d)", count)
+            return
+        self._catalogue_size = count
+        logger.info("Loaded %d broker stock listings", count)
+
+    async def _refresh_stock_catalogue_if_due(self) -> None:
+        if time.monotonic() - self._catalogue_loaded_at < _CATALOGUE_REFRESH_SECONDS:
+            return
+        await self._load_stock_catalogue()
+
     async def subscribe(self, symbol: str):
         """
         Subscribe to price updates for a symbol (100 ms polling cadence).
@@ -168,7 +223,7 @@ class ICMarketsStream:
         symbol_info = await self._run_mt5(mt5.symbol_info, symbol)
 
         if symbol_info is None:
-            raise Exception(f"Symbol {symbol} not found in MT5")
+            raise UnlistedSymbolError(f"Symbol {symbol} not found in MT5")
 
         if not symbol_info.visible:
             await self._run_mt5(mt5.symbol_select, symbol, True)
@@ -218,6 +273,15 @@ class ICMarketsStream:
         for symbol in symbols:
             try:
                 await self.subscribe(symbol)
+            except UnlistedSymbolError as e:
+                # A symbol the broker does not carry stays unlisted, and every
+                # reconnect re-subscribes the whole set — so report it once and
+                # keep quiet about it thereafter.
+                if symbol not in self._unlisted_symbols:
+                    self._unlisted_symbols.add(symbol)
+                    logger.error("Failed to subscribe to %s: %s", symbol, e)
+                else:
+                    logger.debug("Skipping unlisted symbol %s", symbol)
             except Exception as e:
                 logger.error(f"Failed to subscribe to {symbol}: {e}")
 
@@ -235,6 +299,8 @@ class ICMarketsStream:
 
         while self.streaming:
             try:
+                await self._refresh_stock_catalogue_if_due()
+
                 symbols = sorted(self.subscribed_symbols)
                 ticks = []
                 if symbols:

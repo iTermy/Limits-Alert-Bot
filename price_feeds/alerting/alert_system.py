@@ -490,6 +490,16 @@ class AlertSystem:
             logger.warning("Live update network error for signal %s: %s", signal_id, e)
             return False
 
+        except RuntimeError as e:
+            # aiohttp raises this once the client session is closed. The bot is
+            # on its way down and no later pass can succeed, so stand the worker
+            # down rather than logging a traceback per embed per pass.
+            if "session is closed" not in str(e).lower():
+                raise
+            logger.debug("Live update abandoned for signal %s: client session closed", signal_id)
+            self.stop_live_updates()
+            return False
+
         except Exception as e:
             logger.error("Live update failed for signal %s: %r", signal_id, e, exc_info=True)
             return False

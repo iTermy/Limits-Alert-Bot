@@ -62,7 +62,13 @@ core/
                                   get_gold_tolls_sl_offset() (settings.json, 30 s cache)
     validators.py               is_potential_signal(), should_exclude(), validate_signal(),
                                   detect_channel_type()
-    ai_fallback.py              AIFallbackParser (gpt-4o-mini); only runs if pattern fails + flag enabled
+    stock_catalogue.py          StockCatalogue + the `stock_catalogue` singleton — ticker → DB symbol
+                                  and symbol → description for US equities. Written by
+                                  ICMarketsStream, read by StockPatternParser and ai_fallback.
+                                  Also owns STOCK_SUFFIXES
+    ai_fallback.py              AIFallbackParser (gpt-4o-mini); only runs if pattern fails + flag enabled;
+                                  a stock instrument it names is resolved through stock_catalogue
+                                  and the signal rejected if the broker doesn't list it
 
 database/
   __init__.py                   Loads .env; exposes global db (DatabaseManager) and initialize_signal_db()
@@ -476,6 +482,14 @@ Requests are deduplicated by signal id in `_pending_live_updates` (an `OrderedDi
 
 Status/event edits stand the cosmetic worker down via `_priority_edits_active`: a channel abandons the rest of its snapshots so the critical event gets the next HTTP slot. Critical events go through `deliver_critical`, which bounds the attempt at 20 s (`_DELIVERY_ATTEMPT_TIMEOUT`) and hands failures to a deduplicated exponential-backoff retry task. Stopped when a signal closes or is cancelled.
 
+**`TradingBot.close` must stop the worker before `super().close()`.** It didn't until
+2026-09-27, so every shutdown left the sweep editing embeds through an aiohttp session
+the client had already closed: one ERROR plus a ~20-line traceback per live embed per
+pass, for as long as the process took to exit. That was ~30,000 lines — the single
+largest thing in both log files. `_refresh_one_embed` also treats a
+`RuntimeError("Session is closed")` as a stand-down (`stop_live_updates`, DEBUG) rather
+than an error worth a traceback, since no later pass can succeed.
+
 ### Key public methods
 - `send_approaching_alert(signal, limit, current_price, distance_formatted, spread, spread_buffer_enabled)` — creates embed; registers for live updates
 - `send_limit_hit_alert(signal, limit, current_price, spread, spread_buffer_enabled)` — edits embed; sends ping
@@ -545,6 +559,50 @@ The default sort for `!active` is `distance` (closest pending limit first). Othe
 
 ### Dual MT5 terminals (ICMarkets + Exness)
 The `MetaTrader5` Python package is process-global — `mt5.initialize()` can only connect to one terminal at a time. The ICMarkets feed runs in the main process; the Exness feed runs in a **child process** (`exness_worker.py`) spawned via `asyncio.create_subprocess_exec`. Communication is via JSON lines over stdin (commands) and stdout (prices). Both terminals must be running on the VPS before the bot starts. The `MT5_PATH` and `EXNESS_MT5_PATH` env vars should both be set to avoid auto-discovery ambiguity.
+
+### Only ICMarketsStream may call MT5, and a stock ticker is resolved from its catalogue
+`MetaTrader5` is process-global and talks to the terminal over a single pipe, so it
+is not thread-safe. `ICMarketsStream` owns every call: `_run_mt5` hands them to its
+dedicated pool **one at a time** under `_mt5_lock`, because a `symbol_info()` landing
+mid-sweep returns `None` for a symbol the broker does list.
+
+`StockPatternParser` used to hold a second MT5 connection of its own —
+`mt5.initialize()` with no path, then `symbols_get()` and a `symbol_info()` per
+listing straight from the event loop, thousands of blocking IPC calls racing the
+100 ms sweep. That cost the stocks channel most of August and September 2026:
+
+- The racing `symbols_get()` came back with no stocks in it, the parser logged
+  *"No stock symbols found in MT5"* and returned None, and **every** stock message
+  fell through to the AI fallback — which guesses the exchange suffix. `XOM.NAS`
+  and `SPY.NAS` were saved for NYSE listings and `GLID.NAS` for nothing at all.
+  Nothing can price those, so the signals sat silent (5 were still `active` when
+  this was found) and only ever appeared to move on a restart.
+- Its `cleanup()` called `mt5.shutdown()`, which would have taken the price feed's
+  connection with it. Nothing called it, which is the only reason it never fired.
+
+`ICMarketsStream._load_stock_catalogue` now snapshots the listings on connect and
+every `_CATALOGUE_REFRESH_SECONDS` (6 h) from inside the poll loop, so the read
+never overlaps a sweep. `core/parser/stock_catalogue.py` holds the snapshot; the
+parser and the AI fallback read it and make no MT5 calls at all.
+
+Two rules the catalogue encodes, both of which the old plain-symbol scan got wrong:
+
+- **A ticker whose only contract is the 24-hour one still counts.** 2,672 of the
+  broker's 4,513 tickers are in that shape (`ACHR.NYSE-24` with no `ACHR.NYSE`).
+  The old scan filtered them out entirely, so they were unparseable. The catalogue
+  keys on the bare name the DB stores; `SymbolMapper` appends `-24` back on and
+  `_resolve_stock_symbol` falls back to the bare name when there is no twin.
+- **When a ticker is listed on both exchanges, the one with a 24-hour contract
+  wins.** The broker keeps the delisted side around, so `HON`, `PANW`, `DPZ`, `ACB`,
+  `CGC` and `AMRX` all appear twice; only the current listing gets the `-24`.
+
+A symbol the broker doesn't carry raises `UnlistedSymbolError`, which
+`bulk_subscribe` reports **once per symbol** — every reconnect re-subscribes the
+whole set, and the old `Exception` catch logged it every time.
+
+`MarketContextProvider` also calls MT5 (`copy_rates_from_pos`, on the default
+executor) and is the remaining unserialized caller. It only runs at limit-hit and
+never calls `initialize()`, so it rides the feed's connection.
 
 ### Exness oil symbol mapping
 Internal symbol `USOILSPOT` maps to `USOILm` on Exness MT5. The mapping is defined in both `symbol_mappings.json` (`symbol_mappings.exness.specific_mappings`) and the reverse direction (`reverse_mappings.exness`). Both sections are required — without the reverse mapping, prices arrive under `USOILM` instead of `USOILSPOT` and don't match signals.

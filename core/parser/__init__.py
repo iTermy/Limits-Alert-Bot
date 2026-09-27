@@ -8,6 +8,7 @@ from typing import Optional
 
 from utils.logger import get_logger
 
+from .stock_catalogue import STOCK_SUFFIXES
 from .validators import (
     detect_channel_type,
     is_potential_signal,
@@ -21,10 +22,6 @@ logger = get_logger("parser")
 # ============================================================================
 # DATA STRUCTURES
 # ============================================================================
-
-
-# US equities carry an exchange suffix (AAPL.NAS, BAC.NYSE).
-STOCK_SUFFIXES = (".NYSE", ".NAS", ".NASDAQ")
 
 
 @dataclass
@@ -374,14 +371,6 @@ class SignalParser:
             self._ai_parser = AIFallbackParser(self.channel_config)
 
         return self._ai_parser.parse(message, channel_name)
-
-    def cleanup(self):
-        """Cleanup resources (e.g., MT5 connections)"""
-        if self._stock_parser and hasattr(self._stock_parser, "cleanup"):
-            try:
-                self._stock_parser.cleanup()
-            except Exception as e:
-                logger.error(f"Error cleaning up stock parser: {e}")
 
 
 # ============================================================================

@@ -11,11 +11,28 @@ from typing import Optional
 from utils.logger import get_logger
 
 # Import from parent package
-from . import INSTRUMENT_MAPPINGS, ParsedSignal
+from . import INSTRUMENT_MAPPINGS, STOCK_SUFFIXES, ParsedSignal
 from .pattern_parsers import get_signal_type
+from .stock_catalogue import stock_catalogue
 from .validators import validate_signal
 
 logger = get_logger("parser.ai_fallback")
+
+
+def _listed_stock_instrument(instrument: str) -> Optional[str]:
+    """Map a model-supplied US equity onto the symbol the broker actually lists.
+
+    The model guesses the exchange suffix and will invent tickers outright — it
+    produced XOM.NAS for a NYSE listing and GLID.NAS for nothing at all. Both
+    save fine and then never price, because no feed carries them.
+    """
+    if not stock_catalogue.loaded:
+        return instrument
+
+    listed = stock_catalogue.resolve(instrument.split(".")[0])
+    if listed and listed != instrument.upper():
+        logger.debug("Corrected AI stock symbol %s -> %s", instrument, listed)
+    return listed
 
 
 class AIFallbackParser:
@@ -246,6 +263,14 @@ If unable to confidently parse even after correction attempts, return null.
                 if raw_instrument
                 else raw_instrument
             )
+
+            if instrument and instrument.upper().endswith(STOCK_SUFFIXES):
+                instrument = _listed_stock_instrument(instrument)
+                if not instrument:
+                    logger.warning(
+                        "AI named a stock the broker does not list: %s", raw_instrument
+                    )
+                    return None
 
             # Create signal
             signal = ParsedSignal(

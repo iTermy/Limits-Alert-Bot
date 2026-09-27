@@ -627,6 +627,12 @@ class TradingBot(commands.Bot):
         # Cancel background tasks
         self.heartbeat.cancel()
 
+        # Before super().close() takes the HTTP session away. Left running, the
+        # refresh worker logs an error and a traceback per live embed per pass
+        # against a session that is never coming back.
+        if self.monitor and self.monitor.alert_system:
+            self.monitor.alert_system.stop_live_updates()
+
         if self.expiry_manager:
             self.expiry_manager.stop()
 

@@ -54,7 +54,20 @@ class ExnessStream:
         self._loop: Optional[asyncio.AbstractEventLoop] = None
         self._reader_thread: Optional[threading.Thread] = None
 
+        # Last connect failure, so a standing one (an expired demo account
+        # refuses authorization on every retry, forever) is reported once
+        # rather than on every reconnect attempt.
+        self._last_connect_failure: Optional[str] = None
+
         logger.debug("ExnessStream initialized")
+
+    def _log_connect_failure(self, reason: str) -> None:
+        """Report a connect failure once per outage; repeats go to DEBUG."""
+        if reason == self._last_connect_failure:
+            logger.debug("Exness connect still failing: %s", reason)
+            return
+        self._last_connect_failure = reason
+        logger.error("Exness connect failed: %s", reason)
 
     def _spawn(self) -> subprocess.Popen:
         """Blocking child-process spawn — always called via asyncio.to_thread."""
@@ -85,17 +98,18 @@ class ExnessStream:
             )
             if not first_line:
                 stderr_out = await self._read_stderr()
-                logger.error(f"Exness worker exited without output. stderr: {stderr_out}")
+                self._log_connect_failure(f"worker exited without output. stderr: {stderr_out}")
                 await self._kill_process()
                 return False
 
             msg = json.loads(first_line)
             if "error" in msg:
                 stderr_out = await self._read_stderr()
-                logger.error(f"Exness worker failed: {msg['error']}. stderr: {stderr_out}")
+                self._log_connect_failure(f"{msg['error']}. stderr: {stderr_out}")
                 await self._kill_process()
                 return False
 
+            self._last_connect_failure = None
             self.connected = True
             self._loop = asyncio.get_running_loop()
             self._queue = asyncio.Queue()
@@ -111,11 +125,11 @@ class ExnessStream:
             return True
 
         except asyncio.TimeoutError:
-            logger.error("Exness worker connection timed out")
+            self._log_connect_failure("worker connection timed out")
             await self._kill_process()
             return False
         except Exception as e:
-            logger.error(f"Error connecting to Exness: {e}")
+            self._log_connect_failure(str(e))
             await self._kill_process()
             return False
 
