@@ -898,6 +898,42 @@ The window is long on purpose. A feed only reaches `down` with its market open, 
 restart the bot roughly twice an hour, which is the accepted cost of never
 repeating 2026-08-27.
 
+**A feed that never ticked at all is not restarted.** The watchdog fires only when
+`_feed_newest_tick(feed)` is non-None — i.e. the feed worked in this process and
+then stopped, which is the shape a restart actually cures. A feed that has produced
+nothing since startup is almost always a symbol the account does not carry, and the
+reconnect path has already re-run the subscribe; restarting would loop the bot every
+30 min forever without fixing it. The `down` status still stops the EX bot placing on
+that feed, and `_report_never_ticked` names the symbol.
+
+### A subscribed symbol that never ticks must age like a stall
+`_check_feed` judged staleness from `last_seen`, which is written only by an arriving
+price — so a symbol that never delivered its **first** tick had no entry, could not
+be stale, and its feed reported `idle`. On 2026-09-18 the Exness account was
+re-authorized and stopped carrying `USOILm`; `symbol_select` refused it, the worker
+acked the subscribe anyway, `symbol_info_tick` returned `None` forever, and oil went
+unmonitored for nine days (signals 4603 and 4646 sat silent through their whole
+lives) while `!health` and `feed_health` both showed nothing wrong.
+
+`expected_since` (feed → symbol → subscribe time) fixes it: subscribing is the moment
+prices become expected, so it is what a never-ticked symbol ages from.
+`PriceStreamManager._mark_subscribed` writes it on every subscribe path, and
+`set_health_monitor` backfills anything subscribed before it was wired in.
+
+It is deliberately **not** folded into `last_seen`: every reconnect re-subscribes, so
+a subscribe timestamp landing there would clear a dead feed's `down` state on the
+reconnect alone — the 2026-08-28 false all-clear by another route. `ticked_recently`
+and the `last_seen` written to `feed_health` therefore read real ticks only, and a
+feed that has never ticked honestly reports `last_seen = NULL`.
+
+`_report_never_ticked` names the symbol once, because neither existing signal could:
+the feed-level line reports a *count*, and a feed only goes `down` when **every**
+symbol on it has stalled — so one unlisted symbol on a busy feed (`XYZ.NAS`,
+`XOM.NAS-24` and `SPY.NAS-24` were all failing to subscribe on ICMarkets in the same
+logs) stays invisible in both. Exness-side, `exness_worker` now reports a refused
+`symbol_select` as `{"unlisted": …}` instead of acking it, so the parent logs which
+symbol the broker rejected and why. Tests: `tests/test_feed_recovery.py`.
+
 ### A feed must never be abandoned, and a session is not a feed
 Four independent safeguards each failed to notice OANDA dying at
 2026-08-27 14:33 and staying dead until a manual restart 28½ h later. OANDA
@@ -941,6 +977,23 @@ state at 01:00 on 2026-08-28, reopening the reconnect budget and DMing an
 all-clear for a feed that then stayed silent another 18 h.
 
 Tests: `tests/test_feed_recovery.py`.
+
+### An empty OANDA instrument list is not a request worth sending
+`stream_prices` checks `subscribed_symbols` once on entry, but the set empties
+*mid-stream* whenever the last OANDA signal closes — a daily mass expiry does it
+(`Expired 46 signals` on 2026-09-26 00:52, a single `cancel` reply on 09-21 05:24).
+`",".join(set())` is `""`, which OANDA rejects with
+`Invalid value specified for 'instruments'`, and the loop re-sent it every 5 s for as
+long as the set stayed empty: 94 rejected requests across two windows, one of them
+20 min long. The loop now idles on an empty set and picks up the next subscribe on its
+own pass, so nothing reconnects and nothing is logged above DEBUG.
+
+Relatedly, a severed OANDA stream (`Connection closed`, a truncated chunked body) is
+recoverable in under 5 s and is logged via `_log_stream_failure` — WARNING for the
+first failure of an outage, DEBUG for repeats, reset on the next successful
+connection. It was an unconditional ERROR, which put several lines a day into
+`errors.log` that nothing acts on; the reconnect budget and `FeedHealthMonitor` own
+the escalation.
 
 ### Discord connection watchdog
 `TradingBot.heartbeat` checks gateway readiness every 30 s and runs an authenticated REST probe every 60 s. A gateway that remains unready for 120 s, three consecutive REST probe failures/timeouts (30 s per probe), or two consecutive bounded message-operation timeouts closes the bot from a separate task so `main.py` can relaunch it. Cosmetic edits time out after 8 s and critical attempts after 20 s; this catches a wedged message route even when the separate user-fetch probe remains healthy. The client also caps any single non-global Retry-After at 60 s; ordinary short Discord Retry-After responses are still honoured. This watchdog is independent of price-feed health, so a network-device reset cannot leave Discord wedged while price ticks keep the process alive.

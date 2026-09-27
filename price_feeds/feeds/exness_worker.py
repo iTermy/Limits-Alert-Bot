@@ -45,7 +45,15 @@ def _read_commands(subscribed: set, lock: threading.Lock, shutdown_event: thread
         if action == "subscribe":
             symbol = cmd.get("symbol")
             if symbol:
-                mt5.symbol_select(symbol, True)
+                # A symbol the account does not carry fails here and then returns
+                # None from every symbol_info_tick forever. Reporting the refusal
+                # is the only way the parent learns the difference between a dead
+                # feed and a symbol name the broker renamed — Exness suffixes
+                # depend on account type, so recreating the account can silently
+                # turn USOILm into USOIL.
+                if not mt5.symbol_select(symbol, True):
+                    _send({"unlisted": symbol, "detail": str(mt5.last_error())})
+                    continue
                 with lock:
                     subscribed.add(symbol)
                 _send({"ack": "subscribe", "symbol": symbol})

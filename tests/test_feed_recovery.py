@@ -60,6 +60,9 @@ def make_monitor():
     """A health monitor with only the fields the reconnect path touches."""
     monitor = fhm.FeedHealthMonitor.__new__(fhm.FeedHealthMonitor)
     monitor.last_seen = defaultdict(dict)
+    monitor.expected_since = defaultdict(dict)
+    monitor._never_ticked_reported = set()
+    monitor._restart_declined = set()
     monitor.feed_status = {}
     monitor.first_stale_time = {}
     monitor.reconnect_attempts = defaultdict(int)
@@ -238,6 +241,9 @@ async def test_dead_feed_watchdog_fires(monkeypatch):
     monitor.first_stale_time[FEED] = datetime.now() - timedelta(
         seconds=fhm.FEED_DOWN_RESTART_SECONDS + 1
     )
+    # OANDA had been ticking for two days before it died; only a feed that once
+    # worked is worth restarting.
+    monitor.last_seen[FEED][SYMBOL] = datetime.now() - timedelta(hours=2)
 
     restarts = []
     monkeypatch.setattr(
@@ -308,3 +314,149 @@ async def test_down_feed_is_held_down_until_a_real_tick(monkeypatch):
 
     assert monitor.feed_status[FEED] == "down"
     assert written == ["down"]
+
+
+# ── A symbol that never ticks at all must still age ────────────────────
+
+
+@pytest.mark.asyncio
+async def test_never_ticked_symbol_takes_its_feed_down(monkeypatch):
+    """The Exness oil symbol was subscribed but never delivered one price, so it
+    had no last_seen entry, staleness could not see it, and the feed read "idle"
+    for nine days while every oil signal sat silent."""
+    now = datetime.now()
+    stale_threshold = timedelta(seconds=fhm.STALE_THRESHOLD_SECONDS)
+
+    monitor = make_monitor()
+    monitor.stream_manager = type("S", (), {"subscribed_symbols": {"USOILSPOT"}})()
+    monitor.mark_subscribed("USOILSPOT", "exness")
+    monitor.expected_since["exness"]["USOILSPOT"] = now - timedelta(hours=2)
+
+    monkeypatch.setattr(
+        fhm.FeedHealthMonitor, "is_market_open", lambda self, ac, at=None: True
+    )
+
+    written = []
+    monkeypatch.setattr(
+        fhm.FeedHealthMonitor,
+        "_write_feed_health",
+        lambda self, feed, status, secs, seen: written.append((status, seen))
+        or asyncio.sleep(0),
+    )
+    monkeypatch.setattr(
+        fhm.FeedHealthMonitor,
+        "_handle_feed_failure",
+        lambda self, feed, stale: asyncio.sleep(0),
+    )
+
+    await monitor._check_feed("exness", stale_threshold, now)
+
+    assert monitor.feed_status["exness"] == "down"
+    # No real tick ever arrived, so last_seen must be reported as unknown rather
+    # than backfilled from the subscribe time.
+    assert written == [("down", None)]
+    assert "USOILSPOT" in monitor._never_ticked_reported
+
+
+@pytest.mark.asyncio
+async def test_resubscribe_cannot_clear_a_down_feed(monkeypatch):
+    """A subscribe timestamp says prices are expected, never that any arrived.
+    Letting it count as a tick would let a reconnect's resubscribe declare a
+    silent feed recovered — the 2026-08-28 false all-clear by another route."""
+    now = datetime.now()
+    stale_threshold = timedelta(seconds=fhm.STALE_THRESHOLD_SECONDS)
+
+    monitor = make_monitor()
+    monitor.feed_status[FEED] = "down"
+    monitor.stream_manager = type("S", (), {"subscribed_symbols": {SYMBOL}})()
+    monitor.last_seen[FEED][SYMBOL] = now - timedelta(hours=8)
+    # The reconnect just resubscribed the symbol, so "expected since" is now.
+    monitor.mark_subscribed(SYMBOL, FEED)
+
+    monkeypatch.setattr(
+        fhm.FeedHealthMonitor, "is_market_open", lambda self, ac, at=None: True
+    )
+    monkeypatch.setattr(
+        fhm.FeedHealthMonitor,
+        "_write_feed_health",
+        lambda self, feed, status, secs, seen: asyncio.sleep(0),
+    )
+    monkeypatch.setattr(
+        fhm.FeedHealthMonitor,
+        "_handle_feed_failure",
+        lambda self, feed, stale: asyncio.sleep(0),
+    )
+    monkeypatch.setattr(
+        fhm.FeedHealthMonitor,
+        "_handle_feed_recovery",
+        lambda self, feed: pytest.fail("recovered on a resubscribe, not a tick"),
+    )
+
+    await monitor._check_feed(FEED, stale_threshold, now)
+
+    assert monitor.feed_status[FEED] == "down"
+
+
+@pytest.mark.asyncio
+async def test_first_tick_clears_the_never_ticked_report():
+    monitor = make_monitor()
+    monitor._never_ticked_reported.add("USOILSPOT")
+
+    monitor.update_last_seen("USOILSPOT", "exness")
+
+    assert "USOILSPOT" not in monitor._never_ticked_reported
+
+
+# ── A restart cannot conjure a symbol the broker does not list ───────────
+
+
+@pytest.mark.asyncio
+async def test_watchdog_does_not_restart_a_feed_that_never_ticked():
+    """A restart cures a feed that worked and stopped. It cannot conjure a symbol
+    the account does not carry — and firing on that would loop the bot every
+    30 minutes forever."""
+    now = datetime.now()
+
+    monitor = make_monitor()
+    monitor.startup_time = now - timedelta(hours=3)
+    monitor.feed_status["exness"] = "down"
+    monitor.first_stale_time["exness"] = now - timedelta(
+        seconds=fhm.FEED_DOWN_RESTART_SECONDS + 60
+    )
+    # expected_since is set, last_seen is empty: subscribed, never ticked.
+    monitor.mark_subscribed("USOILSPOT", "exness")
+
+    await monitor._check_dead_feed_watchdog(now)
+
+    assert monitor._watchdog_fired is False
+
+
+@pytest.mark.asyncio
+async def test_watchdog_still_restarts_a_feed_that_died(monkeypatch):
+    """The 2026-08-27 OANDA outage: the feed ticked for two days, then stopped.
+    That is the case a restart actually fixed, and it must still fire."""
+    now = datetime.now()
+
+    monitor = make_monitor()
+    monitor.startup_time = now - timedelta(hours=3)
+    monitor.feed_status[FEED] = "down"
+    monitor.first_stale_time[FEED] = now - timedelta(
+        seconds=fhm.FEED_DOWN_RESTART_SECONDS + 60
+    )
+    monitor.last_seen[FEED][SYMBOL] = now - timedelta(hours=2)
+
+    restarts = []
+    monkeypatch.setattr(
+        fhm.FeedHealthMonitor,
+        "_watchdog_restart",
+        lambda self, alert: restarts.append(alert) or asyncio.sleep(0),
+    )
+    monkeypatch.setattr(
+        fhm.FeedHealthMonitor, "_format_duration", lambda self, d: str(d)
+    )
+
+    await monitor._check_dead_feed_watchdog(now)
+    await asyncio.sleep(0)
+
+    assert monitor._watchdog_fired is True
+    assert restarts

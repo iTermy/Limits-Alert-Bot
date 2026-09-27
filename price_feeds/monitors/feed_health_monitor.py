@@ -188,6 +188,23 @@ class FeedHealthMonitor:
         # Track last update times: feed -> symbol -> timestamp
         self.last_seen: dict[str, dict[str, datetime]] = defaultdict(dict)
 
+        # feed -> symbol -> when the symbol was subscribed. A symbol that has
+        # never ticked has no last_seen entry at all, so staleness could not see
+        # it and its feed read "idle" — which is how a subscribed-but-unlisted
+        # Exness oil symbol stayed silent for nine days while `!health` reported
+        # nothing wrong. Subscribing is the moment prices become expected, so it
+        # is what a never-ticked symbol ages from. Kept apart from last_seen
+        # because only a real tick may clear a feed's `down` state.
+        self.expected_since: dict[str, dict[str, datetime]] = defaultdict(dict)
+
+        # Symbols already reported as never having ticked, so the warning naming
+        # the symbol is logged once per outage rather than every check.
+        self._never_ticked_reported: set[str] = set()
+
+        # Feeds the dead-feed watchdog has declined to restart because they never
+        # ticked at all; keeps that explanation to one line per feed.
+        self._restart_declined: set[str] = set()
+
         # Track feed status
         self.feed_status: dict[str, str] = {}  # 'healthy', 'down', 'idle'
         self.last_alert_time: dict[str, datetime] = {}
@@ -407,6 +424,23 @@ class FeedHealthMonitor:
             if down_for < FEED_DOWN_RESTART_SECONDS:
                 continue
 
+            # A restart only helps a feed that was working and stopped. A feed
+            # that has produced nothing at all since this process connected is
+            # almost always a symbol the account does not carry (Exness suffixes
+            # move with account type), and reconnecting already re-ran the
+            # subscribe — so restarting cures nothing and would loop the bot
+            # every 30 minutes forever. The `down` status still stops the EX bot
+            # placing on it, and _report_never_ticked names the symbol.
+            if self._feed_newest_tick(feed_name) is None:
+                if feed_name not in self._restart_declined:
+                    self._restart_declined.add(feed_name)
+                    logger.warning(
+                        "%s has delivered no prices since startup — not restarting, "
+                        "a restart cannot fix a symbol the feed does not carry",
+                        feed_name,
+                    )
+                continue
+
             self._watchdog_fired = True
             logger.critical(
                 "Dead-feed watchdog: %s has delivered no prices for %.0fs — forcing restart",
@@ -446,10 +480,24 @@ class FeedHealthMonitor:
             feed: Feed name
         """
         self.last_seen[feed][symbol] = datetime.now()
+        self._never_ticked_reported.discard(symbol)
+
+    def mark_subscribed(self, symbol: str, feed: str):
+        """
+        Record that prices are now expected for a symbol on a feed.
+
+        Called by PriceStreamManager on every subscribe. Without this a symbol
+        that never delivers a single tick is invisible to staleness checks.
+
+        Args:
+            symbol: Internal format symbol
+            feed: Feed name
+        """
+        self.expected_since[feed][symbol] = datetime.now()
 
     def clear_symbol(self, symbol: str):
         """
-        Remove a symbol from all last_seen tracking.
+        Remove a symbol from all health tracking.
         Should be called when a symbol is unsubscribed (e.g. DB cleared).
         This prevents stale entries from triggering false feed-down alerts.
 
@@ -458,6 +506,9 @@ class FeedHealthMonitor:
         """
         for feed_data in self.last_seen.values():
             feed_data.pop(symbol, None)
+        for feed_data in self.expected_since.values():
+            feed_data.pop(symbol, None)
+        self._never_ticked_reported.discard(symbol)
         logger.debug(f"Cleared health tracking for symbol: {symbol}")
 
     async def check_feed_health(self):
@@ -490,8 +541,16 @@ class FeedHealthMonitor:
         # prevents ghost alerts for symbols whose signals have been cleared from the DB.
         active_symbols = getattr(self.stream_manager, "subscribed_symbols", set())
 
+        # A symbol that has yet to deliver its first price ages from the moment
+        # it was subscribed, so a feed whose symbols never tick at all goes down
+        # rather than reading "idle" forever.
         feed_last_seen = self.last_seen.get(feed_name, {})
-        feed_symbols = {sym: ts for sym, ts in feed_last_seen.items() if sym in active_symbols}
+        feed_expected = self.expected_since.get(feed_name, {})
+        feed_symbols = {
+            sym: feed_last_seen.get(sym, feed_expected.get(sym))
+            for sym in set(feed_last_seen) | set(feed_expected)
+            if sym in active_symbols
+        }
 
         if not feed_symbols:
             # No active subscriptions for this feed
@@ -532,9 +591,14 @@ class FeedHealthMonitor:
                         }
                     )
 
-        # Determine feed health
-        newest_seen = max(feed_symbols.values()) if feed_symbols else None
-        ticked_recently = any(now - ts <= stale_threshold for ts in feed_symbols.values())
+        self._report_never_ticked(feed_name, stale_symbols, feed_last_seen)
+
+        # Feed health is judged on real ticks only: a subscribe timestamp says
+        # prices are expected, never that any arrived, so it must not clear a
+        # feed's `down` state nor be written out as a last_seen time.
+        real_ticks = [feed_last_seen[sym] for sym in feed_symbols if sym in feed_last_seen]
+        newest_seen = max(real_ticks) if real_ticks else None
+        ticked_recently = any(now - ts <= stale_threshold for ts in real_ticks)
 
         # The EX bot blocks placement on any feed marked "down", so we only mark a
         # feed down when every subscribed symbol has stalled. One unrelated quiet
@@ -586,6 +650,28 @@ class FeedHealthMonitor:
             max_stale_secs = int(max(s["time_since"].total_seconds() for s in stale_symbols))
             await self._write_feed_health(feed_name, "down", max_stale_secs, newest_seen)
             await self._handle_feed_failure(feed_name, stale_symbols)
+
+    def _report_never_ticked(self, feed_name: str, stale_symbols: list, feed_last_seen: dict):
+        """Name any subscribed symbol that has never delivered a single price.
+
+        The feed-level stale line reports a count, and a feed only goes down when
+        *every* symbol on it has stalled — so a single symbol the broker does not
+        list is silent in both. Naming it is the difference between "oil stopped
+        working nine days ago" and knowing the Exness account no longer carries
+        USOILm. Logged once per symbol; a first tick clears the flag.
+        """
+        for entry in stale_symbols:
+            symbol = entry["symbol"]
+            if symbol in feed_last_seen or symbol in self._never_ticked_reported:
+                continue
+            self._never_ticked_reported.add(symbol)
+            logger.error(
+                "%s has never ticked on %s since it was subscribed %ds ago — "
+                "the feed may not carry this symbol",
+                symbol,
+                feed_name,
+                int(entry["time_since"].total_seconds()),
+            )
 
     async def _handle_feed_failure(self, feed_name: str, stale_symbols: list):
         """

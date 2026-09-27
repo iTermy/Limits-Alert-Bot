@@ -165,6 +165,22 @@ class OANDAStream:
         if was_streaming:
             self.streaming = True
 
+    @staticmethod
+    def _log_stream_failure(failures: int, kind: str, error: Exception):
+        """Report a stream drop at a level that matches what it costs.
+
+        OANDA's stream is severed several times a day (`Connection closed`,
+        a truncated chunked body) and the loop re-requests it within 5 s, so a
+        single drop is recoverable and belongs at WARNING. A run of them is the
+        same outage restating itself — the reconnect budget and the feed-health
+        monitor own that escalation, so repeats go to DEBUG rather than filling
+        errors.log with lines nothing acts on.
+        """
+        if failures == 1:
+            logger.warning("OANDA stream %s: %s", kind, error)
+        else:
+            logger.debug("OANDA stream %s (attempt %d): %s", kind, failures, error)
+
     async def stream_prices(self) -> AsyncIterator[tuple[str, dict]]:
         """
         Stream price updates from OANDA
@@ -183,9 +199,21 @@ class OANDAStream:
             return
 
         self.streaming = True
+        failures = 0
 
         while self.streaming:
             try:
+                if not self.subscribed_symbols:
+                    # Every OANDA signal closed at once (a mass expiry does it
+                    # daily) and the set emptied mid-stream. An empty
+                    # `instruments` is rejected with a 400, and the old code
+                    # re-sent it every 5 s for as long as the set stayed empty —
+                    # 94 rejected requests over two such windows. Wait for a
+                    # subscribe instead; the next pass picks it up.
+                    logger.debug("No OANDA symbols subscribed — idling")
+                    await asyncio.sleep(5)
+                    continue
+
                 # Build instrument list
                 instruments = ",".join(self.subscribed_symbols)
                 params = {"instruments": instruments}
@@ -204,6 +232,7 @@ class OANDAStream:
                         continue
 
                     self.stream_response = response
+                    failures = 0
 
                     # Read stream line by line with a watchdog: OANDA's heartbeat
                     # keeps data flowing, so a read that stalls past the timeout
@@ -265,11 +294,13 @@ class OANDAStream:
                             continue
 
             except aiohttp.ClientError as e:
-                logger.error(f"OANDA stream connection error: {e}")
+                failures += 1
+                self._log_stream_failure(failures, "connection error", e)
                 await asyncio.sleep(5)
 
             except Exception as e:
-                logger.error(f"Error in OANDA stream: {e}")
+                failures += 1
+                self._log_stream_failure(failures, "error", e)
                 await asyncio.sleep(5)
 
     def get_subscribed_symbols(self) -> set[str]:

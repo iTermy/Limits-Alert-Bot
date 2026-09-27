@@ -159,6 +159,15 @@ class ExnessStream:
                         },
                     )
                     self._loop.call_soon_threadsafe(queue.put_nowait, data)
+                elif "unlisted" in msg:
+                    # The account does not carry this symbol, so it will never
+                    # tick. Reported once per subscribe rather than per poll.
+                    logger.error(
+                        "Exness does not list %s (%s) — check the account type's "
+                        "symbol suffix",
+                        msg["unlisted"],
+                        msg.get("detail", "no detail"),
+                    )
         except Exception as e:
             logger.error(f"Error reading Exness stream: {e}")
         finally:

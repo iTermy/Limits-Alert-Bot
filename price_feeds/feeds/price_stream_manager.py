@@ -184,6 +184,7 @@ class PriceStreamManager:
             await self.feeds[feed_name].subscribe(feed_symbol)
             self.subscribed_symbols.add(symbol)
             self.symbol_to_feed[symbol] = feed_name
+            self._mark_subscribed(symbol, feed_name)
             logger.debug(f"Subscribed to {symbol} via {feed_name} (as {feed_symbol})")
         except Exception as e:
             logger.error(f"Failed to subscribe to {symbol}: {e}")
@@ -256,10 +257,21 @@ class PriceStreamManager:
                 for internal, _feed_sym in symbol_pairs:
                     self.subscribed_symbols.add(internal)
                     self.symbol_to_feed[internal] = feed_name
+                    self._mark_subscribed(internal, feed_name)
 
                 logger.debug(f"Bulk subscribed {len(symbol_pairs)} symbols to {feed_name}")
             except Exception as e:
                 logger.error(f"Failed to bulk subscribe to {feed_name}: {e}")
+
+    def _mark_subscribed(self, symbol: str, feed_name: str):
+        """Tell the health monitor prices are now expected for a symbol.
+
+        Subscribing is the only moment that fact is known. Without it a symbol
+        that never delivers a first tick has no timestamp to age from and its
+        feed reads "idle" no matter how long it stays silent.
+        """
+        if self.health_monitor:
+            self.health_monitor.mark_subscribed(symbol, feed_name)
 
     def add_subscriber(self, callback: Callable):
         """
@@ -285,6 +297,11 @@ class PriceStreamManager:
         """
         self.health_monitor = health_monitor
         logger.debug("Health monitor connected to stream manager")
+
+        # Backfill anything subscribed before the monitor was wired in, so those
+        # symbols are still expected to tick rather than silently unwatched.
+        for symbol, feed_name in self.symbol_to_feed.items():
+            health_monitor.mark_subscribed(symbol, feed_name)
 
         # Wire the MT5 stream's per-poll callback into the health monitor so
         # quiet ticks (no bid/ask change) still refresh last_seen.
